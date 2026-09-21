@@ -57,9 +57,10 @@ class TelegramUpdate(Base):
 class Message(Base):
     """A stored chat message, user or assistant side (plan section 5).
 
-    1b only ever writes role="user" rows (router.py, before the echo).
-    Assistant rows (reply_to_update, sent_at, usage, cost) are 1c's
-    idempotent turn — see app/tg/router.py's TODO.
+    1b only ever wrote role="user" rows. 1c's idempotent turn
+    (app/core/turn.py) writes both: the user row (moved there from
+    router.py) and the assistant row (reply_to_update, sent_at, usage,
+    cost).
     """
 
     __tablename__ = "message"
@@ -151,8 +152,9 @@ class PersonaVersion(Base):
 class SpendLedger(Base):
     """Per-call spend rows (plan section 5); today_usd() sums these for /state.
 
-    Cost calculation (1c) and cap enforcement (1d) are not implemented
-    yet — see app/core/spend.py.
+    Written by app/core/turn.py alongside each assistant message row,
+    in the same transaction. Cost calculation and cap enforcement both
+    live in app/core/spend.py (compute_cost, check_cap).
     """
 
     __tablename__ = "spend_ledger"

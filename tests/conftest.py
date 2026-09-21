@@ -22,13 +22,19 @@ import shutil
 import string
 import subprocess
 from pathlib import Path
+from typing import AsyncGenerator
 
 import asyncpg
 import pytest
 import pytest_asyncio
+from aiogram import Bot
+from aiogram.client.session.base import BaseSession
+from aiogram.methods import SendChatAction, SendMessage, TelegramMethod
+from aiogram.types import Message as TgMessage
 from sqlalchemy import text
 
 from app.db.session import create_engine_and_sessionmaker
+from app.llm.provider import LLMResponse, LLMUsage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -155,3 +161,106 @@ async def sessionmaker(test_database_url: str):
             )
             await session.commit()
         await engine.dispose()
+
+
+class FakeSession(BaseSession):
+    """Captures outgoing methods instead of making real HTTP requests.
+
+    Lifted out of test_worker.py/test_messages.py (1a/1b), where it was
+    duplicated verbatim, and extended with a SendChatAction branch: 1c's
+    turn.run() pings sendChatAction every 4s while waiting on the LLM
+    (app/tg/send.py), and without this branch every turn test would hit
+    make_request's NotImplementedError the instant typing starts.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[SendMessage] = []
+        self.chat_actions: list[SendChatAction] = []
+        self._next_message_id = 1
+
+    async def close(self) -> None:
+        pass
+
+    async def make_request(self, bot: Bot, method: TelegramMethod, timeout: int | None = None):
+        if isinstance(method, SendMessage):
+            self.sent.append(method)
+            message_id = self._next_message_id
+            self._next_message_id += 1
+            return TgMessage.model_validate(
+                {
+                    "message_id": message_id,
+                    "date": 0,
+                    "chat": {"id": method.chat_id, "type": "private"},
+                    "text": method.text,
+                },
+                context={"bot": bot},
+            )
+        if isinstance(method, SendChatAction):
+            self.chat_actions.append(method)
+            return True
+        raise NotImplementedError(f"FakeSession cannot handle {method!r}")
+
+    async def stream_content(
+        self,
+        url: str,
+        headers: dict | None = None,
+        timeout: int = 30,
+        chunk_size: int = 65536,
+        raise_for_status: bool = True,
+    ) -> AsyncGenerator[bytes, None]:
+        raise NotImplementedError
+        yield b""  # pragma: no cover
+
+
+def make_bot(token: str = "123456:TESTTOKEN") -> tuple[Bot, FakeSession]:
+    """A Bot wired to a fresh FakeSession, for tests that don't need the
+    session object directly (most do, to assert on .sent)."""
+    fake_session = FakeSession()
+    return Bot(token=token, session=fake_session), fake_session
+
+
+class FakeLLMProvider:
+    """A canned `LLMProvider` -- every test uses this, never the network.
+
+    `raises` is a list of exceptions consumed one per call, front first;
+    once exhausted (or if empty), `complete()` returns the canned
+    LLMResponse. This is what lets test_turn.py drive turn.py's retry
+    loop deterministically: e.g. `raises=[LLMRetryableError(), LLMRetryableError()]`
+    fails twice then succeeds on the third call, and a longer list (or
+    a non-retryable LLMError) exercises the final-failure path.
+    """
+
+    def __init__(
+        self,
+        text: str = "Тестовый ответ Anchor.",
+        usage: LLMUsage | None = None,
+        model: str = "grok-4.7-fake",
+        raises: list[Exception] | None = None,
+    ) -> None:
+        self.calls = 0
+        self.text = text
+        self.usage = usage or LLMUsage(
+            input_tokens=100, cached_tokens=20, output_tokens=50, cost_usd=None
+        )
+        self.model = model
+        self._raises = list(raises) if raises else []
+        self.closed = False
+        self.received_messages: list[list] = []
+        self.received_conversation_ids: list[str] = []
+
+    async def complete(self, messages, *, conversation_id: str) -> LLMResponse:
+        self.calls += 1
+        self.received_messages.append(messages)
+        self.received_conversation_ids.append(conversation_id)
+        if self._raises:
+            raise self._raises.pop(0)
+        return LLMResponse(text=self.text, usage=self.usage, model=self.model)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture()
+def fake_llm_provider() -> FakeLLMProvider:
+    return FakeLLMProvider()

@@ -48,7 +48,18 @@ class _JsonFormatter(logging.Formatter):
         }
         # Only include known-safe extras; never dump __dict__ wholesale,
         # since that could reintroduce a redacted key under a new spelling.
-        for key in ("update_id", "chat_id", "latency_ms", "attempts", "event", "count"):
+        for key in (
+            "update_id",
+            "chat_id",
+            "latency_ms",
+            "attempts",
+            "event",
+            "count",
+            "tokens_in",
+            "tokens_cached",
+            "tokens_out",
+            "usd_cost",
+        ):
             if hasattr(record, key):
                 base[key] = getattr(record, key)
         return json.dumps(base, default=str)

@@ -1,9 +1,13 @@
 """Application configuration loaded from environment variables.
 
-All keys from the Phase 1 plan (section 4) are declared here, even the ones
-that are only read starting in later milestones (XAI_*, DAILY_USD_CAP,
-TRANSCRIPT_TURNS), so that .env.example stays complete across milestones.
-Nothing in 1a reads those extra keys.
+All keys from the Phase 1 plan (section 4) are declared here, even
+XAI_API_KEY/DAILY_USD_CAP/TRANSCRIPT_TURNS which 1a/1b did not yet
+read, so that .env.example stays complete across milestones. 1c reads
+all of the XAI_* keys (app/llm/xai.py), TRANSCRIPT_TURNS (app/core/
+prompt.py) and DAILY_USD_CAP (app/core/spend.py's check_cap) -- the
+daily cap ships with the persona turn rather than waiting for 1d's
+other safety features, per the decision recorded in the 1c plan doc
+(the wallet guard must exist the moment the API key goes live).
 """
 
 from __future__ import annotations
@@ -30,18 +34,15 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     PORT: int = 8080
 
-    # --- reserved for 1c/1d; declared now so .env.example is complete ---
-    # TODO(phase-1c): read XAI_* in app/llm/xai.py
+    # --- 1c: LLM provider, prompt assembly, cost and the daily spend cap ---
     XAI_API_KEY: str = ""
     XAI_MODEL: str = "grok-4.7"
     XAI_REASONING_EFFORT: str = "medium"
     XAI_PRICE_IN: float = 2.00
     XAI_PRICE_CACHED: float = 0.50
     XAI_PRICE_OUT: float = 6.00
-    # TODO(phase-1d): read DAILY_USD_CAP in app/core/spend.py
     DAILY_USD_CAP: float = 1.00
     TZ_DEFAULT: str = "Europe/Paris"
-    # TODO(phase-1c): read TRANSCRIPT_TURNS in app/core/prompt.py
     TRANSCRIPT_TURNS: int = 30
 
     @field_validator("DATABASE_URL")

@@ -8,11 +8,13 @@ modes (plan section 5, last line / section 17 milestone 1b).
    pause words), not config.
 2. Hash persona.md and insert a persona_version row only if that hash
    is new, so editing the file produces exactly one new row per edit.
+   The read+hash itself lives in app/core/prompt.py's load_persona(),
+   the same helper core/turn.py uses to build the system prompt -- one
+   read path for persona content, shared here.
 """
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from sqlalchemy import select
@@ -20,11 +22,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core.prompt import PERSONA_PATH, load_persona
 from app.core.state import STATE_ID
 from app.db.models import PersonaVersion, UserState
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PERSONA_PATH = REPO_ROOT / "persona" / "persona.md"
+DEFAULT_PERSONA_PATH = PERSONA_PATH
 
 
 async def upsert_user_state(session: AsyncSession, chat_id: int, timezone: str) -> None:
@@ -48,8 +50,7 @@ async def sync_persona_version(
 
     Returns True iff a row was inserted.
     """
-    body = persona_path.read_text(encoding="utf-8")
-    sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    body, sha256 = load_persona(persona_path)
 
     existing = await session.execute(
         select(PersonaVersion.id).where(PersonaVersion.sha256 == sha256)
