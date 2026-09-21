@@ -8,6 +8,10 @@ it feeds the dispatcher inline, which contradicts plan section 6.1's
 
 Polling mode: same worker, app.tg.polling.run_polling() instead of the
 web app. Dev only.
+
+Both modes run app.startup.run_startup_tasks() first (user_state
+upsert + persona_version sync, plan section 5), then register bot
+commands, before the worker/transport starts.
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ from aiohttp import web
 from app.config import Settings, get_settings
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
 from app.log import setup_logging
+from app.startup import run_startup_tasks
 from app.tg.polling import run_polling
-from app.tg.router import router as tg_router
+from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
 from app.worker import run_worker, stop_worker
 
@@ -31,21 +36,31 @@ logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
 
 
-def build_dispatcher() -> Dispatcher:
+def build_dispatcher(sessionmaker, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
-    dp.include_router(tg_router)
+    dp.include_router(build_router(sessionmaker, settings))
     return dp
 
 
 async def _on_startup(app: web.Application) -> None:
     settings: Settings = app["settings"]
     bot: Bot = app["bot"]
+    sessionmaker = app["sessionmaker"]
+
+    # Migrations already ran (the Railway start command is
+    # `alembic upgrade head && python -m app.main`); this is the
+    # "then upsert user_state... then persona_version" step that
+    # follows, per plan section 5's last line.
+    async with sessionmaker() as session:
+        await run_startup_tasks(session, settings)
+
     await bot.set_webhook(
         url=settings.PUBLIC_URL.rstrip("/") + WEBHOOK_PATH,
         secret_token=settings.TELEGRAM_SECRET_TOKEN,
         allowed_updates=["message", "callback_query"],
     )
-    app["worker_tasks"] = await run_worker(app["sessionmaker"], app["dp"], bot)
+    await register_commands(bot)
+    app["worker_tasks"] = await run_worker(sessionmaker, app["dp"], bot)
     logger.info("startup complete", extra={"event": "startup"})
 
 
@@ -74,7 +89,11 @@ def build_webhook_app(settings: Settings, bot: Bot, dp: Dispatcher, sessionmaker
 
 
 async def _run_polling_mode(settings: Settings, bot: Bot, dp: Dispatcher, sessionmaker, engine) -> None:
+    async with sessionmaker() as session:
+        await run_startup_tasks(session, settings)
+
     await bot.delete_webhook(drop_pending_updates=False)
+    await register_commands(bot)
     worker_tasks = await run_worker(sessionmaker, dp, bot)
     try:
         await run_polling(bot, sessionmaker, settings)
@@ -90,7 +109,7 @@ def main() -> None:
 
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-    dp = build_dispatcher()
+    dp = build_dispatcher(sessionmaker, settings)
 
     if settings.MODE == "webhook":
         app = build_webhook_app(settings, bot, dp, sessionmaker, engine)

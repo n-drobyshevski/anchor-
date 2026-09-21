@@ -19,6 +19,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import Message, Update
 
+from app.config import Settings
 from app.db.models import TelegramUpdate
 from app.db.queue import enqueue
 from app.tg.polling import dump_update
@@ -86,7 +87,7 @@ async def test_worker_echoes_text_and_marks_row_done(sessionmaker):
     fake_session = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake_session)
     dp = Dispatcher()
-    dp.include_router(build_router())
+    dp.include_router(build_router(sessionmaker, Settings()))
 
     async with sessionmaker() as session:
         await enqueue(session, 200, _update_payload(200, "hello anchor"))
@@ -109,7 +110,7 @@ async def test_process_one_update_returns_false_when_queue_empty(sessionmaker):
     fake_session = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake_session)
     dp = Dispatcher()
-    dp.include_router(build_router())
+    dp.include_router(build_router(sessionmaker, Settings()))
 
     processed = await process_one_update(sessionmaker, dp, bot)
     assert processed is False

@@ -146,6 +146,12 @@ async def sessionmaker(test_database_url: str):
         yield maker
     finally:
         async with maker() as session:
-            await session.execute(text("TRUNCATE TABLE telegram_update"))
+            await session.execute(
+                text(
+                    "TRUNCATE TABLE telegram_update, message, user_state, "
+                    "state_change, persona_version, spend_ledger "
+                    "RESTART IDENTITY CASCADE"
+                )
+            )
             await session.commit()
         await engine.dispose()
