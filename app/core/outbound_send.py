@@ -62,6 +62,14 @@ from app.llm.provider import LLMProvider
 logger = logging.getLogger(__name__)
 
 SEND_OUTBOUND = "send_outbound"
+# NOTE: app/core/scheduler.py imports this constant, which makes
+# scheduler -> outbound_send a one-way edge today only because nothing
+# here needs the scheduler. If a later milestone ever wants
+# run_send_outbound to reschedule itself -- a retry with backoff,
+# calling plan() or pick_send_time() -- that edge becomes a cycle, and
+# it is the same cycle 3d hit. TICK_DECIDE's placement in scheduler.py
+# is the precedent for the fix: the constant moves to the enqueuer and
+# the deviation gets a comment.
 
 # Its own ledger category (plan section 7 step 6), so /state can show
 # what speaking first costs, separately from replying.
@@ -154,9 +162,19 @@ async def run_send_outbound(
     outbound_id: int,
 ) -> None:
     """The `send_outbound` job body. Steps are plan section 7's, in order."""
-    # Local imports: app/core/turn.py imports this module's constants
-    # for the transcript filter, and app/core/outbound.py imports the
-    # gate loaders that turn.py also uses.
+    # Local imports.
+    #
+    # `app.tg.outbound` has to stay local: app/core/ does not import
+    # app/tg/ at module level, which is the layering rule app/core/
+    # turn.py's own local import of app.tg.welfare follows for the same
+    # reason. Nothing under core may depend on aiogram types being
+    # importable to be importable itself.
+    #
+    # The app.core.* ones below are local out of caution rather than
+    # necessity -- nothing in outbound, prompt, scene, spend, state or
+    # turn imports this module, so hoisting them introduces no cycle.
+    # That cleanup is deliberately not folded into a milestone that is
+    # about behaviour.
     from app.core.outbound import (
         FAILED,
         PLANNED,

@@ -180,10 +180,18 @@ def _ceiling(
     return ceiling
 
 
-def planned_for(
+def pick_send_time(
     kind: Kind, settings: Settings, clock: Clock, timezone: str
 ) -> datetime.datetime:
     """When to actually send: now plus jitter, clamped to the ceiling.
+
+    Named `pick_send_time` rather than `planned_for` because this file
+    already has three of those: the `Outbound.planned_for` column, the
+    keyword argument of plan() below, and the local variable two lines
+    down. A fourth would read as `planned_for=planned_for(...)` at
+    every call site, and the first person to use the helper from inside
+    plan() -- where the name is already bound to a datetime -- would
+    get `TypeError: 'datetime.datetime' object is not callable`.
 
     The jitter exists so Anchor does not arrive at exactly 09:00:00
     every single day. The clamp exists because without it a plan made
@@ -194,10 +202,10 @@ def planned_for(
     """
     now = clock.now_utc()
     jitter_seconds = random.randint(0, max(0, settings.JITTER_MAX_MIN) * 60)
-    planned_for = now + datetime.timedelta(seconds=jitter_seconds)
+    candidate = now + datetime.timedelta(seconds=jitter_seconds)
 
     latest = _ceiling(kind, settings, clock, timezone) - datetime.timedelta(seconds=1)
-    return min(planned_for, max(now, latest))
+    return min(candidate, max(now, latest))
 
 
 async def _already_exists(
@@ -355,7 +363,7 @@ async def heartbeat(
             clock,
             kind,
             local_date=today,
-            planned_for=planned_for(kind, settings, clock, timezone),
+            planned_for=pick_send_time(kind, settings, clock, timezone),
         )
 
     return None

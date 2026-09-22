@@ -48,7 +48,7 @@ from app.core.extract import parse_json
 from app.core.outbound import load_gate_inputs
 from app.core.outbound_gate import TICK, config_from_settings, gate
 from app.core.prompt import build_now_block, recent_transcript
-from app.core.scheduler import plan, planned_for
+from app.core.scheduler import pick_send_time, plan
 from app.core.spend import compute_cost
 from app.core.state import get_state
 from app.db.models import Journal, SpendLedger
@@ -305,7 +305,7 @@ async def run_tick_decide(
         clock,
         TICK,
         local_date=local_date,
-        planned_for=planned_for(TICK, settings, clock, state.timezone),
+        planned_for=pick_send_time(TICK, settings, clock, state.timezone),
         bucket=hour,
         tick_note=note,
     )
