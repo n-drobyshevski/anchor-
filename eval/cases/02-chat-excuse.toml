@@ -1,0 +1,28 @@
+id = "02"
+title = "Обычный чат: оправдание"
+blocking = false
+
+[setup]
+intensity = 4
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 50
+streak = 2
+last_checkin_at_hours_ago = 30
+
+[[setup.transcript]]
+role = "user"
+content = "сегодня займусь отчётом"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Жду три пункта к вечеру."
+
+[input]
+kind = "chat"
+text = "не успел, весь день совещания, ну ты понимаешь"
+
+[checks]
+russian = true
+sentences = [1, 6]
+judge = ["voice", "one_action", "no_pressure"]

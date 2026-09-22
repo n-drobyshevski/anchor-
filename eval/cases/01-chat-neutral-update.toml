@@ -1,0 +1,30 @@
+id = "01"
+title = "Обычный чат: нейтральный апдейт"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 26
+streak = 4
+last_checkin_at_hours_ago = 14
+memories = ["Живёт в Лилле", "Работает аналитиком"]
+summaries = ["Вчера договорились: глава отчёта до четверга."]
+
+[[setup.transcript]]
+role = "user"
+content = "сел за отчёт"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Принято. Час без телефона."
+
+[input]
+kind = "chat"
+text = "сделал примерно половину, завтра добью"
+
+[checks]
+russian = true
+sentences = [1, 6]
+judge = ["voice", "one_action"]

@@ -124,6 +124,35 @@ def hidden_flag(kind: str, tick_note: str | None = None) -> str:
     return f"{body}\n{COMMON_FLAG}"
 
 
+async def build_outbound_messages(session, settings, state, *, clock, kind, tick_note=None):
+    """The exact message list a proactive send is generated from.
+
+    Factored out of run_send_outbound in 3e so `eval/` can build the
+    real prompt rather than a lookalike. Plan section 9 is explicit
+    that the harness "builds the real prompt through the production
+    `prompt.py`" -- an eval that assembled its own approximation would
+    pass happily while the thing that ships regressed.
+    """
+    from app.core.prompt import build_messages
+    from app.core.scene import recent_summaries
+
+    return await build_messages(
+        session,
+        clock=clock,
+        timezone=state.timezone,
+        intensity=state.intensity,
+        user_text=hidden_flag(kind, tick_note),
+        update_id=None,
+        transcript_turns=settings.TRANSCRIPT_TURNS,
+        summaries=await recent_summaries(session),
+        focus_on=state.focus_on,
+        due_action=state.due_action,
+        due_set_at=state.due_set_at,
+        streak=state.streak,
+        last_checkin_at=state.last_checkin_at,
+    )
+
+
 # --- the job body -------------------------------------------------------
 
 
@@ -182,10 +211,9 @@ async def run_send_outbound(
         SKIPPED,
         load_gate_inputs,
     )
-    from app.core.prompt import build_messages
     from app.core.spend import compute_cost
     from app.core.state import get_state
-    from app.core.scene import ensure_open_scene, recent_summaries
+    from app.core.scene import ensure_open_scene
     from app.core.turn import _complete_with_retries
     from app.tg.outbound import send_outbound_message
 
@@ -246,20 +274,13 @@ async def run_send_outbound(
     )
 
     # 5. Generate. Main model, section 7's prompt plus the hidden flag.
-    messages = await build_messages(
+    messages = await build_outbound_messages(
         session,
+        settings,
+        state,
         clock=clock,
-        timezone=state.timezone,
-        intensity=state.intensity,
-        user_text=hidden_flag(row.kind, row.tick_note),
-        update_id=None,
-        transcript_turns=settings.TRANSCRIPT_TURNS,
-        summaries=await recent_summaries(session),
-        focus_on=state.focus_on,
-        due_action=state.due_action,
-        due_set_at=state.due_set_at,
-        streak=state.streak,
-        last_checkin_at=state.last_checkin_at,
+        kind=row.kind,
+        tick_note=row.tick_note,
     )
     response = await _complete_with_retries(
         provider, messages, update_id=outbound_id

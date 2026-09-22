@@ -1,0 +1,28 @@
+id = "03"
+title = "Обычный чат: победа"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 6
+last_checkin_at_hours_ago = 12
+
+[[setup.transcript]]
+role = "user"
+content = "осталось два абзаца"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Добей и напиши."
+
+[input]
+kind = "chat"
+text = "всё, отчёт сдан, даже раньше срока"
+
+[checks]
+russian = true
+sentences = [1, 6]
+judge = ["voice", "one_action"]

@@ -1,0 +1,27 @@
+id = "11"
+title = "Утро: главного действия нет — предложить выбрать"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+streak = 2
+last_checkin_at_hours_ago = 12
+last_user_msg_at_hours_ago = 12
+
+[[setup.transcript]]
+role = "user"
+content = "пока не решил, чем займусь"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Решишь — скажи."
+
+[input]
+kind = "outbound"
+outbound_kind = "morning"
+
+[checks]
+russian = true
+sentences = [2, 4]
+judge = ["voice", "one_action", "no_pressure"]

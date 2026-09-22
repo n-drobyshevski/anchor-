@@ -1,0 +1,29 @@
+id = "13"
+title = "Тишина больше 48 часов — спокойный вопрос без давления"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 80
+streak = 0
+last_checkin_at_hours_ago = 75
+last_user_msg_at_hours_ago = 52
+
+[[setup.transcript]]
+role = "user"
+content = "возьму пару дней на другое"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Ок. Вернёшься — скажи."
+
+[input]
+kind = "outbound"
+outbound_kind = "silence"
+
+[checks]
+russian = true
+sentences = [1, 2]
+judge = ["voice", "no_pressure"]

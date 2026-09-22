@@ -1,4 +1,4 @@
-# Anchor — Milestone 3d (the optional tick)
+# Anchor — Milestone 3e (the eval harness) · Phase 3 complete
 
 A private, single-user Telegram bot.
 
@@ -268,6 +268,81 @@ model is asked whether there is a natural reason to write first — an
 unclosed thread from the last conversation, a due action with a near
 deadline, something the user said they would do today. The default is
 no, and at most one tick a day actually goes out.
+
+Milestone 3e closes Phase 3 with the thing that catches a regression
+before it reaches someone who did not ask to be written to.
+
+```
+python -m eval.run              # all 13 cases, ~$0.10
+python -m eval.run --case 04    # one case
+python -m eval.run --dry-run    # build every prompt, call nothing
+```
+
+**Manual only, never in CI**, because it costs money. Section 9's rule:
+run it before any `persona.md` edit or model change ships. A failure in
+a blocking case — 04, 05, 06, 09, 12, 13 — stops the change. Exit codes
+say which: `0` clean, `1` a blocking failure, `2` only non-blocking
+ones. That split matters, because Cydonia drifting a sentence over on
+case 3 is worth seeing and is not worth halting a deploy for.
+
+### It builds the real prompt, not a lookalike
+
+Section 9 asks for the prompt to be built "through the production
+`prompt.py`", and that is the whole value. Each case goes through the
+same function the bot uses — `build_messages` for chat and check-in
+reactions, `build_neutral_messages` for neutral mode, and
+`build_outbound_messages` for the three proactive kinds. The last of
+those was factored out of `run_send_outbound` in 3e for exactly this
+reason: a harness that assembled its own approximation would keep
+passing while the thing that ships regressed.
+
+That is also why the harness needs a database. `build_messages` reads
+the transcript out of `message`, so the only honest way to give a case
+a conversation history is to put one in a table. A throwaway database
+is created per run, migrated with the project's own Alembic revisions,
+truncated between cases and dropped at the end.
+
+### Two layers of check
+
+**Deterministic first**, because they never flake and an obviously
+broken reply should cost nothing to reject: at least 80% Cyrillic
+letters, a sentence count inside the case's bounds, no address
+nicknames on the out-of-character cases, and no forbidden pattern —
+the plan's own example being a dosage, which is the shape of the
+boundary that matters most.
+
+**Then the rubric judge**: 1–5 on each item the case asks for, and the
+case passes only if every item clears 4. An unusable judgement fails
+the case rather than passing it — this harness exists to block a
+change, so "the judge broke" must not read as "the case passed".
+
+### Two deviations from section 9, both deliberate
+
+**The case files are TOML, not YAML.** PyYAML is not among this
+project's dependencies and 3e was not worth adding one for, while
+`tomllib` has been in the standard library since 3.11. The plan's
+intent — hand-editable case files with multi-line Russian prose — is
+served either way.
+
+**The judge model is configurable.** `LLM_MODEL_JUDGE` defaults to
+empty, meaning `LLM_MODEL_CHEAP`, which is exactly what section 9
+specifies. It exists as a knob because the cheap model is the same
+Cydonia fine-tune being graded, and the items it scores are what block
+a persona change from shipping. A judge sharing a family with the
+candidate is a weak judge. Until that setting points somewhere else,
+read a passing score as "nothing obviously wrong", not "verified".
+
+### What is tested, and what deliberately is not
+
+Only the parts that run without a network: the four checks, the
+judge's response *validation*, and the case files — which are validated
+eagerly, so a typo in case 13 fails in a second rather than after $0.09
+of model calls. The case tests double as a guard on the plan's
+contract: 13 cases exist, and the six section 9 marks blocking are the
+six flagged blocking.
+
+Everything else needs a real model to mean anything, and a test against
+a mocked judge would test the mock.
 
 ### The model proposes, the code decides — twice
 

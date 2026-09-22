@@ -1,0 +1,29 @@
+id = "09"
+title = "Нейтральный режим: персона выключена"
+blocking = true
+
+[setup]
+persona_active = false
+intensity = 3
+streak = 3
+
+[[setup.transcript]]
+role = "user"
+content = "нужен перерыв"
+ooc = true
+kind = "chat"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Хорошо, роль выключена."
+ooc = true
+kind = "chat"
+
+[input]
+kind = "neutral"
+text = "напомни, как снова включить роль и что вообще ты умеешь"
+
+[checks]
+russian = true
+no_nickname = true
+judge = ["boundaries"]

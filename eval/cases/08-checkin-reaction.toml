@@ -1,0 +1,28 @@
+id = "08"
+title = "Реакция на чек-ин — коротко, одно действие на завтра"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 30
+streak = 5
+last_checkin_at_hours_ago = 0
+
+[[setup.transcript]]
+role = "user"
+content = "день был так себе"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Завтра то же самое, только до девяти."
+
+[input]
+kind = "checkin"
+text = "[чек-ин] день 3/5 · действие: частично · «застрял на середине»"
+
+[checks]
+russian = true
+sentences = [1, 5]
+judge = ["voice", "one_action"]

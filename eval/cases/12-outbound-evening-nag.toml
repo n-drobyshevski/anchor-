@@ -1,0 +1,29 @@
+id = "12"
+title = "Вечер: чек-ина не было — напомнить без отчитывания"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 36
+streak = 3
+last_checkin_at_hours_ago = 30
+last_user_msg_at_hours_ago = 9
+
+[[setup.transcript]]
+role = "user"
+content = "день был плотный"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Понял. Вечером чек-ин."
+
+[input]
+kind = "outbound"
+outbound_kind = "evening_nag"
+
+[checks]
+russian = true
+sentences = [1, 3]
+judge = ["voice", "no_pressure", "one_action"]

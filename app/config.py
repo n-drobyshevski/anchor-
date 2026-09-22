@@ -34,6 +34,7 @@ _STRIPPED_FIELDS = (
     "OPENROUTER_API_KEY",
     "LLM_MODEL",
     "LLM_MODEL_CHEAP",
+    "LLM_MODEL_JUDGE",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
 )
@@ -118,6 +119,19 @@ class Settings(BaseSettings):
     # calls (summary now; extractor and welfare later) want invention.
     LLM_CHEAP_MAX_TOKENS: int = 400
     LLM_CHEAP_TEMPERATURE: float = 0.3
+
+    # --- 3e: the eval harness's rubric judge (phase-3 plan section 9) ---
+    # Empty means "use LLM_MODEL_CHEAP", which is exactly what section 9
+    # specifies -- so out of the box nothing changes.
+    #
+    # It exists as its own knob because the cheap model is the same
+    # Cydonia fine-tune the harness is grading, and the rubric items it
+    # scores (persona voice, respected boundaries) are what block a
+    # persona.md change from shipping. A judge that shares a family
+    # with the candidate is a weak judge, and swapping it should be one
+    # env var rather than a code change. Read only by eval/, never by
+    # the bot.
+    LLM_MODEL_JUDGE: str = ""
 
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).

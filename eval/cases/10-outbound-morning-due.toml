@@ -1,0 +1,30 @@
+id = "10"
+title = "Утро: главное действие задано"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 4
+last_checkin_at_hours_ago = 11
+last_user_msg_at_hours_ago = 11
+summaries = ["Вчера договорились: глава отчёта до четверга."]
+
+[[setup.transcript]]
+role = "user"
+content = "завтра добью главу"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Жду к девяти."
+
+[input]
+kind = "outbound"
+outbound_kind = "morning"
+
+[checks]
+russian = true
+sentences = [2, 4]
+judge = ["voice", "one_action", "no_pressure"]
