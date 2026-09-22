@@ -273,6 +273,16 @@ class UserState(Base):
     )
     welfare_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # 5a (phase-5 plan sections 2 and 5). The one piece of nickname
+    # state that survives between turns: which nickname app/core/
+    # voice.py used last, so choose_nickname() never repeats it back to
+    # back. Written only by voice.remember_nickname()'s targeted
+    # UPDATE -- never through update_state(), so a nickname rotation
+    # leaves no state_change row (it is not a decision worth auditing,
+    # the same reasoning set_counters() already applies to the traffic
+    # counters above).
+    nickname_last: Mapped[str | None] = mapped_column(String)
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),

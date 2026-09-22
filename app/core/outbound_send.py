@@ -124,7 +124,9 @@ def hidden_flag(kind: str, tick_note: str | None = None) -> str:
     return f"{body}\n{COMMON_FLAG}"
 
 
-async def build_outbound_messages(session, settings, state, *, clock, kind, tick_note=None):
+async def build_outbound_messages(
+    session, settings, state, *, clock, kind, tick_note=None, persona_context=None
+):
     """The exact message list a proactive send is generated from.
 
     Factored out of run_send_outbound in 3e so `eval/` can build the
@@ -132,10 +134,30 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
     that the harness "builds the real prompt through the production
     `prompt.py`" -- an eval that assembled its own approximation would
     pass happily while the thing that ships regressed.
+
+    5a: an outbound message is a persona reply, so it gets the same
+    mood/voice/nickname treatment a chat turn does, via app/core/
+    persona_context.py. There is no update_id to exclude for the mood
+    facts' "last user message" query (an outbound send has no current
+    user message at all), and the voice seed falls back to the local
+    calendar date, since no caller threads a scene id through here.
+
+    `persona_context` lets run_send_outbound gather once and hand the
+    *same* PersonaContext to both this function and the nickname write
+    that follows a real delivery -- gathering twice would draw the
+    nickname coin flip twice and could remember a different nickname
+    than the one the sent prompt actually carried. Left `None` (the
+    default), this function gathers its own, read-only context, which
+    is what eval/scenario.py relies on: it calls this function directly
+    with no delivery afterwards, so nothing here may have a side
+    effect. The one write, remember_nickname(), lives in
+    run_send_outbound's own step 7, after a real send.
     """
     from app.core.memory import retrieve_techniques
+    from app.core import persona_context as persona_context_module
     from app.core.prompt import build_messages
     from app.core.scene import recent_summaries
+    from app.core.turn import NICKNAME_RNG
 
     # 4d: adopted techniques are for in-character generation, which a
     # proactive message is (phase-4 plan section 10: "chat turns and
@@ -149,6 +171,18 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
     techniques = await retrieve_techniques(
         session, hidden_flag(kind, tick_note), settings.RESEARCH_TECHNIQUES_IN_PROMPT
     )
+
+    persona_ctx = persona_context
+    if persona_ctx is None:
+        persona_ctx = await persona_context_module.gather(
+            session,
+            settings,
+            state,
+            clock,
+            scene_id=None,
+            exclude_update_id=None,
+            rng=NICKNAME_RNG,
+        )
 
     return await build_messages(
         session,
@@ -165,6 +199,9 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
         due_set_at=state.due_set_at,
         streak=state.streak,
         last_checkin_at=state.last_checkin_at,
+        voice_lines=persona_ctx.voice_lines,
+        mood=persona_ctx.mood,
+        nickname_directive=persona_ctx.nickname_directive,
     )
 
 
@@ -226,10 +263,12 @@ async def run_send_outbound(
         SKIPPED,
         load_gate_inputs,
     )
+    from app.core import persona_context as persona_context_module
     from app.core.spend import priced
     from app.core.state import get_state
     from app.core.scene import ensure_open_scene
-    from app.core.turn import _complete_with_retries
+    from app.core.turn import NICKNAME_RNG, _complete_with_retries
+    from app.core.voice import remember_nickname
     from app.tg.outbound import send_outbound_message
 
     # 1. Still live?
@@ -289,6 +328,20 @@ async def run_send_outbound(
     )
 
     # 5. Generate. Main model, section 7's prompt plus the hidden flag.
+    # 5a: gathered once, here, and handed into build_outbound_messages
+    # so the nickname write below (step 7) remembers exactly the
+    # nickname the sent prompt's directive carried -- gathering a
+    # second time would draw the coin flip again and could disagree
+    # with what was actually said.
+    persona_ctx = await persona_context_module.gather(
+        session,
+        settings,
+        state,
+        clock,
+        scene_id=None,
+        exclude_update_id=None,
+        rng=NICKNAME_RNG,
+    )
     messages = await build_outbound_messages(
         session,
         settings,
@@ -296,6 +349,7 @@ async def run_send_outbound(
         clock=clock,
         kind=row.kind,
         tick_note=row.tick_note,
+        persona_context=persona_ctx,
     )
     response = await _complete_with_retries(
         provider, messages, update_id=outbound_id
@@ -347,6 +401,10 @@ async def run_send_outbound(
 
     # 7. Send, then mark delivered and move the counters.
     await send_outbound_message(bot, state.chat_id, text, kind=row.kind)
+    # 5a: only after the send above actually happened -- never on a
+    # skipped, cancelled or failed row, all of which returned earlier.
+    if persona_ctx.nickname is not None:
+        await remember_nickname(session, persona_ctx.nickname)
     await _finish(session, row, message, clock)
     logger.info(
         "outbound sent",

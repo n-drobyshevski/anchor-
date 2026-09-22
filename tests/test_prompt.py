@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 from zoneinfo import ZoneInfo
 
+from app.core import prompt
 from app.core.prompt import PERSONA_PATH, build_messages, build_now_block, load_persona
 from app.db.models import Message, TelegramUpdate
 
@@ -226,6 +227,138 @@ def test_build_now_block_includes_flags(clock):
     )
     assert "Интенсивность: 2/5" in block
     assert "жёлтый" in block
+
+
+# --- 5a: section order, omission, and the neutral/welfare exclusion ---------
+
+
+async def test_full_order_with_every_section_populated(sessionmaker, tmp_path, clock):
+    """Plan section 10's order, checked by header index: persona ->
+    Поправки -> Голос -> pinned -> Договорённости -> Твои заметки ->
+    Прошлые сессии -> transcript -> Сейчас -> user text."""
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+            amendments=["меньше вопросов по утрам"],
+            voice_lines=["Коротко. По делу."],
+            pinned=["живёт в Лилле"],
+            orders=["не есть после десяти"],
+            notebook={"intentions": ["держать темп"], "observations": ["пишет вечером"]},
+            summaries=["вчера говорили про отчёт"],
+            mood="ровный",
+            nickname_directive="Обращение в этом ответе: напарник",
+        )
+
+    contents = [m.content for m in messages]
+    assert contents[0] == "# Anchor\n"
+    idx = {
+        "amendments": next(i for i, c in enumerate(contents) if "## Поправки" in c),
+        "voice": next(i for i, c in enumerate(contents) if "## Голос" in c),
+        "pinned": next(i for i, c in enumerate(contents) if prompt.PINNED_HEADER in c),
+        "orders": next(i for i, c in enumerate(contents) if "## Договорённости" in c),
+        "notebook": next(i for i, c in enumerate(contents) if "## Твои заметки" in c),
+        "sessions": next(i for i, c in enumerate(contents) if prompt.SESSIONS_HEADER in c),
+        "now": next(i for i, c in enumerate(contents) if "## Сейчас" in c),
+    }
+    assert (
+        0
+        < idx["amendments"]
+        < idx["voice"]
+        < idx["pinned"]
+        < idx["orders"]
+        < idx["notebook"]
+        < idx["sessions"]
+        < idx["now"]
+    )
+    assert messages[-1].role == "user"
+    assert idx["now"] == len(messages) - 2
+
+    now_block = messages[idx["now"]].content
+    # "## Сейчас" internal order: mood before due action/last check-in,
+    # nickname directive after both.
+    assert now_block.index("Настроение:") < now_block.index("Главное действие:")
+    assert now_block.index("Главное действие:") < now_block.index("Последний чек-ин:")
+    assert now_block.index("Последний чек-ин:") < now_block.index("Обращение в этом ответе")
+
+
+async def test_empty_new_sections_are_omitted(sessionmaker, tmp_path, clock):
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+        )
+
+    contents = "\n".join(m.content for m in messages)
+    for marker in (
+        "## Поправки",
+        "## Голос",
+        "## Договорённости",
+        "## Твои заметки",
+        "Настроение:",
+        "Обращение в этом ответе",
+        "Без обращения в этом ответе",
+        "## Можно вспомнить",
+    ):
+        assert marker not in contents
+
+
+async def test_neutral_messages_carry_none_of_the_persona_mode_sections(sessionmaker):
+    from app.core.prompt import build_neutral_messages
+
+    async with sessionmaker() as session:
+        messages = await build_neutral_messages(session, user_text="привет", update_id=None)
+
+    contents = "\n".join(m.content for m in messages)
+    for marker in (
+        "Поправки",
+        "## Голос",
+        "Договорённости",
+        "Твои заметки",
+        "Настроение",
+        "Обращение в этом ответе",
+        "Без обращения",
+        "Можно вспомнить",
+    ):
+        assert marker not in contents
+
+
+async def test_welfare_prompts_carry_none_of_the_persona_mode_sections():
+    """app/core/welfare.py never calls build_messages() at all, so this
+    is a property of its own fixed prompts -- checked directly rather
+    than through a turn, since welfare.py owns its own prompt text."""
+    from app.core import welfare
+
+    all_prompt_text = welfare.CLASSIFIER_PROMPT + welfare.WELFARE_PROMPT + welfare.FALLBACK_REPLY
+    for marker in (
+        "Поправки",
+        "## Голос",
+        "Договорённости",
+        "Твои заметки",
+        "Настроение",
+        "Обращение в этом ответе",
+        "Без обращения",
+        "Можно вспомнить",
+    ):
+        assert marker not in all_prompt_text
 
 
 def test_build_now_block_weekday_does_not_rely_on_locale(clock):

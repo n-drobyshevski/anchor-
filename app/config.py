@@ -181,6 +181,41 @@ class Settings(BaseSettings):
     # behaviour -- it stops the run with exit code 3.
     LLM_MODEL_JUDGE: str = "openai/gpt-4.1-nano"
 
+    # --- 5a: voice, mood and nicknames (phase-5 plan section 2) ---
+    # Paths are resolved against the repo root (app/core/prompt.py's
+    # REPO_ROOT), not the process's cwd, so a deploy that starts the
+    # bot from a different working directory still finds them.
+    #
+    # An empty NICKNAMES_FILE means nicknames are never used -- the
+    # plan states this explicitly, and app/core/voice.py's loader
+    # treats a file with no lines exactly like a file with none that
+    # pass the comment/blank filter, so no separate flag is needed.
+    NICKNAMES_FILE: str = "persona/nicknames.txt"
+    # Share of persona replies that carry a nickname. 0 means never,
+    # 1 means every reply that has one to give -- both ends are valid
+    # configurations, not errors, so the validator only rejects outside
+    # [0, 1].
+    NICKNAME_RATE: float = 0.5
+    VOICE_FILE: str = "persona/voice.md"
+    # How many lines of voice.md app/core/voice.py samples per scene.
+    # Capped at the file's own length there, so this number is a
+    # ceiling, not a promise.
+    VOICE_PER_SCENE: int = 4
+
+    @field_validator("NICKNAME_RATE")
+    @classmethod
+    def _rate_in_unit_interval(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"NICKNAME_RATE must be between 0 and 1, got {value}")
+        return value
+
+    @field_validator("VOICE_PER_SCENE")
+    @classmethod
+    def _voice_per_scene_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"VOICE_PER_SCENE must be >= 0, got {value}")
+        return value
+
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6

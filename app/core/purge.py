@@ -138,6 +138,10 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         "last_outbound_at": None,
         "ignored_in_row": 0,
         "welfare_at": None,
+        # 5a: the nickname rotation resets like everything else here --
+        # a wipe returns the bot to a state where no nickname has been
+        # used yet, exactly as a fresh deploy would see it.
+        "nickname_last": None,
         "updated_at": clock.now_utc(),
     }
 

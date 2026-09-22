@@ -158,7 +158,7 @@ async def run_case(
         )
 
     reply = response.text.strip()
-    check_results = checks_module.run_all(reply, case.checks)
+    check_results = checks_module.run_all(reply, case.checks, settings)
     verdict = await judge_module.judge(
         judge,
         items=case.judge_items,

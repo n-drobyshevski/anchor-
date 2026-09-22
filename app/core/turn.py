@@ -81,6 +81,15 @@ those returns before this point. That is why the enqueue is a single
 line at the very bottom of run() rather than a condition somewhere in
 the middle: the control flow already encodes the rule.
 
+5a (phase-5 plan section 5) gathers mood, this scene's voice anchors
+and the nickname directive once per turn via app/core/persona_context.py
+and threads the same `PersonaContext` into both build_messages() calls
+below (the original attempt and the boundary retry), so a retry never
+re-rolls any of the three. `remember_nickname()` runs only after the
+persona reply is actually delivered -- never on a welfare turn (which
+returns from run_welfare_turn long before this point) and never in
+neutral mode (turn_persona_context stays None there).
+
 Milestone 1f once threaded an opt-in `web_search` flag from run() down
 to the single provider call, behind a now-removed /search command.
 Milestone 4a (2026-09) removed it: it reached the tree without a plan
@@ -95,6 +104,7 @@ import asyncio
 import datetime
 import decimal
 import logging
+import random
 import time
 
 from aiogram import Bot
@@ -109,14 +119,24 @@ from app.core import boundaries, safety_events, welfare_terms
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
+from app.core import persona_context as persona_context_module
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import Priced, check_cap, priced
 from app.core.state import Source, get_state, update_state
+from app.core.voice import remember_nickname
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
 from app.llm.provider import LLMError, LLMProvider, LLMRetryableError
 from app.tg.send import send_reply, start_typing, stop_typing
+
+# 5a: the nickname coin flip's source of randomness. Module-level so a
+# test can monkeypatch it to a seeded `random.Random(n)` for a
+# deterministic outcome, the same injection style app/core/voice.py's
+# own `voice_anchors()` uses for its *deterministic* draw (seeded by
+# scene_id) -- this one is a genuine coin flip and has nothing to seed
+# it by, so the object itself is the injection point instead.
+NICKNAME_RNG = random.Random()
 
 logger = logging.getLogger(__name__)
 
@@ -834,6 +854,11 @@ async def run(
     category = CHAT_CATEGORY if user_state.persona_active else OOC_CATEGORY
     typing_task = start_typing(bot, chat_id)
     injected_memory_ids: list[int] = []
+    # 5a: set only on the persona branch below, and reused verbatim by
+    # the boundary retry further down -- a retry must not re-roll the
+    # mood, the voice anchors or the nickname; see app/core/
+    # persona_context.py's docstring.
+    turn_persona_context: persona_context_module.PersonaContext | None = None
     try:
         async with sessionmaker() as session:
             if user_state.persona_active:
@@ -857,6 +882,19 @@ async def run(
                 injected_memory_ids = [
                     row.id for row in pinned_rows + retrieved_rows + technique_rows
                 ]
+                # 5a: mood, this scene's voice anchors and the nickname
+                # directive -- gathered once per turn, not once per
+                # model call (see turn_persona_context's own comment
+                # above).
+                turn_persona_context = await persona_context_module.gather(
+                    session,
+                    settings,
+                    user_state,
+                    clock,
+                    scene_id=scene_id,
+                    exclude_update_id=update_id,
+                    rng=NICKNAME_RNG,
+                )
                 messages = await build_messages(
                     session,
                     clock=clock,
@@ -875,6 +913,9 @@ async def run(
                     due_set_at=user_state.due_set_at,
                     streak=user_state.streak,
                     last_checkin_at=user_state.last_checkin_at,
+                    voice_lines=turn_persona_context.voice_lines,
+                    mood=turn_persona_context.mood,
+                    nickname_directive=turn_persona_context.nickname_directive,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1004,6 +1045,11 @@ async def run(
                 due_set_at=user_state.due_set_at,
                 streak=user_state.streak,
                 last_checkin_at=user_state.last_checkin_at,
+                # 5a: the same context the first attempt used -- no
+                # re-roll of mood/voice/nickname on a retry.
+                voice_lines=turn_persona_context.voice_lines,
+                mood=turn_persona_context.mood,
+                nickname_directive=turn_persona_context.nickname_directive,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id
@@ -1081,6 +1127,16 @@ async def run(
     async with sessionmaker() as session:
         row = await _get_assistant_row(session, update_id)
         await memory.mark_used(session, clock, injected_memory_ids)
+        # 5a: only now, with the persona reply actually on its way to
+        # the user -- never on a welfare turn (run_welfare_turn returns
+        # long before this point) and never on neutral mode (category
+        # is OOC_CATEGORY there, and turn_persona_context stays None).
+        if (
+            category == CHAT_CATEGORY
+            and turn_persona_context is not None
+            and turn_persona_context.nickname is not None
+        ):
+            await remember_nickname(session, turn_persona_context.nickname)
         await _mark_sent(session, clock, row.id)
 
     # Step 8 (2c): hand the delivered exchange to the extractor.

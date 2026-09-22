@@ -241,6 +241,37 @@ def test_the_guides_packet_is_capped_at_five_domains():
     assert len(Settings(_env_file=None, PACKET_GUIDES="a.com,b.com,c.com,d.com,e.com").PACKET_GUIDES) == 5
 
 
+# --- 5a: voice, mood and nicknames ---
+
+
+def test_voice_and_nickname_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.NICKNAMES_FILE == "persona/nicknames.txt"
+    assert settings.NICKNAME_RATE == 0.5
+    assert settings.VOICE_FILE == "persona/voice.md"
+    assert settings.VOICE_PER_SCENE == 4
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0, 0.5])
+def test_nickname_rate_accepts_the_closed_unit_interval(value):
+    assert Settings(_env_file=None, NICKNAME_RATE=value).NICKNAME_RATE == value
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01, -1, 2])
+def test_nickname_rate_rejects_outside_zero_to_one(value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, NICKNAME_RATE=value)
+
+
+def test_voice_per_scene_rejects_negative():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, VOICE_PER_SCENE=-1)
+
+
+def test_voice_per_scene_accepts_zero():
+    assert Settings(_env_file=None, VOICE_PER_SCENE=0).VOICE_PER_SCENE == 0
+
+
 def test_the_user_agent_names_us_and_no_browser():
     """Plan section 5.9 forbids spoofing this. A default that already
     looked like a browser would make that rule a formality."""

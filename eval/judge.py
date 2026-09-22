@@ -64,6 +64,17 @@ RUBRIC: dict[str, str] = {
         "карточке, заметке, /notes или о том, что это найденная/сохранённая "
         "рекомендация."
     ),
+    # 5a (phase-5 plan section 11, case 17). Настроение «доволен» is
+    # tone color only (app/core/mood.py), and this is the judge-side
+    # half of that: does the reply actually read warmer and shorter, and
+    # does the praise point at something concrete the user did, rather
+    # than a generic "молодец"? `one_action` (above) already covers
+    # "exactly one action", so it is not repeated here.
+    "warm_brief": (
+        "Ответ теплее обычного и короче: конкретная, по делу похвала за то, "
+        "что пользователь реально сделал — без общих слов вроде «молодец» "
+        "и без затянутых объяснений."
+    ),
 }
 
 JUDGE_PROMPT = (

@@ -38,6 +38,14 @@ a property of an f-string somewhere. Retrieval itself lives in
 app/core/memory.py and is driven by app/core/turn.py, which needs the
 ids back anyway to mark them used after delivery.
 
+5a (phase-5 plan section 10) inserts four more stable-prefix sections
+between persona and the transcript -- "## Поправки", "## Голос",
+"## Договорённости" and "## Твои заметки" -- and extends the "## Сейчас"
+block with a mood line, a nickname directive, and 5c/5e placeholders.
+See build_messages()'s and build_now_block()'s own docstrings for the
+exact order; every new section follows the same "omitted when empty"
+rule sections 2 and 3 above already establish.
+
 The double-user-message bug: core/turn.py stores the user's message
 (step 1 of the turn) and then appends `user_text` again as the final
 message (step 4 here). If the transcript query did not exclude the
@@ -61,6 +69,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock as clock_module
 from app.core.clock import Clock
+from app.core.mood import GLOSS
 from app.db.models import Message
 from app.llm.provider import LLMMessage
 
@@ -88,9 +97,33 @@ NEUTRAL_SYSTEM_PROMPT = (
     "на языке пользователя. Не возвращайся в роль; если спросят как вернуться — подскажи команду /in."
 )
 
+# 5a (phase-5 plan section 10). Stable-prefix sections, in the order
+# they appear in build_messages() below: amendments and voice come
+# right after persona (amendments amend it, voice colors it), orders
+# and notebook come after pinned memories and before the session
+# summaries -- all four still stable within a scene or longer, just
+# less so than persona.md itself.
+AMENDMENTS_HEADER = "## Поправки (одобрены тобой)"
+VOICE_HEADER = "## Голос"
 PINNED_HEADER = "## Что ты знаешь (закреплено)"
+ORDERS_HEADER = "## Договорённости"
+NOTEBOOK_HEADER = "## Твои заметки"
 SESSIONS_HEADER = "## Прошлые сессии"
 RETRIEVED_HEADER = "## Может быть важно"
+# 5e placeholder (plan section 11a): not populated by any caller in 5a,
+# but part of the "## Сейчас" block's fixed shape from here on so 5e
+# only has to start passing `callback=`, not reorder anything.
+CALLBACK_HEADER = "## Можно вспомнить (только если к месту)"
+
+# 5b's labels for the three notebook kinds, in the fixed order plan
+# section 6 renders them. Kept here (not in a later milestone's module)
+# because the "## Твои заметки" line shape is part of this module's
+# stable-section contract, exactly like _bullets() below.
+_NOTEBOOK_LABELS = (
+    ("intentions", "Намерения"),
+    ("observations", "Наблюдения"),
+    ("threads", "Незакрытое"),
+)
 # 4d, phase-4 plan section 10. Its own header, not folded into
 # RETRIEVED_HEADER, because the two are different kinds of thing and
 # the model should treat them differently: what is under "Может быть
@@ -136,6 +169,27 @@ def _bullets(header: str, items: list[str]) -> list[str]:
     return [header, *(f"- {item}" for item in items)]
 
 
+def _notebook_lines(notebook: dict[str, list[str]] | None) -> list[str]:
+    """"## Твои заметки" (plan section 6), or nothing when there is nothing to say.
+
+    One line per non-empty kind, `; `-joined -- not `_bullets()`'s one
+    line per item, because plan section 6's own example renders each
+    kind as a single "Намерения: …" line rather than a bulleted list.
+    A kind with no active entries is left out entirely, same convention
+    as every other optional section in this module.
+    """
+    if not notebook:
+        return []
+    lines: list[str] = []
+    for key, label in _NOTEBOOK_LABELS:
+        items = notebook.get(key) or []
+        if items:
+            lines.append(f"{label}: " + "; ".join(items))
+    if not lines:
+        return []
+    return [NOTEBOOK_HEADER, *lines]
+
+
 def _ago(moment: datetime.datetime, *, today: datetime.date, tz: ZoneInfo) -> str:
     """"сегодня" / "вчера" / "N дн. назад", for the now block.
 
@@ -163,6 +217,10 @@ def build_now_block(
     due_set_at: datetime.datetime | None = None,
     streak: int = 0,
     last_checkin_at: datetime.datetime | None = None,
+    mood: str | None = None,
+    nickname_directive: str | None = None,
+    orders_yesterday: str | None = None,
+    callback: str | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -178,6 +236,17 @@ def build_now_block(
     only path by which anything read from the open web reaches this
     prompt, and only after the user pressed [Принять] on it (phase-4
     plan section 10).
+
+    5a reorders this block to match phase-5 plan section 10 and adds
+    three lines/sections: `mood` right after the intensity/focus/streak
+    line (only when given -- neutral and welfare callers never pass
+    one), `nickname_directive` after the due action and last check-in
+    (also only when given), and `orders_yesterday`/`callback`
+    placeholders for 5c/5e, wired the same way. **The due action now
+    comes before the last check-in**, the opposite of Phase 1-4's
+    order -- plan section 10 states it that way and no existing test
+    encoded the old relative order (only substring checks), so nothing
+    else needed updating for the swap.
     """
     now_local = clock_module.now_local(clock, timezone)
     weekday = _RU_WEEKDAYS[now_local.weekday()]
@@ -187,8 +256,15 @@ def build_now_block(
         f"Интенсивность: {intensity}/5 · Фокус: {'вкл' if focus_on else 'выкл'} "
         f"· Серия: {streak} дн.",
     ]
+    if mood is not None:
+        lines.append(f"Настроение: {mood} — {GLOSS[mood]}")
     tz = ZoneInfo(timezone)
     today = now_local.date()
+    if due_action:
+        when = f" (задано {_ago(due_set_at, today=today, tz=tz)})" if due_set_at else ""
+        lines.append(f"Главное действие: «{due_action}»{when}")
+    else:
+        lines.append("Главное действие: нет")
     if last_checkin_at is not None:
         stamp = last_checkin_at.astimezone(tz).strftime("%H:%M")
         lines.append(
@@ -196,16 +272,18 @@ def build_now_block(
         )
     else:
         lines.append("Последний чек-ин: давно")
-    if due_action:
-        when = f" (задано {_ago(due_set_at, today=today, tz=tz)})" if due_set_at else ""
-        lines.append(f"Главное действие: «{due_action}»{when}")
-    else:
-        lines.append("Главное действие: нет")
+    if orders_yesterday:
+        lines.append(f"Договорённости вчера: {orders_yesterday}")
+    if nickname_directive:
+        lines.append(nickname_directive)
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     # After the retrieved memories and before the flags: a technique is
     # less volatile than what this turn happened to match, and the flags
     # stay last because they are the most volatile thing in the prompt.
     lines.extend(_bullets(TECHNIQUES_HEADER, techniques or []))
+    if callback:
+        lines.append(CALLBACK_HEADER)
+        lines.append(f"- {callback}")
     lines.extend(flags or [])
     return "\n".join(lines)
 
@@ -302,8 +380,16 @@ async def build_messages(
     streak: int = 0,
     last_checkin_at: datetime.datetime | None = None,
     persona_path: Path = PERSONA_PATH,
+    amendments: list[str] | None = None,
+    voice_lines: list[str] | None = None,
+    orders: list[str] | None = None,
+    notebook: dict[str, list[str]] | None = None,
+    mood: str | None = None,
+    nickname_directive: str | None = None,
+    orders_yesterday: str | None = None,
+    callback: str | None = None,
 ) -> list[LLMMessage]:
-    """Assemble the full message list for one turn, in plan section 7's order.
+    """Assemble the full message list for one turn, plan section 10's order.
 
     `pinned`, `summaries` and `retrieved` are plain strings supplied by
     the caller (app/core/turn.py), never ORM rows and never ids -- see
@@ -311,6 +397,17 @@ async def build_messages(
     call site keeps its exact previous behaviour: with no memories and
     no summaries the empty sections are omitted and the message list is
     identical to what section 9 produced.
+
+    5a adds `amendments`, `voice_lines`, `orders`, `notebook`, `mood`,
+    `nickname_directive`, `orders_yesterday` and `callback` -- all
+    keyword-only, all defaulting to empty, and every one of them
+    producing an omitted section when empty, the same convention 2b's
+    `pinned`/`summaries` already established. Only `voice_lines`,
+    `mood` and `nickname_directive` are wired up by any caller in 5a
+    (app/core/persona_context.py's `gather()`); `amendments`, `orders`,
+    `notebook`, `orders_yesterday` and `callback` exist here already so
+    milestones 5b-5e only have to start passing data, never touch this
+    function's shape or the fixed order below.
     """
     persona_body, _ = load_persona(persona_path)
     transcript = await _load_transcript(
@@ -323,9 +420,25 @@ async def build_messages(
 
     messages = [LLMMessage(role="system", content=persona_body)]
 
+    amendments_block = _bullets(AMENDMENTS_HEADER, amendments or [])
+    if amendments_block:
+        messages.append(LLMMessage(role="system", content="\n".join(amendments_block)))
+
+    if voice_lines:
+        voice_block = [VOICE_HEADER, *(f"- {line}" for line in voice_lines)]
+        messages.append(LLMMessage(role="system", content="\n".join(voice_block)))
+
     pinned_block = _bullets(PINNED_HEADER, pinned or [])
     if pinned_block:
         messages.append(LLMMessage(role="system", content="\n".join(pinned_block)))
+
+    orders_block = _bullets(ORDERS_HEADER, orders or [])
+    if orders_block:
+        messages.append(LLMMessage(role="system", content="\n".join(orders_block)))
+
+    notebook_block = _notebook_lines(notebook)
+    if notebook_block:
+        messages.append(LLMMessage(role="system", content="\n".join(notebook_block)))
 
     sessions_block = _bullets(SESSIONS_HEADER, summaries or [])
     if sessions_block:
@@ -347,6 +460,10 @@ async def build_messages(
                 due_set_at=due_set_at,
                 streak=streak,
                 last_checkin_at=last_checkin_at,
+                mood=mood,
+                nickname_directive=nickname_directive,
+                orders_yesterday=orders_yesterday,
+                callback=callback,
             ),
         )
     )

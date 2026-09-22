@@ -59,6 +59,7 @@ from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import memory as memory_core
+from app.core import mood as mood_core
 from app.core import safety_events
 from app.core import proposal as proposal_core
 from app.core.outbound import cancel_outbound, load_state_summary
@@ -185,12 +186,19 @@ def _format_state(
     outbound=None,
     welfare_counts=None,
     research_counts=None,
+    mood=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
     Spend is broken down by ledger category so a day where the
     background jobs cost more than the conversation is visible at a
     glance rather than hidden inside one total.
+
+    5a: `mood`, computed by the caller through the same
+    load_mood_facts()+mood() pair the persona prompt uses, so /state
+    can never show a mood the prompt itself would not have shown this
+    turn. Plain -- no gloss here; the gloss is an instruction to the
+    model, not information for the user.
     """
     tz = ZoneInfo(user_state.timezone)
     now = clock_module.now_local(clock, user_state.timezone)
@@ -253,6 +261,7 @@ def _format_state(
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
         "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
+        "Настроение: {mood}\n"
         "Главное действие: {due}\n"
         "{outbound}"
         "{welfare}"
@@ -267,6 +276,7 @@ def _format_state(
         focus="вкл" if user_state.focus_on else "выкл",
         streak=user_state.streak,
         last_checkin=last_checkin,
+        mood=mood,
         due=due,
         outbound="".join(
             line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
@@ -342,6 +352,15 @@ def build_router(
                     session, clock, user_state.timezone, kind=safety_events.SEARCH
                 ),
             )
+            # 5a: the same pair the persona prompt uses (app/core/
+            # persona_context.py's gather()), so /state can never claim
+            # a mood the prompt itself would not have shown this turn.
+            # `exclude_update_id=None`: /state is not itself a chat
+            # turn, so there is no "this turn's own message" to exclude.
+            mood_facts = await mood_core.load_mood_facts(
+                session, user_state, clock, exclude_update_id=None
+            )
+            current_mood = mood_core.mood(user_state, mood_facts, clock.now_utc())
         await message.answer(
             _format_state(
                 user_state,
@@ -353,6 +372,7 @@ def build_router(
                 outbound=outbound,
                 welfare_counts=welfare_counts,
                 research_counts=research_counts,
+                mood=current_mood,
             )
         )
 
