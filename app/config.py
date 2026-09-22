@@ -112,6 +112,19 @@ class Settings(BaseSettings):
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6
 
+    # --- 2b: memory (phase-2 plan sections 2, 6, 7) ---
+    # How many memories each in-character prompt may carry. The
+    # retrieval *thresholds* are deliberately not here but in
+    # app/core/memory.py -- a deploy should not be able to set the
+    # dedupe cutoff to 0 and start duplicating every fact.
+    #
+    # MEMORY_PINNED_MAX is enforced on write as well as on render
+    # (app/tg/memory.py): section 7 caps the render at 8, so silently
+    # accepting a ninth pin would drop a memory the user explicitly
+    # asked to always be remembered, with no feedback.
+    MEMORY_PINNED_MAX: int = 8
+    MEMORY_RETRIEVED_MAX: int = 6
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _rewrite_asyncpg_scheme(cls, value: str) -> str:

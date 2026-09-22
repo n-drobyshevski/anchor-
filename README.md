@@ -1,4 +1,4 @@
-# Anchor — Milestone 2a
+# Anchor — Milestone 2b
 
 A private, single-user Telegram bot.
 
@@ -26,8 +26,43 @@ Milestone 2a adds the machinery Phase 2 is built on:
   its own price triple, so `compute_cost` is genuinely model-aware and
   the background model can be swapped with one env var.
 
+Milestone 2b makes it remember:
+
+- **Durable memory** (`memory` table, `app/core/memory.py`). Facts
+  survive across sessions, are retrieved per turn by trigram similarity,
+  deduped on write, and superseded rather than duplicated when a fact
+  changes.
+- **Prompt assembly per plan §7**: persona → pinned memories → last 3
+  scene summaries → transcript → the "now" block with the retrieved
+  memories → the new message. Memory IDs never reach the chat model —
+  `build_messages` is handed strings, not rows, so that cannot be
+  violated by accident.
+- **`/remember` `/memories` `/forget` `/pin` `/unpin`**, the bot's first
+  inline keyboards.
+
 See `app/config.py` and inline `# TODO(phase-N):` comments for what is
 deliberately deferred.
+
+### Retrieval, and one deviation from the plan
+
+`word_similarity(a, b)` is asymmetric: the whole of `a` must be matched
+by some continuous extent of `b`. The plan specifies
+`word_similarity(user_text, memory.text)`, which makes the user's whole
+message the needle and therefore scores *lower the more they type* —
+long, context-rich messages would retrieve nothing. Measured against a
+memory `"пользователь живёт в Лилле"`:
+
+| user text | plan order | flipped |
+|---|---|---|
+| `Лилль` | 0.667 | 0.179 |
+| `я сегодня думал про Лилль` | 0.154 | 0.194 |
+| `слушай, я сегодня ехал домой … Лилль` | 0.075 | 0.194 |
+
+So the arguments are flipped, and the cutoff moves with them (0.15, not
+the plan's 0.3, which was calibrated for the un-flipped orientation).
+Both numbers live in `app/core/memory.py` with the measurements that
+justify them; `tests/test_memory.py` asserts ranking and separation, not
+the floats.
 
 ## Local setup
 
@@ -73,8 +108,14 @@ database is created with an explicit `LOCALE 'C.UTF-8'` rather than
 inheriting `template1`'s, because under a plain `C` locale `pg_trgm`
 silently stops seeing Cyrillic — `show_trgm('привет мир')` returns zero
 trigrams and every `similarity()` is `0`, with no error anywhere. That
-would make Phase 2's memory retrieval quietly return nothing, so the
-suite must never be able to pass under a locale production does not use.
+would make memory retrieval quietly return nothing, so the suite must
+never be able to pass under a locale production does not use.
+
+As of 2b the 2b migration asserts the same thing and **aborts** if it
+fails, naming the cause and the fallback: a database in that state can
+never carry the schema that depends on trigram search. A database's
+locale is fixed at `CREATE DATABASE`, so the remedy is a new database,
+not a redeploy.
 
 ## Smoke test (real API calls)
 

@@ -48,6 +48,14 @@ class _JsonFormatter(logging.Formatter):
         }
         # Only include known-safe extras; never dump __dict__ wholesale,
         # since that could reintroduce a redacted key under a new spelling.
+        #
+        # This allowlist is what actually enforces the privacy rule --
+        # RedactionFilter above only strips the three literal spellings
+        # text/content/payload, so a key like "memory_text" would sail
+        # straight through it. Everything added here must be an id, a
+        # kind, a count, a duration or a flag. Never a preview, never a
+        # truncated string. (2a's scene_id/job_id/kind were missing and
+        # were therefore silently dropped from every 2a log line.)
         for key in (
             "update_id",
             "chat_id",
@@ -60,6 +68,14 @@ class _JsonFormatter(logging.Formatter):
             "tokens_out",
             "usd_cost",
             "search",
+            # 2a
+            "scene_id",
+            "job_id",
+            "kind",
+            # 2b
+            "memory_id",
+            "superseded_id",
+            "pinned",
         ):
             if hasattr(record, key):
                 base[key] = getattr(record, key)

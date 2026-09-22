@@ -154,3 +154,79 @@ async def test_readyz_200_when_db_reachable(test_database_url, sessionmaker):
     async with TestClient(TestServer(app)) as client:
         resp = await client.get("/readyz")
         assert resp.status == 200
+
+
+# --- 2b: callback_query updates (the first inline keyboards) ---
+
+
+def _private_callback_update(update_id: int = 700) -> dict:
+    """A button press. The allow-list keys on callback_query.message.chat,
+    which extract_chat already falls back to -- these tests pin that
+    behaviour now that something actually sends keyboards."""
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": "cb1",
+            "from": {"id": ALLOWED_CHAT_ID, "is_bot": False, "first_name": "Test"},
+            "chat_instance": "ci",
+            "data": "m:p:20",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": ALLOWED_CHAT_ID, "type": "private"},
+                "text": "…",
+            },
+        },
+    }
+
+
+def _foreign_callback_update(update_id: int = 701) -> dict:
+    payload = _private_callback_update(update_id)
+    payload["callback_query"]["message"]["chat"]["id"] = 999999
+    return payload
+
+
+def _group_callback_update(update_id: int = 702) -> dict:
+    payload = _private_callback_update(update_id)
+    payload["callback_query"]["message"]["chat"] = {"id": -100123, "type": "group"}
+    return payload
+
+
+async def test_allowed_private_callback_stores_exactly_one_row(
+    test_database_url, sessionmaker
+):
+    app = _build_app(_settings(test_database_url), sessionmaker)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/telegram/webhook",
+            json=_private_callback_update(),
+            headers={SECRET_HEADER: SECRET},
+        )
+        assert resp.status == 200
+    assert await _row_count(sessionmaker) == 1
+
+
+async def test_foreign_chat_callback_returns_200_and_stores_nothing(
+    test_database_url, sessionmaker
+):
+    app = _build_app(_settings(test_database_url), sessionmaker)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/telegram/webhook",
+            json=_foreign_callback_update(),
+            headers={SECRET_HEADER: SECRET},
+        )
+        assert resp.status == 200
+    assert await _row_count(sessionmaker) == 0
+
+
+async def test_group_callback_returns_200_and_stores_nothing(test_database_url, sessionmaker):
+    app = _build_app(_settings(test_database_url), sessionmaker)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/telegram/webhook",
+            json=_group_callback_update(),
+            headers={SECRET_HEADER: SECRET},
+        )
+        assert resp.status == 200
+    assert await _row_count(sessionmaker) == 0

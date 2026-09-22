@@ -4,6 +4,8 @@
 adds the rest of the Phase 1 schema (plan section 5): message,
 user_state, state_change, persona_version, spend_ledger.
 
+2b adds `memory` and `pending_memory` (phase-2 plan sections 4 and 11).
+
 2a adds the phase-2 plan's generic `job` queue (section 3) and `scene`
 (section 4), plus two columns on `message`: `scene_id` and `kind`. The
 `kind` check constraint is not in the plan's SQL, which leaves it as a
@@ -23,6 +25,7 @@ from __future__ import annotations
 import datetime
 import decimal
 
+import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -32,6 +35,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Float,
     Numeric,
     String,
     func,
@@ -259,3 +263,84 @@ class SpendLedger(Base):
     usd_cost: Mapped[decimal.Decimal] = mapped_column(Numeric(10, 6), nullable=False)
 
     __table_args__ = (Index("ix_spend_ledger_local_date", "local_date"),)
+
+
+class Memory(Base):
+    """A durable fact about the user (phase-2 plan section 4).
+
+    Active means `superseded_by IS NULL`. A fact is never edited in
+    place: a correction is a new row whose predecessor is pointed at it,
+    so the history of what the bot believed stays readable.
+
+    **The `text` column shadows sqlalchemy's `text()`** for the rest of
+    this class body, which is why `sa.text(...)` is used for the
+    server_defaults below rather than the bare `text(...)` every other
+    model in this file uses. Declaring the column last would also work,
+    but would leave a trap for whoever adds the next column.
+
+    Two constraints beyond the plan's SQL. `ck_memory_no_self_supersede`
+    stops a row from retiring itself, which would make it permanently
+    invisible with no way to find it. Chains are kept linear by
+    app/core/memory.py, which only ever supersedes an active row -- that
+    is what makes /forget's relink (see hard_delete) unambiguous.
+    """
+
+    __tablename__ = "memory"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    pinned: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.text("false")
+    )
+    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt
+    confidence: Mapped[float | None] = mapped_column(Float)
+    superseded_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    use_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sa.text("0")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('identity', 'preference', 'event', 'rule', 'technique')",
+            name="ck_memory_kind",
+        ),
+        # char_length, not octet_length: 300 characters, which for
+        # Cyrillic is not 300 bytes.
+        CheckConstraint('char_length("text") <= 300', name="ck_memory_text_length"),
+        CheckConstraint("superseded_by <> id", name="ck_memory_no_self_supersede"),
+        Index("memory_trgm", "text", postgresql_using="gin", postgresql_ops={"text": "gin_trgm_ops"}),
+    )
+
+
+class PendingMemory(Base):
+    """Text from /remember, parked until the user picks a kind (plan section 11).
+
+    Section 11 offers `user_state.awaiting_ref` or "a small
+    pending_memory row if simpler". This is the simpler one twice over:
+    `awaiting`/`awaiting_ref` are milestone 2d columns and would be dead
+    state here, and a single scalar would clobber the first text if the
+    user sent `/remember A` and `/remember B` before pressing either
+    keyboard. A table keeps both, and each keyboard's callback carries
+    its own row id.
+
+    The row is deleted when its kind button is pressed, which is what
+    makes a replayed callback idempotent: the second press finds nothing
+    and is answered "Устарело".
+    """
+
+    __tablename__ = "pending_memory"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 300', name="ck_pending_memory_text_length"),
+    )

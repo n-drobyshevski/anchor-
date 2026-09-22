@@ -1,10 +1,23 @@
 """Read/update the singleton `user_state` row, with an audit trail.
 
-Every field write goes through update_state() so a `state_change` row
-(field, old_value, new_value, source) is always recorded in the same
-transaction as the change itself (plan section 5). `source` is one of
-command|pause|system, matching the callers introduced across 1b-1d:
-1b's commands, 1d's pause words, and startup/system-driven changes.
+Every `user_state` field write goes through update_state() so a
+`state_change` row (field, old_value, new_value, source) is always
+recorded in the same transaction as the change itself (plan section 5).
+
+2b adds record_change() for the other kind of audit row: a change worth
+recording that is *not* a user_state field at all, such as a deleted
+memory. Those cannot go through update_state(), which reads and writes
+an attribute on the singleton row. The audit table accommodates them
+because every one of its columns is nullable.
+
+`source` gains `button` in 2b (an inline keyboard press), joining 1b's
+commands, 1d's pause words, and startup/system-driven changes.
+
+**Never put content in an audit row.** `old_value` is exactly where a
+future maintainer would helpfully record a deleted memory's text, and
+plan section 11 explicitly requires the opposite: "`state_change`
+records `memory <id> deleted` with no text". tests/test_memory.py
+asserts it.
 """
 
 from __future__ import annotations
@@ -18,7 +31,7 @@ from app.db.models import StateChange, UserState
 
 STATE_ID = 1
 
-Source = Literal["command", "pause", "system"]
+Source = Literal["command", "pause", "system", "button"]
 
 
 async def get_state(session: AsyncSession) -> UserState:
@@ -54,3 +67,25 @@ async def update_state(session: AsyncSession, field: str, value: Any, source: So
     await session.commit()
     await session.refresh(state)
     return state
+
+
+async def record_change(
+    session: AsyncSession,
+    *,
+    field: str,
+    old_value: str | None,
+    new_value: str | None,
+    source: Source,
+) -> None:
+    """Write a bare audit row for a change outside `user_state`.
+
+    Commits. Used by 2b's /forget (plan section 11); update_state()
+    remains the only way to change a user_state field.
+
+    Callers must pass identifiers, never content -- see the module
+    docstring.
+    """
+    session.add(
+        StateChange(field=field, old_value=old_value, new_value=new_value, source=source)
+    )
+    await session.commit()

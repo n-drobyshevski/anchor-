@@ -46,7 +46,14 @@ import pytest
 import pytest_asyncio
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendChatAction, SendMessage, TelegramMethod
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageReplyMarkup,
+    EditMessageText,
+    SendChatAction,
+    SendMessage,
+    TelegramMethod,
+)
 from aiogram.types import Message as TgMessage
 from sqlalchemy import text
 
@@ -198,7 +205,8 @@ async def sessionmaker(test_database_url: str):
             await session.execute(
                 text(
                     "TRUNCATE TABLE telegram_update, message, user_state, "
-                    "state_change, persona_version, spend_ledger, job, scene "
+                    "state_change, persona_version, spend_ledger, job, scene, "
+                    "memory, pending_memory "
                     "RESTART IDENTITY CASCADE"
                 )
             )
@@ -214,12 +222,21 @@ class FakeSession(BaseSession):
     turn.run() pings sendChatAction every 4s while waiting on the LLM
     (app/tg/send.py), and without this branch every turn test would hit
     make_request's NotImplementedError the instant typing starts.
+
+    2b adds the inline-keyboard methods (plan section 11). `edits`
+    records every editMessageText so tests can assert that paging edits
+    one message rather than sending a new one per tap, and `answered`
+    records every answerCallbackQuery -- a button that is never answered
+    spins in the real client until Telegram times it out, so "did we
+    answer?" is a property worth asserting rather than assuming.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[SendMessage] = []
         self.chat_actions: list[SendChatAction] = []
+        self.edits: list[EditMessageText] = []
+        self.answered: list[AnswerCallbackQuery] = []
         self._next_message_id = 1
 
     async def close(self) -> None:
@@ -241,6 +258,22 @@ class FakeSession(BaseSession):
             )
         if isinstance(method, SendChatAction):
             self.chat_actions.append(method)
+            return True
+        if isinstance(method, AnswerCallbackQuery):
+            self.answered.append(method)
+            return True
+        if isinstance(method, EditMessageText):
+            self.edits.append(method)
+            return TgMessage.model_validate(
+                {
+                    "message_id": method.message_id,
+                    "date": 0,
+                    "chat": {"id": method.chat_id, "type": "private"},
+                    "text": method.text,
+                },
+                context={"bot": bot},
+            )
+        if isinstance(method, EditMessageReplyMarkup):
             return True
         raise NotImplementedError(f"FakeSession cannot handle {method!r}")
 

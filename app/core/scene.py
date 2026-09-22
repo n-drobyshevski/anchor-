@@ -133,6 +133,42 @@ async def ensure_open_scene(session: AsyncSession, *, idle_hours: int) -> int:
     return scene.id
 
 
+# How many closed scenes' summaries reach the prompt (plan section 7).
+PROMPT_SUMMARY_COUNT = 3
+
+
+async def recent_summaries(session: AsyncSession, limit: int = PROMPT_SUMMARY_COUNT) -> list[str]:
+    """The last `limit` closed scenes' summaries, oldest first (plan section 7).
+
+    Three filters, not one. `summary IS NOT NULL` matters because NULL
+    is a *valid terminal state* here, not a pending one -- a scene with
+    fewer than MIN_MESSAGES_FOR_SUMMARY messages is deliberately never
+    summarized (see run_summarize_scene), so omitting this filter would
+    put empty bullets in every prompt. `ended_at IS NOT NULL` excludes
+    the scene currently in progress. The id tiebreak gives a total
+    order, since two scenes can share an ended_at.
+
+    Newest-first in SQL then reversed in Python, matching the transcript
+    query in app/core/prompt.py: "the last N, oldest first" cannot be
+    expressed as one ORDER BY.
+
+    Worth knowing how far this reaches: a summary is cheap-model output
+    that now recurs in *every* in-character prompt until it ages out, so
+    SUMMARY_PROMPT's exclusions above protect every future turn, not
+    just one stored row.
+    """
+    result = await session.execute(
+        select(Scene.summary)
+        .where(Scene.ended_at.is_not(None))
+        .where(Scene.summary.is_not(None))
+        .order_by(Scene.ended_at.desc(), Scene.id.desc())
+        .limit(limit)
+    )
+    rows = [row for row in result.scalars().all()]
+    rows.reverse()
+    return rows
+
+
 async def bump_message_count(session: AsyncSession, scene_id: int, n: int = 1) -> None:
     """Increment scene.message_count. Does not commit -- the caller does.
 

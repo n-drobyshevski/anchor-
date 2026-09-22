@@ -32,6 +32,22 @@ written as kind='canned' from here on, so scene summaries and (in 2c)
 the extractor never see them. scene.message_count is incremented only
 when a row is actually inserted, so a queue replay cannot inflate it.
 
+2b injects memory (plan sections 6 and 7). run() owns *when* retrieval
+happens -- inside the persona branch only, so a neutral turn does zero
+memory work -- and passes the results into build_messages() as plain
+strings, never ids. It keeps the injected ids itself, because section 6
+requires them to be marked used only **after the turn is delivered**:
+mark_used() therefore runs in the same transaction as _mark_sent(),
+downstream of send_reply().
+
+That ordering is also what makes double-counting impossible. A queue
+replay of an already-delivered turn returns at step 2 without ever
+rebuilding the prompt, so the ids do not exist on that path and
+mark_used cannot run twice for one update_id. A crash between the send
+and the commit loses one increment instead; undercounting a use is
+harmless, while overcounting would corrupt the last_used_at tie-break
+that gives retrieval its callback variety.
+
 1f adds `web_search`, threaded from run() down to the single provider
 call: it is opt-in only, set by app/tg/router.py's /search handler and
 nowhere else, so an ordinary text turn never sends OpenRouter's `web`
@@ -56,8 +72,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import pause
 from app.core.outbound import cancel_outbound
+from app.core import memory
 from app.core.prompt import build_messages, build_neutral_messages
-from app.core.scene import bump_message_count, ensure_open_scene
+from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import check_cap, compute_cost, local_date_for
 from app.core.state import Source, get_state, update_state
 from app.db.models import Message, SpendLedger
@@ -308,6 +325,86 @@ async def _send_canned_reply(
             await _mark_sent(session, row.id)
 
 
+async def already_handled(
+    sessionmaker: async_sessionmaker[AsyncSession], update_id: int
+) -> bool:
+    """True iff this update already produced a reply.
+
+    The replay gate, in public form. The worker re-runs an update after
+    any crash between feed_update and complete(), and after the 60s
+    stuck sweep (app/worker.py), so anything that mutates in response to
+    an update has to ask this first or do its work twice. run_hard_pause
+    and run_resume above use the same check inline; app/tg/router.py's
+    memory commands use this.
+    """
+    async with sessionmaker() as session:
+        return await _get_assistant_row(session, update_id) is not None
+
+
+async def send_command_reply(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    *,
+    chat_id: int,
+    update_id: int,
+    text: str,
+    scene_id: int | None = None,
+) -> None:
+    """A plain command reply, stored and sent exactly once (2b).
+
+    The public name for _send_canned_reply on behalf of app/tg/memory.py
+    and friends: the memory commands answer with fixed text that costs
+    nothing and must survive a queue replay without double-sending,
+    which is exactly what the canned-reply machinery already does.
+    Stored as kind='canned', so plan section 7's transcript filter keeps
+    it out of the persona's context.
+    """
+    await _send_canned_reply(
+        sessionmaker,
+        bot,
+        chat_id=chat_id,
+        update_id=update_id,
+        text=text,
+        category=OOC_CATEGORY,
+        scene_id=scene_id,
+    )
+
+
+async def mark_update_handled(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    update_id: int,
+    text: str,
+    scene_id: int | None = None,
+) -> None:
+    """Record that this update produced a reply, without sending anything.
+
+    For the handful of replies that carry an inline keyboard and are
+    therefore sent directly rather than through send_command_reply: the
+    row still has to exist, because it is the thing _once() in
+    app/tg/router.py checks to decide whether an update is a replay.
+
+    `sent_at` is set here, unlike _send_canned_reply's two-step
+    insert-then-send: the message has already gone out by the time this
+    is called, so a row with sent_at NULL would invite a resend of text
+    whose keyboard no longer matches any live state.
+    """
+    async with sessionmaker() as session:
+        message_id = await _insert_assistant_row(
+            session,
+            update_id=update_id,
+            content=text,
+            usd_cost=decimal.Decimal("0"),
+            local_date=None,
+            category=OOC_CATEGORY,
+            scene_id=scene_id,
+            kind=CANNED_KIND,
+        )
+    if message_id is not None:
+        async with sessionmaker() as session:
+            await _mark_sent(session, message_id)
+
+
 async def ensure_scene(
     sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
 ) -> int:
@@ -513,9 +610,20 @@ async def run(
     # flags, or the minimal neutral-mode prompt over ooc=True history.
     category = CHAT_CATEGORY if user_state.persona_active else OOC_CATEGORY
     typing_task = start_typing(bot, chat_id)
+    injected_memory_ids: list[int] = []
     try:
         async with sessionmaker() as session:
             if user_state.persona_active:
+                # 2b: retrieval lives here, not in prompt.py, because
+                # run() needs the ids back to mark them used after
+                # delivery. prompt.py only ever sees the texts.
+                pinned_rows = await memory.pinned_memories(
+                    session, settings.MEMORY_PINNED_MAX
+                )
+                retrieved_rows = await memory.retrieve_memories(
+                    session, user_text, settings.MEMORY_RETRIEVED_MAX
+                )
+                injected_memory_ids = [row.id for row in pinned_rows + retrieved_rows]
                 messages = await build_messages(
                     session,
                     timezone=user_state.timezone,
@@ -524,6 +632,9 @@ async def run(
                     update_id=update_id,
                     transcript_turns=settings.TRANSCRIPT_TURNS,
                     flags=flags,
+                    pinned=[row.text for row in pinned_rows],
+                    retrieved=[row.text for row in retrieved_rows],
+                    summaries=await recent_summaries(session),
                 )
             else:
                 messages = await build_neutral_messages(
@@ -576,8 +687,13 @@ async def run(
             kind=CHAT_KIND,
         )
 
-    # Split, send, then mark sent.
+    # Split, send, then mark sent -- and only then mark the injected
+    # memories used (plan section 6: "after the turn is delivered").
+    # mark_used() does not commit; _mark_sent()'s commit covers both, so
+    # "this reply was delivered" and "these memories were used" can
+    # never diverge.
     await send_reply(bot, chat_id, response.text)
     async with sessionmaker() as session:
         row = await _get_assistant_row(session, update_id)
+        await memory.mark_used(session, injected_memory_ids)
         await _mark_sent(session, row.id)

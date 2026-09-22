@@ -6,18 +6,37 @@ sync_persona_version() calls load_persona() internally instead of
 hashing the file itself, without changing its own signature (tests/
 test_startup.py calls it directly).
 
-Prompt order, stable prefix first for cache-friendliness in general
-(Cydonia, the current model, has no implicit caching -- see
-app/llm/openrouter.py -- but the ordering costs nothing and keeps the
-door open for a future model that does cache):
+Prompt order (2b: plan section 7, which amends Phase 1 section 9),
+stable prefix first for cache-friendliness in general (Cydonia, the
+current model, has no implicit caching -- see app/llm/openrouter.py --
+but the ordering costs nothing and keeps the door open for a future
+model that does cache):
   1. system  -- persona.md body, byte-identical every call.
-  2. transcript -- last TRANSCRIPT_TURNS `message` rows with ooc=false,
-     oldest first, excluding the row(s) belonging to the current
-     update_id (see the double-user-message bug this guards against,
-     below).
-  3. system  -- the "## Сейчас" block, rebuilt every turn: local time,
-     Russian weekday, intensity, and any flags.
-  4. user    -- the new text.
+  2. system  -- "## Что ты знаешь (закреплено)": pinned memories.
+     Changes only when pins change.
+  3. system  -- "## Прошлые сессии": the last 3 closed scenes'
+     summaries, oldest first. Changes only when a scene closes.
+  4. transcript -- last TRANSCRIPT_TURNS `message` rows with ooc=false
+     and kind in (chat, checkin), oldest first, excluding the row(s)
+     belonging to the current update_id (see the double-user-message
+     bug this guards against, below).
+  5. system  -- the "## Сейчас" block, rebuilt every turn: local time,
+     Russian weekday, intensity, "## Может быть важно" with the
+     retrieved memories, and any flags.
+  6. user    -- the new text.
+
+Sections 2 and 3 are **omitted entirely when empty** rather than
+emitted as a bare header. An empty heading is noise to the model, and
+it would churn the byte-stable prefix that the ordering above exists to
+protect.
+
+**This module never sees a memory id.** `build_messages` takes pinned
+and retrieved memories as `list[str]`, not as ORM rows, which makes
+plan section 7's "memory IDs are never shown to the chat model; only
+the extractor sees IDs" structurally impossible to violate rather than
+a property of an f-string somewhere. Retrieval itself lives in
+app/core/memory.py and is driven by app/core/turn.py, which needs the
+ids back anyway to mark them used after delivery.
 
 The double-user-message bug: core/turn.py stores the user's message
 (step 1 of the turn) and then appends `user_text` again as the final
@@ -50,10 +69,21 @@ PERSONA_PATH = REPO_ROOT / "persona" / "persona.md"
 # "## Сейчас" block -- unlike build_messages()'s byte-stable prefix,
 # there is nothing here that needs to be cache-friendly, since neutral
 # mode is meant to be rare and short-lived.
+# Plan section 7 item 4: the persona transcript sees chat and check-in
+# rows only. Welfare turns (2e) and canned replies are excluded here by
+# kind, independently of the ooc flag that also excludes them -- one
+# filter failing must not be enough to leak a welfare exchange into the
+# persona's context.
+PERSONA_TRANSCRIPT_KINDS = ("chat", "checkin")
+
 NEUTRAL_SYSTEM_PROMPT = (
     "Ты нейтральный ассистент. Роль Anchor сейчас выключена. Отвечай спокойно и по делу, "
     "на языке пользователя. Не возвращайся в роль; если спросят как вернуться — подскажи команду /in."
 )
+
+PINNED_HEADER = "## Что ты знаешь (закреплено)"
+SESSIONS_HEADER = "## Прошлые сессии"
+RETRIEVED_HEADER = "## Может быть важно"
 
 # strftime("%A") depends on a ru_RU locale that is not installed in the
 # container, so the weekday name is a hardcoded lookup instead
@@ -84,8 +114,34 @@ def load_persona(persona_path: Path = PERSONA_PATH) -> tuple[str, str]:
     return body, sha256
 
 
-def build_now_block(*, timezone: str, intensity: int, flags: list[str] | None = None) -> str:
-    """The "## Сейчас" system message (plan section 9), rebuilt every turn."""
+def _bullets(header: str, items: list[str]) -> list[str]:
+    """`header` followed by `- item` lines, or nothing at all when empty."""
+    if not items:
+        return []
+    return [header, *(f"- {item}" for item in items)]
+
+
+def build_now_block(
+    *,
+    timezone: str,
+    intensity: int,
+    flags: list[str] | None = None,
+    retrieved: list[str] | None = None,
+) -> str:
+    """The "## Сейчас" system message (plan section 7), rebuilt every turn.
+
+    2b appends "## Может быть важно" with the retrieved memories. They
+    belong *inside* this block rather than as their own message because
+    they are the most volatile thing in the prompt and the ordering is
+    cache-aware: everything that changes per-turn is last.
+
+    # TODO(2d): plan section 7 also specifies "Фокус", "Серия",
+    # "Главное действие" and "Последний чек-ин" on this block. Those
+    # read user_state columns (focus_on, streak, due_action,
+    # last_checkin_at) that milestone 2d adds. Emitting them now would
+    # mean either dead columns or invented values, so the lines are
+    # added when the data behind them exists.
+    """
     now_local = datetime.datetime.now(ZoneInfo(timezone))
     weekday = _RU_WEEKDAYS[now_local.weekday()]
     lines = [
@@ -93,12 +149,18 @@ def build_now_block(*, timezone: str, intensity: int, flags: list[str] | None = 
         f"Локальное время: {now_local.strftime('%Y-%m-%d %H:%M')} ({timezone}), {weekday}",
         f"Интенсивность: {intensity}/5",
     ]
+    lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     lines.extend(flags or [])
     return "\n".join(lines)
 
 
 async def _load_transcript(
-    session: AsyncSession, *, ooc: bool, update_id: int | None, limit: int
+    session: AsyncSession,
+    *,
+    ooc: bool,
+    update_id: int | None,
+    limit: int,
+    kinds: tuple[str, ...] | None = None,
 ) -> list[Message]:
     """The last `limit` message rows with `ooc=ooc`, oldest first, excluding `update_id`.
 
@@ -108,6 +170,14 @@ async def _load_transcript(
     `!=`: plain `!=` silently drops any historical row whose update_id
     is NULL (NULL != x is NULL/unknown in SQL, which excludes rather
     than includes it).
+
+    `kinds` (2b) is a *parameter* rather than a filter baked in here,
+    and is passed only by build_messages(). Plan section 7 restricts
+    the persona transcript to kind in (chat, checkin); applying that to
+    this shared helper unconditionally would also stop neutral mode
+    from seeing kind='canned' rows, a silent behaviour change to 1d
+    that no test would catch (tests/test_turn.py's ooc rows are written
+    with the default kind='chat' and would keep passing).
     """
     stmt = (
         select(Message)
@@ -116,6 +186,8 @@ async def _load_transcript(
         .order_by(Message.id.desc())
         .limit(limit)
     )
+    if kinds is not None:
+        stmt = stmt.where(Message.kind.in_(kinds))
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
     rows.reverse()
@@ -131,18 +203,46 @@ async def build_messages(
     update_id: int | None,
     transcript_turns: int,
     flags: list[str] | None = None,
+    pinned: list[str] | None = None,
+    summaries: list[str] | None = None,
+    retrieved: list[str] | None = None,
     persona_path: Path = PERSONA_PATH,
 ) -> list[LLMMessage]:
-    """Assemble the full message list for one turn, in plan section 9's order."""
+    """Assemble the full message list for one turn, in plan section 7's order.
+
+    `pinned`, `summaries` and `retrieved` are plain strings supplied by
+    the caller (app/core/turn.py), never ORM rows and never ids -- see
+    the module docstring. All three default to None, so every Phase 1
+    call site keeps its exact previous behaviour: with no memories and
+    no summaries the empty sections are omitted and the message list is
+    identical to what section 9 produced.
+    """
     persona_body, _ = load_persona(persona_path)
-    transcript = await _load_transcript(session, ooc=False, update_id=update_id, limit=transcript_turns)
+    transcript = await _load_transcript(
+        session,
+        ooc=False,
+        update_id=update_id,
+        limit=transcript_turns,
+        kinds=PERSONA_TRANSCRIPT_KINDS,
+    )
 
     messages = [LLMMessage(role="system", content=persona_body)]
+
+    pinned_block = _bullets(PINNED_HEADER, pinned or [])
+    if pinned_block:
+        messages.append(LLMMessage(role="system", content="\n".join(pinned_block)))
+
+    sessions_block = _bullets(SESSIONS_HEADER, summaries or [])
+    if sessions_block:
+        messages.append(LLMMessage(role="system", content="\n".join(sessions_block)))
+
     messages.extend(LLMMessage(role=row.role, content=row.content) for row in transcript)
     messages.append(
         LLMMessage(
             role="system",
-            content=build_now_block(timezone=timezone, intensity=intensity, flags=flags),
+            content=build_now_block(
+                timezone=timezone, intensity=intensity, flags=flags, retrieved=retrieved
+            ),
         )
     )
     messages.append(LLMMessage(role="user", content=user_text))
