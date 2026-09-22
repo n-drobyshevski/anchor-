@@ -48,6 +48,18 @@ and the commit loses one increment instead; undercounting a use is
 harmless, while overcounting would corrupt the last_used_at tie-break
 that gives retrieval its callback variety.
 
+2d adds the check-in note branch (plan section 9), and where it sits is
+the whole design. It must run **after** pause.match -- plan section 13
+puts pause words before everything, `awaiting` states included -- and
+**before** _store_user_message_once, because a check-in stores a
+synthetic summary line, not the user's raw note. That leaves exactly one
+insertion point, marked "Step 0c" below.
+
+It falls through rather than recursing: the branch rebinds its own
+`user_text` to the synthetic line, sets kind='checkin' and adds the
+hidden flag, and the same invocation carries on into step 1. Everything
+downstream then happens once, through the path that already exists.
+
 2c enqueues the post-turn extractor (plan section 8), and the *where*
 matters more than the what. It is enqueued only on the success path of
 an in-character turn, after the reply has been sent: never for a
@@ -81,7 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import pause
 from app.core.outbound import cancel_outbound
-from app.core import memory
+from app.core import checkin, memory
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import check_cap, compute_cost, local_date_for
@@ -130,6 +142,13 @@ EXTRACT = "extract"
 # and no ledger row at all.
 CHAT_KIND = "chat"
 CANNED_KIND = "canned"
+CHECKIN_KIND = "checkin"
+
+# Plan section 9, verbatim: the hidden flag on the turn that follows a
+# completed check-in.
+CHECKIN_FLAG = (
+    "Пользователь только что прошёл чек-ин; отреагируй коротко и дай одно действие на завтра."
+)
 
 
 async def _store_user_message_once(
@@ -541,6 +560,8 @@ async def run(
     update_id: int,
     user_text: str,
     web_search: bool = False,
+    kind: str = CHAT_KIND,
+    extra_flags: list[str] | None = None,
 ) -> None:
     """Run one idempotent chat turn. See module and plan sections 7/8 docs.
 
@@ -568,13 +589,43 @@ async def run(
     # inbound message and not only on ones that reach the model.
     scene_id = await ensure_scene(sessionmaker, settings)
 
+    # Step 0c (2d): the check-in note step. Deliberately here and
+    # nowhere else -- see the module docstring.
+    #
+    # A pause word of *either* level wins and clears the flag: plan
+    # section 9's "Pause words always win and clear awaiting" is
+    # unqualified, so "жёлтый" at the note step lowers intensity and
+    # carries on as an ordinary turn rather than being filed as a note.
+    flags: list[str] | None = list(extra_flags) if extra_flags else None
+    if user_state.awaiting is not None and level is not None:
+        async with sessionmaker() as session:
+            await checkin.clear_awaiting(session)
+    elif level is None and user_state.awaiting == checkin.AWAITING_NOTE:
+        async with sessionmaker() as session:
+            pending = await checkin.pending_note_checkin(session, user_state.timezone)
+            if pending is not None:
+                await checkin.set_note(session, pending.id, user_text)
+                row, streak = await checkin.finish(session, user_state.timezone)
+                # From here on this turn is the check-in's turn: the
+                # raw note never becomes a message of its own.
+                user_text = checkin.synthetic_line(row)
+                kind = CHECKIN_KIND
+                flags = [*(flags or []), CHECKIN_FLAG]
+                user_state = await get_state(session)
+                if pending.tg_message_id is not None:
+                    # Local import: app/tg/checkin.py imports this
+                    # module (lazily, for the same reason).
+                    from app.tg.checkin import retire
+
+                    await retire(bot, chat_id, pending.tg_message_id, streak)
+
     # Step 1: store the user message idempotently. A safeword, or any
     # message sent while persona is already off, must never land in
     # the persona transcript.
     ooc = (not user_state.persona_active) or level == "hard"
     async with sessionmaker() as session:
         await _store_user_message_once(
-            session, update_id, user_text, ooc=ooc, scene_id=scene_id, kind=CHAT_KIND
+            session, update_id, user_text, ooc=ooc, scene_id=scene_id, kind=kind
         )
 
     # Step 2: never regenerate if an assistant row already exists.
@@ -598,13 +649,12 @@ async def run(
 
     # Step 4: SOFT pause word -- lower intensity, then carry on into a
     # normal turn with the flag. Still runs at intensity 1 (plan section 7).
-    flags: list[str] | None = None
     if level == "soft":
         async with sessionmaker() as session:
             user_state = await update_state(
                 session, "intensity", max(1, user_state.intensity - 1), "pause"
             )
-        flags = [YELLOW_FLAG]
+        flags = [*(flags or []), YELLOW_FLAG]
 
     # Step 5: spend cap check, before any LLM call. Unchanged from 1c.
     async with sessionmaker() as session:
@@ -654,6 +704,8 @@ async def run(
                     focus_on=user_state.focus_on,
                     due_action=user_state.due_action,
                     due_set_at=user_state.due_set_at,
+                    streak=user_state.streak,
+                    last_checkin_at=user_state.last_checkin_at,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -703,7 +755,7 @@ async def run(
             local_date=local_date_for(user_state.timezone),
             category=category,
             scene_id=scene_id,
-            kind=CHAT_KIND,
+            kind=kind,
         )
 
     # Split, send, then mark sent -- and only then mark the injected

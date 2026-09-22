@@ -14,6 +14,12 @@ Handler registration order follows plan section 6.4:
 3. Anything else (stickers, photos, voice): a fixed "text only" reply,
    no LLM call.
 
+2d adds /checkin, /due and /focus, the `c:*` callbacks, and the
+codebase's first middleware -- an outer one on the message observer
+that clears a pending `awaiting` step on any slash command (plan
+section 9). It is registered inside build_router so each Dispatcher a
+test builds gets its own, exactly like the handlers.
+
 2b adds the memory commands and this bot's first callback_query
 handlers (plan section 11). The commands go **before** the F.text
 handler for the reason stated above -- registered after it, they are
@@ -50,9 +56,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core import turn
-from app.core.spend import today_usd
-from app.core.state import get_state
+from app.core import checkin as checkin_core
+from app.core import memory as memory_core
+from app.core import proposal as proposal_core
+from app.core.spend import today_by_category, today_usd
+from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.tg import checkin as checkin_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
 
@@ -74,7 +84,16 @@ BOT_COMMANDS = [
     BotCommand(command="forget", description="Забыть запись по id"),
     BotCommand(command="pin", description="Закрепить запись"),
     BotCommand(command="unpin", description="Открепить запись"),
+    BotCommand(command="checkin", description="Чек-ин за день"),
+    BotCommand(command="due", description="Главное действие"),
+    BotCommand(command="focus", description="Фокус вкл/выкл"),
 ]
+
+DUE_CLEARED = "Главное действие снято."
+DUE_SET = "Главное действие: «{text}»."
+FOCUS_USAGE = "Как именно? /focus on или /focus off."
+FOCUS_ON = "Фокус включён."
+FOCUS_OFF = "Фокус выключен."
 
 
 async def register_commands(bot) -> None:
@@ -82,21 +101,58 @@ async def register_commands(bot) -> None:
     await bot.set_my_commands(BOT_COMMANDS)
 
 
-def _format_state(user_state, spend, settings: Settings) -> str:
-    now_local = datetime.datetime.now(ZoneInfo(user_state.timezone)).strftime("%Y-%m-%d %H:%M")
+def _format_state(user_state, spend, settings: Settings, *, by_category=None, memories=0) -> str:
+    """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
+
+    Spend is broken down by ledger category so a day where the
+    background jobs cost more than the conversation is visible at a
+    glance rather than hidden inside one total.
+    """
+    tz = ZoneInfo(user_state.timezone)
+    now_local = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+
+    if user_state.last_checkin_at is None:
+        last_checkin = "давно"
+    else:
+        local = user_state.last_checkin_at.astimezone(tz)
+        days = (datetime.datetime.now(tz).date() - local.date()).days
+        when = "сегодня" if days <= 0 else "вчера" if days == 1 else f"{days} дн. назад"
+        last_checkin = f"{when} {local.strftime('%H:%M')}"
+
+    if user_state.due_action:
+        due = f"«{user_state.due_action}»"
+        if user_state.due_set_at:
+            days = (datetime.datetime.now(tz).date() - user_state.due_set_at.astimezone(tz).date()).days
+            due += " (задано сегодня)" if days <= 0 else f" (задано {days} дн. назад)"
+    else:
+        due = "нет"
+
+    breakdown = ""
+    if by_category:
+        breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
+
     return (
         "Персона: {persona}\n"
-        "Интенсивность: {intensity}/5\n"
+        "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
+        "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
+        "Главное действие: {due}\n"
+        "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
-        "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD\n"
+        "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
         "Модель: {model}"
     ).format(
         persona="вкл" if user_state.persona_active else "выкл",
         intensity=user_state.intensity,
+        focus="вкл" if user_state.focus_on else "выкл",
+        streak=user_state.streak,
+        last_checkin=last_checkin,
+        due=due,
+        memories=memories,
         time=now_local,
         tz=user_state.timezone,
         spend=spend,
         cap=settings.DAILY_USD_CAP,
+        breakdown=breakdown,
         model=settings.LLM_MODEL,
     )
 
@@ -121,7 +177,13 @@ def build_router(
         async with sessionmaker() as session:
             user_state = await get_state(session)
             spend = await today_usd(session, user_state.timezone)
-        await message.answer(_format_state(user_state, spend, settings))
+            by_category = await today_by_category(session, user_state.timezone)
+            memories = await memory_core.count_active(session)
+        await message.answer(
+            _format_state(
+                user_state, spend, settings, by_category=by_category, memories=memories
+            )
+        )
 
     @router.message(Command("out"))
     async def out(message: Message, event_update: Update) -> None:
@@ -196,6 +258,105 @@ def build_router(
             update_id=event_update.update_id,
             user_text=query,
             web_search=True,
+        )
+
+    # --- 2d: clearing `awaiting` on any command (plan section 9) ---
+
+    @router.message.outer_middleware()
+    async def clear_awaiting_on_command(handler, event, data):
+        """Any slash command clears a pending conversational step.
+
+        Plan section 9 states this as a blanket rule, so it is enforced
+        by a blanket mechanism rather than a line at the top of each of
+        the fourteen command handlers -- one that a future command would
+        eventually forget.
+
+        This is the codebase's first middleware, and deliberately not
+        the dependency injection this module's docstring says the repo
+        avoids: it carries no dependencies into handlers, it enforces an
+        invariant. Outer rather than inner so it runs before filters,
+        which means it also fires for a command no handler matches.
+        """
+        text = getattr(event, "text", None) or ""
+        if text.startswith("/"):
+            async with sessionmaker() as session:
+                await checkin_core.clear_awaiting(session)
+        return await handler(event, data)
+
+    # --- 2d: check-in, /due, /focus (plan section 9) ---
+
+    async def _expire_proposal_for(message: Message, field: str) -> None:
+        """A direct command outranks an outstanding proposal for the same field.
+
+        Otherwise a live `Принять` would sit there waiting to overwrite
+        what the user just typed. Reuses the expiry machinery plan
+        section 8 already defines for one proposal superseding another.
+        """
+        async with sessionmaker() as session:
+            pending = await proposal_core.get_pending(session)
+            if pending is None or pending.field != field:
+                return
+            proposal_id = pending.id
+            pending.status = proposal_core.EXPIRED
+            pending.decided_at = datetime.datetime.now(datetime.timezone.utc)
+            await session.commit()
+        await proposals_ui.retire_buttons(
+            sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=proposal_id
+        )
+
+    @router.message(Command("checkin"))
+    async def checkin_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        await turn.ensure_scene(sessionmaker, settings)
+        await checkin_ui.start(
+            sessionmaker, message.bot, chat_id=message.chat.id, timezone=user_state.timezone
+        )
+        await turn.mark_update_handled(
+            sessionmaker, update_id=event_update.update_id, text="[/checkin]"
+        )
+
+    @router.message(Command("due"))
+    async def due(message: Message, event_update: Update, command: CommandObject) -> None:
+        text = (command.args or "").strip()
+        async with sessionmaker() as session:
+            if text:
+                await update_state(session, "due_action", text, "command")
+                await update_state(
+                    session, "due_set_at", datetime.datetime.now(datetime.timezone.utc), "command"
+                )
+            else:
+                await update_state(session, "due_action", None, "command")
+                await update_state(session, "due_set_at", None, "command")
+        await _expire_proposal_for(message, proposal_core.DUE_ACTION)
+        await _reply_once(
+            message,
+            event_update.update_id,
+            DUE_SET.format(text=text) if text else DUE_CLEARED,
+        )
+
+    @router.message(Command("focus"))
+    async def focus(message: Message, event_update: Update, command: CommandObject) -> None:
+        raw = (command.args or "").strip().lower()
+        if raw not in ("on", "off", "вкл", "выкл"):
+            await _reply_once(message, event_update.update_id, FOCUS_USAGE)
+            return
+        # parse_focus is shared with the proposal button, so a command
+        # and a button can never disagree about what "on" means.
+        enabled = proposal_core.parse_focus(raw)
+        async with sessionmaker() as session:
+            await update_state(session, "focus_on", enabled, "command")
+            await update_state(
+                session,
+                "focus_since",
+                datetime.datetime.now(datetime.timezone.utc) if enabled else None,
+                "command",
+            )
+        await _expire_proposal_for(message, proposal_core.FOCUS_ON)
+        await _reply_once(
+            message, event_update.update_id, FOCUS_ON if enabled else FOCUS_OFF
         )
 
     # --- 2b: memory (plan section 11) ---
@@ -324,6 +485,21 @@ def build_router(
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("c:"))
+    async def checkin_callback(callback: CallbackQuery, event_update: Update) -> None:
+        """`c:r:<n>` / `c:d:<result>` / `c:n:skip` -- the check-in flow."""
+        await checkin_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            provider,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            update_id=event_update.update_id,
             data=callback.data,
         )
 

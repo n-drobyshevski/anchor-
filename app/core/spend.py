@@ -45,6 +45,27 @@ async def today_usd(session: AsyncSession, timezone: str) -> decimal.Decimal:
     return decimal.Decimal(result.scalar_one())
 
 
+async def today_by_category(
+    session: AsyncSession, timezone: str
+) -> dict[str, decimal.Decimal]:
+    """Today's spend per ledger category, largest first (plan section 11).
+
+    Categories are not enumerated here: the ledger takes whatever
+    category the writer used (chat, ooc, summary, extractor, and later
+    welfare and checkin), and /state should show a new one the day it
+    first appears rather than the day someone remembers to add it to a
+    list.
+    """
+    local_today = local_date_for(timezone)
+    result = await session.execute(
+        select(SpendLedger.category, func.sum(SpendLedger.usd_cost))
+        .where(SpendLedger.local_date == local_today)
+        .group_by(SpendLedger.category)
+        .order_by(func.sum(SpendLedger.usd_cost).desc())
+    )
+    return {category: decimal.Decimal(total) for category, total in result.all()}
+
+
 async def check_cap(session: AsyncSession, settings: Settings, timezone: str) -> bool:
     """True iff today's spend has already reached DAILY_USD_CAP.
 

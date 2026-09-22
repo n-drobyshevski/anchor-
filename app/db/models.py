@@ -4,6 +4,9 @@
 adds the rest of the Phase 1 schema (plan section 5): message,
 user_state, state_change, persona_version, spend_ledger.
 
+2d adds `checkin` (phase-2 plan sections 4 and 9) and the last four
+`user_state` columns.
+
 2c adds `journal` and `proposal` (phase-2 plan sections 4 and 8), and
 four `user_state` columns.
 
@@ -220,6 +223,18 @@ class UserState(Base):
     due_action: Mapped[str | None] = mapped_column(String)
     due_set_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # 2d (phase-2 plan section 4). `awaiting` names a pending
+    # conversational step -- only 'checkin_note' exists today -- and
+    # `awaiting_ref` is the row it refers to (a checkin.id). Both are
+    # cleared by a pause word or any slash command (plan section 9), so
+    # they can never strand the plain-text path.
+    streak: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_checkin_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    awaiting: Mapped[str | None] = mapped_column(String)
+    awaiting_ref: Mapped[int | None] = mapped_column(BigInteger)
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
@@ -427,4 +442,41 @@ class Proposal(Base):
             name="ck_proposal_status",
         ),
         Index("ix_proposal_status", "status"),
+    )
+
+
+class Checkin(Base):
+    """One day's structured check-in (phase-2 plan sections 4 and 9).
+
+    The row **is** the state machine for the flow: /checkin upserts
+    today's row with the answer fields nulled, and each button fills one
+    of them. That is also why section 9's "a second check-in the same day
+    overwrites the first" needs no special handling -- `local_date` is
+    unique, so starting again simply resets the day's row.
+
+    `tg_message_id` is not in the plan's SQL, but section 9's stale-button
+    rule cannot be implemented without it: the callback data it specifies
+    (`c:r:<n>`) carries no check-in id, so "is this button from the
+    current check-in?" can only be answered by comparing message ids.
+    `proposal` carries the same column for the same reason.
+    """
+
+    __tablename__ = "checkin"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False, unique=True)
+    day_rating: Mapped[int | None] = mapped_column(Integer)
+    due_result: Mapped[str | None] = mapped_column(String)  # done|partial|no|none
+    note: Mapped[str | None] = mapped_column(String)
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("day_rating between 1 and 5", name="ck_checkin_day_rating"),
+        CheckConstraint(
+            "due_result in ('done', 'partial', 'no', 'none')", name="ck_checkin_due_result"
+        ),
+        CheckConstraint('char_length("note") <= 500', name="ck_checkin_note_length"),
     )

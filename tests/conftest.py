@@ -206,7 +206,7 @@ async def sessionmaker(test_database_url: str):
                 text(
                     "TRUNCATE TABLE telegram_update, message, user_state, "
                     "state_change, persona_version, spend_ledger, job, scene, "
-                    "memory, pending_memory, journal, proposal "
+                    "memory, pending_memory, journal, proposal, checkin "
                     "RESTART IDENTITY CASCADE"
                 )
             )

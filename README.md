@@ -1,4 +1,4 @@
-# Anchor — Milestone 2c
+# Anchor — Milestone 2d
 
 A private, single-user Telegram bot.
 
@@ -52,6 +52,41 @@ Milestone 2c closes the loop — the bot now notices things on its own:
   `due_action`, `focus_on`, or a rule is ever applied directly: it lands
   as a `pending` row with `[Принять] [Отклонить]` buttons, and only a
   press applies it.
+
+Milestone 2d adds the daily ritual the rest is built around:
+
+- **`/checkin`** — three steps in one message edited in place: rate the
+  day, report the main action, add a one-line note. Finishing runs a
+  normal in-character turn with a hidden flag, so Anchor reacts and
+  names one action for tomorrow.
+- **A streak**, incremented when yesterday has a check-in, reset after a
+  gap, and unchanged by a same-day redo.
+- **`/due`** and **`/focus`** — direct commands for the two fields 2c's
+  proposals can only *suggest*. Typing one expires an outstanding
+  proposal for the same field, so a stale `Принять` can't later
+  overwrite what you just set.
+- **Extended `/state`** with focus, streak, last check-in, due action,
+  memory count, and today's spend broken down by category.
+
+### Pause words still come first
+
+Plan §13 puts pause words before everything — `awaiting` states
+included. The check-in note step is the only place in this codebase
+where plain text means something other than "talk to me", so the note
+branch sits at exactly one point in `turn.run()`: after `pause.match()`,
+before the raw text is stored. A safeword typed at the note step pauses
+the persona and is never filed as a note; a soft `жёлтый` does the same,
+because §9's "pause words always win" is unqualified.
+
+Any slash command also clears a pending step. That is enforced by an
+outer middleware on the message observer rather than a line in each of
+the fourteen command handlers — a blanket rule deserves a blanket
+mechanism, and it fires even for a command no handler matches.
+
+A note step left open overnight expires on the local-date boundary, so
+tomorrow's first message is an ordinary message rather than yesterday's
+note. §9 doesn't specify that; left literal it is a silent data-loss
+bug.
 
 ### The extractor cannot write sensitive state
 

@@ -92,6 +92,14 @@ async def count_pinned(session: AsyncSession) -> int:
     return result.scalar_one()
 
 
+async def count_active(session: AsyncSession) -> int:
+    """How many memories are live (plan section 11's /state line)."""
+    result = await session.execute(
+        select(func.count()).select_from(Memory).where(Memory.superseded_by.is_(None))
+    )
+    return result.scalar_one()
+
+
 async def retrieve_memories(session: AsyncSession, user_text: str, limit: int) -> list[Memory]:
     """Active, unpinned memories relevant to `user_text` (plan section 6).
 

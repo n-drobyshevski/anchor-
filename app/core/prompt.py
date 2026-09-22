@@ -140,6 +140,8 @@ def build_now_block(
     focus_on: bool = False,
     due_action: str | None = None,
     due_set_at: datetime.datetime | None = None,
+    streak: int = 0,
+    last_checkin_at: datetime.datetime | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -148,22 +150,25 @@ def build_now_block(
     they are the most volatile thing in the prompt and the ordering is
     cache-aware: everything that changes per-turn is last.
 
-    2c fills in "Фокус" and "Главное действие": the columns behind them
-    arrived with the proposal-accept path (app/core/proposal.py).
-
-    # TODO(2d): "Серия" and "Последний чек-ин" still read user_state
-    # columns (streak, last_checkin_at) that milestone 2d adds. Emitting
-    # them now would mean dead columns or invented values.
+    2c filled in "Фокус" and "Главное действие"; 2d adds "Серия" and
+    "Последний чек-ин", completing plan section 7's block.
     """
     now_local = datetime.datetime.now(ZoneInfo(timezone))
     weekday = _RU_WEEKDAYS[now_local.weekday()]
     lines = [
         "## Сейчас",
         f"Локальное время: {now_local.strftime('%Y-%m-%d %H:%M')} ({timezone}), {weekday}",
-        f"Интенсивность: {intensity}/5 · Фокус: {'вкл' if focus_on else 'выкл'}",
+        f"Интенсивность: {intensity}/5 · Фокус: {'вкл' if focus_on else 'выкл'} "
+        f"· Серия: {streak} дн.",
     ]
+    tz = ZoneInfo(timezone)
+    if last_checkin_at is not None:
+        stamp = last_checkin_at.astimezone(tz).strftime("%H:%M")
+        lines.append(f"Последний чек-ин: {_ago(last_checkin_at, tz=tz)} {stamp}")
+    else:
+        lines.append("Последний чек-ин: давно")
     if due_action:
-        when = f" (задано {_ago(due_set_at, tz=ZoneInfo(timezone))})" if due_set_at else ""
+        when = f" (задано {_ago(due_set_at, tz=tz)})" if due_set_at else ""
         lines.append(f"Главное действие: «{due_action}»{when}")
     else:
         lines.append("Главное действие: нет")
@@ -227,6 +232,8 @@ async def build_messages(
     focus_on: bool = False,
     due_action: str | None = None,
     due_set_at: datetime.datetime | None = None,
+    streak: int = 0,
+    last_checkin_at: datetime.datetime | None = None,
     persona_path: Path = PERSONA_PATH,
 ) -> list[LLMMessage]:
     """Assemble the full message list for one turn, in plan section 7's order.
@@ -269,6 +276,8 @@ async def build_messages(
                 focus_on=focus_on,
                 due_action=due_action,
                 due_set_at=due_set_at,
+                streak=streak,
+                last_checkin_at=last_checkin_at,
             ),
         )
     )
