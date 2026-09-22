@@ -322,6 +322,13 @@ def build_router(
             scene_id=scene_id,
         )
 
+    # TODO(phase-4): replace with gated research loop.
+    #
+    # H3 left this handler standing but turned it off (LLM_WEB_SEARCH now
+    # defaults to False). It is the one path that sends the user's words to
+    # a third party, and it reached the tree without a plan behind it --
+    # so what replaces it should be deliberate: an explicit, budgeted,
+    # logged research step rather than a raw plugin on a persona turn.
     @router.message(Command("search"))
     async def search(message: Message, event_update: Update, command: CommandObject) -> None:
         """/search <query>: opt-in web search (plan milestone 1f).

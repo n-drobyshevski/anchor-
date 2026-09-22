@@ -600,6 +600,45 @@ Both numbers live in `app/core/memory.py` with the measurements that
 justify them; `tests/test_memory.py` asserts ranking and separation, not
 the floats.
 
+## Hardening H3 — `/search` is off
+
+`/search` reached the tree with milestone 1f without a plan behind it, and
+it defaulted **on**. It is the only path in this bot that sends the user's
+words to a third party (Exa, through OpenRouter's `web` plugin), so
+`LLM_WEB_SEARCH` now defaults to `false`. Disabled, the handler answers
+«Поиск пока выключен.» and makes no model call at all — it takes the same
+zero-cost canned-reply path as an empty query, so nothing is billed and
+nothing reaches the persona transcript.
+
+The feature is not deleted. It carries a `TODO(phase-4)` marker: what
+replaces it should be an explicit, budgeted, logged research step, not a
+raw plugin bolted onto a persona turn.
+
+### The test asserts a property, not five call sites
+
+`tests/test_web_search_isolation.py` guards this from two directions,
+because "the current call sites all pass False" is not the guarantee that
+matters — "no future call site can pass True by accident" is.
+
+An AST walk over all of `app/` finds every call passing a truthy
+`web_search=` and asserts the only one is the `/search` handler. Three
+`web_search=web_search` pass-throughs in `turn.py` are skipped as
+non-origins, which is safe only because a companion check asserts that
+*every* function declaring the parameter defaults it to `False` — flip one
+default and the whole bot would search without a single call site
+changing. Both detectors have a guard-the-guard test, the convention
+`tests/test_core_clock_discipline.py` set.
+
+Alongside that, an ordinary chat turn, an outbound message and each
+background job are driven through a recording provider under **both**
+values of `LLM_WEB_SEARCH`. The setting is parametrized deliberately: it
+gates whether `/search` is allowed and must never be mistaken for
+something that gates the rest of the bot.
+
+The wire below that seam was already pinned in `tests/test_openrouter.py`
+— `web_search=False` sends no `plugins`, no `tools`, no `tool_choice` and
+no `functions`.
+
 ## Local setup
 
 ```bash

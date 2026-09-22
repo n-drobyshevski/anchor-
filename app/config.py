@@ -70,7 +70,14 @@ class Settings(BaseSettings):
     LLM_PRICE_OUT: float = 0.50
     # 1f: opt-in web search via OpenRouter's `web` plugin, triggered only
     # by the /search command (app/tg/router.py) -- never on an ordinary turn.
-    LLM_WEB_SEARCH: bool = True
+    #
+    # H3: defaults to False. /search was never in a plan -- it arrived with
+    # milestone 1f and defaulted on -- and it is the only path in this bot
+    # that sends the user's words to a third party (Exa, via the plugin).
+    # The feature stays in the tree for phase 4; it is simply not live
+    # until someone turns it on deliberately. When it is False the handler
+    # answers SEARCH_DISABLED_REPLY_TEXT and makes no model call at all.
+    LLM_WEB_SEARCH: bool = False
     LLM_WEB_SEARCH_MAX_RESULTS: int = 5
     # OpenRouter's docs do not say whether the Exa search fee ($0.007/req)
     # is already folded into the `usage.cost` OpenRouter reports, and

@@ -139,7 +139,7 @@ YELLOW_FLAG = "Пользователь сказал «жёлтый»: сниз�
 
 # 1f: /search canned replies -- neither ever reaches the model.
 SEARCH_EMPTY_REPLY_TEXT = "Что поискать? Напиши так: /search вопрос."
-SEARCH_DISABLED_REPLY_TEXT = "Поиск сейчас выключен."
+SEARCH_DISABLED_REPLY_TEXT = "Поиск пока выключен."
 
 CHAT_CATEGORY = "chat"
 OOC_CATEGORY = "ooc"
