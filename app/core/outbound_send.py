@@ -133,8 +133,22 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
     `prompt.py`" -- an eval that assembled its own approximation would
     pass happily while the thing that ships regressed.
     """
+    from app.core.memory import retrieve_techniques
     from app.core.prompt import build_messages
     from app.core.scene import recent_summaries
+
+    # 4d: adopted techniques are for in-character generation, which a
+    # proactive message is (phase-4 plan section 10: "chat turns and
+    # outbound generation, **not** the extractor or classifier").
+    #
+    # Matched against the hidden flag rather than against a user
+    # message, because there is no user message here -- so in practice
+    # this almost always falls through to least-recently-used, which is
+    # the right behaviour: an unprompted message is exactly the place to
+    # try a technique the user has not seen used in a while.
+    techniques = await retrieve_techniques(
+        session, hidden_flag(kind, tick_note), settings.RESEARCH_TECHNIQUES_IN_PROMPT
+    )
 
     return await build_messages(
         session,
@@ -144,6 +158,7 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
         user_text=hidden_flag(kind, tick_note),
         update_id=None,
         transcript_turns=settings.TRANSCRIPT_TURNS,
+        techniques=[row.text for row in techniques],
         summaries=await recent_summaries(session),
         focus_on=state.focus_on,
         due_action=state.due_action,

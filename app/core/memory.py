@@ -62,6 +62,19 @@ DEDUPE_MAX_SIMILARITY = 0.6  # plan section 6, unchanged
 TOPUP_MIN_MATCHES = 3
 TOPUP_KINDS = ("identity", "rule")
 
+# 4d. `technique` memories are retrieved separately (phase-4 plan
+# section 10) and injected under their own header, so they are excluded
+# from the ordinary retrieval pool here.
+#
+# **This was a live leak, not a refactor.** From the moment 4b could
+# adopt a card, an adopted technique was an ordinary unpinned memory and
+# `retrieve_memories` returned it like any other -- into the "Может быть
+# важно" block, with no separate cap, competing with facts about the
+# user for MEMORY_RETRIEVED_MAX slots. Nothing in 4b or 4c noticed,
+# because RESEARCH_ENABLED was false the whole way and no technique
+# could exist yet.
+TECHNIQUE = "technique"
+
 # Below this many characters, skip retrieval entirely. "ок", "да", "ага"
 # produce three or four padded trigrams that match almost anything at a
 # respectable score, so a short acknowledgement would inject noise into
@@ -106,7 +119,9 @@ async def retrieve_memories(session: AsyncSession, user_text: str, limit: int) -
 
     Pinned memories are excluded: they are already injected as their own
     prompt block, and including them here would render duplicate bullets
-    and double-count `use_count` for a single injection.
+    and double-count `use_count` for a single injection. Techniques are
+    excluded for the same reason since 4d -- see `retrieve_techniques`,
+    and see TECHNIQUE above for why that exclusion is a fix.
 
     Two statements rather than one. The top-up is conditional on a count
     over the first result set, has different ordering and different
@@ -131,6 +146,7 @@ async def retrieve_memories(session: AsyncSession, user_text: str, limit: int) -
         select(Memory, score)
         .where(Memory.superseded_by.is_(None))
         .where(Memory.pinned.is_(False))
+        .where(Memory.kind != TECHNIQUE)
         .where(score > RETRIEVAL_MIN_SCORE)
         # NULLS FIRST is explicit on purpose: Postgres defaults ASC to
         # NULLS LAST, which would silently invert section 6's "ties go
@@ -147,6 +163,67 @@ async def retrieve_memories(session: AsyncSession, user_text: str, limit: int) -
         return rows
 
     return rows + await _topup(session, exclude_ids=[row.id for row in rows], limit=limit)
+
+
+async def retrieve_techniques(
+    session: AsyncSession, user_text: str, limit: int
+) -> list[Memory]:
+    """Adopted techniques worth having in this turn (plan section 10).
+
+    A separate pool from `retrieve_memories`, with its own small cap
+    (`RESEARCH_TECHNIQUES_IN_PROMPT`, default 2), because the two answer
+    different questions. A retrieved memory is a fact about the user
+    that the reply may need to be *consistent with*. A technique is a
+    method the user approved that the reply may choose to *use*. Letting
+    them compete for the same slots would mean a chatty week of adopted
+    cards quietly crowding out the bot knowing who it is talking to.
+
+    Same `word_similarity` metric and threshold as ordinary retrieval,
+    **but with a different fallback**: when nothing matches the user's
+    text, the least recently used techniques are offered instead (plan
+    section 10: "falling back to the least recently used"), rather than
+    the newest identity/rule rows `_topup` reaches for.
+
+    That fallback is deliberate and is the opposite of `_topup`'s known
+    distortion. `_topup` returns the *same* newest rows on every
+    low-match turn, so their `use_count` measures how often retrieval
+    failed. Least-recently-used rotates instead: every adopted technique
+    gets its turn in front of the model, which is the only way a card
+    the user accepted months ago is ever tried at all.
+
+    Unlike `retrieve_memories` there is no minimum query length. A
+    technique is useful on a short message too -- «не могу начать» is
+    four words and exactly when a method helps.
+    """
+    if limit <= 0:
+        return []
+
+    score = func.word_similarity(Memory.text, user_text).label("score")
+    matched = (
+        select(Memory, score)
+        .where(Memory.superseded_by.is_(None))
+        .where(Memory.kind == TECHNIQUE)
+        .where(score > RETRIEVAL_MIN_SCORE)
+        .order_by(score.desc(), Memory.last_used_at.asc().nullsfirst(), Memory.id.asc())
+        .limit(limit)
+    )
+    rows = [row[0] for row in (await session.execute(matched)).all()]
+    if len(rows) >= limit:
+        return rows
+
+    # NULLS FIRST is explicit: a technique never used is the least
+    # recently used one there is, and Postgres would otherwise sort it
+    # last under ASC.
+    fallback = (
+        select(Memory)
+        .where(Memory.superseded_by.is_(None))
+        .where(Memory.kind == TECHNIQUE)
+        .order_by(Memory.last_used_at.asc().nullsfirst(), Memory.id.asc())
+        .limit(limit - len(rows))
+    )
+    if rows:
+        fallback = fallback.where(Memory.id.notin_([row.id for row in rows]))
+    return rows + list((await session.execute(fallback)).scalars().all())
 
 
 async def _topup(session: AsyncSession, *, exclude_ids: list[int], limit: int) -> list[Memory]:

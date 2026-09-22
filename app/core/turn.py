@@ -846,7 +846,17 @@ async def run(
                 retrieved_rows = await memory.retrieve_memories(
                     session, user_text, settings.MEMORY_RETRIEVED_MAX
                 )
-                injected_memory_ids = [row.id for row in pinned_rows + retrieved_rows]
+                # 4d: a separate pool with its own small cap (phase-4
+                # plan section 10). Their ids join the injected set, so
+                # a technique that reached a delivered turn gets its
+                # last_used_at bumped -- which is what rotates the
+                # least-recently-used fallback in retrieve_techniques.
+                technique_rows = await memory.retrieve_techniques(
+                    session, user_text, settings.RESEARCH_TECHNIQUES_IN_PROMPT
+                )
+                injected_memory_ids = [
+                    row.id for row in pinned_rows + retrieved_rows + technique_rows
+                ]
                 messages = await build_messages(
                     session,
                     clock=clock,
@@ -858,6 +868,7 @@ async def run(
                     flags=flags,
                     pinned=[row.text for row in pinned_rows],
                     retrieved=[row.text for row in retrieved_rows],
+                    techniques=[row.text for row in technique_rows],
                     summaries=await recent_summaries(session),
                     focus_on=user_state.focus_on,
                     due_action=user_state.due_action,

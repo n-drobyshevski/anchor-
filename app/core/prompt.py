@@ -91,6 +91,14 @@ NEUTRAL_SYSTEM_PROMPT = (
 PINNED_HEADER = "## Что ты знаешь (закреплено)"
 SESSIONS_HEADER = "## Прошлые сессии"
 RETRIEVED_HEADER = "## Может быть важно"
+# 4d, phase-4 plan section 10. Its own header, not folded into
+# RETRIEVED_HEADER, because the two are different kinds of thing and
+# the model should treat them differently: what is under "Может быть
+# важно" is a fact the reply must stay consistent with, what is here is
+# a method the reply may choose to use. The parenthetical is the point
+# -- these arrived from the open web and are in this prompt only
+# because the user read one and pressed [Принять].
+TECHNIQUES_HEADER = "## Приёмы (одобрены тобой)"
 
 # strftime("%A") depends on a ru_RU locale that is not installed in the
 # container, so the weekday name is a hardcoded lookup instead
@@ -149,6 +157,7 @@ def build_now_block(
     intensity: int,
     flags: list[str] | None = None,
     retrieved: list[str] | None = None,
+    techniques: list[str] | None = None,
     focus_on: bool = False,
     due_action: str | None = None,
     due_set_at: datetime.datetime | None = None,
@@ -164,6 +173,11 @@ def build_now_block(
 
     2c filled in "Фокус" and "Главное действие"; 2d adds "Серия" and
     "Последний чек-ин", completing plan section 7's block.
+
+    4d adds "## Приёмы (одобрены тобой)" -- adopted research cards, the
+    only path by which anything read from the open web reaches this
+    prompt, and only after the user pressed [Принять] on it (phase-4
+    plan section 10).
     """
     now_local = clock_module.now_local(clock, timezone)
     weekday = _RU_WEEKDAYS[now_local.weekday()]
@@ -188,6 +202,10 @@ def build_now_block(
     else:
         lines.append("Главное действие: нет")
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
+    # After the retrieved memories and before the flags: a technique is
+    # less volatile than what this turn happened to match, and the flags
+    # stay last because they are the most volatile thing in the prompt.
+    lines.extend(_bullets(TECHNIQUES_HEADER, techniques or []))
     lines.extend(flags or [])
     return "\n".join(lines)
 
@@ -277,6 +295,7 @@ async def build_messages(
     pinned: list[str] | None = None,
     summaries: list[str] | None = None,
     retrieved: list[str] | None = None,
+    techniques: list[str] | None = None,
     focus_on: bool = False,
     due_action: str | None = None,
     due_set_at: datetime.datetime | None = None,
@@ -322,6 +341,7 @@ async def build_messages(
                 intensity=intensity,
                 flags=flags,
                 retrieved=retrieved,
+                techniques=techniques,
                 focus_on=focus_on,
                 due_action=due_action,
                 due_set_at=due_set_at,
