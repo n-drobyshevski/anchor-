@@ -1,4 +1,4 @@
-# Anchor — Milestone 2b
+# Anchor — Milestone 2c
 
 A private, single-user Telegram bot.
 
@@ -42,6 +42,36 @@ Milestone 2b makes it remember:
 
 See `app/config.py` and inline `# TODO(phase-N):` comments for what is
 deliberately deferred.
+
+Milestone 2c closes the loop — the bot now notices things on its own:
+
+- **A post-turn extractor** (`app/core/extract.py`) runs as a background
+  job after each delivered in-character turn. It proposes durable facts,
+  a one-line journal entry, and at most one change to how the bot pushes.
+- **Proposals** (`app/core/proposal.py`). Nothing the model suggests about
+  `due_action`, `focus_on`, or a rule is ever applied directly: it lands
+  as a `pending` row with `[Принять] [Отклонить]` buttons, and only a
+  press applies it.
+
+### The extractor cannot write sensitive state
+
+Plan §13: `intensity`, `focus_on`, `due_action`, `streak` and
+`persona_active` change only via commands, buttons, pause handling or
+check-in logic — never via model output. That is enforced structurally,
+not by care. `app/core/extract.py` imports exactly three things that can
+write: `memory.write_memory`, `proposal.create`, and a `Journal` row. It
+does not import `update_state`, and `proposal.accept()` — the only
+function that touches a sensitive field — is not in its namespace at all.
+
+`tests/test_extract.py` pins this two ways: a scripted extractor reply
+that tries to set `intensity`, `persona_active`, `streak`, `focus_on`
+and `due_action` must change nothing, and an AST check asserts the
+forbidden names appear nowhere in the module's executable code (its
+docstrings discuss them at length, so a plain grep would pass or fail
+for the wrong reasons).
+
+Rule memories are never auto-written at any confidence — a rule is the
+user instructing themselves, so it always becomes a proposal.
 
 ### Retrieval, and one deviation from the plan
 

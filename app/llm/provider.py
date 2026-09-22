@@ -83,9 +83,35 @@ class LLMRetryableError(Exception):
         self.retry_after = retry_after
 
 
+@dataclass(frozen=True)
+class JSONSchema:
+    """A strict JSON schema for a structured-output call (2c).
+
+    Vendor-agnostic on purpose: `openrouter.py` turns this into
+    OpenAI's `response_format={"type": "json_schema", ...}` shape, and a
+    future vendor would turn it into whatever that vendor wants.
+    Nothing above the seam knows how it is transmitted.
+
+    `strict` asks the provider to constrain decoding to the schema.
+    It is a *reliability* feature, never a correctness one: every field
+    is validated in code after parsing regardless (app/core/extract.py),
+    because a model that can emit a field is a model that can emit the
+    wrong field.
+    """
+
+    name: str
+    schema: dict
+    strict: bool = True
+
+
 class LLMProvider(Protocol):
     async def complete(
-        self, messages: list[LLMMessage], *, conversation_id: str, web_search: bool = False
+        self,
+        messages: list[LLMMessage],
+        *,
+        conversation_id: str,
+        web_search: bool = False,
+        json_schema: JSONSchema | None = None,
     ) -> LLMResponse: ...
 
     async def close(self) -> None: ...

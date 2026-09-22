@@ -18,6 +18,15 @@ reachable from turn.py's own loop.
 
 timeout=90.0 overrides the SDK's 10-minute default, which is far too
 long to hold a Telegram chat turn open.
+
+2c adds structured outputs. OpenRouter reports that Cydonia's only
+provider (Parasail) supports `structured_outputs`, but a *declared*
+capability is not a verified one, which is why `structured_outputs`
+is a constructor flag fed from LLM_STRUCTURED_OUTPUTS: if a live call
+turns out to reject `response_format`, one env var turns it off
+without a code change, and app/core/extract.py still parses and
+validates the reply exactly as it did before. Strict schema is a
+reliability feature here, never a correctness one.
 """
 
 from __future__ import annotations
@@ -28,7 +37,14 @@ from decimal import Decimal
 import openai
 from openai import AsyncOpenAI
 
-from app.llm.provider import LLMError, LLMMessage, LLMResponse, LLMRetryableError, LLMUsage
+from app.llm.provider import (
+    JSONSchema,
+    LLMError,
+    LLMMessage,
+    LLMResponse,
+    LLMRetryableError,
+    LLMUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +183,7 @@ class OpenRouterProvider:
         data_collection: str,
         web_search_max_results: int,
         client: AsyncOpenAI | None = None,
+        structured_outputs: bool = True,
     ) -> None:
         self._owns_client = client is None
         self._client = build_client(api_key) if client is None else client
@@ -175,15 +192,36 @@ class OpenRouterProvider:
         self._temperature = temperature
         self._data_collection = data_collection
         self._web_search_max_results = web_search_max_results
+        self._structured_outputs = structured_outputs
 
     async def complete(
-        self, messages: list[LLMMessage], *, conversation_id: str, web_search: bool = False
+        self,
+        messages: list[LLMMessage],
+        *,
+        conversation_id: str,
+        web_search: bool = False,
+        json_schema: JSONSchema | None = None,
     ) -> LLMResponse:
         # conversation_id is part of the Protocol's call shape but unused
         # here: OpenRouter has no prompt-cache-key field, and Cydonia
         # reports supports_implicit_caching: false, so there is nothing
         # to key a cache on -- cached_tokens will always come back 0.
         extra_body = {"provider": {"data_collection": self._data_collection}}
+        request: dict = {}
+        if json_schema is not None and self._structured_outputs:
+            # require_parameters refuses a provider that would ignore
+            # response_format and hand back prose. Failing loudly beats
+            # silently returning something the validator then rejects
+            # for reasons that look like the model's fault.
+            extra_body["provider"]["require_parameters"] = True
+            request["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": json_schema.name,
+                    "strict": json_schema.strict,
+                    "schema": json_schema.schema,
+                },
+            }
         if web_search:
             extra_body["plugins"] = [
                 {
@@ -200,6 +238,7 @@ class OpenRouterProvider:
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
                 extra_body=extra_body,
+                **request,
                 # No HTTP-Referer / X-Title headers here on purpose: both
                 # are optional OpenRouter attribution headers that would
                 # list this private bot on OpenRouter's public

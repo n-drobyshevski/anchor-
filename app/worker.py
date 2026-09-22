@@ -31,11 +31,13 @@ from aiogram.types import Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
+from app.tg.proposals import send_proposal
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +92,20 @@ async def _run_job(
     session: AsyncSession,
     settings: Settings,
     cheap_provider: LLMProvider,
+    bot: Bot,
     kind: str,
     payload: dict,
-) -> None:
+) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
-    A dict would be tidier, but handlers do not share a signature --
-    2c's `extract` needs different arguments than `summarize_scene`
-    does -- so this stays an explicit branch and an unknown kind raises
-    rather than being silently dropped.
+    Returns what the job changed, for the caller to act on.
+    A dict lookup would be tidier, but the handlers do not share a
+    signature, so this stays an explicit branch and an unknown kind
+    raises rather than being silently dropped.
     """
+    user_state = await get_state(session)
+
     if kind == SUMMARIZE_SCENE:
-        user_state = await get_state(session)
         await run_summarize_scene(
             session,
             settings,
@@ -109,7 +113,21 @@ async def _run_job(
             scene_id=payload["scene_id"],
             timezone=user_state.timezone,
         )
-        return
+        return ExtractOutcome()
+
+    if kind == EXTRACT:
+        return await run_extract(
+            session,
+            settings,
+            cheap_provider,
+            update_id=payload["update_id"],
+            memory_ids=payload.get("memory_ids") or [],
+            timezone=user_state.timezone,
+            intensity=user_state.intensity,
+            focus_on=user_state.focus_on,
+            due_action=user_state.due_action,
+        )
+
     raise ValueError(f"unknown job kind: {kind}")
 
 
@@ -117,6 +135,7 @@ async def process_one_job(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     cheap_provider: LLMProvider,
+    bot: Bot | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
 
@@ -132,9 +151,12 @@ async def process_one_job(
 
     job_id, kind, payload = job.id, job.kind, job.payload
     started_at = time.monotonic()
+    outcome = ExtractOutcome()
     try:
         async with sessionmaker() as session:
-            await _run_job(session, settings, cheap_provider, kind, payload)
+            outcome = await _run_job(
+                session, settings, cheap_provider, bot, kind, payload
+            )
     except Deferred as deferred:
         async with sessionmaker() as session:
             await defer_job(session, job_id, deferred.run_after)
@@ -162,8 +184,43 @@ async def process_one_job(
                 "latency_ms": int((time.monotonic() - started_at) * 1000),
             },
         )
+        # Sent after the job is marked done, not inside it: a send that
+        # fails must not roll the job back and re-run the model call.
+        # A proposal with no message is recoverable (the next one
+        # expires it); a double-charged extraction is not.
+        if outcome.created and bot is not None:
+            await _send_proposals(sessionmaker, bot, outcome)
 
     return True
+
+
+async def _send_proposals(
+    sessionmaker: async_sessionmaker[AsyncSession], bot: Bot, outcome: ExtractOutcome
+) -> None:
+    """Send confirmation messages for proposals a job created.
+
+    Only the newest can still be pending -- proposal.create() expires
+    any outstanding one -- so send_proposal() is a no-op for the rest,
+    by its own pending check. The first expired id is handed along so
+    its now-stale buttons get edited away (plan section 8).
+    """
+    async with sessionmaker() as session:
+        user_state = await get_state(session)
+    expired_id = outcome.expired[0] if outcome.expired else None
+    for proposal_id in outcome.created:
+        try:
+            await send_proposal(
+                sessionmaker,
+                bot,
+                chat_id=user_state.chat_id,
+                proposal_id=proposal_id,
+                expired_id=expired_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+            logger.warning(
+                "proposal send failed",
+                extra={"proposal_id": proposal_id, "event": type(exc).__name__},
+            )
 
 
 async def _claim_loop(
@@ -177,7 +234,7 @@ async def _claim_loop(
     while True:
         if await process_one_update(sessionmaker, dp, bot):
             continue
-        if await process_one_job(sessionmaker, settings, cheap_provider):
+        if await process_one_job(sessionmaker, settings, cheap_provider, bot):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
 

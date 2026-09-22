@@ -121,12 +121,25 @@ def _bullets(header: str, items: list[str]) -> list[str]:
     return [header, *(f"- {item}" for item in items)]
 
 
+def _ago(moment: datetime.datetime, *, tz: ZoneInfo) -> str:
+    """"сегодня" / "вчера" / "N дн. назад", for the now block."""
+    days = (datetime.datetime.now(tz).date() - moment.astimezone(tz).date()).days
+    if days <= 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    return f"{days} дн. назад"
+
+
 def build_now_block(
     *,
     timezone: str,
     intensity: int,
     flags: list[str] | None = None,
     retrieved: list[str] | None = None,
+    focus_on: bool = False,
+    due_action: str | None = None,
+    due_set_at: datetime.datetime | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -135,20 +148,25 @@ def build_now_block(
     they are the most volatile thing in the prompt and the ordering is
     cache-aware: everything that changes per-turn is last.
 
-    # TODO(2d): plan section 7 also specifies "Фокус", "Серия",
-    # "Главное действие" and "Последний чек-ин" on this block. Those
-    # read user_state columns (focus_on, streak, due_action,
-    # last_checkin_at) that milestone 2d adds. Emitting them now would
-    # mean either dead columns or invented values, so the lines are
-    # added when the data behind them exists.
+    2c fills in "Фокус" and "Главное действие": the columns behind them
+    arrived with the proposal-accept path (app/core/proposal.py).
+
+    # TODO(2d): "Серия" and "Последний чек-ин" still read user_state
+    # columns (streak, last_checkin_at) that milestone 2d adds. Emitting
+    # them now would mean dead columns or invented values.
     """
     now_local = datetime.datetime.now(ZoneInfo(timezone))
     weekday = _RU_WEEKDAYS[now_local.weekday()]
     lines = [
         "## Сейчас",
         f"Локальное время: {now_local.strftime('%Y-%m-%d %H:%M')} ({timezone}), {weekday}",
-        f"Интенсивность: {intensity}/5",
+        f"Интенсивность: {intensity}/5 · Фокус: {'вкл' if focus_on else 'выкл'}",
     ]
+    if due_action:
+        when = f" (задано {_ago(due_set_at, tz=ZoneInfo(timezone))})" if due_set_at else ""
+        lines.append(f"Главное действие: «{due_action}»{when}")
+    else:
+        lines.append("Главное действие: нет")
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     lines.extend(flags or [])
     return "\n".join(lines)
@@ -206,6 +224,9 @@ async def build_messages(
     pinned: list[str] | None = None,
     summaries: list[str] | None = None,
     retrieved: list[str] | None = None,
+    focus_on: bool = False,
+    due_action: str | None = None,
+    due_set_at: datetime.datetime | None = None,
     persona_path: Path = PERSONA_PATH,
 ) -> list[LLMMessage]:
     """Assemble the full message list for one turn, in plan section 7's order.
@@ -241,7 +262,13 @@ async def build_messages(
         LLMMessage(
             role="system",
             content=build_now_block(
-                timezone=timezone, intensity=intensity, flags=flags, retrieved=retrieved
+                timezone=timezone,
+                intensity=intensity,
+                flags=flags,
+                retrieved=retrieved,
+                focus_on=focus_on,
+                due_action=due_action,
+                due_set_at=due_set_at,
             ),
         )
     )

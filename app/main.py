@@ -76,6 +76,7 @@ def build_providers(settings: Settings):
         data_collection=settings.LLM_DATA_COLLECTION,
         web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
+        structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
     return provider, cheap_provider, client
 

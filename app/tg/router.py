@@ -54,6 +54,7 @@ from app.core.spend import today_usd
 from app.core.state import get_state
 from app.llm.provider import LLMProvider
 from app.tg import memory as memory_ui
+from app.tg import proposals as proposals_ui
 
 NON_TEXT_REPLY = "Пока только текст."
 
@@ -318,6 +319,18 @@ def build_router(
     @router.callback_query(F.data.startswith("m:p:"))
     async def memory_page(callback: CallbackQuery) -> None:
         await memory_ui.handle_page_callback(
+            sessionmaker,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("p:"))
+    async def proposal_decision(callback: CallbackQuery) -> None:
+        """`p:a:<id>` / `p:r:<id>` -- the extractor's confirmation buttons."""
+        await proposals_ui.handle_decision_callback(
             sessionmaker,
             callback.bot,
             callback_id=callback.id,

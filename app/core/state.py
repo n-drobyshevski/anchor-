@@ -10,8 +10,11 @@ memory. Those cannot go through update_state(), which reads and writes
 an attribute on the singleton row. The audit table accommodates them
 because every one of its columns is nullable.
 
-`source` gains `button` in 2b (an inline keyboard press), joining 1b's
-commands, 1d's pause words, and startup/system-driven changes.
+`source` gains `button` in 2b (an inline keyboard press) and
+`extractor` in 2c, joining 1b's commands, 1d's pause words, and
+startup/system-driven changes. `extractor` may only ever appear on a
+memory or journal write -- never on a user_state field, which is the
+invariant app/core/extract.py exists to keep (plan section 13).
 
 **Never put content in an audit row.** `old_value` is exactly where a
 future maintainer would helpfully record a deleted memory's text, and
@@ -31,7 +34,7 @@ from app.db.models import StateChange, UserState
 
 STATE_ID = 1
 
-Source = Literal["command", "pause", "system", "button"]
+Source = Literal["command", "pause", "system", "button", "extractor"]
 
 
 async def get_state(session: AsyncSession) -> UserState:

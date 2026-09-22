@@ -41,10 +41,11 @@ LLM_WEB_SEARCH_PRICE_USD should stay 0.0 or become 0.007.
 from __future__ import annotations
 
 import asyncio
-import json
 from decimal import Decimal
+from types import SimpleNamespace
 
 from app.config import get_settings
+from app.core.extract import EXTRACT_PROMPT, EXTRACT_SCHEMA, build_input, parse_json, validate
 from app.core.scene import SUMMARY_PROMPT
 from app.core.spend import compute_cost
 from app.llm.openrouter import OpenRouterProvider, _extract_usage, build_client
@@ -68,62 +69,24 @@ SUMMARY_DIALOGUE = (
     "Пользователь: ок, сделаю одну до вечера"
 )
 
-# 2a: the 2c gate. Deliberately the *shape* of the real extractor
-# schema from plan section 8 -- nested objects, an enum, a nullable
-# integer, bounded arrays -- not a toy {"answer": "string"}, because the
-# thing that breaks under constrained decoding is nesting and
-# nullability, not flat strings.
-EXTRACTOR_SCHEMA = {
-    "name": "anchor_extract",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["journal", "memories", "proposals"],
-        "properties": {
-            "journal": {"type": ["string", "null"]},
-            "memories": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["kind", "text", "supersedes_id", "confidence"],
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["identity", "preference", "event", "rule"],
-                        },
-                        "text": {"type": "string"},
-                        "supersedes_id": {"type": ["integer", "null"]},
-                        "confidence": {"type": "number"},
-                    },
-                },
-            },
-            "proposals": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["field", "value", "reason"],
-                    "properties": {
-                        "field": {"type": "string", "enum": ["due_action", "focus_on"]},
-                        "value": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                },
-            },
-        },
-    },
-}
-
-STRUCTURED_SYSTEM_TEXT = (
-    "Ты — модуль учёта. По последнему обмену репликами верни JSON по схеме. "
-    "Если ничего нового — пустые массивы и null."
-)
-STRUCTURED_USER_TEXT = (
-    "Пользователь: я переехал в Руан месяц назад, теперь езжу на работу на поезде\n"
-    "Anchor: и как, лучше?\n"
-    "Пользователь: да, спокойнее. договорились: сдам отчёт до пятницы"
+# 2c: the real extractor input. Not a stand-in -- this sends
+# app/core/extract.py's actual schema and actual prompt, so what this
+# prints is what the extractor will really do.
+STRUCTURED_USER_TEXT = build_input(
+    intensity=3,
+    focus_on=False,
+    due_action=None,
+    offered=[
+        SimpleNamespace(id=1, text="пользователь живёт в Лилле"),
+        SimpleNamespace(id=2, text="пользователь работает аналитиком"),
+    ],
+    context=[
+        SimpleNamespace(role="user", content="привет"),
+        SimpleNamespace(role="assistant", content="что сегодня?"),
+    ],
+    user_text="я переехал в Руан месяц назад, теперь езжу на работу на поезде. "
+    "и давай так: сдам отчёт до пятницы",
+    assistant_text="Принято. До пятницы — отчёт.",
 )
 
 
@@ -309,71 +272,86 @@ async def _smoke_cheap_model(settings) -> None:
     # not part of LLMProvider.complete() yet -- 2c adds it -- and this
     # probe exists precisely to decide whether it is safe to.
     print()
-    print("--- strict json_schema probe (the 2c gate) ---")
-    client = build_client(settings.OPENROUTER_API_KEY)
+    print("--- the real extractor call ---")
+    extractor = OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_CHEAP,
+        max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
+        temperature=settings.LLM_CHEAP_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
+        structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+    )
     try:
-        response = await client.chat.completions.create(
-            model=settings.LLM_MODEL_CHEAP,
-            messages=[
-                {"role": "system", "content": STRUCTURED_SYSTEM_TEXT},
-                {"role": "user", "content": STRUCTURED_USER_TEXT},
+        extracted = await extractor.complete(
+            [
+                LLMMessage(role="system", content=EXTRACT_PROMPT),
+                LLMMessage(role="user", content=STRUCTURED_USER_TEXT),
             ],
-            max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
-            temperature=settings.LLM_CHEAP_TEMPERATURE,
-            response_format={"type": "json_schema", "json_schema": EXTRACTOR_SCHEMA},
-            extra_body={
-                "provider": {
-                    "data_collection": settings.LLM_DATA_COLLECTION,
-                    # Refuse to silently fall back to a provider that
-                    # would ignore response_format and hand back prose.
-                    "require_parameters": True,
-                }
-            },
+            conversation_id="anchor-extract-smoke",
+            json_schema=EXTRACT_SCHEMA,
         )
     except Exception as exc:
         print(f"STRUCTURED OUTPUTS: FAILED at the API ({type(exc).__name__})")
         print(f"  detail: {type(exc).__name__}: {exc}")
         print(
-            "  -> 2c cannot use strict json_schema on this model. Fallback: "
-            "json_object mode plus code-side validation, or a different "
-            "LLM_MODEL_CHEAP. Report this before starting 2c."
+            "  -> the provider rejects strict json_schema. Set "
+            "LLM_STRUCTURED_OUTPUTS=false: the extractor then asks for JSON "
+            "in the prompt alone and validates identically, so nothing "
+            "unsafe can be applied either way -- only the hit rate drops."
         )
         return
     finally:
-        await client.close()
+        await extractor.close()
 
-    usage = _extract_usage(response)
-    text = response.choices[0].message.content
+    usage = extracted.usage
+    text = extracted.text
     print(f"raw content: {text}")
     print(
         f"tokens: in={usage.input_tokens} cached={usage.cached_tokens} "
         f"out={usage.output_tokens}"
     )
-    print(f"our computed cost_usd: {compute_cost(usage, settings, model=settings.LLM_MODEL_CHEAP)}")
+    print(f"our computed cost_usd: {compute_cost(usage, settings, model=extracted.model)}")
 
-    try:
-        parsed = json.loads(text)
-    except (TypeError, json.JSONDecodeError) as exc:
-        print(f"STRUCTURED OUTPUTS: FAILED -- not valid JSON ({type(exc).__name__})")
-        print("  -> see the fallback note above. Report this before starting 2c.")
+    parsed = parse_json(text)
+    if parsed is None:
+        print("STRUCTURED OUTPUTS: FAILED -- the reply is not JSON at all")
+        print(
+            "  -> set LLM_STRUCTURED_OUTPUTS=false and re-run; if it still "
+            "fails, LLM_MODEL_CHEAP needs to be a model that can do this."
+        )
         return
 
     missing = [k for k in ("journal", "memories", "proposals") if k not in parsed]
     if missing:
-        print(f"STRUCTURED OUTPUTS: PARTIAL -- valid JSON but missing keys: {missing}")
-        print("  -> strict mode is not being enforced. Report this before starting 2c.")
-        return
+        print(f"STRUCTURED OUTPUTS: PARTIAL -- valid JSON, missing keys: {missing}")
+    else:
+        print("STRUCTURED OUTPUTS: OK -- valid JSON with every required key.")
 
-    if not isinstance(parsed["memories"], list) or not isinstance(parsed["proposals"], list):
-        print("STRUCTURED OUTPUTS: PARTIAL -- memories/proposals are not arrays")
-        print("  -> strict mode is not being enforced. Report this before starting 2c.")
-        return
-
-    print("STRUCTURED OUTPUTS: OK -- valid JSON, all required keys, correct types.")
+    # The part that matters more than schema conformance: what survives
+    # the validator is what would actually have been applied.
+    validated = validate(parsed, offered_ids={1, 2})
+    print()
+    print("--- after app/core/extract.py's validator ---")
+    print(f"journal:   {validated['journal']}")
+    for item in validated["memories"]:
+        auto = item["confidence"] >= settings.MEMORY_AUTOWRITE_MIN_CONF
+        fate = "auto-write" if auto else "DROPPED (low confidence)"
+        if item["kind"] == "rule":
+            fate = "-> proposal (rules are never auto-written)"
+        print(
+            f"memory:    [{item['kind']}] {item['text']!r} "
+            f"conf={item['confidence']} supersedes={item['supersedes_id']} -> {fate}"
+        )
+    for item in validated["proposals"]:
+        print(f"proposal:  {item['field']} = {item['value']!r}")
+    print()
     print(
-        "  Sanity-check the CONTENT too: 'переехал в Руан' should appear as a "
-        "memory, and 'сдать отчёт до пятницы' as a due_action proposal. "
-        "Schema conformance without useful content still blocks 2c."
+        "EXPECTED: a memory about Rouan superseding id 1, and a due_action "
+        "proposal for the report. If the memories list is empty or every "
+        "confidence is below "
+        f"{settings.MEMORY_AUTOWRITE_MIN_CONF}, the extractor is running but "
+        "useless -- tune the prompt or the threshold, not the validator."
     )
 
 

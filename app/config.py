@@ -125,6 +125,20 @@ class Settings(BaseSettings):
     MEMORY_PINNED_MAX: int = 8
     MEMORY_RETRIEVED_MAX: int = 6
 
+    # --- 2c: the post-turn extractor (phase-2 plan sections 2 and 8) ---
+    # Confidence at or above which an extracted identity/preference/event
+    # memory is written without asking. Rule memories are never
+    # auto-written at any confidence -- they become proposals.
+    MEMORY_AUTOWRITE_MIN_CONF: float = 0.8
+    # Whether to send a strict json_schema response_format on extractor
+    # calls. OpenRouter reports Cydonia's provider supports it, but that
+    # is a declared capability, not a verified one. Turning this off
+    # falls back to asking for JSON in the prompt alone; app/core/
+    # extract.py parses and validates identically either way, so this
+    # changes how often the model returns something usable, never
+    # whether bad output could be applied.
+    LLM_STRUCTURED_OUTPUTS: bool = True
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _rewrite_asyncpg_scheme(cls, value: str) -> str:

@@ -206,7 +206,7 @@ async def sessionmaker(test_database_url: str):
                 text(
                     "TRUNCATE TABLE telegram_update, message, user_state, "
                     "state_change, persona_version, spend_ledger, job, scene, "
-                    "memory, pending_memory "
+                    "memory, pending_memory, journal, proposal "
                     "RESTART IDENTITY CASCADE"
                 )
             )
@@ -325,12 +325,21 @@ class FakeLLMProvider:
         self.received_messages: list[list] = []
         self.received_conversation_ids: list[str] = []
         self.received_web_search: list[bool] = []
+        self.received_schemas: list = []
 
-    async def complete(self, messages, *, conversation_id: str, web_search: bool = False) -> LLMResponse:
+    async def complete(
+        self,
+        messages,
+        *,
+        conversation_id: str,
+        web_search: bool = False,
+        json_schema=None,
+    ) -> LLMResponse:
         self.calls += 1
         self.received_messages.append(messages)
         self.received_conversation_ids.append(conversation_id)
         self.received_web_search.append(web_search)
+        self.received_schemas.append(json_schema)
         if self._raises:
             raise self._raises.pop(0)
         return LLMResponse(text=self.text, usage=self.usage, model=self.model)

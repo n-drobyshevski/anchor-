@@ -4,6 +4,15 @@
 adds the rest of the Phase 1 schema (plan section 5): message,
 user_state, state_change, persona_version, spend_ledger.
 
+2c adds `journal` and `proposal` (phase-2 plan sections 4 and 8), and
+four `user_state` columns.
+
+Those four -- focus_on/focus_since/due_action/due_set_at -- are listed
+under milestone 2d in plan section 15, but section 8's proposal-accept
+path writes them, and that path ships in 2c. They arrive here with only
+the button as a writer; 2d adds the /due and /focus commands that also
+write them, plus the streak/check-in columns 2c has no use for.
+
 2b adds `memory` and `pending_memory` (phase-2 plan sections 4 and 11).
 
 2a adds the phase-2 plan's generic `job` queue (section 3) and `scene`
@@ -201,6 +210,16 @@ class UserState(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+    # 2c (phase-2 plan section 4). Written only by an accepted proposal
+    # button today; 2d adds /due and /focus as the other writers. The
+    # extractor can never reach them -- see app/core/extract.py.
+    focus_on: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    focus_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    due_action: Mapped[str | None] = mapped_column(String)
+    due_set_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
@@ -343,4 +362,69 @@ class PendingMemory(Base):
 
     __table_args__ = (
         CheckConstraint('char_length("text") <= 300', name="ck_pending_memory_text_length"),
+    )
+
+
+class Journal(Base):
+    """One neutral sentence per notable exchange (phase-2 plan section 8).
+
+    Written by the extractor and nothing else. Unlike `memory` it is
+    never retrieved into a prompt -- it exists so the user can read back
+    what happened, and so later milestones have a factual spine for
+    digests. 240 characters because section 8's schema says so.
+    """
+
+    __tablename__ = "journal"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 240', name="ck_journal_text_length"),
+        Index("ix_journal_local_date", "local_date"),
+    )
+
+
+class Proposal(Base):
+    """A change the extractor suggested and the user has not agreed to yet.
+
+    This table is the whole reason the extractor is safe (plan sections
+    8 and 13). Model output never reaches `user_state` or a rule memory
+    directly; it lands here as `pending` and only a button press applies
+    it. `tg_message_id` is kept so an expired proposal's buttons can be
+    edited away rather than left live on a decision that no longer
+    stands.
+
+    Exactly one proposal is pending at a time -- see
+    app/core/proposal.py.
+    """
+
+    __tablename__ = "proposal"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    field: Mapped[str] = mapped_column(String, nullable=False)  # due_action|focus_on|rule
+    value: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=text("'pending'")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "field in ('due_action', 'focus_on', 'rule')", name="ck_proposal_field"
+        ),
+        CheckConstraint(
+            "status in ('pending', 'accepted', 'rejected', 'expired')",
+            name="ck_proposal_status",
+        ),
+        Index("ix_proposal_status", "status"),
     )

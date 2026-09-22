@@ -48,6 +48,15 @@ and the commit loses one increment instead; undercounting a use is
 harmless, while overcounting would corrupt the last_used_at tie-break
 that gives retrieval its callback variety.
 
+2c enqueues the post-turn extractor (plan section 8), and the *where*
+matters more than the what. It is enqueued only on the success path of
+an in-character turn, after the reply has been sent: never for a
+neutral/OOC turn, never for a pause or cap or failure reply, never for
+a command, and (in 2e) never for a welfare turn -- because every one of
+those returns before this point. That is why the enqueue is a single
+line at the very bottom of run() rather than a condition somewhere in
+the middle: the control flow already encodes the rule.
+
 1f adds `web_search`, threaded from run() down to the single provider
 call: it is opt-in only, set by app/tg/router.py's /search handler and
 nowhere else, so an ordinary text turn never sends OpenRouter's `web`
@@ -77,6 +86,7 @@ from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import check_cap, compute_cost, local_date_for
 from app.core.state import Source, get_state, update_state
+from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
 from app.llm.provider import LLMError, LLMProvider, LLMRetryableError
 from app.tg.send import send_reply, start_typing, stop_typing
@@ -107,6 +117,12 @@ SEARCH_DISABLED_REPLY_TEXT = "Поиск сейчас выключен."
 
 CHAT_CATEGORY = "chat"
 OOC_CATEGORY = "ooc"
+
+# The job kind enqueued after a delivered in-character turn (plan
+# section 8). Spelled here rather than imported from app/core/extract.py
+# to keep turn.py free of any dependency on the extractor itself -- the
+# turn's job is to hand off, not to know what happens next.
+EXTRACT = "extract"
 
 # message.kind (phase-2 plan section 4), distinct from the ledger's
 # category above: `kind` says what sort of message this is, `category`
@@ -635,6 +651,9 @@ async def run(
                     pinned=[row.text for row in pinned_rows],
                     retrieved=[row.text for row in retrieved_rows],
                     summaries=await recent_summaries(session),
+                    focus_on=user_state.focus_on,
+                    due_action=user_state.due_action,
+                    due_set_at=user_state.due_set_at,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -697,3 +716,17 @@ async def run(
         row = await _get_assistant_row(session, update_id)
         await memory.mark_used(session, injected_memory_ids)
         await _mark_sent(session, row.id)
+
+    # Step 8 (2c): hand the delivered exchange to the extractor.
+    # Only in-character turns get here -- see the module docstring.
+    # dedup_key makes a queue replay of this update a no-op, and the
+    # injected memory ids ride along because the extractor needs them
+    # to validate any supersedes_id it proposes (plan section 8).
+    if category == CHAT_CATEGORY:
+        async with sessionmaker() as session:
+            await enqueue_job(
+                session,
+                EXTRACT,
+                {"update_id": update_id, "memory_ids": injected_memory_ids},
+                dedup_key=f"extract:{update_id}",
+            )
