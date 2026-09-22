@@ -38,6 +38,9 @@ RATING_TEXT = "Как день? (1 — провал, 5 — отлично)"
 DUE_TEXT = "Главное действие «{action}» — сделано?"
 NOTE_TEXT = "Одной строкой — что важного? Или пропусти."
 
+# The evening nag's button (app/tg/outbound.py) fires this.
+START_CALLBACK = "c:start"
+
 DUE_LABELS = ((checkin.DONE, "Да"), (checkin.PARTIAL, "Частично"), (checkin.NO, "Нет"))
 SKIP = "Пропустить"
 STALE = "Устарело."
@@ -122,13 +125,24 @@ async def handle_callback(
     update_id: int,
     data: str,
 ) -> None:
-    """`c:r:<n>` / `c:d:<result>` / `c:n:skip`."""
+    """`c:start` (3b) / `c:r:<n>` / `c:d:<result>` / `c:n:skip`."""
     clock = clock or SystemClock()
-    _, step, value = data.split(":", 2)
 
     async with sessionmaker() as session:
         user_state = await get_state(session)
     timezone = user_state.timezone
+
+    # 3b: the evening nag's [Чек-ин] button (phase-3 plan section 10).
+    # Handled before the split below, which expects three parts --
+    # `c:start` has two. It opens the flow exactly as typing /checkin
+    # does, so a second press just restarts today's check-in, which is
+    # already what plan section 9 says a second check-in should do.
+    if data == START_CALLBACK:
+        await answer_callback(bot, callback_id)
+        await start(sessionmaker, bot, clock, chat_id=chat_id, timezone=timezone)
+        return
+
+    _, step, value = data.split(":", 2)
 
     row = await _current(sessionmaker, clock, timezone, message_id)
     if row is None:

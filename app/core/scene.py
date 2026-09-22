@@ -56,7 +56,11 @@ MIN_MESSAGES_FOR_SUMMARY = 3
 # Only these kinds are ever shown to the summarizer. See the module
 # docstring on why this is paired with an ooc=false filter rather than
 # trusted alone.
-SUMMARIZABLE_KINDS = ("chat", "checkin")
+# 3b: a proactive message is part of the session it opened, so it
+# belongs in that session's summary. The plan does not say either
+# way; the alternative is a summary that reads as if the user
+# started every conversation, which is no longer true.
+SUMMARIZABLE_KINDS = ("chat", "checkin", "outbound")
 
 # Plan section 5, verbatim.
 SUMMARY_PROMPT = (

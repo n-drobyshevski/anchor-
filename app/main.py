@@ -121,7 +121,13 @@ async def _on_startup(app: web.Application) -> None:
     )
     await register_commands(bot)
     app["worker_tasks"] = await run_worker(
-        sessionmaker, app["dp"], bot, settings, app["cheap_provider"], app["clock"]
+        sessionmaker,
+        app["dp"],
+        bot,
+        settings,
+        app["cheap_provider"],
+        app["clock"],
+        app["provider"],
     )
     logger.info("startup complete", extra={"event": "startup"})
 
@@ -174,13 +180,16 @@ async def _run_polling_mode(
     cheap_provider: LLMProvider,
     llm_client,
     clock: Clock,
+    provider: LLMProvider | None = None,
 ) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
-    worker_tasks = await run_worker(sessionmaker, dp, bot, settings, cheap_provider, clock)
+    worker_tasks = await run_worker(
+        sessionmaker, dp, bot, settings, cheap_provider, clock, provider
+    )
     try:
         await run_polling(bot, sessionmaker, settings)
     finally:
@@ -219,7 +228,15 @@ def main() -> None:
     else:
         asyncio.run(
             _run_polling_mode(
-                settings, bot, dp, sessionmaker, engine, cheap_provider, llm_client, clock
+                settings,
+                bot,
+                dp,
+                sessionmaker,
+                engine,
+                cheap_provider,
+                llm_client,
+                clock,
+                provider,
             )
         )
 

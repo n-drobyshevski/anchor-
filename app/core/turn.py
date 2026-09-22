@@ -478,7 +478,12 @@ async def run_welfare_turn(
         # (silence, tick) for WELFARE_COOLDOWN_H. Morning and evening
         # are part of the agreed routine and resume with the persona.
         await record_welfare(session, clock)
-    await cancel_outbound()
+        # 3b: the hook is real now. Any message already planned for
+        # today is revoked here, and the send-time gate would refuse it
+        # anyway on persona_active=false -- two independent stops,
+        # because this is the one path where a proactive message
+        # arriving would be actively harmful.
+        await cancel_outbound(session, clock)
 
     text, usage = await welfare.generate_reply(provider, user_text)
 
@@ -670,7 +675,7 @@ async def run_hard_pause(
     if already_handled is None:
         async with sessionmaker() as session:
             await update_state(session, "persona_active", False, source)
-        await cancel_outbound()
+            await cancel_outbound(session, clock)
 
     await _send_canned_reply(
         sessionmaker,

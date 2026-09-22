@@ -35,6 +35,7 @@ from app.config import Settings
 from app.core import export, purge
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
+from app.core.outbound import cancel_outbound
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,12 @@ async def handle_delete_callback(
         return
 
     async with sessionmaker() as session:
+        # 3b (plan section 6): /delete cancels first. The wipe
+        # truncates `outbound` and `job` anyway, so this is
+        # belt and braces -- but the plan names /delete as a
+        # cancel trigger, and a future wipe that spared a table
+        # must not silently resurrect a scheduled message.
+        await cancel_outbound(session, clock)
         await purge.delete_everything(session, settings, clock)
 
     await edit_keyboard(bot, chat_id, message_id, DELETED_TEXT, None)

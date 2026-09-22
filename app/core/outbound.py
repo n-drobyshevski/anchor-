@@ -19,18 +19,18 @@ Three responsibilities:
    authoritative send-time call cannot drift apart. They must agree on
    what "sent today" means or the second check stops being a check.
 
-3. **`cancel_outbound()`**, still the Phase 1 no-op. 3b gives it a
-   body, when there are finally planned rows to revoke; until then
-   nothing plans anything, so there is nothing to cancel and a stub
-   that lies about having cancelled something would be worse than one
-   that plainly does nothing.
+3. **`cancel_outbound()`**, real as of 3b: every planned row becomes
+   `cancelled`, and the pending job no-ops when it sees that. Pause,
+   welfare and /delete call it; /quiet joins them in 3c.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 
 from sqlalchemy import func, select
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -46,6 +46,8 @@ from app.core.outbound_gate import (
 from app.core.spend import today_usd
 from app.core.state import set_counters
 from app.db.models import Outbound, UserState
+
+logger = logging.getLogger(__name__)
 
 # Terminal and live statuses, named so queries read as English.
 PLANNED = "planned"
@@ -234,15 +236,39 @@ async def load_gate_inputs(
 # --- the cancel hook ---------------------------------------------------
 
 
-async def cancel_outbound() -> None:
-    """Cancel every planned outbound message.
+async def cancel_outbound(session: AsyncSession, clock: Clock) -> int:
+    """Cancel every planned outbound message. Returns how many.
 
-    Called from the HARD pause path and the welfare trigger today;
-    plan section 6 adds /quiet and /delete in 3b.
+    Real as of 3b (plan section 6). Called by the HARD pause path, the
+    welfare trigger and /delete; /quiet joins them in 3c.
 
-    # TODO(phase-3b): set status='cancelled' on every planned row and
-    # make the pending send_outbound jobs no-op when they see it. Still
-    # a no-op in 3a because nothing plans a row until the heartbeat
-    # ships, so there is genuinely nothing to revoke.
+    **The pending jobs are deliberately left alone.** Deleting them
+    would be a second thing to get wrong, and a job whose row is no
+    longer `planned` already exits at step 1 of
+    app/core/outbound_send.py -- before the gate, before the model,
+    before anything is spent. One mechanism, checked in the one place
+    that matters.
+
+    Status, not deletion: a cancelled row is the record that a message
+    *was* going to be sent and was revoked, which is what /state shows
+    and what stops the heartbeat re-planning the same intent sixty
+    seconds later (see scheduler._already_exists). Deleting the row
+    would make the bot forget it had been told to be quiet.
+
+    `clock` is taken and not yet used for a timestamp -- there is no
+    `cancelled_at` column in plan section 4. It is in the signature
+    because every other write path in this module takes one, and a
+    cancel that silently read the wall clock later would be exactly the
+    regression tests/test_core_clock_discipline.py exists to prevent.
     """
-    return None
+    result = await session.execute(
+        sql_update(Outbound)
+        .where(Outbound.status == PLANNED)
+        .values(status=CANCELLED)
+        .returning(Outbound.id)
+    )
+    cancelled = [row[0] for row in result.all()]
+    await session.commit()
+    if cancelled:
+        logger.info("outbound cancelled", extra={"count": len(cancelled)})
+    return len(cancelled)

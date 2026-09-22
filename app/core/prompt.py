@@ -76,7 +76,12 @@ PERSONA_PATH = REPO_ROOT / "persona" / "persona.md"
 # kind, independently of the ooc flag that also excludes them -- one
 # filter failing must not be enough to leak a welfare exchange into the
 # persona's context.
-PERSONA_TRANSCRIPT_KINDS = ("chat", "checkin")
+# 3b: 'outbound' joins these (phase-3 plan section 7: "Outbound
+# messages **are** included in the persona transcript, so Anchor
+# remembers what it said"). Without it the bot would re-send
+# essentially the same morning message every day, having no memory of
+# the previous one -- the transcript is the only thing that stops it.
+PERSONA_TRANSCRIPT_KINDS = ("chat", "checkin", "outbound")
 
 NEUTRAL_SYSTEM_PROMPT = (
     "Ты нейтральный ассистент. Роль Anchor сейчас выключена. Отвечай спокойно и по делу, "
@@ -215,10 +220,17 @@ async def _load_transcript(
     stmt = (
         select(Message)
         .where(Message.ooc.is_(ooc))
-        .where(Message.update_id.is_distinct_from(update_id))
         .order_by(Message.id.desc())
         .limit(limit)
     )
+    # 3b: only exclude when there is a current turn to exclude. A
+    # proactive message (phase-3) has no update_id at all, and
+    # `update_id IS DISTINCT FROM NULL` is *true* for every non-null
+    # row -- so passing None used to mean "drop every outbound and
+    # canned row", silently emptying the very transcript that stops
+    # Anchor repeating yesterday's morning message.
+    if update_id is not None:
+        stmt = stmt.where(Message.update_id.is_distinct_from(update_id))
     if kinds is not None:
         stmt = stmt.where(Message.kind.in_(kinds))
     result = await session.execute(stmt)

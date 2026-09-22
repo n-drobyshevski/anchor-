@@ -1,4 +1,4 @@
-# Anchor — Milestone 3a (Phase 3 foundations)
+# Anchor — Milestone 3b (Anchor speaks first)
 
 A private, single-user Telegram bot.
 
@@ -181,6 +181,99 @@ true *before* that is safe.
   tapping through a check-in is the user being present just as much as
   a sentence is.
 
+Milestone 3b is where Anchor starts speaking first. Two fixed intents:
+a **morning message** naming the day's main action (or offering to pick
+one), and an **evening nag** with a working **Чек-ин** button, sent only
+when no check-in happened that day.
+
+- **The heartbeat** (`app/core/scheduler.py`) — a third
+  `asyncio.create_task` in the existing worker, on the recovery sweep's
+  model. It plans and never does: a few indexed `SELECT`s and at most
+  one insert per minute. Everything slow is a row in the Phase 2 `job`
+  table, claimed by the loop that already takes inbound updates first,
+  so a reply always outranks a proactive message. No APScheduler, no
+  second process, no new dependency.
+
+- **Planning is safe to repeat.** The insert is `ON CONFLICT DO
+  NOTHING` against `unique (kind, local_date, bucket)`. A 3-hour grace
+  window gives the heartbeat ~180 chances to plan the same morning
+  message; all 180 collapse into one. `tests/test_scheduler.py` runs
+  960 heartbeats across a simulated day and asserts exactly two rows.
+
+- **A refused gate inserts nothing** — not a `skipped` row. That is
+  what lets `/quiet 2h` at 08:55 expire at 10:55 and still get the
+  morning message, inside grace. A row would have made that impossible.
+
+- **The evening nag's window is clamped to `QUIET_START`**, and so is
+  its jitter. Planned at 22:29 with 15 minutes of jitter, the naive
+  answer is 22:44 — inside quiet hours, where the send-time gate would
+  refuse it, so the message would be silently dropped rather than sent
+  slightly late. The clamp picks "late" over "never".
+
+### Generation happens once; sending may repeat
+
+`app/core/outbound_send.py` is built around one asymmetry. Generating
+costs money and is not idempotent. Sending is cheap and repeatable. So
+a commit separates them:
+
+    insert message (sent_at NULL) + ledger   <- commit
+    send to Telegram
+    set sent_at, status='sent', counters     <- commit
+
+A crash in the middle leaves a stored message with `sent_at` NULL, and
+the re-run **resends the stored text instead of regenerating**. The
+user gets the message they were owed and the model is paid once. A
+duplicated send is a nuisance; a duplicated generation is money.
+
+**The gate runs twice, and the second run wins.** Minutes pass between
+planning and sending because of the jitter, and in those minutes the
+user can check in, type a pause word, or set `/quiet`. The re-check
+happens *before* the model call, so a nag made redundant at 22:10 costs
+nothing at all.
+
+**A failed generation sends nothing.** `status='failed'` and silence —
+no canned fallback. A message the user did not ask for has to earn its
+place, and boilerplate does not.
+
+**No welfare classifier and no extractor.** Both react to something the
+*user* said, and there is no user input here. Running the extractor on
+Anchor's own words would let it propose facts about the user from a
+message the user never sent.
+
+### The hidden flag is a user turn, not a flag line
+
+Every other hidden flag in this codebase is a `[флаги]` line in the
+"## Сейчас" block. The outbound flags are the trailing **user** message
+instead, for a practical reason: there is no user message here, and the
+chat template this bot runs against expects a conversation that ends
+with one. The flag is never stored — only Anchor's reply is — so it
+cannot leak into a later transcript.
+
+Outbound messages **do** go into the persona transcript (plan §7) and
+into scene summaries. Without that, Anchor would send essentially the
+same morning message every day, having no memory of the previous one.
+That also required fixing `_load_transcript`: it excluded the current
+turn with `update_id IS DISTINCT FROM :id`, which is *true* for every
+non-null row — so passing `None` (a proactive message has no update_id)
+used to mean "drop every outbound and canned row".
+
+### cancel_outbound, and why the jobs are left alone
+
+`cancel_outbound()` is real now: every `planned` row becomes
+`cancelled`. A HARD pause, a welfare trigger and `/delete` all call it;
+`/quiet` joins them in 3c.
+
+The pending jobs are deliberately **not** deleted. A job whose row is
+no longer `planned` already exits at step 1 of the send path — before
+the gate, before the model, before anything is spent. One mechanism,
+checked in the one place that matters, rather than two things to keep
+in sync.
+
+Status, not deletion, for the same reason: a cancelled row is the
+record that a message *was* going to be sent and was revoked. It is
+what `/state` will show in 3c, and it is what stops the heartbeat
+re-planning the same intent sixty seconds later.
+
 ### The counters write no audit row, on purpose
 
 `app/core/state.py::update_state` has been the only sanctioned writer of
@@ -201,7 +294,7 @@ excluded by default, which is the direction an accident should fail in.
 `intensity`, `focus_on`, `due_action` and `streak` are not in it, and
 that passing one raises without writing anything on the way.
 
-### The scheduler will not get its own process
+### The scheduler did not get its own process
 
 Phase 3's heartbeat is a third `asyncio.create_task` in the existing
 worker, modelled on the recovery sweep — not a second service and not

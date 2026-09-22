@@ -27,6 +27,20 @@ even an update no handler matches. A middleware on the message
 observer would miss callback queries, and "the user tapped a button"
 is the user being present just as much as a sentence is.
 
+3b adds the heartbeat as a third background task, modelled on the
+recovery sweep rather than on anything new. It **plans, it never
+does**: a few indexed SELECTs and at most one insert per minute, no
+model call and no Telegram call. Everything slow goes into the job
+table instead, where the priority rule above -- updates first, jobs
+only when the update queue is empty -- already makes an inbound
+message outrank a proactive one. That is why the heartbeat cannot
+starve inbound handling: there is nothing in it long enough to.
+
+The job path also gains the **main** provider in 3b. Until now only
+background work ran as a job, so `cheap_provider` was enough;
+`send_outbound` generates an in-character message and needs the same
+model a reply would use.
+
 It is recorded **before** feed_update, not after. The counters say
 "the user was here", which is already true by the time the row is
 claimed, and stamping first means a handler that raises still clears
@@ -48,6 +62,8 @@ from app.config import Settings
 from app.core.clock import Clock
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
+from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
+from app.core.scheduler import heartbeat
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
@@ -59,6 +75,10 @@ logger = logging.getLogger(__name__)
 
 IDLE_SLEEP_SECONDS = 0.5
 RECOVER_INTERVAL_SECONDS = 60
+# Plan section 6: "A heartbeat task runs in the worker process every
+# 60 s." Fine-grained enough for a 3-hour grace window, coarse enough
+# that a minute of planning work per day is a rounding error.
+HEARTBEAT_INTERVAL_SECONDS = 60
 
 
 async def process_one_update(
@@ -110,6 +130,7 @@ async def process_one_update(
 async def _run_job(
     session: AsyncSession,
     settings: Settings,
+    provider: LLMProvider | None,
     cheap_provider: LLMProvider,
     bot: Bot,
     clock: Clock,
@@ -150,6 +171,21 @@ async def _run_job(
             due_action=user_state.due_action,
         )
 
+    if kind == SEND_OUTBOUND:
+        # The only job kind that uses the main model and the bot: it
+        # generates an in-character message and delivers it.
+        if provider is None or bot is None:
+            raise ValueError("send_outbound needs the main provider and a bot")
+        await run_send_outbound(
+            session,
+            settings,
+            provider,
+            bot,
+            clock=clock,
+            outbound_id=payload["outbound_id"],
+        )
+        return ExtractOutcome()
+
     raise ValueError(f"unknown job kind: {kind}")
 
 
@@ -159,6 +195,7 @@ async def process_one_job(
     cheap_provider: LLMProvider,
     clock: Clock,
     bot: Bot | None = None,
+    provider: LLMProvider | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
 
@@ -178,7 +215,7 @@ async def process_one_job(
     try:
         async with sessionmaker() as session:
             outcome = await _run_job(
-                session, settings, cheap_provider, bot, clock, kind, payload
+                session, settings, provider, cheap_provider, bot, clock, kind, payload
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -253,14 +290,38 @@ async def _claim_loop(
     settings: Settings,
     cheap_provider: LLMProvider,
     clock: Clock,
+    provider: LLMProvider | None = None,
 ) -> None:
     """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
         if await process_one_update(sessionmaker, dp, bot, clock):
             continue
-        if await process_one_job(sessionmaker, settings, cheap_provider, clock, bot):
+        if await process_one_job(
+            sessionmaker, settings, cheap_provider, clock, bot, provider
+        ):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
+
+
+async def _heartbeat_loop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    clock: Clock,
+) -> None:
+    """Plan due intents once a minute (phase-3 plan section 6).
+
+    Broad except, like the loops above: a heartbeat that died on one
+    bad tick would silently stop every proactive message for the rest
+    of the process's life, and the first sign would be a morning that
+    never arrived.
+    """
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            async with sessionmaker() as session:
+                await heartbeat(session, settings, clock)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 
 
 async def _recover_loop(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -282,14 +343,18 @@ async def run_worker(
     settings: Settings,
     cheap_provider: LLMProvider,
     clock: Clock,
+    provider: LLMProvider | None = None,
 ) -> list[asyncio.Task]:
-    """Start the claim loop and the recovery sweep as two background tasks."""
+    """Start the claim loop, the recovery sweep and the heartbeat."""
     claim_task = asyncio.create_task(
-        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider, clock),
+        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider, clock, provider),
         name="anchor-claim-loop",
     )
     recover_task = asyncio.create_task(_recover_loop(sessionmaker), name="anchor-recover-loop")
-    return [claim_task, recover_task]
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(sessionmaker, settings, clock), name="anchor-heartbeat-loop"
+    )
+    return [claim_task, recover_task, heartbeat_task]
 
 
 async def stop_worker(tasks: list[asyncio.Task]) -> None:
