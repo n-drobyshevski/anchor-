@@ -99,6 +99,14 @@ EMPTY_TOPIC = "empty_topic"
 # study_job.status, set by app/core/purge.py when /delete runs.
 CANCELLED = "cancelled"
 
+# A job in one of these has finished and will never do more work. Every
+# other status is a job that was mid-run when something stopped it.
+TERMINAL_STATUSES = ("done", "failed", CANCELLED)
+
+# error_code for a job whose process died mid-run. Not a refusal code --
+# nothing refused it, the worker simply went away.
+INTERRUPTED = "interrupted"
+
 # The three packet names /study accepts (plan section 9). Not a config
 # value: the names are the command's vocabulary, and only the domains
 # behind each one are the user's to set.
@@ -318,10 +326,32 @@ async def _recent_clip_urls(session: AsyncSession, clock: Clock, *, days: int = 
     Failed fetches are included deliberately: a page that refused us on
     Monday is not a better candidate on Tuesday, and retrying it would
     burn the job's one or two pins on the same refusal.
+
+    **Both branches are bounded, and the second one needs a join to be.**
+    `fetched_at` is set only on a *successful* fetch, so a failed clip
+    keeps it NULL forever and `study_clip` has no `created_at` of its
+    own. Filtering on `fetched_at IS NULL` alone -- which is what this
+    did until the 4d fixes -- excluded a URL from every future /study
+    permanently after one failure, including a transient timeout, and
+    grew the result set without bound for the life of the deployment.
+    The parent job's `created_at` is the timestamp the clip does not
+    have, and it is already there.
+
+    `study_job.created_at` is stamped by the database
+    (`server_default=func.now()`) while `since` comes from the injected
+    clock. That is the same looseness app/research/sweeps.py documents
+    and accepts for `study_card.created_at`, for the same reason: in
+    production both are the same physical clock, and a test that cares
+    sets `created_at` explicitly.
     """
     since = clock.now_utc() - datetime.timedelta(days=days)
     result = await session.execute(
-        select(StudyClip.url).where(StudyClip.fetched_at.is_(None) | (StudyClip.fetched_at >= since))
+        select(StudyClip.url)
+        .join(StudyJob, StudyClip.job_id == StudyJob.id)
+        .where(
+            (StudyClip.fetched_at >= since)
+            | (StudyClip.fetched_at.is_(None) & (StudyJob.created_at >= since))
+        )
     )
     return set(result.scalars().all())
 
@@ -631,10 +661,51 @@ async def run_research_job(
             job_id=job_id, status="failed", error_code="not_found",
             visible_cards=0, hidden_cards=0,
         )
-    if job.status != "queued":
+    if job.status in TERMINAL_STATUSES:
+        # An ordinary redelivery of a job that already finished -- a
+        # worker restart between complete_job and its ack, say. Report
+        # what it produced and touch nothing.
         visible, hidden = await _card_counts(session, job.id)
         return ResearchOutcome(
             job_id=job.id, status=job.status, error_code=job.error_code,
+            visible_cards=visible, hidden_cards=hidden,
+        )
+    if job.status != "queued":
+        # searching/fetching/distilling: this job was mid-run when its
+        # process died. app/db/queue.py's recover_stuck_jobs returned
+        # the *queue* row to pending after STUCK_AFTER and it has been
+        # redelivered; nothing ever moved `study_job` out of its
+        # intermediate status, and nothing ever would.
+        #
+        # Before 4d this fell into the branch above and was reported as
+        # "already finished", which made the queue row complete and left
+        # the study_job wedged forever -- while the user was told
+        # «Не получилось: техническая проблема», a failure the database
+        # had no record of.
+        #
+        # **Failed, not resumed, on purpose.** A resume would re-run a
+        # search or a distill that may already have been paid for, and
+        # /study's candidate loop has no resume point to start from.
+        # Failing is honest and costs nothing; plan section 12 already
+        # settles a job stopped mid-flight the same way (`failed:cap`
+        # keeps whatever cards it made). The daily quota is not refunded
+        # -- the money may genuinely be gone.
+        #
+        # A redelivery cannot be a job still running elsewhere:
+        # recover_stuck_jobs waits STUCK_AFTER (5 minutes) before it
+        # returns a claimed row to the queue at all.
+        visible, hidden = await _card_counts(session, job.id)
+        job.status = "failed"
+        job.error_code = INTERRUPTED
+        job.finished_at = clock.now_utc()
+        await session.commit()
+        logger.info(
+            "research job was interrupted mid-run",
+            extra={"job_id": job.id, "kind": job.kind, "error_code": INTERRUPTED,
+                   "cards": visible + hidden},
+        )
+        return ResearchOutcome(
+            job_id=job.id, status="failed", error_code=INTERRUPTED,
             visible_cards=visible, hidden_cards=hidden,
         )
 
@@ -820,6 +891,7 @@ __all__ = [
     "DISABLED",
     "EMPTY_PACKET",
     "EMPTY_TOPIC",
+    "INTERRUPTED",
     "PACKETS",
     "QUERY_MAX",
     "QUOTA",

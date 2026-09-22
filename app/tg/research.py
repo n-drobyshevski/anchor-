@@ -203,6 +203,10 @@ ERROR_RU = {
     errors.NETWORK_ERROR: "сетевая ошибка",
     errors.EMPTY_EXTRACTION: "не удалось извлечь текст со страницы",
     research_jobs.CAP: "исчерпан бюджет на это задание",
+    # 4d fix: the worker died mid-run. Not a refusal -- nothing
+    # refused us -- so the wording says what happened rather than
+    # blaming the site.
+    research_jobs.INTERRUPTED: "задание прервалось на полпути",
 }
 # A safe fallback for a code this mapping does not carry. Codes are a
 # closed, reviewed set (tests/test_research_isolation.py pins it), so

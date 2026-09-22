@@ -1066,3 +1066,197 @@ async def test_a_read_job_cancelled_before_distill_makes_no_provider_call(sessio
 
     assert outcome.status == "cancelled"
     assert provider.calls == 0, "a cancelled job must not spend money on a distill"
+
+
+# --- a job whose worker died mid-run (4d fixes) ------------------------
+
+
+async def _park_at(sessionmaker, job_id: int, status: str) -> None:
+    """Leave a job in the state a crashed worker would have left it in."""
+    async with sessionmaker() as session:
+        job = await session.get(StudyJob, job_id)
+        job.status = status
+        await session.commit()
+
+
+@pytest.mark.parametrize("status", ["searching", "fetching", "distilling"])
+async def test_a_job_interrupted_mid_run_is_failed_not_reported_as_finished(
+    sessionmaker, clock, status
+):
+    """The queue recovers the *queue* row after STUCK_AFTER and
+    redelivers it; nothing ever moved `study_job` out of its
+    intermediate status.
+
+    Until this fix that landed in the "already finished" branch, so the
+    job was reported as still `fetching`, the queue row was completed,
+    and the row wedged there forever -- while the user was told
+    «Не получилось: техническая проблема», a failure the database had no
+    record of.
+    """
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+    await _park_at(sessionmaker, job_id, status)
+    provider = FakeLLMProvider()
+
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, provider, job_id=job_id, url=URL, clock=clock,
+            timezone=TIMEZONE, fetch_fn=_fetch_ok(_clip()),
+        )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == jobs.INTERRUPTED
+    assert provider.calls == 0, "a resume would re-spend on a call already paid for"
+
+    async with sessionmaker() as session:
+        row = await session.get(StudyJob, job_id)
+    assert row.status == "failed"
+    assert row.error_code == jobs.INTERRUPTED
+    assert row.finished_at is not None, "the row must reach a terminal state"
+
+
+async def test_an_interrupted_job_keeps_the_cards_it_already_made(sessionmaker, clock):
+    """Same rule plan section 12 gives a job stopped at the cap: what it
+    already produced survives."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+    async with sessionmaker() as session:
+        job = await session.get(StudyJob, job_id)
+        clip = StudyClip(job_id=job.id, url=URL, domain="example.com", text=CLIP_TEXT)
+        session.add(clip)
+        await session.flush()
+        session.add(
+            StudyCard(
+                job_id=job.id, clip_id=clip.id, kind="technique",
+                text="Уже сделанная карточка.", quote=SENTENCE1,
+                source_url=URL, risk_model="low", risk_rules="low", risk_final="low",
+            )
+        )
+        job.status = "distilling"
+        await session.commit()
+
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, FakeLLMProvider(), job_id=job_id, url=URL, clock=clock,
+            timezone=TIMEZONE, fetch_fn=_fetch_ok(_clip()),
+        )
+
+    assert outcome.error_code == jobs.INTERRUPTED
+    assert outcome.visible_cards == 1
+    async with sessionmaker() as session:
+        assert len((await session.execute(select(StudyCard))).scalars().all()) == 1
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
+async def test_a_terminal_job_is_still_reported_not_relabelled(sessionmaker, clock, status):
+    """The regression guard that matters most is `cancelled`: /delete set
+    it, and turning it into `interrupted` would rewrite the record of a
+    deletion the user asked for."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+    await _park_at(sessionmaker, job_id, status)
+
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, FakeLLMProvider(), job_id=job_id, url=URL, clock=clock,
+            timezone=TIMEZONE, fetch_fn=_fetch_ok(_clip()),
+        )
+
+    assert outcome.status == status
+    assert outcome.error_code != jobs.INTERRUPTED
+    async with sessionmaker() as session:
+        assert (await session.get(StudyJob, job_id)).status == status
+
+
+async def test_the_interrupted_message_says_what_happened(clock):
+    """Not «техническая проблема» -- nothing refused us, the worker went
+    away, and the reply should say so."""
+    from app.tg import research as research_ui
+
+    text = research_ui.completion_text(
+        status="failed", error_code=jobs.INTERRUPTED, visible_cards=0
+    )
+    assert text == "Не получилось: задание прервалось на полпути."
+    assert research_ui.ERROR_RU_FALLBACK not in text
+
+
+# --- the dedupe window is bounded on both branches (4d fixes) ---------
+
+
+async def _clip_row(sessionmaker, *, url, fetched_at, job_created_at):
+    async with sessionmaker() as session:
+        job = StudyJob(
+            kind="read", local_date=datetime.date(2026, 9, 1), status="done",
+            created_at=job_created_at,
+        )
+        session.add(job)
+        await session.flush()
+        session.add(
+            StudyClip(job_id=job.id, url=url, domain="example.com", fetched_at=fetched_at)
+        )
+        await session.commit()
+
+
+async def test_a_failed_clip_stops_blocking_its_url_after_the_window(sessionmaker, clock):
+    """The defect this fixes: `fetched_at` is NULL on every failed fetch
+    and `study_clip` has no `created_at`, so filtering on NULL alone
+    excluded a URL from every future /study permanently -- after one
+    transient timeout -- and grew the set without bound.
+    """
+    now = clock.now_utc()
+    recent = "https://reddit.com/r/failed-yesterday"
+    ancient = "https://reddit.com/r/failed-long-ago"
+    await _clip_row(
+        sessionmaker, url=recent, fetched_at=None,
+        job_created_at=now - datetime.timedelta(days=1),
+    )
+    await _clip_row(
+        sessionmaker, url=ancient, fetched_at=None,
+        job_created_at=now - datetime.timedelta(days=90),
+    )
+
+    async with sessionmaker() as session:
+        seen = await jobs._recent_clip_urls(session, clock)
+
+    assert recent in seen, "a fresh failure still stops us burning a pin on it"
+    assert ancient not in seen, "a failure from ninety days ago is not evidence today"
+
+
+async def test_a_successful_clip_is_bounded_by_its_own_timestamp(sessionmaker, clock):
+    now = clock.now_utc()
+    recent = "https://reddit.com/r/read-last-week"
+    ancient = "https://reddit.com/r/read-last-year"
+    await _clip_row(
+        sessionmaker, url=recent, fetched_at=now - datetime.timedelta(days=7),
+        job_created_at=now - datetime.timedelta(days=7),
+    )
+    await _clip_row(
+        sessionmaker, url=ancient, fetched_at=now - datetime.timedelta(days=365),
+        job_created_at=now - datetime.timedelta(days=365),
+    )
+
+    async with sessionmaker() as session:
+        seen = await jobs._recent_clip_urls(session, clock)
+
+    assert recent in seen
+    assert ancient not in seen
+
+
+async def test_a_stale_failed_url_is_offered_to_search_again(sessionmaker, clock):
+    """End to end: the ancient failure is not in `recent_urls`, so the
+    search is free to return it and the job to try it."""
+    settings = _study_settings()
+    stale = "https://reddit.com/r/failed-long-ago"
+    await _clip_row(
+        sessionmaker, url=stale, fetched_at=None,
+        job_created_at=clock.now_utc() - datetime.timedelta(days=90),
+    )
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    searcher = _Search(error_code=search.NO_RESULTS)
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=searcher, fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    assert stale not in searcher.seen[0]["recent_urls"]

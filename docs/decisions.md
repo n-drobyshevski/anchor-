@@ -712,3 +712,76 @@ Case 16's dosage, by contrast, verifies as `('high', ['health_meds'])`
 — so a card like it could not be adopted today at all. The case exists
 for the day a rule is loosened, a migration backfills rows written
 before the rule, or a bug lets one through.
+
+---
+
+## Post-4d — a crashed job was orphaned, and told you a failure it had not recorded
+
+`run_research_job` treated *anything* not `'queued'` as an
+already-finished job to report on. That is right for `done`, `failed`
+and `cancelled`. It was wrong for `searching`, `fetching` and
+`distilling`, which is exactly where the row sits when a worker dies
+mid-run:
+
+1. `recover_stuck_jobs` returns the *queue* row to pending after
+   `STUCK_AFTER`; it never touches `study_job`.
+2. The job is redelivered, hits that branch, does nothing, raises
+   nothing.
+3. `process_one_job` therefore completes the queue row — never retried
+   again.
+4. `study_job.status` is wedged at `fetching` with no code path that
+   could ever move it.
+5. The user is told «Не получилось: техническая проблема», a failure
+   nothing in the database recorded.
+
+Now the branch splits on `TERMINAL_STATUSES`, and a non-terminal
+redelivery is marked `failed` / `interrupted` with a `finished_at`,
+keeping whatever cards were already committed.
+
+**Failed rather than resumed, deliberately.** A resume would re-run a
+search or a distill that may already have been paid for, and `/study`'s
+candidate loop has no resume point to start from. Plan section 12
+already settles a job stopped mid-flight the same way: `failed:cap`
+keeps its cards. The daily quota is not refunded, because the money may
+genuinely be gone.
+
+A redelivery cannot be a job still running elsewhere: the queue waits
+five minutes before returning a claimed row.
+
+**This would be wrong if** research jobs ever became long enough that
+losing one to a restart costs real work. At one or two page fetches
+they are not.
+
+## Post-4d — the dedupe window had no floor under failed fetches
+
+`_recent_clip_urls` documented a thirty-day window and implemented
+`fetched_at IS NULL OR fetched_at >= since`. `fetched_at` is set only
+on a *successful* fetch and `study_clip` has no `created_at`, so the
+first branch matched **every failed clip ever recorded**. One transient
+timeout excluded a URL from every future `/study` permanently, and the
+query and its in-memory set grew without bound for the life of the
+deployment.
+
+Fixed by joining to the parent `study_job` and bounding the NULL case
+by its `created_at` — the timestamp the clip does not have, already
+present. A `study_clip.created_at` column would be tidier and needs a
+migration; the join costs nothing.
+
+The same DB-clock-versus-injected-clock looseness applies as in
+`app/research/sweeps.py`, and for the same reason: in production they
+are the same physical clock.
+
+## Post-4d — «без ограничений» left the injection list
+
+It was flagged as borderline when written and is now gone. The phrase
+means "unlimited" at least as often as it means a boundary coming off,
+and «работайте без ограничений по времени» is ordinary advice.
+
+What made it worth removing rather than tolerating: a hit on this list
+does not raise a card's risk, it **drops the card outright**. A false
+positive here costs a good card silently, which is the exact failure
+mode `docs/decisions.md`'s 4b entry argues these lists must avoid — the
+filter you stop trusting is worse than the one that is merely narrow.
+
+The jailbreak vocabulary with one meaning stays: `DAN mode`,
+`jailbreak`, `developer mode`, «режим разработчика», `do anything now`.

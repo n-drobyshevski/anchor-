@@ -64,6 +64,10 @@ CLEAN: tuple[tuple[str, str], ...] = (
     ("override_previous_fr", "Oubliez le téléphone une heure avant de dormir."),
     ("system_prompt", "Системный подход к планированию дня помогает."),
     ("developer_mode", "Режим дня важнее мотивации."),
+    # Removed from the pattern in the 4d review: it means
+    # "unlimited" at least as often as it means a boundary coming
+    # off, and a hit here drops the card outright.
+    ("developer_mode", "Работайте без ограничений по времени."),
     ("role_reassign", "Представьте спокойное место перед сном."),
     ("role_reassign", "Ведите дневник, чтобы видеть прогресс."),
     ("speak_as_assistant", "Отвечайте на письма один раз в день."),

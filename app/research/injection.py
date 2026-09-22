@@ -75,10 +75,14 @@ PATTERNS: tuple[tuple[str, str, str], ...] = (
     (
         "developer_mode",
         r"(режим\w*\s+разработчик\w*|\bdeveloper mode\b|\bjailbreak\b|"
-        r"\bDAN mode\b|\bdo anything now\b|\bбез ограничени[йя]\b)",
-        "The named jailbreak vocabulary. `без ограничений` is borderline -- it "
-        "can mean 'unlimited' innocently -- but in a card it reads as a "
-        "boundary being removed, which the risk rules would flag anyway.",
+        r"\bDAN mode\b|\bdo anything now\b)",
+        "The named jailbreak vocabulary, and only vocabulary with one "
+        "meaning. `без ограничений` was here until the 4d review and is "
+        "deliberately gone: «работайте без ограничений по времени» is "
+        "ordinary advice, and a hit here does not lower a card's risk, it "
+        "drops the card outright -- so a false positive costs a good card "
+        "silently, which is the failure mode this whole list is written to "
+        "avoid.",
     ),
     # --- reassigning the role -------------------------------------------
     (
