@@ -18,6 +18,7 @@ UTC's -- is unchanged and still tested here and in tests/test_clock.py.
 from __future__ import annotations
 
 import decimal
+from typing import NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -125,28 +126,67 @@ def price_triple_for(model: str | None, settings: Settings) -> tuple[
     )
 
 
-def compute_cost(
-    usage: LLMUsage, settings: Settings, model: str | None = None
-) -> decimal.Decimal:
+# H4: which of the two prices a ledger row carries. Recorded because
+# they are not the same kind of number -- VENDOR is what OpenRouter says
+# it charged, COMPUTED is our arithmetic over token counts at prices
+# from config that could be months stale. A row that does not say which
+# one it is cannot be audited, and "our total looks wrong" becomes
+# unanswerable.
+VENDOR = "vendor"
+COMPUTED = "computed"
+COST_SOURCES = (VENDOR, COMPUTED)
+
+
+class Priced(NamedTuple):
+    """A cost and where the number came from."""
+
+    usd: decimal.Decimal
+    source: str
+
+
+def priced(usage: LLMUsage, settings: Settings, model: str | None = None) -> Priced:
     """usage.cost_usd (vendor-reported) when present, else the section 10 formula.
 
     `model` (2a) picks the price triple; it defaults to None, which
     means the main model, so every Phase 1 call site keeps its exact
     previous behaviour without being touched.
+
+    **The web-search fee is added to the computed branch only** (H4).
+    OpenRouter documents `usage.cost` as "the total amount charged to
+    your account", as distinct from `cost_details.upstream_inference_cost`,
+    "the actual cost charged by the upstream AI provider" -- the two
+    fields exist separately precisely because the first is broader than
+    inference, and the Exa fee is charged to the same OpenRouter credits.
+    So when the vendor gives us a number, the fee is already inside it
+    and adding it again would double-bill; when it does not, the fee is
+    ours to add. Before H4 it was added to both, which was safe only
+    because the default was 0.0 and therefore wrong in the other
+    direction -- a searched turn on the fallback path was under-billed.
+
+    Checked 2026-09-22 against
+    https://openrouter.ai/docs/use-cases/usage-accounting. The claim is
+    falsifiable on live data: scripts/smoke.py prints the reported-cost
+    delta between an unsearched and a searched call, and a delta of about
+    $0.007 confirms it while a delta of roughly zero refutes it.
     """
     if usage.cost_usd is not None:
-        cost = usage.cost_usd
-    else:
-        uncached = usage.input_tokens - usage.cached_tokens
-        price_in, price_cached, price_out = price_triple_for(model, settings)
-        million = decimal.Decimal(1_000_000)
-        cost = (
-            uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out
-        ) / million
-    # Applies to both branches above deliberately: a web search can
-    # accompany either a vendor-reported cost or a formula fallback, and
-    # the fee is independent of which one priced the tokens. Defaults to
-    # zero -- see the LLM_WEB_SEARCH_PRICE_USD comment in app/config.py
-    # for why (OpenRouter may already include the Exa fee in cost_usd).
+        return Priced(
+            usage.cost_usd.quantize(_CENTS_EXPONENT, rounding=decimal.ROUND_HALF_UP),
+            VENDOR,
+        )
+
+    uncached = usage.input_tokens - usage.cached_tokens
+    price_in, price_cached, price_out = price_triple_for(model, settings)
+    million = decimal.Decimal(1_000_000)
+    cost = (
+        uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out
+    ) / million
     cost += usage.web_search_requests * decimal.Decimal(str(settings.LLM_WEB_SEARCH_PRICE_USD))
-    return cost.quantize(_CENTS_EXPONENT, rounding=decimal.ROUND_HALF_UP)
+    return Priced(cost.quantize(_CENTS_EXPONENT, rounding=decimal.ROUND_HALF_UP), COMPUTED)
+
+
+def compute_cost(
+    usage: LLMUsage, settings: Settings, model: str | None = None
+) -> decimal.Decimal:
+    """The cost alone. `priced()` when the source matters too."""
+    return priced(usage, settings, model).usd

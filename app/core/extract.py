@@ -42,7 +42,7 @@ from app.core import clock as clock_module
 from app.core import safety_events
 from app.core.clock import Clock
 from app.core.scene import Deferred
-from app.core.spend import check_cap, compute_cost
+from app.core.spend import check_cap, priced
 from app.db.models import Journal, Memory, Message, SpendLedger, StateChange
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
 
@@ -458,7 +458,8 @@ async def run_extract(
         json_schema=EXTRACT_SCHEMA,
     )
 
-    usd_cost = compute_cost(response.usage, settings, model=response.model)
+    cost = priced(response.usage, settings, model=response.model)
+    usd_cost = cost.usd
     session.add(
         SpendLedger(
             local_date=clock_module.local_date(clock, timezone),
@@ -468,6 +469,7 @@ async def run_extract(
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
             usd_cost=usd_cost,
+            cost_source=cost.source,
         )
     )
     await session.commit()

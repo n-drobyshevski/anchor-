@@ -211,7 +211,7 @@ async def run_send_outbound(
         SKIPPED,
         load_gate_inputs,
     )
-    from app.core.spend import compute_cost
+    from app.core.spend import priced
     from app.core.state import get_state
     from app.core.scene import ensure_open_scene
     from app.core.turn import _complete_with_retries
@@ -312,7 +312,8 @@ async def run_send_outbound(
         return
 
     # 6. Store the message and the ledger row together.
-    usd_cost = compute_cost(response.usage, settings, model=response.model)
+    cost = priced(response.usage, settings, model=response.model)
+    usd_cost = cost.usd
     message = await _insert_outbound_message(
         session,
         outbound_id=outbound_id,
@@ -322,6 +323,7 @@ async def run_send_outbound(
         model=response.model,
         usage=response.usage,
         usd_cost=usd_cost,
+        cost_source=cost.source,
     )
     if message is None:
         # A concurrent run inserted it. Let that run deliver it.
@@ -353,6 +355,7 @@ async def _insert_outbound_message(
     model: str | None,
     usage,
     usd_cost,
+    cost_source: str | None = None,
 ) -> Message | None:
     """Insert the assistant row and its ledger row in one transaction.
 
@@ -401,6 +404,7 @@ async def _insert_outbound_message(
             tokens_cached=usage.cached_tokens,
             tokens_out=usage.output_tokens,
             usd_cost=usd_cost,
+            cost_source=cost_source,
         )
     )
     await session.commit()

@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # outright rather than silently falling back to a provider that
     # would retain our prompts.
     LLM_DATA_COLLECTION: str = "deny"
+    # Verified 2026-09-22 against OpenRouter's live model endpoint for
+    # thedrummer/cydonia-24b-v4.1 (sole provider: Parasail). A fallback
+    # only -- when OpenRouter reports usage.cost, that figure wins and
+    # these are never consulted; spend_ledger.cost_source records which
+    # of the two priced each row (H4).
     LLM_PRICE_IN: float = 0.30
     LLM_PRICE_CACHED: float = 0.15
     LLM_PRICE_OUT: float = 0.50
@@ -80,15 +85,33 @@ class Settings(BaseSettings):
     # answers SEARCH_DISABLED_REPLY_TEXT and makes no model call at all.
     LLM_WEB_SEARCH: bool = False
     LLM_WEB_SEARCH_MAX_RESULTS: int = 5
-    # OpenRouter's docs do not say whether the Exa search fee ($0.007/req)
-    # is already folded into the `usage.cost` OpenRouter reports, and
-    # compute_cost (app/core/spend.py) prefers that vendor-reported cost
-    # outright. Adding a non-zero price here on top of a cost that
-    # already includes the fee would double-bill every searched turn.
-    # Default to 0.0 (trust the vendor); scripts/smoke.py measures the
-    # actual delta between a searched and unsearched call on live data --
-    # set this to 0.007 only if that shows OpenRouter excludes the fee.
-    LLM_WEB_SEARCH_PRICE_USD: float = 0.0
+    # Exa's "auto" mode, the engine app/llm/openrouter.py asks for, at
+    # $0.007 per request including up to 10 results. Verified 2026-09-22
+    # at https://openrouter.ai/docs/features/web-search (we request 5).
+    #
+    # H4 answered the question this setting used to carry. It defaulted
+    # to 0.0 because nobody knew whether OpenRouter's reported
+    # `usage.cost` already included the fee, and compute_cost added it to
+    # both the vendor and the computed branch -- so 0.0 was the only
+    # value that could not double-bill. That made the *fallback* path
+    # silently under-bill every searched turn instead.
+    #
+    # The answer, from https://openrouter.ai/docs/use-cases/usage-accounting
+    # (checked 2026-09-22): `cost` is "the total amount charged to your
+    # account", stated as distinct from cost_details.upstream_inference_cost,
+    # "the actual cost charged by the upstream AI provider". The two
+    # fields are separate precisely because the first is broader than
+    # inference, and the Exa fee is charged to the same OpenRouter
+    # credits. So the fee is inside a vendor-reported figure and outside
+    # a computed one, and app/core/spend.py now adds it to the computed
+    # branch only -- which lets this be the real price rather than a
+    # placeholder.
+    #
+    # Still falsifiable on live data: scripts/smoke.py prints the
+    # reported-cost delta between an unsearched and a searched call. A
+    # delta near $0.007 confirms this reading; a delta near zero refutes
+    # it, and then the fee belongs on both branches.
+    LLM_WEB_SEARCH_PRICE_USD: float = 0.007
     # Lowered from 3.00 to 1.00 in 3a, by decision: phase-3 plan
     # section 12 budgets the whole proactive day (morning + evening
     # nag + at most one tick, plus ~6 tick decisions) at about
@@ -118,6 +141,8 @@ class Settings(BaseSettings):
     # reasoning_effort=low, but Cydonia's only provider (Parasail) does
     # not advertise that parameter, so the knob would be dead config.
     LLM_MODEL_CHEAP: str = "thedrummer/cydonia-24b-v4.1"
+    # Same model as LLM_MODEL today, hence the same prices; verified
+    # 2026-09-22.
     LLM_CHEAP_PRICE_IN: float = 0.30
     LLM_CHEAP_PRICE_CACHED: float = 0.15
     LLM_CHEAP_PRICE_OUT: float = 0.50

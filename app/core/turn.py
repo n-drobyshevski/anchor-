@@ -111,7 +111,7 @@ from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
-from app.core.spend import check_cap, compute_cost
+from app.core.spend import Priced, check_cap, priced
 from app.core.state import Source, get_state, update_state
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
@@ -235,6 +235,7 @@ async def _insert_assistant_row(
     update_id: int,
     content: str,
     usd_cost: decimal.Decimal,
+    cost_source: str | None = None,
     model: str | None = None,
     tokens_in: int | None = None,
     tokens_cached: int | None = None,
@@ -294,6 +295,7 @@ async def _insert_assistant_row(
                 tokens_cached=tokens_cached,
                 tokens_out=tokens_out,
                 usd_cost=usd_cost,
+                cost_source=cost_source,
             )
         )
     await session.commit()
@@ -394,6 +396,7 @@ async def _ledger_only(
     """
     if response is None:
         return
+    cost = priced(response.usage, settings, model=response.model)
     session.add(
         SpendLedger(
             local_date=local_date,
@@ -402,7 +405,8 @@ async def _ledger_only(
             tokens_in=response.usage.input_tokens,
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
-            usd_cost=compute_cost(response.usage, settings, model=response.model),
+            usd_cost=cost.usd,
+            cost_source=cost.source,
         )
     )
     await session.commit()
@@ -489,13 +493,17 @@ async def run_welfare_turn(
     text, usage = await welfare.generate_reply(provider, user_text)
 
     async with sessionmaker() as session:
+        reply_cost = (
+            priced(usage.usage, settings, model=usage.model)
+            if usage is not None
+            else Priced(decimal.Decimal("0"), None)
+        )
         message_id = await _insert_assistant_row(
             session,
             update_id=update_id,
             content=text,
-            usd_cost=compute_cost(usage.usage, settings, model=usage.model)
-            if usage is not None
-            else decimal.Decimal("0"),
+            usd_cost=reply_cost.usd,
+            cost_source=reply_cost.source,
             model=usage.model if usage is not None else None,
             tokens_in=usage.usage.input_tokens if usage is not None else None,
             tokens_cached=usage.usage.cached_tokens if usage is not None else None,
@@ -993,7 +1001,8 @@ async def run(
         return
 
     latency_ms = int((time.monotonic() - started_at) * 1000)
-    usd_cost = compute_cost(response.usage, settings, model=response.model)
+    cost = priced(response.usage, settings, model=response.model)
+    usd_cost = cost.usd
     logger.info(
         "turn completed",
         extra={
@@ -1020,6 +1029,7 @@ async def run(
             tokens_in=response.usage.input_tokens,
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
+            cost_source=cost.source,
             local_date=clock_module.local_date(clock, user_state.timezone),
             category=category,
             scene_id=scene_id,

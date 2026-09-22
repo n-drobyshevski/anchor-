@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core.spend import check_cap, compute_cost
+from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
 from app.db.models import Message, Scene, SpendLedger
 from app.llm.provider import LLMMessage, LLMProvider
@@ -260,7 +260,8 @@ async def run_summarize_scene(
         conversation_id=f"anchor-scene-{scene_id}",
     )
 
-    usd_cost = compute_cost(response.usage, settings, model=response.model)
+    cost = priced(response.usage, settings, model=response.model)
+    usd_cost = cost.usd
     scene.summary = response.text.strip()
     session.add(
         SpendLedger(
@@ -271,6 +272,7 @@ async def run_summarize_scene(
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
             usd_cost=usd_cost,
+            cost_source=cost.source,
         )
     )
     await session.commit()

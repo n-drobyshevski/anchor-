@@ -17,9 +17,10 @@ import decimal
 from app.config import Settings
 from app.core.clock import SystemClock
 from app.core.clock import local_date as clock_local_date
-from app.core.spend import check_cap, compute_cost, today_usd
+from app.core.spend import check_cap, compute_cost, priced, today_usd
 from app.db.models import SpendLedger
 from app.llm.provider import LLMUsage
+from sqlalchemy import select
 
 
 def test_compute_cost_uses_formula_when_no_vendor_cost():
@@ -92,7 +93,14 @@ def test_compute_cost_adds_the_web_search_fee_on_the_formula_branch():
     assert searched_cost == base_cost + decimal.Decimal("0.007")
 
 
-def test_compute_cost_adds_the_web_search_fee_on_the_vendor_cost_branch():
+def test_compute_cost_does_not_add_the_web_search_fee_on_the_vendor_branch():
+    """H4 reversed this. OpenRouter documents `usage.cost` as "the total
+    amount charged to your account" -- as distinct from
+    cost_details.upstream_inference_cost, "the actual cost charged by the
+    upstream AI provider" -- and the Exa fee is charged to the same
+    credits. So the fee is already inside a vendor-reported figure, and
+    adding it again double-bills the one path where we have the real
+    number."""
     settings = Settings(LLM_WEB_SEARCH_PRICE_USD=0.007)
     base_usage = LLMUsage(
         input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=decimal.Decimal("0.001234")
@@ -105,32 +113,93 @@ def test_compute_cost_adds_the_web_search_fee_on_the_vendor_cost_branch():
         web_search_requests=1,
     )
 
-    base_cost = compute_cost(base_usage, settings)
-    searched_cost = compute_cost(searched_usage, settings)
-
-    assert searched_cost == base_cost + decimal.Decimal("0.007")
+    assert compute_cost(searched_usage, settings) == compute_cost(base_usage, settings)
 
 
-def test_compute_cost_web_search_fee_defaults_to_a_no_op():
-    """Default LLM_WEB_SEARCH_PRICE_USD=0.0: a searched call must cost
-    exactly the same as an unsearched one unless the operator opts in
-    to a non-zero fee (see the config comment for why 0.0 is the default)."""
+def test_the_cost_source_says_which_branch_priced_the_row():
+    """The provenance H4 adds. Two numbers of different kinds -- one
+    reported, one estimated from prices in config that can go stale --
+    and a row that does not say which it is cannot be audited."""
     settings = Settings()
+    reported = LLMUsage(
+        input_tokens=10, cached_tokens=0, output_tokens=5, cost_usd=decimal.Decimal("0.000900")
+    )
+    estimated = LLMUsage(input_tokens=10, cached_tokens=0, output_tokens=5, cost_usd=None)
+
+    assert priced(reported, settings) == (decimal.Decimal("0.000900"), "vendor")
+    assert priced(estimated, settings).source == "computed"
+
+
+def test_the_web_search_fee_defaults_to_the_real_exa_rate():
+    """H4 changed the default from 0.0 to Exa's documented $0.007 per
+    request. 0.0 was a placeholder for an unanswered question -- whether
+    the vendor figure already included the fee -- and it made the
+    fallback path silently under-bill a searched turn. The question is
+    now answered per branch, so the number can be the real one."""
+    settings = Settings()
+    assert settings.LLM_WEB_SEARCH_PRICE_USD == 0.007
+
     unsearched = LLMUsage(input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None)
     searched = LLMUsage(
         input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None, web_search_requests=1
     )
+    assert compute_cost(searched, settings) == compute_cost(
+        unsearched, settings
+    ) + decimal.Decimal("0.007")
 
-    assert compute_cost(unsearched, settings) == compute_cost(searched, settings)
+
+async def test_a_real_turn_stamps_the_ledger_row_with_its_cost_source(sessionmaker, clock):
+    """End to end, not just compute_cost in isolation: the provenance has
+    to survive the trip into the table, or the column is decoration."""
+    from aiogram import Bot
+
+    from app.core import turn
+    from app.db.models import TelegramUpdate, UserState
+    from conftest import FakeLLMProvider, FakeSession
+
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=4242, timezone="Europe/Paris", intensity=3))
+        await session.commit()
+        session.add(TelegramUpdate(update_id=77, payload={}))
+        await session.commit()
+
+    # A provider whose usage carries no vendor cost -> the computed branch.
+    provider = FakeLLMProvider(
+        text="Принято.",
+        usage=LLMUsage(input_tokens=100, cached_tokens=0, output_tokens=50, cost_usd=None),
+    )
+    fake = FakeSession()
+    await turn.run(
+        sessionmaker,
+        Bot(token="123456:TESTTOKEN", session=fake),
+        Settings(DAILY_USD_CAP=10.0),
+        provider,
+        clock=clock,
+        chat_id=4242,
+        update_id=77,
+        user_text="привет",
+    )
+
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(SpendLedger))).scalars().all()
+    assert [r.cost_source for r in rows] == ["computed"]
 
 
 async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker, clock):
     """The fee lands in spend_ledger.usd_cost like any other cost, so
     check_cap sees it through today_usd -- exercised end to end against
     the real ledger table rather than just compute_cost in isolation."""
-    settings = Settings(DAILY_USD_CAP=0.01, LLM_WEB_SEARCH_PRICE_USD=0.007)
+    settings = Settings(
+        DAILY_USD_CAP=0.01,
+        LLM_WEB_SEARCH_PRICE_USD=0.007,
+        LLM_PRICE_IN=5.00,
+        LLM_PRICE_CACHED=5.00,
+        LLM_PRICE_OUT=5.00,
+    )
+    # The computed branch: no vendor figure, so the fee is ours to add.
+    # 1000 tokens at $5/M is $0.005, plus the $0.007 search fee.
     usage = LLMUsage(
-        input_tokens=0, cached_tokens=0, output_tokens=0, cost_usd=decimal.Decimal("0.005000"), web_search_requests=1
+        input_tokens=1000, cached_tokens=0, output_tokens=0, cost_usd=None, web_search_requests=1
     )
     cost = compute_cost(usage, settings)
     assert cost == decimal.Decimal("0.012000")

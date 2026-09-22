@@ -50,7 +50,7 @@ from app.core.outbound import load_gate_inputs
 from app.core.outbound_gate import TICK, config_from_settings, gate
 from app.core.prompt import build_now_block, recent_transcript
 from app.core.scheduler import pick_send_time, plan
-from app.core.spend import compute_cost
+from app.core.spend import priced
 from app.core.state import get_state
 from app.db.models import Journal, SpendLedger
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
@@ -280,7 +280,8 @@ async def run_tick_decide(
     )
 
     # 3. Ledger before parsing: the call was billed whatever came back.
-    usd_cost = compute_cost(response.usage, settings, model=response.model)
+    cost = priced(response.usage, settings, model=response.model)
+    usd_cost = cost.usd
     session.add(
         SpendLedger(
             local_date=clock_module.local_date(clock, state.timezone),
@@ -290,6 +291,7 @@ async def run_tick_decide(
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
             usd_cost=usd_cost,
+            cost_source=cost.source,
         )
     )
     await session.commit()

@@ -698,6 +698,75 @@ key at all, so its rows leaked between tests in the same file and made
 assertions pass or fail depending on test order. The list is now derived
 from `Base.metadata.sorted_tables`.
 
+## Hardening H4 — truthful cost accounting
+
+The review said cost accounting ignored OpenRouter's reported figure. It
+does not, and never did: `compute_cost` has always preferred
+`usage.cost_usd` when present. What was missing was *provenance*, and
+one real bug underneath it.
+
+### `cost_source`
+
+`spend_ledger` rows carried two different kinds of number under one
+column. One is what OpenRouter says it charged. The other is our
+arithmetic over token counts, at prices from config that can quietly go
+stale. A row that does not say which it is cannot be audited — "the
+totals look wrong" has no answer, because a drifted price setting and a
+vendor change produce the same symptom.
+
+So rows now carry `cost_source`: `'vendor'` or `'computed'`. Nullable,
+and deliberately **not** backfilled — rows written before H4 genuinely
+do not know, and stamping them with a guess is the false certainty the
+column exists to remove.
+
+### The web-search fee was on the wrong branch
+
+Exa's "auto" mode, which `app/llm/openrouter.py` asks for, costs **$0.007
+per request** including up to 10 results (we ask for 5). Verified
+2026-09-22 on [OpenRouter's web-search docs](https://openrouter.ai/docs/features/web-search).
+
+`LLM_WEB_SEARCH_PRICE_USD` defaulted to `0.0`, and `compute_cost` added
+it to *both* the vendor and the computed branch. That made `0.0` the
+only value that could not double-bill — the setting was a placeholder
+for an unanswered question, not a price.
+
+The question is now answered.
+[OpenRouter's usage-accounting docs](https://openrouter.ai/docs/use-cases/usage-accounting)
+define `cost` as *"the total amount charged to your account"*, stated as
+distinct from `cost_details.upstream_inference_cost`, *"the actual cost
+charged by the upstream AI provider"*. The two fields exist separately
+precisely because the first is broader than inference, and the Exa fee
+is charged to the same OpenRouter credits. So:
+
+- **vendor branch** — the fee is already inside the reported figure.
+  Adding it again would double-bill the one path where we have the real
+  number.
+- **computed branch** — the fee is not there, and is ours to add.
+
+Which means the default can be the real price: `0.007`, applied to the
+computed branch only. The old `0.0` was not neutral — it made the
+fallback path silently **under**-bill every searched turn, which is the
+dangerous direction for a setting the daily cap depends on.
+
+This reading is falsifiable on live data, and the way to falsify it is
+already in the tree: `scripts/smoke.py` prints the reported-cost delta
+between an unsearched and a searched call. A delta near $0.007 confirms
+it; a delta near zero refutes it, and then the fee belongs on both
+branches after all.
+
+With `/search` off since H3, none of this is live billing today — it is
+the accounting being right before the feature comes back in phase 4.
+
+### Price audit
+
+Every declared price re-checked against OpenRouter's live model
+endpoints on 2026-09-22. All three sets matched — Cydonia at
+$0.30/$0.15/$0.50 and Flash-Lite at $0.10/$0.01/$0.40 — so nothing
+changed but the dated citations saying so. The model prices are a
+fallback in any case: when OpenRouter reports a cost, that figure wins
+and the config prices are never consulted, which `cost_source` now makes
+visible per row.
+
 ## Hardening H3 — `/search` is off
 
 `/search` reached the tree with milestone 1f without a plan behind it, and

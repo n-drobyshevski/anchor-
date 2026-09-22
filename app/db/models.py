@@ -334,8 +334,24 @@ class SpendLedger(Base):
     tokens_cached: Mapped[int | None] = mapped_column(Integer)
     tokens_out: Mapped[int | None] = mapped_column(Integer)
     usd_cost: Mapped[decimal.Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    # H4: 'vendor' when OpenRouter reported the cost itself, 'computed'
+    # when usd_cost is our arithmetic over token counts at config prices.
+    # They are not the same kind of number -- one is what was charged,
+    # the other is an estimate that a stale price setting can silently
+    # skew -- and a row that does not say which it is cannot be audited.
+    #
+    # Nullable, with no backfill: rows written before H4 genuinely do not
+    # know, and inventing a value for them would be the one thing this
+    # column exists to prevent.
+    cost_source: Mapped[str | None] = mapped_column(String)
 
-    __table_args__ = (Index("ix_spend_ledger_local_date", "local_date"),)
+    __table_args__ = (
+        CheckConstraint(
+            "cost_source is null or cost_source in ('vendor', 'computed')",
+            name="ck_spend_ledger_cost_source",
+        ),
+        Index("ix_spend_ledger_local_date", "local_date"),
+    )
 
 
 class SafetyEvent(Base):
