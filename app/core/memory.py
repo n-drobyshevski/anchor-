@@ -49,6 +49,7 @@ import logging
 from sqlalchemy import delete, func, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import Clock
 from app.db.models import Memory, PendingMemory
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ async def _topup(session: AsyncSession, *, exclude_ids: list[int], limit: int) -
     return list(result.scalars().all())
 
 
-async def mark_used(session: AsyncSession, memory_ids: list[int]) -> None:
+async def mark_used(session: AsyncSession, clock: Clock, memory_ids: list[int]) -> None:
     """Record that these memories were injected into a **delivered** turn.
 
     Does not commit: the caller (app/core/turn.py) folds this into the
@@ -196,7 +197,7 @@ async def mark_used(session: AsyncSession, memory_ids: list[int]) -> None:
     await session.execute(
         sql_update(Memory)
         .where(Memory.id.in_(memory_ids))
-        .values(last_used_at=func.now(), use_count=Memory.use_count + 1)
+        .values(last_used_at=clock.now_utc(), use_count=Memory.use_count + 1)
     )
 
 
@@ -391,13 +392,13 @@ async def take_pending(session: AsyncSession, pending_id: int) -> str | None:
 
 
 async def purge_pending_older_than(
-    session: AsyncSession, older_than: datetime.timedelta
+    session: AsyncSession, clock: Clock, older_than: datetime.timedelta
 ) -> int:
     """Drop pending rows whose keyboard was never pressed.
 
     # TODO(phase-3): call this from the scheduled-job kinds the tick adds.
     """
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - older_than
+    cutoff = clock.now_utc() - older_than
     result = await session.execute(
         delete(PendingMemory).where(PendingMemory.created_at < cutoff).returning(PendingMemory.id)
     )

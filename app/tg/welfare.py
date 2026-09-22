@@ -20,6 +20,7 @@ import logging
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.core.clock import Clock, SystemClock
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ async def handle_callback(
     sessionmaker,
     bot: Bot,
     settings,
+    clock: Clock | None = None,
     *,
     callback_id: str,
     chat_id: int,
@@ -64,6 +66,7 @@ async def handle_callback(
     """`w:resume` / `w:stay`."""
     from app.core import turn
 
+    clock = clock or SystemClock()
     await answer_callback(bot, callback_id)
     action = data.split(":", 1)[1]
     base = (message_text or "").strip()
@@ -74,6 +77,7 @@ async def handle_callback(
         await turn.run_resume(
             sessionmaker,
             bot,
+            clock=clock,
             chat_id=chat_id,
             update_id=update_id,
             source="button",

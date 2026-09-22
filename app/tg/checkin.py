@@ -25,6 +25,7 @@ import logging
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.core.clock import Clock, SystemClock
 from app.config import Settings
 from app.core import checkin
 from app.core.state import get_state
@@ -69,10 +70,12 @@ def note_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def start(sessionmaker, bot: Bot, *, chat_id: int, timezone: str) -> None:
+async def start(
+    sessionmaker, bot: Bot, clock: Clock, *, chat_id: int, timezone: str
+) -> None:
     """/checkin: reset today's row and ask the first question."""
     async with sessionmaker() as session:
-        row = await checkin.start(session, timezone)
+        row = await checkin.start(session, clock, timezone)
         checkin_id = row.id
 
     message_id = await send_keyboard(bot, chat_id, RATING_TEXT, rating_keyboard())
@@ -80,10 +83,10 @@ async def start(sessionmaker, bot: Bot, *, chat_id: int, timezone: str) -> None:
         await checkin.set_message_id(session, checkin_id, message_id)
 
 
-async def _current(sessionmaker, timezone: str, message_id: int):
+async def _current(sessionmaker, clock: Clock, timezone: str, message_id: int):
     """Today's check-in, or None if this button belongs to another one."""
     async with sessionmaker() as session:
-        row = await checkin.today(session, timezone)
+        row = await checkin.today(session, clock, timezone)
     if row is None or row.tg_message_id != message_id:
         return None
     return row
@@ -111,6 +114,7 @@ async def handle_callback(
     settings: Settings,
     provider,
     cheap_provider=None,
+    clock: Clock | None = None,
     *,
     callback_id: str,
     chat_id: int,
@@ -119,13 +123,14 @@ async def handle_callback(
     data: str,
 ) -> None:
     """`c:r:<n>` / `c:d:<result>` / `c:n:skip`."""
+    clock = clock or SystemClock()
     _, step, value = data.split(":", 2)
 
     async with sessionmaker() as session:
         user_state = await get_state(session)
     timezone = user_state.timezone
 
-    row = await _current(sessionmaker, timezone, message_id)
+    row = await _current(sessionmaker, clock, timezone, message_id)
     if row is None:
         await answer_callback(bot, callback_id, STALE)
         return
@@ -189,6 +194,7 @@ async def finish_and_react(
     settings: Settings,
     provider,
     cheap_provider=None,
+    clock: Clock | None = None,
     *,
     chat_id: int,
     update_id: int,
@@ -208,11 +214,12 @@ async def finish_and_react(
     """
     from app.core import turn
 
+    clock = clock or SystemClock()
     async with sessionmaker() as session:
         user_state = await get_state(session)
         if user_state.awaiting != checkin.AWAITING_NOTE:
             return
-        row, streak = await checkin.finish(session, timezone)
+        row, streak = await checkin.finish(session, clock, timezone)
         if row is None:
             return
         line = checkin.synthetic_line(row)
@@ -225,6 +232,7 @@ async def finish_and_react(
         bot,
         settings,
         provider,
+        clock=clock,
         chat_id=chat_id,
         update_id=update_id,
         user_text=line,

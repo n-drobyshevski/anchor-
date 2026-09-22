@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import Settings
+from app.core.clock import next_local_midnight
 from app.core.scene import (
     Deferred,
     MIN_MESSAGES_FOR_SUMMARY,
@@ -22,7 +23,6 @@ from app.core.scene import (
     bump_message_count,
     ensure_open_scene,
     get_open_scene,
-    next_local_midnight,
     render_dialogue,
     run_summarize_scene,
     summarizable_messages,
@@ -75,35 +75,35 @@ async def _add_message(
 # --- lifecycle ---
 
 
-async def test_first_message_opens_a_scene(sessionmaker):
+async def test_first_message_opens_a_scene(sessionmaker, clock):
     async with sessionmaker() as session:
-        scene_id = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         scene = await session.get(Scene, scene_id)
 
     assert scene.ended_at is None
     assert scene.message_count == 0
 
 
-async def test_recent_message_keeps_the_same_scene(sessionmaker):
+async def test_recent_message_keeps_the_same_scene(sessionmaker, clock):
     async with sessionmaker() as session:
-        first = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        first = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(session, first, created_at=_utcnow() - datetime.timedelta(hours=1))
 
     async with sessionmaker() as session:
-        second = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        second = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
 
     assert second == first
 
 
-async def test_six_hour_gap_opens_a_new_scene_and_enqueues_a_summary(sessionmaker):
+async def test_six_hour_gap_opens_a_new_scene_and_enqueues_a_summary(sessionmaker, clock):
     """The plan's headline case (section 5 / section 16's last checkbox)."""
     stale_at = _utcnow() - datetime.timedelta(hours=IDLE_HOURS, minutes=1)
     async with sessionmaker() as session:
-        first = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        first = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(session, first, created_at=stale_at)
 
     async with sessionmaker() as session:
-        second = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        second = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         closed = await session.get(Scene, first)
         jobs = (await session.execute(select(Job))).scalars().all()
 
@@ -119,17 +119,17 @@ async def test_six_hour_gap_opens_a_new_scene_and_enqueues_a_summary(sessionmake
     assert jobs[0].dedup_key == f"scene:{first}"
 
 
-async def test_a_replayed_close_queues_one_summary(sessionmaker):
+async def test_a_replayed_close_queues_one_summary(sessionmaker, clock):
     """The close commits the scene and the enqueue together, but a worker
     crash can still replay the enqueue. dedup_key makes that free."""
     async with sessionmaker() as session:
-        first = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        first = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(
             session, first, created_at=_utcnow() - datetime.timedelta(hours=IDLE_HOURS, minutes=1)
         )
 
     async with sessionmaker() as session:
-        await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
 
     # Replay the enqueue the close performed, exactly as it performed it.
     async with sessionmaker() as session:
@@ -141,13 +141,13 @@ async def test_a_replayed_close_queues_one_summary(sessionmaker):
     assert len(jobs) == 1
 
 
-async def test_empty_open_scene_is_reused_not_duplicated(sessionmaker):
+async def test_empty_open_scene_is_reused_not_duplicated(sessionmaker, clock):
     """A scene opened but never written to (worker restart mid-turn) must
     not leak a fresh empty scene on the next message."""
     async with sessionmaker() as session:
-        first = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        first = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
     async with sessionmaker() as session:
-        second = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        second = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         scenes = (await session.execute(select(Scene))).scalars().all()
 
     assert second == first
@@ -162,9 +162,9 @@ async def test_get_open_scene_returns_none_when_all_closed(sessionmaker):
         assert await get_open_scene(session) is None
 
 
-async def test_bump_message_count_accumulates(sessionmaker):
+async def test_bump_message_count_accumulates(sessionmaker, clock):
     async with sessionmaker() as session:
-        scene_id = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(session, scene_id)
         await _add_message(session, scene_id, role="assistant")
         scene = await session.get(Scene, scene_id)
@@ -176,12 +176,12 @@ async def test_bump_message_count_accumulates(sessionmaker):
 # --- what the summarizer is allowed to see ---
 
 
-async def test_welfare_and_ooc_and_canned_rows_are_excluded_from_summary_input(sessionmaker):
+async def test_welfare_and_ooc_and_canned_rows_are_excluded_from_summary_input(sessionmaker, clock):
     """Plan sections 10 and 13: welfare content never reaches a summary.
     Both filters (ooc and kind) must exclude it independently, so that
     one of them failing is not enough to leak it."""
     async with sessionmaker() as session:
-        scene_id = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(session, scene_id, content="обычная реплика")
         await _add_message(session, scene_id, content="чек-ин", kind="checkin")
         # Welfare: excluded by kind AND by ooc.
@@ -200,9 +200,9 @@ async def test_welfare_and_ooc_and_canned_rows_are_excluded_from_summary_input(s
     assert not any("кризис" in c for c in contents)
 
 
-async def test_render_dialogue_labels_roles_in_russian(sessionmaker):
+async def test_render_dialogue_labels_roles_in_russian(sessionmaker, clock):
     async with sessionmaker() as session:
-        scene_id = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
         await _add_message(session, scene_id, role="user", content="привет")
         await _add_message(session, scene_id, role="assistant", content="и тебе")
         rows = await summarizable_messages(session, scene_id)
@@ -213,8 +213,8 @@ async def test_render_dialogue_labels_roles_in_russian(sessionmaker):
 # --- the job body ---
 
 
-async def _scene_with(session, n: int, **kwargs) -> int:
-    scene_id = await ensure_open_scene(session, idle_hours=IDLE_HOURS)
+async def _scene_with(session, clock, n: int, **kwargs) -> int:
+    scene_id = await ensure_open_scene(session, clock, idle_hours=IDLE_HOURS)
     for i in range(n):
         await _add_message(
             session,
@@ -226,14 +226,14 @@ async def _scene_with(session, n: int, **kwargs) -> int:
     return scene_id
 
 
-async def test_scene_under_three_messages_is_not_summarized(sessionmaker):
+async def test_scene_under_three_messages_is_not_summarized(sessionmaker, clock):
     provider = FakeLLMProvider(text="сводка")
     async with sessionmaker() as session:
-        scene_id = await _scene_with(session, MIN_MESSAGES_FOR_SUMMARY - 1)
+        scene_id = await _scene_with(session, clock, MIN_MESSAGES_FOR_SUMMARY - 1)
 
     async with sessionmaker() as session:
         await run_summarize_scene(
-            session, _settings(), provider, scene_id=scene_id, timezone=TIMEZONE
+            session, _settings(), provider, scene_id=scene_id, clock=clock, timezone=TIMEZONE
         )
 
     async with sessionmaker() as session:
@@ -243,14 +243,14 @@ async def test_scene_under_three_messages_is_not_summarized(sessionmaker):
     assert scene.summary is None
 
 
-async def test_scene_with_three_messages_is_summarized_and_ledgered(sessionmaker):
+async def test_scene_with_three_messages_is_summarized_and_ledgered(sessionmaker, clock):
     provider = FakeLLMProvider(text="  Говорили об отчёте.  ", model="cydonia-fake")
     async with sessionmaker() as session:
-        scene_id = await _scene_with(session, MIN_MESSAGES_FOR_SUMMARY)
+        scene_id = await _scene_with(session, clock, MIN_MESSAGES_FOR_SUMMARY)
 
     async with sessionmaker() as session:
         await run_summarize_scene(
-            session, _settings(), provider, scene_id=scene_id, timezone=TIMEZONE
+            session, _settings(), provider, scene_id=scene_id, clock=clock, timezone=TIMEZONE
         )
 
     async with sessionmaker() as session:
@@ -264,17 +264,17 @@ async def test_scene_with_three_messages_is_summarized_and_ledgered(sessionmaker
     assert ledger[0].model == "cydonia-fake"
 
 
-async def test_summary_prompt_is_a_system_message_and_dialogue_is_plain_text(sessionmaker):
+async def test_summary_prompt_is_a_system_message_and_dialogue_is_plain_text(sessionmaker, clock):
     """A roleplay model handed a real transcript continues the roleplay
     instead of describing it, so the dialogue goes in as one plain-text
     user message, not as user/assistant turns."""
     provider = FakeLLMProvider(text="сводка")
     async with sessionmaker() as session:
-        scene_id = await _scene_with(session, MIN_MESSAGES_FOR_SUMMARY)
+        scene_id = await _scene_with(session, clock, MIN_MESSAGES_FOR_SUMMARY)
 
     async with sessionmaker() as session:
         await run_summarize_scene(
-            session, _settings(), provider, scene_id=scene_id, timezone=TIMEZONE
+            session, _settings(), provider, scene_id=scene_id, clock=clock, timezone=TIMEZONE
         )
 
     sent = provider.received_messages[0]
@@ -283,17 +283,17 @@ async def test_summary_prompt_is_a_system_message_and_dialogue_is_plain_text(ses
     assert "Пользователь: реплика 0" in sent[1].content
 
 
-async def test_already_summarized_scene_is_a_no_op(sessionmaker):
+async def test_already_summarized_scene_is_a_no_op(sessionmaker, clock):
     """A job can be re-claimed after a crash; re-running it must not pay
     for a second model call."""
     provider = FakeLLMProvider(text="сводка")
     async with sessionmaker() as session:
-        scene_id = await _scene_with(session, MIN_MESSAGES_FOR_SUMMARY)
+        scene_id = await _scene_with(session, clock, MIN_MESSAGES_FOR_SUMMARY)
 
     for _ in range(2):
         async with sessionmaker() as session:
             await run_summarize_scene(
-                session, _settings(), provider, scene_id=scene_id, timezone=TIMEZONE
+                session, _settings(), provider, scene_id=scene_id, clock=clock, timezone=TIMEZONE
             )
 
     async with sessionmaker() as session:
@@ -303,47 +303,52 @@ async def test_already_summarized_scene_is_a_no_op(sessionmaker):
     assert len(ledger) == 1
 
 
-async def test_missing_scene_is_a_no_op(sessionmaker):
+async def test_missing_scene_is_a_no_op(sessionmaker, clock):
     provider = FakeLLMProvider(text="сводка")
     async with sessionmaker() as session:
         await run_summarize_scene(
-            session, _settings(), provider, scene_id=999_999, timezone=TIMEZONE
+            session, _settings(), provider, scene_id=999_999, clock=clock, timezone=TIMEZONE
         )
     assert provider.calls == 0
 
 
-async def test_at_cap_the_summary_is_deferred_to_next_local_midnight(sessionmaker):
+async def test_at_cap_the_summary_is_deferred_to_next_local_midnight(sessionmaker, clock):
     """Plan section 12: at the cap, summaries are re-queued rather than
     run or dropped."""
     provider = FakeLLMProvider(text="сводка")
     settings = _settings(DAILY_USD_CAP=0.0)
     async with sessionmaker() as session:
-        scene_id = await _scene_with(session, MIN_MESSAGES_FOR_SUMMARY)
+        scene_id = await _scene_with(session, clock, MIN_MESSAGES_FOR_SUMMARY)
 
     async with sessionmaker() as session:
         with pytest.raises(Deferred) as excinfo:
             await run_summarize_scene(
-                session, settings, provider, scene_id=scene_id, timezone=TIMEZONE
+                session, settings, provider, scene_id=scene_id, clock=clock, timezone=TIMEZONE
             )
 
     assert provider.calls == 0
-    assert excinfo.value.run_after == next_local_midnight(TIMEZONE)
+    assert excinfo.value.run_after == next_local_midnight(clock, TIMEZONE)
 
     async with sessionmaker() as session:
         scene = await session.get(Scene, scene_id)
     assert scene.summary is None
 
 
-async def test_next_local_midnight_is_the_next_local_day_boundary():
+async def test_next_local_midnight_is_the_next_local_day_boundary(clock):
     import zoneinfo
 
     tz = zoneinfo.ZoneInfo(TIMEZONE)
-    midnight = next_local_midnight(TIMEZONE)
+    midnight = next_local_midnight(clock, TIMEZONE)
     now_local = datetime.datetime.now(tz)
 
+    # next_local_midnight now returns a UTC-comparable instant (see its
+    # docstring), not a tzinfo=Paris datetime with a naive local time-of-day
+    # like the old scene.py version did -- so the wall-clock check below
+    # renders it back into Paris local time first.
     assert midnight > now_local
-    assert midnight.hour == 0 and midnight.minute == 0
-    assert (midnight.date() - now_local.date()).days == 1
+    local_midnight = midnight.astimezone(tz)
+    assert local_midnight.hour == 0 and local_midnight.minute == 0
+    assert (local_midnight.date() - now_local.date()).days == 1
 
 
 # --- integration with core/turn.py (plan section 5: "every message row
@@ -360,7 +365,7 @@ async def _seed_state(sessionmaker, update_id: int, *, chat_id: int = 4242) -> N
         await session.commit()
 
 
-async def test_a_turn_stamps_both_rows_with_the_scene_and_kind_chat(sessionmaker):
+async def test_a_turn_stamps_both_rows_with_the_scene_and_kind_chat(sessionmaker, clock):
     from aiogram import Bot
 
     from app.core import turn
@@ -376,6 +381,7 @@ async def test_a_turn_stamps_both_rows_with_the_scene_and_kind_chat(sessionmaker
         bot,
         _settings(),
         provider,
+        clock=clock,
         chat_id=4242,
         update_id=update_id,
         user_text="привет",
@@ -392,7 +398,7 @@ async def test_a_turn_stamps_both_rows_with_the_scene_and_kind_chat(sessionmaker
     assert scenes[0].message_count == 2
 
 
-async def test_a_replayed_turn_does_not_inflate_message_count(sessionmaker):
+async def test_a_replayed_turn_does_not_inflate_message_count(sessionmaker, clock):
     """Both inserts are idempotent, so the count must follow the insert,
     not the attempt."""
     from aiogram import Bot
@@ -411,6 +417,7 @@ async def test_a_replayed_turn_does_not_inflate_message_count(sessionmaker):
             bot,
             _settings(),
             provider,
+            clock=clock,
             chat_id=4242,
             update_id=update_id,
             user_text="привет",
@@ -422,7 +429,7 @@ async def test_a_replayed_turn_does_not_inflate_message_count(sessionmaker):
     assert scenes[0].message_count == 2
 
 
-async def test_a_pause_word_writes_a_canned_row_excluded_from_summaries(sessionmaker):
+async def test_a_pause_word_writes_a_canned_row_excluded_from_summaries(sessionmaker, clock):
     """The canned pause acknowledgement must never reach a summary."""
     from aiogram import Bot
 
@@ -439,6 +446,7 @@ async def test_a_pause_word_writes_a_canned_row_excluded_from_summaries(sessionm
         bot,
         _settings(),
         provider,
+        clock=clock,
         chat_id=4242,
         update_id=update_id,
         user_text="пурпурный",

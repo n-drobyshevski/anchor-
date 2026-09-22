@@ -45,7 +45,7 @@ def _update_payload(update_id: int, text: str) -> dict:
     }
 
 
-async def test_worker_runs_persona_turn_and_marks_row_done(sessionmaker):
+async def test_worker_runs_persona_turn_and_marks_row_done(sessionmaker, clock):
     await _seed_state(sessionmaker)
     fake_session = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake_session)
@@ -56,7 +56,7 @@ async def test_worker_runs_persona_turn_and_marks_row_done(sessionmaker):
     async with sessionmaker() as session:
         await enqueue(session, 200, _update_payload(200, "hello anchor"))
 
-    processed = await process_one_update(sessionmaker, dp, bot)
+    processed = await process_one_update(sessionmaker, dp, bot, clock)
     assert processed is True
 
     assert len(fake_session.sent) == 1
@@ -71,14 +71,14 @@ async def test_worker_runs_persona_turn_and_marks_row_done(sessionmaker):
     await bot.session.close()
 
 
-async def test_process_one_update_returns_false_when_queue_empty(sessionmaker):
+async def test_process_one_update_returns_false_when_queue_empty(sessionmaker, clock):
     fake_session = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake_session)
     provider = FakeLLMProvider()
     dp = Dispatcher()
     dp.include_router(build_router(sessionmaker, Settings(), provider))
 
-    processed = await process_one_update(sessionmaker, dp, bot)
+    processed = await process_one_update(sessionmaker, dp, bot, clock)
     assert processed is False
     assert fake_session.sent == []
     assert provider.calls == 0

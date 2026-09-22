@@ -72,7 +72,7 @@ async def _seed(sessionmaker, *update_ids: int, **state):
     return Bot(token="123456:TESTTOKEN", session=fake), fake
 
 
-async def _run(sessionmaker, bot, cheap, *, update_id=1, text=DISTRESS, main=None, settings=None):
+async def _run(sessionmaker, bot, cheap, clock, *, update_id=1, text=DISTRESS, main=None, settings=None):
     from app.core import turn
 
     await turn.run(
@@ -80,6 +80,7 @@ async def _run(sessionmaker, bot, cheap, *, update_id=1, text=DISTRESS, main=Non
         bot,
         settings or _settings(),
         main or FakeLLMProvider(text="Не оправдание. Что сделаешь за час?"),
+        clock=clock,
         chat_id=CHAT_ID,
         update_id=update_id,
         user_text=text,
@@ -95,13 +96,14 @@ async def _state(sessionmaker) -> UserState:
 # --- a real verdict ---
 
 
-async def test_real_distress_discards_the_persona_reply_and_pauses(sessionmaker):
+async def test_real_distress_discards_the_persona_reply_and_pauses(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
     persona = FakeLLMProvider(text="Не оправдание. Что сделаешь за час?")
 
     await _run(
         sessionmaker, bot,
         ScriptedWelfare(level="real", confidence=0.9, reply="Я рядом. Всё на паузе."),
+        clock,
         main=persona,
     )
 
@@ -118,19 +120,19 @@ async def test_real_distress_discards_the_persona_reply_and_pauses(sessionmaker)
     assert all("Не оправдание" not in m.content for m in stored), "nor stored"
 
 
-async def test_the_welfare_reply_carries_both_buttons(sessionmaker):
+async def test_the_welfare_reply_carries_both_buttons(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     labels = [b.text for row in fake.sent[0].reply_markup.inline_keyboard for b in row]
     assert labels == [welfare_ui.RESUME, welfare_ui.STAY]
 
 
-async def test_the_discarded_generation_is_still_ledgered(sessionmaker):
+async def test_the_discarded_generation_is_still_ledgered(sessionmaker, clock):
     """Plan section 10: "don't send it, don't store it; its cost is
     still ledgered". The money left whether the words did or not."""
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(SpendLedger))).scalars().all()
@@ -140,9 +142,9 @@ async def test_the_discarded_generation_is_still_ledgered(sessionmaker):
     )
 
 
-async def test_pausing_is_audited_as_welfare(sessionmaker):
+async def test_pausing_is_audited_as_welfare(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     async with sessionmaker() as session:
         rows = (
@@ -154,10 +156,10 @@ async def test_pausing_is_audited_as_welfare(sessionmaker):
     assert rows[0].source == "welfare"
 
 
-async def test_a_low_confidence_real_verdict_passes_through(sessionmaker):
+async def test_a_low_confidence_real_verdict_passes_through(sessionmaker, clock):
     """WELFARE_MIN_CONF is a floor, not decoration."""
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.3))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.3), clock)
 
     assert fake.sent[0].text == "Не оправдание. Что сделаешь за час?"
     assert (await _state(sessionmaker)).persona_active is True
@@ -166,21 +168,21 @@ async def test_a_low_confidence_real_verdict_passes_through(sessionmaker):
 # --- privacy (plan sections 10 and 13) ---
 
 
-async def test_a_welfare_turn_never_enqueues_the_extractor(sessionmaker):
+async def test_a_welfare_turn_never_enqueues_the_extractor(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     async with sessionmaker() as session:
         jobs = (await session.execute(select(Job))).scalars().all()
     assert [j for j in jobs if j.kind == "extract"] == []
 
 
-async def test_both_halves_of_a_welfare_exchange_are_excluded_from_summaries(sessionmaker):
+async def test_both_halves_of_a_welfare_exchange_are_excluded_from_summaries(sessionmaker, clock):
     """The reply is written kind='welfare' from the start; the message
     that triggered it was stored as ordinary chat before anyone knew,
     and must be retagged or it lands in the next scene summary."""
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(Message))).scalars().all()
@@ -192,15 +194,15 @@ async def test_both_halves_of_a_welfare_exchange_are_excluded_from_summaries(ses
     assert visible == [], "nothing from this exchange may reach a summary"
 
 
-async def test_a_welfare_exchange_is_excluded_from_the_persona_transcript(sessionmaker):
+async def test_a_welfare_exchange_is_excluded_from_the_persona_transcript(sessionmaker, clock):
     from app.core.prompt import build_messages
 
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9))
+    await _run(sessionmaker, bot, ScriptedWelfare(level="real", confidence=0.9), clock)
 
     async with sessionmaker() as session:
         messages = await build_messages(
-            session, timezone=TIMEZONE, intensity=3, user_text="новое",
+            session, clock=clock, timezone=TIMEZONE, intensity=3, user_text="новое",
             update_id=999, transcript_turns=30,
         )
     blob = "\n".join(m.content for m in messages)
@@ -212,12 +214,13 @@ async def test_a_welfare_exchange_is_excluded_from_the_persona_transcript(sessio
 
 
 @pytest.mark.parametrize("level", ["none", "scene"])
-async def test_scene_and_none_pass_through(sessionmaker, level):
+async def test_scene_and_none_pass_through(sessionmaker, level, clock):
     """An in-game complaint gets a normal in-character reply."""
     bot, fake = await _seed(sessionmaker, 1)
     await _run(
         sessionmaker, bot,
         ScriptedWelfare(level=level, confidence=0.95),
+        clock,
         text="это слишком сложно, ну",
     )
 
@@ -225,7 +228,7 @@ async def test_scene_and_none_pass_through(sessionmaker, level):
     assert (await _state(sessionmaker)).persona_active is True
 
 
-async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker):
+async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker, clock):
     """Plan section 10: fail open for chat."""
 
     class SlowClassifier(FakeLLMProvider):
@@ -235,7 +238,7 @@ async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker):
 
     bot, fake = await _seed(sessionmaker, 1)
     await _run(
-        sessionmaker, bot, SlowClassifier(),
+        sessionmaker, bot, SlowClassifier(), clock,
         settings=_settings(WELFARE_TIMEOUT_SECONDS=0.05),
     )
 
@@ -243,40 +246,40 @@ async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker):
     assert (await _state(sessionmaker)).persona_active is True
 
 
-async def test_a_classifier_error_sends_the_normal_reply(sessionmaker):
+async def test_a_classifier_error_sends_the_normal_reply(sessionmaker, clock):
     class BrokenClassifier(FakeLLMProvider):
         async def complete(self, messages, *, conversation_id, web_search=False, json_schema=None):
             raise RuntimeError("upstream is on fire")
 
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, BrokenClassifier())
+    await _run(sessionmaker, bot, BrokenClassifier(), clock)
 
     assert fake.sent[0].text == "Не оправдание. Что сделаешь за час?"
     assert (await _state(sessionmaker)).persona_active is True
 
 
-async def test_unparseable_classifier_output_passes_through(sessionmaker):
+async def test_unparseable_classifier_output_passes_through(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, FakeLLMProvider(text="кажется, всё в порядке"))
+    await _run(sessionmaker, bot, FakeLLMProvider(text="кажется, всё в порядке"), clock)
 
     assert fake.sent[0].text == "Не оправдание. Что сделаешь за час?"
     assert (await _state(sessionmaker)).persona_active is True
 
 
-async def test_a_neutral_turn_runs_no_classifier(sessionmaker):
+async def test_a_neutral_turn_runs_no_classifier(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1, persona_active=False)
     cheap = ScriptedWelfare(level="real", confidence=0.9)
 
-    await _run(sessionmaker, bot, cheap, text="привет")
+    await _run(sessionmaker, bot, cheap, clock, text="привет")
 
     assert cheap.calls == 0, "the persona is already off; there is nothing to drop"
 
 
-async def test_a_pause_word_runs_no_classifier(sessionmaker):
+async def test_a_pause_word_runs_no_classifier(sessionmaker, clock):
     bot, fake = await _seed(sessionmaker, 1)
     cheap = ScriptedWelfare(level="real", confidence=0.9)
 
-    await _run(sessionmaker, bot, cheap, text="пурпурный")
+    await _run(sessionmaker, bot, cheap, clock, text="пурпурный")
 
     assert cheap.calls == 0
 
@@ -387,7 +390,7 @@ async def test_main_builds_a_dispatcher_with_the_cheap_provider(sessionmaker):
     from app import main as main_module
 
     source = inspect.getsource(main_module)
-    assert "build_dispatcher(sessionmaker, settings, provider, cheap_provider)" in source
+    assert "build_dispatcher(sessionmaker, settings, provider, cheap_provider, clock)" in source
 
 
 # --- the classifier's own contract ---
@@ -450,7 +453,7 @@ async def test_the_plan_prompts_are_carried_verbatim(sessionmaker):
     assert "3114" in welfare.FALLBACK_REPLY and "112" in welfare.FALLBACK_REPLY
 
 
-async def test_a_failed_welfare_reply_still_sends_something_with_the_numbers(sessionmaker):
+async def test_a_failed_welfare_reply_still_sends_something_with_the_numbers(sessionmaker, clock):
     """The persona is off by this point. Silence is not an option."""
 
     class ClassifiesThenBreaks(FakeLLMProvider):
@@ -467,7 +470,7 @@ async def test_a_failed_welfare_reply_still_sends_something_with_the_numbers(ses
             raise RuntimeError("the reply call fell over")
 
     bot, fake = await _seed(sessionmaker, 1)
-    await _run(sessionmaker, bot, ClassifiesThenBreaks())
+    await _run(sessionmaker, bot, ClassifiesThenBreaks(), clock)
 
     assert fake.sent[0].text == welfare.FALLBACK_REPLY
     assert "3114" in fake.sent[0].text

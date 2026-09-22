@@ -18,6 +18,12 @@ build_dispatcher() -> build_router(), so every turn shares one
 AsyncOpenAI client/connection pool, and closed on shutdown in both
 modes -- an unclosed client leaks its underlying HTTP connections.
 
+3a builds the one SystemClock here and threads it the same way
+(phase-3 plan section 3). One instance, injected into the dispatcher
+for the handler path and into the worker for the job path, so nothing
+under app/core/ ever reads the wall clock for itself and a test can
+substitute a FrozenClock at either entry point.
+
 2a adds a second provider for background work (scene summaries now;
 the extractor and the welfare classifier later). It runs the same model
 as chat today, by decision, but is a separate LLMProvider because its
@@ -36,6 +42,7 @@ from aiogram import Bot, Dispatcher
 from aiohttp import web
 
 from app.config import Settings, check_runtime_settings, get_settings
+from app.core.clock import Clock, SystemClock
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
 from app.llm.openrouter import OpenRouterProvider, build_client
 from app.llm.provider import LLMProvider
@@ -86,9 +93,12 @@ def build_dispatcher(
     settings: Settings,
     provider: LLMProvider,
     cheap_provider: LLMProvider | None = None,
+    clock: Clock | None = None,
 ) -> Dispatcher:
     dp = Dispatcher()
-    dp.include_router(build_router(sessionmaker, settings, provider, cheap_provider))
+    dp.include_router(
+        build_router(sessionmaker, settings, provider, cheap_provider, clock or SystemClock())
+    )
     return dp
 
 
@@ -111,7 +121,7 @@ async def _on_startup(app: web.Application) -> None:
     )
     await register_commands(bot)
     app["worker_tasks"] = await run_worker(
-        sessionmaker, app["dp"], bot, settings, app["cheap_provider"]
+        sessionmaker, app["dp"], bot, settings, app["cheap_provider"], app["clock"]
     )
     logger.info("startup complete", extra={"event": "startup"})
 
@@ -133,6 +143,7 @@ def build_webhook_app(
     provider: LLMProvider,
     cheap_provider: LLMProvider,
     llm_client,
+    clock: Clock,
 ) -> web.Application:
     app = web.Application()
     app["settings"] = settings
@@ -143,6 +154,7 @@ def build_webhook_app(
     app["provider"] = provider
     app["cheap_provider"] = cheap_provider
     app["llm_client"] = llm_client
+    app["clock"] = clock
 
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
@@ -161,13 +173,14 @@ async def _run_polling_mode(
     engine,
     cheap_provider: LLMProvider,
     llm_client,
+    clock: Clock,
 ) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
-    worker_tasks = await run_worker(sessionmaker, dp, bot, settings, cheap_provider)
+    worker_tasks = await run_worker(sessionmaker, dp, bot, settings, cheap_provider, clock)
     try:
         await run_polling(bot, sessionmaker, settings)
     finally:
@@ -187,17 +200,26 @@ def main() -> None:
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
     provider, cheap_provider, llm_client = build_providers(settings)
-    dp = build_dispatcher(sessionmaker, settings, provider, cheap_provider)
+    clock = SystemClock()
+    dp = build_dispatcher(sessionmaker, settings, provider, cheap_provider, clock)
 
     if settings.MODE == "webhook":
         app = build_webhook_app(
-            settings, bot, dp, sessionmaker, engine, provider, cheap_provider, llm_client
+            settings,
+            bot,
+            dp,
+            sessionmaker,
+            engine,
+            provider,
+            cheap_provider,
+            llm_client,
+            clock,
         )
         web.run_app(app, host="0.0.0.0", port=settings.PORT)
     else:
         asyncio.run(
             _run_polling_mode(
-                settings, bot, dp, sessionmaker, engine, cheap_provider, llm_client
+                settings, bot, dp, sessionmaker, engine, cheap_provider, llm_client, clock
             )
         )
 

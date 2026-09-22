@@ -26,6 +26,7 @@ from app.db.models import (
     Job,
     Journal,
     Memory,
+    Outbound,
     Message,
     PendingMemory,
     PersonaVersion,
@@ -120,6 +121,17 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 StateChange(field="intensity", old_value="3", new_value="5", source="command"),
                 SpendLedger(local_date=today, category="chat", usd_cost=decimal.Decimal("0.01")),
                 Job(kind="extract", payload={}, dedup_key="extract:1"),
+                # 3a: a proactive message is a record of what the bot
+                # said to this user, so "delete all my data" has to take
+                # it too (phase-3 plan section 4).
+                Outbound(
+                    kind="morning",
+                    local_date=today,
+                    bucket=0,
+                    planned_for=now,
+                    status="sent",
+                    sent_at=now,
+                ),
             ]
         )
         await session.commit()
@@ -138,13 +150,13 @@ async def _counts(sessionmaker) -> dict[str, int]:
 # --- the wipe ---
 
 
-async def test_delete_wipes_every_purged_table(sessionmaker):
+async def test_delete_wipes_every_purged_table(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     before = await _counts(sessionmaker)
     assert all(before[name] > 0 for name in purge.PURGED_TABLES), "fixture must seed everything"
 
     async with sessionmaker() as session:
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
 
     after = await _counts(sessionmaker)
     for name in purge.PURGED_TABLES:
@@ -155,32 +167,32 @@ async def test_delete_wipes_every_purged_table(sessionmaker):
             assert after[name] == 0, f"{name} survived the wipe"
 
 
-async def test_pending_memory_is_wiped_though_the_plan_omits_it(sessionmaker):
+async def test_pending_memory_is_wiped_though_the_plan_omits_it(sessionmaker, clock):
     """It holds text typed at /remember and never classified. Leaving it
     behind after "delete all my data" is the bug rule 7 names."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
         rows = (await session.execute(select(PendingMemory))).scalars().all()
     assert rows == []
 
 
-async def test_persona_version_survives(sessionmaker):
+async def test_persona_version_survives(sessionmaker, clock):
     """Plan section 11: "Keep persona_version". It is a hash of a file in
     the repo, not user data."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
         rows = (await session.execute(select(PersonaVersion))).scalars().all()
     assert len(rows) == 1
 
 
-async def test_user_state_is_reset_but_keeps_chat_id(sessionmaker):
+async def test_user_state_is_reset_but_keeps_chat_id(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     settings = Settings(TZ_DEFAULT=TIMEZONE)
 
     async with sessionmaker() as session:
-        await purge.delete_everything(session, settings)
+        await purge.delete_everything(session, settings, clock)
 
     async with sessionmaker() as session:
         state = await session.get(UserState, 1)
@@ -196,14 +208,14 @@ async def test_user_state_is_reset_but_keeps_chat_id(sessionmaker):
     assert state.awaiting is None and state.awaiting_ref is None
 
 
-async def test_ids_restart_so_the_first_new_row_is_one(sessionmaker):
+async def test_ids_restart_so_the_first_new_row_is_one(sessionmaker, clock):
     """After "delete everything", /memories showing #47 would be a lie."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
         for i in range(5):
             session.add(Memory(kind="event", text=f"факт номер {i}", source="user"))
         await session.commit()
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
 
     async with sessionmaker() as session:
         row = Memory(kind="identity", text="первый новый факт", source="user")
@@ -213,10 +225,10 @@ async def test_ids_restart_so_the_first_new_row_is_one(sessionmaker):
     assert row.id == 1
 
 
-async def test_the_audit_row_records_the_fact_and_no_content(sessionmaker):
+async def test_the_audit_row_records_the_fact_and_no_content(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
         rows = (await session.execute(select(StateChange))).scalars().all()
 
     assert len(rows) == 1
@@ -228,14 +240,14 @@ async def test_the_audit_row_records_the_fact_and_no_content(sessionmaker):
         assert value is None or "факт" not in value
 
 
-async def test_the_bot_still_works_after_a_wipe(sessionmaker):
+async def test_the_bot_still_works_after_a_wipe(sessionmaker, clock):
     """get_state raises on a missing row, so a delete that dropped
     user_state would crash every later message."""
     from app.core.state import get_state
 
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        await purge.delete_everything(session, Settings())
+        await purge.delete_everything(session, Settings(), clock)
     async with sessionmaker() as session:
         state = await get_state(session)
     assert state.chat_id == CHAT_ID
@@ -380,9 +392,9 @@ async def test_every_table_is_either_purged_or_deliberately_kept():
     )
 
 
-async def test_every_user_state_column_is_preserved_or_reset():
+async def test_every_user_state_column_is_preserved_or_reset(clock):
     """A column added later must not silently keep its value through a
     wipe."""
     columns = {c.name for c in UserState.__table__.columns}
-    handled = set(purge.PRESERVED_STATE_COLUMNS) | set(purge.reset_values(Settings()))
+    handled = set(purge.PRESERVED_STATE_COLUMNS) | set(purge.reset_values(Settings(), clock))
     assert columns == handled, f"unhandled user_state columns: {columns ^ handled}"

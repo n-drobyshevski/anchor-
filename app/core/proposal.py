@@ -19,12 +19,12 @@ answerable is worse than no buttons at all.
 
 from __future__ import annotations
 
-import datetime
 import logging
 
 from sqlalchemy import select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import Clock
 from app.core import memory
 from app.core.state import update_state
 from app.db.models import Proposal
@@ -78,7 +78,7 @@ async def get_pending(session: AsyncSession) -> Proposal | None:
 
 
 async def create(
-    session: AsyncSession, *, field: str, value: str, reason: str | None
+    session: AsyncSession, clock: Clock, *, field: str, value: str, reason: str | None
 ) -> tuple[Proposal, Proposal | None]:
     """Insert a pending proposal, expiring any outstanding one.
 
@@ -92,7 +92,7 @@ async def create(
     expired = await get_pending(session)
     if expired is not None:
         expired.status = EXPIRED
-        expired.decided_at = datetime.datetime.now(datetime.timezone.utc)
+        expired.decided_at = clock.now_utc()
 
     proposal = Proposal(field=field, value=value, reason=reason)
     session.add(proposal)
@@ -112,7 +112,7 @@ async def set_message_id(session: AsyncSession, proposal_id: int, message_id: in
     await session.commit()
 
 
-async def accept(session: AsyncSession, proposal_id: int) -> Proposal | None:
+async def accept(session: AsyncSession, clock: Clock, proposal_id: int) -> Proposal | None:
     """Apply a pending proposal. Returns None if it is not pending.
 
     Returning None on a non-pending row is what makes the accept button
@@ -127,7 +127,7 @@ async def accept(session: AsyncSession, proposal_id: int) -> Proposal | None:
     if proposal is None or proposal.status != PENDING:
         return None
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = clock.now_utc()
 
     if proposal.field == DUE_ACTION:
         await update_state(session, "due_action", proposal.value, "button")
@@ -152,13 +152,13 @@ async def accept(session: AsyncSession, proposal_id: int) -> Proposal | None:
     return proposal
 
 
-async def reject(session: AsyncSession, proposal_id: int) -> Proposal | None:
+async def reject(session: AsyncSession, clock: Clock, proposal_id: int) -> Proposal | None:
     """Mark a pending proposal rejected. Returns None if it is not pending."""
     proposal = await session.get(Proposal, proposal_id)
     if proposal is None or proposal.status != PENDING:
         return None
     proposal.status = REJECTED
-    proposal.decided_at = datetime.datetime.now(datetime.timezone.utc)
+    proposal.decided_at = clock.now_utc()
     await session.commit()
     await session.refresh(proposal)
     logger.info("proposal rejected", extra={"proposal_id": proposal_id, "field": proposal.field})

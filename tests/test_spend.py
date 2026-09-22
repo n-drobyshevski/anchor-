@@ -15,7 +15,9 @@ import datetime
 import decimal
 
 from app.config import Settings
-from app.core.spend import check_cap, compute_cost, local_date_for, today_usd
+from app.core.clock import SystemClock
+from app.core.clock import local_date as clock_local_date
+from app.core.spend import check_cap, compute_cost, today_usd
 from app.db.models import SpendLedger
 from app.llm.provider import LLMUsage
 
@@ -122,7 +124,7 @@ def test_compute_cost_web_search_fee_defaults_to_a_no_op():
     assert compute_cost(unsearched, settings) == compute_cost(searched, settings)
 
 
-async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker):
+async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker, clock):
     """The fee lands in spend_ledger.usd_cost like any other cost, so
     check_cap sees it through today_usd -- exercised end to end against
     the real ledger table rather than just compute_cost in isolation."""
@@ -133,20 +135,20 @@ async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker):
     cost = compute_cost(usage, settings)
     assert cost == decimal.Decimal("0.012000")
 
-    today = local_date_for("Europe/Paris")
+    today = clock_local_date(SystemClock(), "Europe/Paris")
     async with sessionmaker() as session:
         session.add(SpendLedger(local_date=today, category="chat", usd_cost=cost))
         await session.commit()
 
     async with sessionmaker() as session:
-        assert await check_cap(session, settings, "Europe/Paris") is True
+        assert await check_cap(session, settings, clock, "Europe/Paris") is True
 
 
 def test_local_date_for_paris_matches_current_zoneinfo_date():
     from zoneinfo import ZoneInfo
 
     expected = datetime.datetime.now(ZoneInfo("Europe/Paris")).date()
-    assert local_date_for("Europe/Paris") == expected
+    assert clock_local_date(SystemClock(), "Europe/Paris") == expected
 
 
 def test_local_date_for_across_midnight_utc_offset():
@@ -159,7 +161,7 @@ def test_local_date_for_across_midnight_utc_offset():
         # Just confirm it always agrees with a fresh zoneinfo computation,
         # i.e. it is not silently using datetime.date.today() (server/UTC).
         expected = datetime.datetime.now(ZoneInfo(tz)).date()
-        assert local_date_for(tz) == expected
+        assert clock_local_date(SystemClock(), tz) == expected
 
 
 def test_local_date_for_handles_the_paris_dst_fold_last_sunday_of_october():
@@ -181,38 +183,38 @@ def test_local_date_for_handles_the_paris_dst_fold_last_sunday_of_october():
     assert after_fold.astimezone(paris).date() == fold_date
 
 
-async def test_check_cap_true_when_today_spend_meets_or_exceeds_cap(sessionmaker):
+async def test_check_cap_true_when_today_spend_meets_or_exceeds_cap(sessionmaker, clock):
     settings = Settings(DAILY_USD_CAP=1.00, TZ_DEFAULT="Europe/Paris")
-    today = local_date_for("Europe/Paris")
+    today = clock_local_date(SystemClock(), "Europe/Paris")
 
     async with sessionmaker() as session:
         session.add(SpendLedger(local_date=today, category="chat", usd_cost=decimal.Decimal("1.000000")))
         await session.commit()
 
     async with sessionmaker() as session:
-        assert await check_cap(session, settings, "Europe/Paris") is True
+        assert await check_cap(session, settings, clock, "Europe/Paris") is True
 
 
-async def test_check_cap_false_when_under_cap(sessionmaker):
+async def test_check_cap_false_when_under_cap(sessionmaker, clock):
     settings = Settings(DAILY_USD_CAP=1.00, TZ_DEFAULT="Europe/Paris")
-    today = local_date_for("Europe/Paris")
+    today = clock_local_date(SystemClock(), "Europe/Paris")
 
     async with sessionmaker() as session:
         session.add(SpendLedger(local_date=today, category="chat", usd_cost=decimal.Decimal("0.500000")))
         await session.commit()
 
     async with sessionmaker() as session:
-        assert await check_cap(session, settings, "Europe/Paris") is False
+        assert await check_cap(session, settings, clock, "Europe/Paris") is False
 
 
-async def test_check_cap_false_with_no_spend_rows(sessionmaker):
+async def test_check_cap_false_with_no_spend_rows(sessionmaker, clock):
     settings = Settings(DAILY_USD_CAP=1.00)
     async with sessionmaker() as session:
-        assert await check_cap(session, settings, "Europe/Paris") is False
+        assert await check_cap(session, settings, clock, "Europe/Paris") is False
 
 
-async def test_today_usd_ignores_other_dates(sessionmaker):
-    today = local_date_for("Europe/Paris")
+async def test_today_usd_ignores_other_dates(sessionmaker, clock):
+    today = clock_local_date(SystemClock(), "Europe/Paris")
     yesterday = today - datetime.timedelta(days=1)
 
     async with sessionmaker() as session:
@@ -221,7 +223,7 @@ async def test_today_usd_ignores_other_dates(sessionmaker):
         await session.commit()
 
     async with sessionmaker() as session:
-        assert await today_usd(session, "Europe/Paris") == decimal.Decimal("0.25")
+        assert await today_usd(session, clock, "Europe/Paris") == decimal.Decimal("0.25")
 
 
 # --- 2a: model-aware pricing (phase-2 plan section 2) ---

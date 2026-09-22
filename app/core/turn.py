@@ -104,11 +104,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core import pause
-from app.core.outbound import cancel_outbound
+from app.core import clock as clock_module
+from app.core.clock import Clock
+from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
-from app.core.spend import check_cap, compute_cost, local_date_for
+from app.core.spend import check_cap, compute_cost
 from app.core.state import Source, get_state, update_state
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
@@ -220,9 +222,9 @@ async def _get_assistant_row(session: AsyncSession, update_id: int) -> Message |
     return result.scalar_one_or_none()
 
 
-async def _mark_sent(session: AsyncSession, message_id: int) -> None:
+async def _mark_sent(session: AsyncSession, clock: Clock, message_id: int) -> None:
     message = await session.get(Message, message_id)
-    message.sent_at = datetime.datetime.now(datetime.timezone.utc)
+    message.sent_at = clock.now_utc()
     await session.commit()
 
 
@@ -335,6 +337,7 @@ async def _send_canned_reply(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     text: str,
@@ -370,7 +373,7 @@ async def _send_canned_reply(
         await send_reply(bot, chat_id, content)
         async with sessionmaker() as session:
             row = await _get_assistant_row(session, update_id)
-            await _mark_sent(session, row.id)
+            await _mark_sent(session, clock, row.id)
 
 
 async def _ledger_only(
@@ -444,6 +447,7 @@ async def run_welfare_turn(
     settings: Settings,
     provider: LLMProvider,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     user_text: str,
@@ -464,11 +468,16 @@ async def run_welfare_turn(
             session,
             response=discarded,
             settings=settings,
-            local_date=local_date_for(timezone),
+            local_date=clock_module.local_date(clock, timezone),
             category=CHAT_CATEGORY,
         )
         await update_state(session, "persona_active", False, "welfare")
         await _retag_as_welfare(session, update_id)
+        # 3a (phase-3 plan section 4): the cooldown starts here, and is
+        # read by the gate to hold back the two discretionary kinds
+        # (silence, tick) for WELFARE_COOLDOWN_H. Morning and evening
+        # are part of the agreed routine and resume with the persona.
+        await record_welfare(session, clock)
     await cancel_outbound()
 
     text, usage = await welfare.generate_reply(provider, user_text)
@@ -485,7 +494,9 @@ async def run_welfare_turn(
             tokens_in=usage.usage.input_tokens if usage is not None else None,
             tokens_cached=usage.usage.cached_tokens if usage is not None else None,
             tokens_out=usage.usage.output_tokens if usage is not None else None,
-            local_date=local_date_for(timezone) if usage is not None else None,
+            local_date=(
+                clock_module.local_date(clock, timezone) if usage is not None else None
+            ),
             category=welfare.WELFARE_CATEGORY,
             scene_id=scene_id,
             kind=WELFARE_KIND,
@@ -499,7 +510,7 @@ async def run_welfare_turn(
 
     await send_welfare_reply(bot, chat_id, text)
     async with sessionmaker() as session:
-        await _mark_sent(session, message_id)
+        await _mark_sent(session, clock, message_id)
     logger.info("welfare turn delivered", extra={"update_id": update_id})
 
 
@@ -523,6 +534,7 @@ async def send_command_reply(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     text: str,
@@ -540,6 +552,7 @@ async def send_command_reply(
     await _send_canned_reply(
         sessionmaker,
         bot,
+        clock=clock,
         chat_id=chat_id,
         update_id=update_id,
         text=text,
@@ -551,6 +564,7 @@ async def send_command_reply(
 async def mark_update_handled(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
+    clock: Clock,
     update_id: int,
     text: str,
     scene_id: int | None = None,
@@ -580,11 +594,11 @@ async def mark_update_handled(
         )
     if message_id is not None:
         async with sessionmaker() as session:
-            await _mark_sent(session, message_id)
+            await _mark_sent(session, clock, message_id)
 
 
 async def ensure_scene(
-    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
+    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings, clock: Clock
 ) -> int:
     """Resolve the scene this inbound message belongs to (plan section 5).
 
@@ -595,13 +609,16 @@ async def ensure_scene(
     arriving as a command rather than as chat.
     """
     async with sessionmaker() as session:
-        return await ensure_open_scene(session, idle_hours=settings.SCENE_IDLE_HOURS)
+        return await ensure_open_scene(
+            session, clock, idle_hours=settings.SCENE_IDLE_HOURS
+        )
 
 
 async def run_search_canned_reply(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     text: str,
@@ -616,6 +633,7 @@ async def run_search_canned_reply(
     await _send_canned_reply(
         sessionmaker,
         bot,
+        clock=clock,
         chat_id=chat_id,
         update_id=update_id,
         text=text,
@@ -628,6 +646,7 @@ async def run_hard_pause(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     source: Source = "pause",
@@ -656,6 +675,7 @@ async def run_hard_pause(
     await _send_canned_reply(
         sessionmaker,
         bot,
+        clock=clock,
         chat_id=chat_id,
         update_id=update_id,
         text=PAUSE_REPLY_TEXT,
@@ -668,6 +688,7 @@ async def run_resume(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     scene_id: int | None = None,
@@ -696,6 +717,7 @@ async def run_resume(
     await _send_canned_reply(
         sessionmaker,
         bot,
+        clock=clock,
         chat_id=chat_id,
         update_id=update_id,
         text=RESUME_REPLY_TEXT,
@@ -710,6 +732,7 @@ async def run(
     settings: Settings,
     provider: LLMProvider,
     *,
+    clock: Clock,
     chat_id: int,
     update_id: int,
     user_text: str,
@@ -742,7 +765,7 @@ async def run(
     # carries the same scene_id. Closing a stale scene here also queues
     # its summary (app/core/scene.py), which is why this runs on every
     # inbound message and not only on ones that reach the model.
-    scene_id = await ensure_scene(sessionmaker, settings)
+    scene_id = await ensure_scene(sessionmaker, settings, clock)
 
     # Step 0c (2d): the check-in note step. Deliberately here and
     # nowhere else -- see the module docstring.
@@ -757,10 +780,12 @@ async def run(
             await checkin.clear_awaiting(session)
     elif level is None and user_state.awaiting == checkin.AWAITING_NOTE:
         async with sessionmaker() as session:
-            pending = await checkin.pending_note_checkin(session, user_state.timezone)
+            pending = await checkin.pending_note_checkin(
+                session, clock, user_state.timezone
+            )
             if pending is not None:
                 await checkin.set_note(session, pending.id, user_text)
-                row, streak = await checkin.finish(session, user_state.timezone)
+                row, streak = await checkin.finish(session, clock, user_state.timezone)
                 # From here on this turn is the check-in's turn: the
                 # raw note never becomes a message of its own.
                 user_text = checkin.synthetic_line(row)
@@ -792,13 +817,18 @@ async def run(
         if existing.sent_at is None:
             await send_reply(bot, chat_id, existing.content)
             async with sessionmaker() as session:
-                await _mark_sent(session, existing.id)
+                await _mark_sent(session, clock, existing.id)
         return
 
     # Step 3: HARD pause word -- persona off, no LLM call, ever.
     if level == "hard":
         await run_hard_pause(
-            sessionmaker, bot, chat_id=chat_id, update_id=update_id, scene_id=scene_id
+            sessionmaker,
+            bot,
+            clock=clock,
+            chat_id=chat_id,
+            update_id=update_id,
+            scene_id=scene_id,
         )
         return
 
@@ -813,11 +843,12 @@ async def run(
 
     # Step 5: spend cap check, before any LLM call. Unchanged from 1c.
     async with sessionmaker() as session:
-        over_cap = await check_cap(session, settings, user_state.timezone)
+        over_cap = await check_cap(session, settings, clock, user_state.timezone)
     if over_cap:
         await _send_canned_reply(
             sessionmaker,
             bot,
+            clock=clock,
             chat_id=chat_id,
             update_id=update_id,
             text=CAP_REPLY_TEXT,
@@ -847,6 +878,7 @@ async def run(
                 injected_memory_ids = [row.id for row in pinned_rows + retrieved_rows]
                 messages = await build_messages(
                     session,
+                    clock=clock,
                     timezone=user_state.timezone,
                     intensity=user_state.intensity,
                     user_text=user_text,
@@ -902,7 +934,7 @@ async def run(
                 session,
                 response=welfare_usage,
                 settings=settings,
-                local_date=local_date_for(user_state.timezone),
+                local_date=clock_module.local_date(clock, user_state.timezone),
                 category=welfare.WELFARE_CATEGORY,
             )
 
@@ -912,6 +944,7 @@ async def run(
             bot,
             settings,
             cheap_provider,
+            clock=clock,
             chat_id=chat_id,
             update_id=update_id,
             user_text=user_text,
@@ -953,7 +986,7 @@ async def run(
             tokens_in=response.usage.input_tokens,
             tokens_cached=response.usage.cached_tokens,
             tokens_out=response.usage.output_tokens,
-            local_date=local_date_for(user_state.timezone),
+            local_date=clock_module.local_date(clock, user_state.timezone),
             category=category,
             scene_id=scene_id,
             kind=kind,
@@ -967,8 +1000,8 @@ async def run(
     await send_reply(bot, chat_id, response.text)
     async with sessionmaker() as session:
         row = await _get_assistant_row(session, update_id)
-        await memory.mark_used(session, injected_memory_ids)
-        await _mark_sent(session, row.id)
+        await memory.mark_used(session, clock, injected_memory_ids)
+        await _mark_sent(session, clock, row.id)
 
     # Step 8 (2c): hand the delivered exchange to the extractor.
     # Only in-character turns get here -- see the module docstring.

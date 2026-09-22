@@ -22,7 +22,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.spend import local_date_for
+from app.core import clock as clock_module
+from app.core.clock import Clock
 from app.db.models import (
     Checkin,
     Journal,
@@ -81,14 +82,14 @@ def _row_to_dict(row) -> dict:
     }
 
 
-async def build_export(session: AsyncSession) -> dict:
+async def build_export(session: AsyncSession, clock: Clock) -> dict:
     """Every row of the nine exported tables, keyed by table name."""
     tables: dict[str, list[dict]] = {}
     for model in EXPORTED_MODELS:
         result = await session.execute(select(model).order_by(*model.__table__.primary_key))
         tables[model.__tablename__] = [_row_to_dict(row) for row in result.scalars().all()]
     return {
-        "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "exported_at": clock.now_utc().isoformat(),
         "tables": tables,
     }
 
@@ -103,9 +104,11 @@ def to_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2, default=encode).encode("utf-8")
 
 
-def export_filename(timezone: str) -> str:
+def export_filename(clock: Clock, timezone: str) -> str:
     """`anchor-export-YYYYMMDD.json` on the user's local date (plan section 11)."""
-    return FILENAME_TEMPLATE.format(date=local_date_for(timezone).strftime("%Y%m%d"))
+    return FILENAME_TEMPLATE.format(
+        date=clock_module.local_date(clock, timezone).strftime("%Y%m%d")
+    )
 
 
 def row_counts(payload: dict) -> dict[str, int]:

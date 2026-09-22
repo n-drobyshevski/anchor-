@@ -46,7 +46,6 @@ pool) is shared across every turn.
 
 from __future__ import annotations
 
-import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -56,6 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core import turn
+from app.core import clock as clock_module
+from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import memory as memory_core
 from app.core import proposal as proposal_core
@@ -106,7 +107,9 @@ async def register_commands(bot) -> None:
     await bot.set_my_commands(BOT_COMMANDS)
 
 
-def _format_state(user_state, spend, settings: Settings, *, by_category=None, memories=0) -> str:
+def _format_state(
+    user_state, spend, settings: Settings, clock: Clock, *, by_category=None, memories=0
+) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
     Spend is broken down by ledger category so a day where the
@@ -114,20 +117,22 @@ def _format_state(user_state, spend, settings: Settings, *, by_category=None, me
     glance rather than hidden inside one total.
     """
     tz = ZoneInfo(user_state.timezone)
-    now_local = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+    now = clock_module.now_local(clock, user_state.timezone)
+    today = now.date()
+    now_local = now.strftime("%Y-%m-%d %H:%M")
 
     if user_state.last_checkin_at is None:
         last_checkin = "давно"
     else:
         local = user_state.last_checkin_at.astimezone(tz)
-        days = (datetime.datetime.now(tz).date() - local.date()).days
+        days = (today - local.date()).days
         when = "сегодня" if days <= 0 else "вчера" if days == 1 else f"{days} дн. назад"
         last_checkin = f"{when} {local.strftime('%H:%M')}"
 
     if user_state.due_action:
         due = f"«{user_state.due_action}»"
         if user_state.due_set_at:
-            days = (datetime.datetime.now(tz).date() - user_state.due_set_at.astimezone(tz).date()).days
+            days = (today - user_state.due_set_at.astimezone(tz).date()).days
             due += " (задано сегодня)" if days <= 0 else f" (задано {days} дн. назад)"
     else:
         due = "нет"
@@ -167,6 +172,7 @@ def build_router(
     settings: Settings,
     provider: LLMProvider,
     cheap_provider: LLMProvider | None = None,
+    clock: Clock | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
 
@@ -181,6 +187,12 @@ def build_router(
     it, and tests/test_welfare.py asserts that this function threads it
     into every turn.run() call, so production cannot quietly lose it.
     """
+    # 3a: one clock for every handler in this router. Defaulted
+    # rather than required, matching cheap_provider above -- the
+    # tests predating Phase 3 keep their shorter call, and
+    # app/main.py always passes the real one.
+    clock = clock or SystemClock()
+
     router = Router(name="anchor")
 
     @router.message(Command("start"))
@@ -191,12 +203,19 @@ def build_router(
     async def state(message: Message) -> None:
         async with sessionmaker() as session:
             user_state = await get_state(session)
-            spend = await today_usd(session, user_state.timezone)
-            by_category = await today_by_category(session, user_state.timezone)
+            spend = await today_usd(session, clock, user_state.timezone)
+            by_category = await today_by_category(
+                session, clock, user_state.timezone
+            )
             memories = await memory_core.count_active(session)
         await message.answer(
             _format_state(
-                user_state, spend, settings, by_category=by_category, memories=memories
+                user_state,
+                spend,
+                settings,
+                clock,
+                by_category=by_category,
+                memories=memories,
             )
         )
 
@@ -211,10 +230,11 @@ def build_router(
         # (phase-2 plan section 5), so arriving as /out after six hours
         # of silence must close the stale scene exactly as a chat
         # message would.
-        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await turn.run_hard_pause(
             sessionmaker,
             message.bot,
+            clock=clock,
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             source="command",
@@ -223,10 +243,11 @@ def build_router(
 
     @router.message(Command("in"))
     async def resume(message: Message, event_update: Update) -> None:
-        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await turn.run_resume(
             sessionmaker,
             message.bot,
+            clock=clock,
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             scene_id=scene_id,
@@ -245,10 +266,11 @@ def build_router(
             await turn.run_search_canned_reply(
                 sessionmaker,
                 message.bot,
+                clock=clock,
                 chat_id=message.chat.id,
                 update_id=event_update.update_id,
                 text=turn.SEARCH_DISABLED_REPLY_TEXT,
-                scene_id=await turn.ensure_scene(sessionmaker, settings),
+                scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
             )
             return
 
@@ -257,10 +279,11 @@ def build_router(
             await turn.run_search_canned_reply(
                 sessionmaker,
                 message.bot,
+                clock=clock,
                 chat_id=message.chat.id,
                 update_id=event_update.update_id,
                 text=turn.SEARCH_EMPTY_REPLY_TEXT,
-                scene_id=await turn.ensure_scene(sessionmaker, settings),
+                scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
             )
             return
 
@@ -269,6 +292,7 @@ def build_router(
             message.bot,
             settings,
             provider,
+            clock=clock,
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             user_text=query,
@@ -314,7 +338,7 @@ def build_router(
                 return
             proposal_id = pending.id
             pending.status = proposal_core.EXPIRED
-            pending.decided_at = datetime.datetime.now(datetime.timezone.utc)
+            pending.decided_at = clock.now_utc()
             await session.commit()
         await proposals_ui.retire_buttons(
             sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=proposal_id
@@ -326,12 +350,16 @@ def build_router(
             return
         async with sessionmaker() as session:
             user_state = await get_state(session)
-        await turn.ensure_scene(sessionmaker, settings)
+        await turn.ensure_scene(sessionmaker, settings, clock)
         await checkin_ui.start(
-            sessionmaker, message.bot, chat_id=message.chat.id, timezone=user_state.timezone
+            sessionmaker,
+            message.bot,
+            clock,
+            chat_id=message.chat.id,
+            timezone=user_state.timezone,
         )
         await turn.mark_update_handled(
-            sessionmaker, update_id=event_update.update_id, text="[/checkin]"
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/checkin]"
         )
 
     @router.message(Command("due"))
@@ -341,7 +369,7 @@ def build_router(
             if text:
                 await update_state(session, "due_action", text, "command")
                 await update_state(
-                    session, "due_set_at", datetime.datetime.now(datetime.timezone.utc), "command"
+                    session, "due_set_at", clock.now_utc(), "command"
                 )
             else:
                 await update_state(session, "due_action", None, "command")
@@ -367,7 +395,7 @@ def build_router(
             await update_state(
                 session,
                 "focus_since",
-                datetime.datetime.now(datetime.timezone.utc) if enabled else None,
+                clock.now_utc() if enabled else None,
                 "command",
             )
         await _expire_proposal_for(message, proposal_core.FOCUS_ON)
@@ -383,28 +411,32 @@ def build_router(
             return
         async with sessionmaker() as session:
             user_state = await get_state(session)
-        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await data_ui.run_export(
-            sessionmaker, message.bot, chat_id=message.chat.id, timezone=user_state.timezone
+            sessionmaker,
+            message.bot,
+            clock,
+            chat_id=message.chat.id,
+            timezone=user_state.timezone,
         )
         # mark_update_handled, not _reply_once: send_command_reply is
         # text-only end to end and would re-send stored *text* on a
         # replay, which is meaningless for a document. Same shape
         # /checkin uses.
         await turn.mark_update_handled(
-            sessionmaker, update_id=event_update.update_id, text="[/export]", scene_id=scene_id
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/export]", scene_id=scene_id
         )
 
     @router.message(Command("delete"))
     async def delete_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
             return
-        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
             message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
         )
         await turn.mark_update_handled(
-            sessionmaker, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
         )
 
     # --- 2b: memory (plan section 11) ---
@@ -423,10 +455,11 @@ def build_router(
         await turn.send_command_reply(
             sessionmaker,
             message.bot,
+            clock=clock,
             chat_id=message.chat.id,
             update_id=update_id,
             text=text,
-            scene_id=await turn.ensure_scene(sessionmaker, settings),
+            scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
         )
 
     @router.message(Command("remember"))
@@ -446,12 +479,12 @@ def build_router(
         # directly and gated on _once rather than on a stored row.
         if not await _once(event_update.update_id):
             return
-        await turn.ensure_scene(sessionmaker, settings)
+        await turn.ensure_scene(sessionmaker, settings, clock)
         await memory_ui.run_remember(
             sessionmaker, message.bot, chat_id=message.chat.id, text=text
         )
         await turn.mark_update_handled(
-            sessionmaker, update_id=event_update.update_id, text=memory_ui.REMEMBER_PROMPT.format(text=text)
+            sessionmaker, clock=clock, update_id=event_update.update_id, text=memory_ui.REMEMBER_PROMPT.format(text=text)
         )
 
     @router.message(Command("memories"))
@@ -460,7 +493,7 @@ def build_router(
             return
         await memory_ui.run_memories(sessionmaker, message.bot, chat_id=message.chat.id)
         await turn.mark_update_handled(
-            sessionmaker, update_id=event_update.update_id, text="[/memories]"
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/memories]"
         )
 
     @router.message(Command("forget"))
@@ -509,6 +542,7 @@ def build_router(
             message.bot,
             settings,
             provider,
+            clock=clock,
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             user_text=message.text,
@@ -546,6 +580,7 @@ def build_router(
             settings,
             provider,
             cheap_provider,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
@@ -565,6 +600,7 @@ def build_router(
             sessionmaker,
             callback.bot,
             settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
@@ -578,6 +614,7 @@ def build_router(
             sessionmaker,
             callback.bot,
             settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
@@ -592,6 +629,7 @@ def build_router(
         await proposals_ui.handle_decision_callback(
             sessionmaker,
             callback.bot,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

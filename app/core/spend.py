@@ -5,38 +5,37 @@ computation (compute_cost) and the cap check (check_cap) that
 core/turn.py calls before every LLM call, per the user's decision to
 ship the daily cap in 1c rather than 1d (plan section 0: the wallet
 guard must exist the moment the API key goes live).
+
+3a moves "today" onto the injected clock (phase-3 plan section 3).
+`local_date_for(timezone)` is gone; every caller now passes a Clock and
+goes through `app.core.clock.local_date`, so there is one definition of
+the local calendar day for the whole application and a frozen clock can
+drive the budget across a simulated midnight. The DST property it
+carried -- that the cap rolls over on the user's calendar day, not
+UTC's -- is unchanged and still tested here and in tests/test_clock.py.
 """
 
 from __future__ import annotations
 
-import datetime
 import decimal
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core import clock as clock_module
+from app.core.clock import Clock
 from app.db.models import SpendLedger
 from app.llm.provider import LLMUsage
 
 _CENTS_EXPONENT = decimal.Decimal("0.000001")  # Numeric(10, 6): quantize to 6dp
 
 
-def local_date_for(timezone: str) -> datetime.date:
-    """Today's date in `timezone` (an IANA name).
-
-    Factored out of today_usd so the ledger row (core/turn.py) and the
-    cap check compute "today" identically -- both must agree on which
-    calendar day a call belongs to, including across the Europe/Paris
-    DST fold.
-    """
-    return datetime.datetime.now(ZoneInfo(timezone)).date()
-
-
-async def today_usd(session: AsyncSession, timezone: str) -> decimal.Decimal:
+async def today_usd(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> decimal.Decimal:
     """Sum usd_cost in spend_ledger for "today" in `timezone` (an IANA name)."""
-    local_today = local_date_for(timezone)
+    local_today = clock_module.local_date(clock, timezone)
     result = await session.execute(
         select(func.coalesce(func.sum(SpendLedger.usd_cost), 0)).where(
             SpendLedger.local_date == local_today
@@ -46,7 +45,7 @@ async def today_usd(session: AsyncSession, timezone: str) -> decimal.Decimal:
 
 
 async def today_by_category(
-    session: AsyncSession, timezone: str
+    session: AsyncSession, clock: Clock, timezone: str
 ) -> dict[str, decimal.Decimal]:
     """Today's spend per ledger category, largest first (plan section 11).
 
@@ -56,7 +55,7 @@ async def today_by_category(
     first appears rather than the day someone remembers to add it to a
     list.
     """
-    local_today = local_date_for(timezone)
+    local_today = clock_module.local_date(clock, timezone)
     result = await session.execute(
         select(SpendLedger.category, func.sum(SpendLedger.usd_cost))
         .where(SpendLedger.local_date == local_today)
@@ -66,7 +65,9 @@ async def today_by_category(
     return {category: decimal.Decimal(total) for category, total in result.all()}
 
 
-async def check_cap(session: AsyncSession, settings: Settings, timezone: str) -> bool:
+async def check_cap(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
     """True iff today's spend has already reached DAILY_USD_CAP.
 
     Called *before* the LLM call (plan section 8 step 3): the check can
@@ -74,7 +75,7 @@ async def check_cap(session: AsyncSession, settings: Settings, timezone: str) ->
     explicitly accepts, in exchange for never blocking a call that is
     already in flight.
     """
-    spent = await today_usd(session, timezone)
+    spent = await today_usd(session, clock, timezone)
     return spent >= decimal.Decimal(str(settings.DAILY_USD_CAP))
 
 

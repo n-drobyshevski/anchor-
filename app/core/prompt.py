@@ -59,6 +59,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import clock as clock_module
+from app.core.clock import Clock
 from app.db.models import Message
 from app.llm.provider import LLMMessage
 
@@ -121,9 +123,13 @@ def _bullets(header: str, items: list[str]) -> list[str]:
     return [header, *(f"- {item}" for item in items)]
 
 
-def _ago(moment: datetime.datetime, *, tz: ZoneInfo) -> str:
-    """"сегодня" / "вчера" / "N дн. назад", for the now block."""
-    days = (datetime.datetime.now(tz).date() - moment.astimezone(tz).date()).days
+def _ago(moment: datetime.datetime, *, today: datetime.date, tz: ZoneInfo) -> str:
+    """"сегодня" / "вчера" / "N дн. назад", for the now block.
+
+    `today` is passed in rather than read, so the whole block is a
+    pure function of the clock the caller was given.
+    """
+    days = (today - moment.astimezone(tz).date()).days
     if days <= 0:
         return "сегодня"
     if days == 1:
@@ -133,6 +139,7 @@ def _ago(moment: datetime.datetime, *, tz: ZoneInfo) -> str:
 
 def build_now_block(
     *,
+    clock: Clock,
     timezone: str,
     intensity: int,
     flags: list[str] | None = None,
@@ -153,7 +160,7 @@ def build_now_block(
     2c filled in "Фокус" and "Главное действие"; 2d adds "Серия" and
     "Последний чек-ин", completing plan section 7's block.
     """
-    now_local = datetime.datetime.now(ZoneInfo(timezone))
+    now_local = clock_module.now_local(clock, timezone)
     weekday = _RU_WEEKDAYS[now_local.weekday()]
     lines = [
         "## Сейчас",
@@ -162,13 +169,16 @@ def build_now_block(
         f"· Серия: {streak} дн.",
     ]
     tz = ZoneInfo(timezone)
+    today = now_local.date()
     if last_checkin_at is not None:
         stamp = last_checkin_at.astimezone(tz).strftime("%H:%M")
-        lines.append(f"Последний чек-ин: {_ago(last_checkin_at, tz=tz)} {stamp}")
+        lines.append(
+            f"Последний чек-ин: {_ago(last_checkin_at, today=today, tz=tz)} {stamp}"
+        )
     else:
         lines.append("Последний чек-ин: давно")
     if due_action:
-        when = f" (задано {_ago(due_set_at, tz=tz)})" if due_set_at else ""
+        when = f" (задано {_ago(due_set_at, today=today, tz=tz)})" if due_set_at else ""
         lines.append(f"Главное действие: «{due_action}»{when}")
     else:
         lines.append("Главное действие: нет")
@@ -220,6 +230,7 @@ async def _load_transcript(
 async def build_messages(
     session: AsyncSession,
     *,
+    clock: Clock,
     timezone: str,
     intensity: int,
     user_text: str,
@@ -269,6 +280,7 @@ async def build_messages(
         LLMMessage(
             role="system",
             content=build_now_block(
+                clock=clock,
                 timezone=timezone,
                 intensity=intensity,
                 flags=flags,

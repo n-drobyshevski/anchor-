@@ -53,7 +53,7 @@ def test_load_persona_default_path_points_at_repo_persona_file():
     assert body == PERSONA_PATH.read_text(encoding="utf-8")
 
 
-async def test_persona_is_first_message_and_byte_identical_across_calls(sessionmaker, tmp_path):
+async def test_persona_is_first_message_and_byte_identical_across_calls(sessionmaker, tmp_path, clock):
     persona_path = tmp_path / "persona.md"
     persona_body = "# Anchor\n\nТы — Anchor. Голос: коротко.\n"
     persona_path.write_text(persona_body, encoding="utf-8")
@@ -61,6 +61,7 @@ async def test_persona_is_first_message_and_byte_identical_across_calls(sessionm
     async with sessionmaker() as session:
         first = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="привет",
@@ -70,6 +71,7 @@ async def test_persona_is_first_message_and_byte_identical_across_calls(sessionm
         )
         second = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="ещё раз",
@@ -83,7 +85,7 @@ async def test_persona_is_first_message_and_byte_identical_across_calls(sessionm
     assert second[0].content == first[0].content  # byte-identical across calls
 
 
-async def test_ooc_messages_excluded_from_transcript(sessionmaker, tmp_path):
+async def test_ooc_messages_excluded_from_transcript(sessionmaker, tmp_path, clock):
     persona_path = tmp_path / "persona.md"
     persona_path.write_text("# Anchor\n", encoding="utf-8")
 
@@ -94,6 +96,7 @@ async def test_ooc_messages_excluded_from_transcript(sessionmaker, tmp_path):
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -108,7 +111,7 @@ async def test_ooc_messages_excluded_from_transcript(sessionmaker, tmp_path):
     assert "тоже ooc" not in contents
 
 
-async def test_current_update_excluded_from_transcript_no_double_user_message(sessionmaker, tmp_path):
+async def test_current_update_excluded_from_transcript_no_double_user_message(sessionmaker, tmp_path, clock):
     """Regression for the double-user-message bug: core/turn.py stores
     the user's row for this update_id *before* calling build_messages,
     so the transcript query must exclude that row -- otherwise the
@@ -124,6 +127,7 @@ async def test_current_update_excluded_from_transcript_no_double_user_message(se
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="текущее сообщение",
@@ -138,7 +142,7 @@ async def test_current_update_excluded_from_transcript_no_double_user_message(se
     assert messages[-1].role == "user"
 
 
-async def test_current_update_excluded_even_when_other_rows_have_null_update_id(sessionmaker, tmp_path):
+async def test_current_update_excluded_even_when_other_rows_have_null_update_id(sessionmaker, tmp_path, clock):
     """update_id.is_distinct_from(update_id), not !=: plain != would
     also (incorrectly) exclude historical rows whose update_id is NULL,
     since NULL != x is NULL/unknown in SQL, not true."""
@@ -152,6 +156,7 @@ async def test_current_update_excluded_even_when_other_rows_have_null_update_id(
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое",
@@ -164,13 +169,14 @@ async def test_current_update_excluded_even_when_other_rows_have_null_update_id(
     assert "без update_id" in contents
 
 
-async def test_now_block_is_second_to_last_before_user_text(sessionmaker, tmp_path):
+async def test_now_block_is_second_to_last_before_user_text(sessionmaker, tmp_path, clock):
     persona_path = tmp_path / "persona.md"
     persona_path.write_text("# Anchor\n", encoding="utf-8")
 
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=4,
             user_text="финальный текст",
@@ -188,7 +194,7 @@ async def test_now_block_is_second_to_last_before_user_text(sessionmaker, tmp_pa
     assert "Интенсивность: 4/5" in now_block.content
 
 
-async def test_transcript_is_oldest_first_and_capped_at_transcript_turns(sessionmaker, tmp_path):
+async def test_transcript_is_oldest_first_and_capped_at_transcript_turns(sessionmaker, tmp_path, clock):
     persona_path = tmp_path / "persona.md"
     persona_path.write_text("# Anchor\n", encoding="utf-8")
 
@@ -198,6 +204,7 @@ async def test_transcript_is_oldest_first_and_capped_at_transcript_turns(session
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -210,8 +217,9 @@ async def test_transcript_is_oldest_first_and_capped_at_transcript_turns(session
     assert [m.content for m in transcript] == ["сообщение 2", "сообщение 3", "сообщение 4"]
 
 
-def test_build_now_block_includes_flags():
+def test_build_now_block_includes_flags(clock):
     block = build_now_block(
+        clock=clock,
         timezone="Europe/Paris",
         intensity=2,
         flags=["Пользователь сказал «жёлтый»: снизь интенсивность прямо сейчас."],
@@ -220,10 +228,10 @@ def test_build_now_block_includes_flags():
     assert "жёлтый" in block
 
 
-def test_build_now_block_weekday_does_not_rely_on_locale():
+def test_build_now_block_weekday_does_not_rely_on_locale(clock):
     """A hardcoded Russian weekday name, independent of strftime("%A")
     and any ru_RU locale being installed."""
-    block = build_now_block(timezone="Europe/Paris", intensity=3)
+    block = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3)
     weekday_names = (
         "понедельник",
         "вторник",

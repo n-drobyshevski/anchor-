@@ -107,47 +107,48 @@ async def _state(sessionmaker) -> UserState:
 
 
 def _today() -> datetime.date:
-    from app.core.spend import local_date_for
+    from app.core.clock import SystemClock
+    from app.core.clock import local_date as clock_local_date
 
-    return local_date_for(TIMEZONE)
+    return clock_local_date(SystemClock(), TIMEZONE)
 
 
-async def _complete_checkin(sessionmaker, *, rating=4):
+async def _complete_checkin(sessionmaker, clock, *, rating=4):
     async with sessionmaker() as session:
-        row = await checkin.start(session, TIMEZONE)
+        row = await checkin.start(session, clock, TIMEZONE)
         await checkin.set_rating(session, row.id, rating)
         await checkin.set_due_result(session, row.id, checkin.NONE)
-        return await checkin.finish(session, TIMEZONE)
+        return await checkin.finish(session, clock, TIMEZONE)
 
 
-async def test_first_checkin_starts_the_streak_at_one(sessionmaker):
+async def test_first_checkin_starts_the_streak_at_one(sessionmaker, clock):
     await _seed(sessionmaker)
-    _, streak = await _complete_checkin(sessionmaker)
+    _, streak = await _complete_checkin(sessionmaker, clock)
     assert streak == 1
     assert (await _state(sessionmaker)).streak == 1
 
 
-async def test_a_checkin_the_day_after_increments(sessionmaker):
+async def test_a_checkin_the_day_after_increments(sessionmaker, clock):
     await _seed(sessionmaker, streak=1)
     async with sessionmaker() as session:
         session.add(Checkin(local_date=_today() - datetime.timedelta(days=1), day_rating=3))
         await session.commit()
 
-    _, streak = await _complete_checkin(sessionmaker)
+    _, streak = await _complete_checkin(sessionmaker, clock)
     assert streak == 2
 
 
-async def test_a_gap_resets_the_streak_to_one(sessionmaker):
+async def test_a_gap_resets_the_streak_to_one(sessionmaker, clock):
     await _seed(sessionmaker, streak=7)
     async with sessionmaker() as session:
         session.add(Checkin(local_date=_today() - datetime.timedelta(days=3), day_rating=3))
         await session.commit()
 
-    _, streak = await _complete_checkin(sessionmaker)
+    _, streak = await _complete_checkin(sessionmaker, clock)
     assert streak == 1
 
 
-async def test_a_same_day_recheckin_does_not_change_the_streak(sessionmaker):
+async def test_a_same_day_recheckin_does_not_change_the_streak(sessionmaker, clock):
     """Plan section 9, and the reason finish() reads last_checkin_at
     rather than counting rows."""
     await _seed(sessionmaker, streak=1)
@@ -155,16 +156,16 @@ async def test_a_same_day_recheckin_does_not_change_the_streak(sessionmaker):
         session.add(Checkin(local_date=_today() - datetime.timedelta(days=1), day_rating=3))
         await session.commit()
 
-    _, first = await _complete_checkin(sessionmaker)
-    _, second = await _complete_checkin(sessionmaker)
+    _, first = await _complete_checkin(sessionmaker, clock)
+    _, second = await _complete_checkin(sessionmaker, clock)
 
     assert first == 2
     assert second == 2, "a redo of today must not bump the streak again"
 
 
-async def test_finishing_writes_a_state_change_for_the_streak(sessionmaker):
+async def test_finishing_writes_a_state_change_for_the_streak(sessionmaker, clock):
     await _seed(sessionmaker)
-    await _complete_checkin(sessionmaker)
+    await _complete_checkin(sessionmaker, clock)
 
     async with sessionmaker() as session:
         rows = (
@@ -176,14 +177,14 @@ async def test_finishing_writes_a_state_change_for_the_streak(sessionmaker):
     assert rows[0].source == "command"
 
 
-async def test_a_second_checkin_the_same_day_overwrites_the_first(sessionmaker):
+async def test_a_second_checkin_the_same_day_overwrites_the_first(sessionmaker, clock):
     """`local_date` is unique, so starting again resets the day's row."""
     await _seed(sessionmaker)
     async with sessionmaker() as session:
-        first = await checkin.start(session, TIMEZONE)
+        first = await checkin.start(session, clock, TIMEZONE)
         await checkin.set_rating(session, first.id, 5)
         await checkin.set_note(session, first.id, "первая заметка")
-        second = await checkin.start(session, TIMEZONE)
+        second = await checkin.start(session, clock, TIMEZONE)
 
     # A fresh session, deliberately: the writing session's identity map
     # would hand back the pre-upsert row and the assertion would pass
@@ -432,9 +433,9 @@ async def test_the_note_completion_retires_the_buttons(sessionmaker):
     assert "Серия: 1" in fake.edits[-1].text
 
 
-async def test_an_over_long_note_is_trimmed_to_the_column_limit(sessionmaker):
+async def test_an_over_long_note_is_trimmed_to_the_column_limit(sessionmaker, clock):
     await _seed(sessionmaker)
     async with sessionmaker() as session:
-        row = await checkin.start(session, TIMEZONE)
+        row = await checkin.start(session, clock, TIMEZONE)
         saved = await checkin.set_note(session, row.id, "я" * 600)
     assert len(saved.note) == checkin.NOTE_MAX

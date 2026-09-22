@@ -1,5 +1,11 @@
 """SQLAlchemy 2.0 declarative models.
 
+3a adds `outbound` (phase-3 plan section 4), five `user_state`
+counters, and `message.outbound_id`. `message.kind` gains 'outbound',
+because plan section 7 puts proactive messages *in* the persona
+transcript -- Anchor has to remember what it said unprompted, or it
+will repeat itself.
+
 1a defined only TelegramUpdate — the inbound queue and dedup table. 1b
 adds the rest of the Phase 1 schema (plan section 5): message,
 user_state, state_change, persona_version, spend_ledger.
@@ -50,6 +56,7 @@ from sqlalchemy import (
     Float,
     Numeric,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -176,9 +183,18 @@ class Message(Base):
         String, nullable=False, default="chat", server_default=text("'chat'")
     )
 
+    # 3a (phase-3 plan section 4). The idempotency key for a proactive
+    # send, exactly as reply_to_update is for a reply: unique, so the
+    # "did I already generate this?" check in plan section 7 step 2 is
+    # a lookup the database enforces rather than a race the worker's
+    # concurrency-of-1 happens to hide.
+    outbound_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("outbound.id"), unique=True
+    )
+
     __table_args__ = (
         CheckConstraint(
-            "kind in ('chat', 'checkin', 'welfare', 'canned', 'system')",
+            "kind in ('chat', 'checkin', 'welfare', 'canned', 'system', 'outbound')",
             name="ck_message_kind",
         ),
     )
@@ -235,9 +251,32 @@ class UserState(Base):
     awaiting: Mapped[str | None] = mapped_column(String)
     awaiting_ref: Mapped[int | None] = mapped_column(BigInteger)
 
+    # 3a (phase-3 plan section 4). The counters the outbound gate
+    # reads. None of them are written by a model -- `quiet_until` by
+    # /quiet, `welfare_at` by the welfare trigger, and the other three
+    # by app/core/outbound.py's two counter functions.
+    #
+    # `last_user_msg_at` is *any* inbound update (text, command or
+    # button press), not just a message that produced a turn: pressing
+    # [Чек-ин] is the user being present, and a bot that nagged
+    # someone mid-check-in would be obviously broken.
+    #
+    # `ignored_in_row` is the back-off. It counts sent-but-unanswered
+    # outbound messages and resets to 0 on any inbound update, so the
+    # bot notices it is being ignored and stops -- fixed intents
+    # included (plan section 11).
+    quiet_until: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_user_msg_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_outbound_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    ignored_in_row: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    welfare_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
+        CheckConstraint("ignored_in_row >= 0", name="ck_user_state_ignored_non_negative"),
     )
 
 
@@ -479,4 +518,82 @@ class Checkin(Base):
             "due_result in ('done', 'partial', 'no', 'none')", name="ck_checkin_due_result"
         ),
         CheckConstraint('char_length("note") <= 500', name="ck_checkin_note_length"),
+    )
+
+
+class Outbound(Base):
+    """One planned, sent, skipped or cancelled proactive message (phase-3 plan section 4).
+
+    The row is the unit of exactly-once delivery. `unique (kind,
+    local_date, bucket)` is what makes a duplicate heartbeat, a
+    redeploy mid-morning, or two processes overlapping during a Railway
+    rollout all collapse into one message: the second insert conflicts
+    and does nothing. Nothing in the send path depends on the worker
+    being single-threaded.
+
+    `bucket` disambiguates several rows of the same kind on the same
+    day. For a tick it is the local hour it was decided in; for the
+    fixed intents and the silence nudge it is 0, because there is at
+    most one of each per local date by definition. The 48-hour rule in
+    plan section 5 is what keeps silence nudges apart -- local_date
+    alone would permit one every midnight.
+
+    **`status` is the whole lifecycle**, and only `planned` is live:
+
+    - `planned`  -- a row exists and a send_outbound job is queued.
+    - `sent`     -- delivered; `message_id`, `sent_at` are set.
+    - `skipped`  -- the send-time gate refused it; `skip_reason` says
+                    which check, and /state shows it.
+    - `cancelled`-- a pause, welfare trigger, /quiet or /delete revoked
+                    it before it went out (plan section 6).
+    - `failed`   -- generation failed after retries. Nothing is sent.
+                    There is deliberately no canned fallback: a
+                    proactive message the user did not ask for has to
+                    earn its place, and boilerplate does not.
+
+    `message_id` points at the delivered message; `message.outbound_id`
+    points back. Both directions are in the plan's SQL, and the
+    message-side one is the idempotency key the send job actually
+    reads. The FK here is `use_alter` because the two tables reference
+    each other -- without it, metadata sorting cannot order the CREATEs.
+    """
+
+    __tablename__ = "outbound"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    bucket: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    planned_for: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="planned", server_default=text("'planned'")
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String)
+    tick_note: Mapped[str | None] = mapped_column(String)
+    message_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("message.id", use_alter=True, name="fk_outbound_message_id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("kind", "local_date", "bucket", name="uq_outbound_kind_date_bucket"),
+        CheckConstraint(
+            "kind in ('morning', 'evening_nag', 'silence', 'tick')", name="ck_outbound_kind"
+        ),
+        CheckConstraint(
+            "status in ('planned', 'sent', 'skipped', 'cancelled', 'failed')",
+            name="ck_outbound_status",
+        ),
+        CheckConstraint('char_length("tick_note") <= 120', name="ck_outbound_tick_note_length"),
+        # Both live queries are "planned rows, by when they are due":
+        # cancel_outbound sweeps them, /state shows the next one.
+        Index("ix_outbound_status_planned_for", "status", "planned_for"),
+        Index("ix_outbound_local_date", "local_date"),
     )

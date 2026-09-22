@@ -16,6 +16,7 @@ import logging
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.core.clock import Clock, SystemClock
 from app.core import proposal
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
@@ -98,7 +99,14 @@ async def retire_buttons(sessionmaker, bot: Bot, *, chat_id: int, proposal_id: i
 
 
 async def handle_decision_callback(
-    sessionmaker, bot: Bot, *, callback_id: str, chat_id: int, message_id: int, data: str
+    sessionmaker,
+    bot: Bot,
+    clock: Clock | None = None,
+    *,
+    callback_id: str,
+    chat_id: int,
+    message_id: int,
+    data: str,
 ) -> None:
     """`p:a:<id>` / `p:r:<id>`.
 
@@ -117,11 +125,12 @@ async def handle_decision_callback(
         await edit_keyboard(bot, chat_id, message_id, STALE, None)
         return
 
+    clock = clock or SystemClock()
     async with sessionmaker() as session:
         if action == "a":
-            decided = await proposal.accept(session, proposal_id)
+            decided = await proposal.accept(session, clock, proposal_id)
         else:
-            decided = await proposal.reject(session, proposal_id)
+            decided = await proposal.reject(session, clock, proposal_id)
 
     if decided is None:
         # Not pending: already decided, expired, or gone. Strip the

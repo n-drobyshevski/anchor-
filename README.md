@@ -1,4 +1,4 @@
-# Anchor — Milestone 2f (Phase 2 complete)
+# Anchor — Milestone 3a (Phase 3 foundations)
 
 A private, single-user Telegram bot.
 
@@ -133,6 +133,86 @@ must really delete": every table must be either purged or explicitly
 kept, and every `user_state` column either preserved or explicitly
 reset. Both fail the day someone adds a table or a column and forgets —
 which is the only day it matters.
+
+Milestone 3a lays the foundations for Phase 3 — the phase where Anchor
+starts speaking first. It ships no proactive message yet: nothing plans
+a row, nothing sends one. What it ships is everything that has to be
+true *before* that is safe.
+
+- **A clock abstraction** (`app/core/clock.py`). `Clock.now_utc()` is
+  now the only source of "now" under `app/core/`, injected from
+  `app/main.py` into both the handler path and the job path. The rule
+  is enforced by `tests/test_core_clock_discipline.py`, which walks the
+  AST of every module in the package and fails on a direct
+  `datetime.now()`, `date.today()`, `time.time()` or SQL `func.now()` —
+  the same shape as the extractor invariant test below, and for the same
+  reason: a rule that lives only in a docstring decays.
+
+  `tests/test_clock.py` pins both Europe/Paris DST transitions the plan
+  names. On **2026-10-25** the local day is 25 hours long and
+  02:00–03:00 happens twice; on **2027-03-28** it is 23 hours and that
+  hour does not exist at all. Those are the two days a naive scheduler
+  sends the morning message twice, or never.
+
+- **The `outbound` table**, whose `unique (kind, local_date, bucket)`
+  constraint *is* the exactly-once guarantee. Two overlapping processes
+  during a Railway rollout, a duplicate heartbeat, or a restart at 09:05
+  all collapse into one message because the second insert conflicts.
+  Nothing in the send path depends on worker concurrency being 1.
+
+- **The gate** (`app/core/outbound_gate.py`) — a pure function with no
+  I/O, and the thing no model can talk its way past. Ten checks in a
+  fixed order, first failure wins: kill switch, paused, `/quiet`, quiet
+  hours, daily spend cap, ignored-in-a-row, welfare cooldown, daily
+  budget, minimum gap while unanswered, then the kind-specific rule.
+  `tests/test_outbound_gate.py` is the plan's truth table, one test per
+  row, plus precedence (`paused` outranks everything below it — the
+  recorded reason has to name the most fundamental cause, because that
+  reason is what `/state` will show) and a structural purity check: the
+  module imports nothing that could query.
+
+- **The counters.** `last_user_msg_at`, `last_outbound_at`,
+  `ignored_in_row` and `welfare_at` on `user_state`. The inbound stamp
+  lives in `app/worker.py::process_one_update`, not in a router
+  middleware, because that function is the only caller of
+  `dp.feed_update` in the repo — so it catches plain text, slash
+  commands, button presses, and even an update no handler matches. A
+  middleware on the message observer would miss callback queries, and
+  tapping through a check-in is the user being present just as much as
+  a sentence is.
+
+### The counters write no audit row, on purpose
+
+`app/core/state.py::update_state` has been the only sanctioned writer of
+a `user_state` field since 1b, and it always pairs the write with a
+`state_change` row. 3a adds one deliberate exception, `set_counters`.
+
+These four columns are not decisions, they are traffic bookkeeping:
+`last_user_msg_at` and `ignored_in_row` change on *every* inbound
+update. Auditing them would turn `state_change` — a short, readable log
+of things that were chosen — into a message-rate counter that buries the
+rows a human actually wants to read, at two extra inserts per message on
+the reply path.
+
+What keeps the exception from widening is `COUNTER_FIELDS`, an
+allow-list rather than a denylist: a sensitive column added later is
+excluded by default, which is the direction an accident should fail in.
+`tests/test_outbound_counters.py` asserts that `persona_active`,
+`intensity`, `focus_on`, `due_action` and `streak` are not in it, and
+that passing one raises without writing anything on the way.
+
+### The scheduler will not get its own process
+
+Phase 3's heartbeat is a third `asyncio.create_task` in the existing
+worker, modelled on the recovery sweep — not a second service and not
+APScheduler. It plans; it never does. Its whole job is a few indexed
+`SELECT`s plus at most one `INSERT ... ON CONFLICT DO NOTHING` and one
+`enqueue_job`. The actual sending is an ordinary row in the Phase 2
+`job` table, claimed by the same loop that already calls
+`process_one_update()` before `process_one_job()` on every iteration —
+so an inbound message outranks an outbound send by a priority rule that
+already exists and is already tested, rather than by a new fairness
+story invented for the occasion.
 
 ### Pause words still come first
 

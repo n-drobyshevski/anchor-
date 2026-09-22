@@ -24,12 +24,12 @@ anyone would notice.
 
 from __future__ import annotations
 
-import datetime
 import logging
 
 from sqlalchemy import text as sql_text, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import Clock
 from app.config import Settings
 from app.core.state import STATE_ID, record_change
 from app.db.models import UserState
@@ -52,6 +52,13 @@ PURGED_TABLES = (
     "job",
     "telegram_update",
     "pending_memory",
+    # 3a: every proactive message ever planned, sent, skipped or
+    # cancelled. Purged, not kept: it is a record of what the bot said
+    # to this user and when, which is exactly what "delete all my data"
+    # means. It also FKs to `message`, so leaving it out made Postgres
+    # refuse the whole TRUNCATE -- /delete failed outright rather than
+    # partially succeeding.
+    "outbound",
 )
 
 # user_state is reset in place, never dropped. persona_version is a
@@ -64,7 +71,7 @@ KEPT_TABLES = ("user_state", "persona_version")
 PRESERVED_STATE_COLUMNS = ("id", "chat_id")
 
 
-def reset_values(settings: Settings) -> dict:
+def reset_values(settings: Settings, clock: Clock) -> dict:
     """Every user_state column except the preserved two, at its default.
 
     Reset explicitly rather than left to the next boot: startup's
@@ -88,11 +95,22 @@ def reset_values(settings: Settings) -> dict:
         "last_checkin_at": None,
         "awaiting": None,
         "awaiting_ref": None,
-        "updated_at": datetime.datetime.now(datetime.timezone.utc),
+        # 3a: the outbound counters (phase-3 plan section 4). A
+        # /delete that left ignored_in_row at 3 would leave the bot
+        # silent after a wipe that is meant to return it to factory
+        # state, and a stale quiet_until would keep it muted.
+        "quiet_until": None,
+        "last_user_msg_at": None,
+        "last_outbound_at": None,
+        "ignored_in_row": 0,
+        "welfare_at": None,
+        "updated_at": clock.now_utc(),
     }
 
 
-async def delete_everything(session: AsyncSession, settings: Settings) -> None:
+async def delete_everything(
+    session: AsyncSession, settings: Settings, clock: Clock
+) -> None:
     """Wipe every content table and reset user_state, in one transaction.
 
     user_state is updated, never deleted and reinserted: get_state()
@@ -110,7 +128,7 @@ async def delete_everything(session: AsyncSession, settings: Settings) -> None:
         sql_text(f"TRUNCATE TABLE {', '.join(PURGED_TABLES)} RESTART IDENTITY")
     )
     await session.execute(
-        sql_update(UserState).where(UserState.id == STATE_ID).values(**reset_values(settings))
+        sql_update(UserState).where(UserState.id == STATE_ID).values(**reset_values(settings, clock))
     )
     await session.commit()
 

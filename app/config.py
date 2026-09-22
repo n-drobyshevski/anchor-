@@ -13,10 +13,13 @@ doc (the wallet guard must exist the moment the API key goes live).
 
 from __future__ import annotations
 
+import datetime
 import re
 
+from typing import Annotated
+
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Telegram's own charset for the webhook secret token.
 _SECRET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
@@ -150,6 +153,99 @@ class Settings(BaseSettings):
     # extra latency ceiling it can add, not a total. On timeout the
     # normal reply goes out -- the check fails open for chat.
     WELFARE_TIMEOUT_SECONDS: float = 8.0
+
+    # --- 3a: proactive outbound (phase-3 plan section 2) ---
+    # The global kill switch. False stops every unsolicited message at
+    # the first gate check (app/core/outbound_gate.py), planning
+    # included, without touching any other setting -- so turning the
+    # whole feature off is one env var and a restart, not a rollback.
+    OUTBOUND_ENABLED: bool = True
+
+    # The two fixed intents. Wall-clock times in user_state.timezone,
+    # not UTC: 09:00 means what the user's phone says, on both DST days.
+    MORNING_TIME: datetime.time = datetime.time(9, 0)
+    EVENING_TIME: datetime.time = datetime.time(22, 0)
+    # How late a fixed intent may still fire -- after a redeploy, a
+    # crash, or a /quiet that expires mid-morning. The evening nag's
+    # effective window is shorter: it is clamped to QUIET_START, since
+    # a nag that arrives during quiet hours is exactly what quiet hours
+    # are for (plan section 2).
+    SEND_GRACE_MIN: int = 180
+
+    # Quiet hours, local wall clock, wrapping past midnight. Compared
+    # as clock faces rather than instants (see app/core/clock.py's
+    # within_window) -- "nothing after half ten at night" is a
+    # statement about the user's clock, and stays true across DST with
+    # no special handling.
+    QUIET_START: datetime.time = datetime.time(22, 30)
+    QUIET_END: datetime.time = datetime.time(8, 0)
+
+    # The budget: at most this many unsolicited messages per local day,
+    # all kinds together.
+    MAX_UNSOLICITED_PER_DAY: int = 3
+    # If the last unsolicited message is still unanswered, wait at
+    # least this long before sending another.
+    MIN_GAP_UNANSWERED_H: int = 8
+    # After this many unanswered in a row, go silent until the user
+    # writes -- fixed intents included (plan section 11). With
+    # MAX_UNSOLICITED_PER_DAY at 3 this is roughly one day of being
+    # ignored, which is the intent: the bot notices and stops.
+    MAX_IGNORED_IN_ROW: int = 3
+    # Silence longer than this, with focus on, earns one calm nudge.
+    SILENCE_NUDGE_H: int = 48
+
+    # Local hours at which the optional tick is *considered*. Being in
+    # this list buys a model call to decide, not a message.
+    # NoDecode because pydantic-settings JSON-decodes any complex-typed
+    # env value *before* field validators run, so without it
+    # `TICK_HOURS=10,12,14` dies in json.loads and the validator below
+    # never sees the string.
+    TICK_HOURS: Annotated[tuple[int, ...], NoDecode] = (10, 12, 14, 16, 18, 20)
+    TICK_MAX_PER_DAY: int = 1
+    # The user wrote this recently -> there is nothing to re-open.
+    TICK_SKIP_IF_ACTIVE_H: int = 2
+
+    # Planned sends are scattered across this many minutes so the bot
+    # does not arrive at exactly 09:00:00 every single day. Set to 0
+    # for manual phone testing, where predictability beats texture.
+    JITTER_MAX_MIN: int = 15
+
+    # After a welfare trigger, the two discretionary kinds (silence,
+    # tick) stay off this long. Morning and evening are part of the
+    # agreed routine and resume with the persona.
+    WELFARE_COOLDOWN_H: int = 24
+    # The ceiling on a single /quiet, so a fat-fingered "/quiet 30d"
+    # cannot mute the bot for a month.
+    QUIET_MAX_DAYS: int = 7
+
+    @field_validator("TICK_HOURS", mode="before")
+    @classmethod
+    def _parse_tick_hours(cls, value):
+        """Accept "10,12,14" from the environment.
+
+        pydantic-settings expects JSON list syntax for a tuple-typed
+        field read from env, so `TICK_HOURS=10,12,14` would otherwise
+        fail to parse -- and the plan writes it exactly that way.
+        Sorted and deduped so the heartbeat can trust the order, and
+        range-checked because an hour of 25 is a typo that would
+        silently disable a tick slot forever.
+        """
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            try:
+                hours = [int(part) for part in parts]
+            except ValueError as exc:
+                raise ValueError(
+                    "TICK_HOURS must be comma-separated local hours, e.g. 10,12,14"
+                ) from exc
+        elif isinstance(value, (list, tuple)):
+            hours = [int(part) for part in value]
+        else:
+            return value
+        for hour in hours:
+            if not 0 <= hour <= 23:
+                raise ValueError(f"TICK_HOURS entries must be 0-23, got {hour}")
+        return tuple(sorted(set(hours)))
 
     @field_validator("DATABASE_URL")
     @classmethod

@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import datetime
 import logging
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.core.spend import check_cap, compute_cost, local_date_for
+from app.core import clock as clock_module
+from app.core.clock import Clock
+from app.core.spend import check_cap, compute_cost
 from app.db.jobs import enqueue_job
 from app.db.models import Message, Scene, SpendLedger
 from app.llm.provider import LLMMessage, LLMProvider
@@ -71,10 +72,6 @@ SUMMARY_PROMPT = (
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Anchor"}
 
 
-def _utcnow() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
 async def get_open_scene(session: AsyncSession) -> Scene | None:
     """The currently open scene (ended_at IS NULL), or None."""
     result = await session.execute(
@@ -90,7 +87,9 @@ async def _last_message_at(session: AsyncSession, scene_id: int) -> datetime.dat
     return result.scalar_one()
 
 
-async def ensure_open_scene(session: AsyncSession, *, idle_hours: int) -> int:
+async def ensure_open_scene(
+    session: AsyncSession, clock: Clock, *, idle_hours: int
+) -> int:
     """Return the id of the scene this message belongs to, opening one if needed.
 
     If the open scene's last message is older than `idle_hours`, that
@@ -112,7 +111,7 @@ async def ensure_open_scene(session: AsyncSession, *, idle_hours: int) -> int:
             # Opened but never used -- reuse it rather than leaking an
             # empty scene every time the worker restarts mid-turn.
             return open_scene.id
-        if _utcnow() - last_at < datetime.timedelta(hours=idle_hours):
+        if clock.now_utc() - last_at < datetime.timedelta(hours=idle_hours):
             return open_scene.id
 
         open_scene.ended_at = last_at
@@ -125,7 +124,7 @@ async def ensure_open_scene(session: AsyncSession, *, idle_hours: int) -> int:
         )
         logger.info("scene closed", extra={"scene_id": open_scene.id})
 
-    scene = Scene(started_at=_utcnow())
+    scene = Scene(started_at=clock.now_utc())
     session.add(scene)
     await session.commit()
     await session.refresh(scene)
@@ -200,19 +199,6 @@ def render_dialogue(messages: list[Message]) -> str:
     )
 
 
-def next_local_midnight(timezone: str) -> datetime.datetime:
-    """The next local midnight in `timezone`, as an aware UTC-comparable datetime.
-
-    Used to defer a summary past the daily spend cap (plan section 12):
-    the cap resets on the local date boundary, so that is the earliest
-    moment retrying can succeed.
-    """
-    tz = ZoneInfo(timezone)
-    now_local = datetime.datetime.now(tz)
-    tomorrow = (now_local + datetime.timedelta(days=1)).date()
-    return datetime.datetime.combine(tomorrow, datetime.time.min, tzinfo=tz)
-
-
 class Deferred(Exception):
     """Raised by a job body that is not done and must be re-run later.
 
@@ -232,6 +218,7 @@ async def run_summarize_scene(
     provider: LLMProvider,
     *,
     scene_id: int,
+    clock: Clock,
     timezone: str,
 ) -> None:
     """The `summarize_scene` job body (plan section 5).
@@ -256,8 +243,8 @@ async def run_summarize_scene(
         )
         return
 
-    if await check_cap(session, settings, timezone):
-        run_after = next_local_midnight(timezone)
+    if await check_cap(session, settings, clock, timezone):
+        run_after = clock_module.next_local_midnight(clock, timezone)
         logger.info("scene summary deferred by cap", extra={"scene_id": scene_id})
         raise Deferred(run_after)
 
@@ -273,7 +260,7 @@ async def run_summarize_scene(
     scene.summary = response.text.strip()
     session.add(
         SpendLedger(
-            local_date=local_date_for(timezone),
+            local_date=clock_module.local_date(clock, timezone),
             category=SUMMARY_CATEGORY,
             model=response.model,
             tokens_in=response.usage.input_tokens,

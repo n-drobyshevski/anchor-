@@ -68,7 +68,7 @@ async def _seed(sessionmaker, update_id: int, *, user="я живу в Лилле
         await session.commit()
 
 
-async def _run(sessionmaker, provider, update_id=1, memory_ids=None, settings=None, **state):
+async def _run(sessionmaker, provider, update_id=1, memory_ids=None, settings=None, *, clock, **state):
     async with sessionmaker() as session:
         return await extract.run_extract(
             session,
@@ -76,6 +76,7 @@ async def _run(sessionmaker, provider, update_id=1, memory_ids=None, settings=No
             provider,
             update_id=update_id,
             memory_ids=memory_ids or [],
+            clock=clock,
             timezone=TIMEZONE,
             intensity=state.get("intensity", 3),
             focus_on=state.get("focus_on", False),
@@ -86,7 +87,7 @@ async def _run(sessionmaker, provider, update_id=1, memory_ids=None, settings=No
 # --- THE invariant (plan sections 8 and 13) ---
 
 
-async def test_model_output_cannot_reach_sensitive_state(sessionmaker):
+async def test_model_output_cannot_reach_sensitive_state(sessionmaker, clock):
     """A hostile extractor reply must change nothing sensitive.
 
     Plan section 13: intensity, focus_on, due_action, streak and
@@ -113,7 +114,7 @@ async def test_model_output_cannot_reach_sensitive_state(sessionmaker):
         ensure_ascii=False,
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=hostile))
+    await _run(sessionmaker, FakeLLMProvider(text=hostile), clock=clock)
 
     async with sessionmaker() as session:
         state = await session.get(UserState, 1)
@@ -148,7 +149,7 @@ async def test_extract_module_has_no_name_that_writes_sensitive_state(sessionmak
     assert "proposal.create" in code
 
 
-async def test_a_rule_memory_is_never_written_even_at_full_confidence(sessionmaker):
+async def test_a_rule_memory_is_never_written_even_at_full_confidence(sessionmaker, clock):
     """Plan section 8: rule memories are never auto-written. They become
     proposals, because a rule is the user instructing themselves."""
     await _seed(sessionmaker, 1)
@@ -159,7 +160,7 @@ async def test_a_rule_memory_is_never_written_even_at_full_confidence(sessionmak
         ]
     )
 
-    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload))
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         memories = (await session.execute(select(Memory))).scalars().all()
@@ -172,14 +173,14 @@ async def test_a_rule_memory_is_never_written_even_at_full_confidence(sessionmak
     assert outcome.created == [proposals[0].id]
 
 
-async def test_a_proposal_changes_nothing_until_accepted(sessionmaker):
+async def test_a_proposal_changes_nothing_until_accepted(sessionmaker, clock):
     """Plan section 16: nothing changes in /state until Принять."""
     await _seed(sessionmaker, 1)
     payload = _payload(
         proposals=[{"field": "due_action", "value": "сдать отчёт до пятницы", "reason": "договорились"}]
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         state = await session.get(UserState, 1)
@@ -296,9 +297,9 @@ async def test_parse_json_returns_none_for_prose(sessionmaker):
     assert extract.parse_json("Мне нечего добавить.") is None
 
 
-async def test_unparseable_output_applies_nothing(sessionmaker):
+async def test_unparseable_output_applies_nothing(sessionmaker, clock):
     await _seed(sessionmaker, 1)
-    outcome = await _run(sessionmaker, FakeLLMProvider(text="Мне нечего добавить."))
+    outcome = await _run(sessionmaker, FakeLLMProvider(text="Мне нечего добавить."), clock=clock)
 
     async with sessionmaker() as session:
         assert (await session.execute(select(Memory))).scalars().all() == []
@@ -309,7 +310,7 @@ async def test_unparseable_output_applies_nothing(sessionmaker):
 # --- confidence and dedupe ---
 
 
-async def test_low_confidence_memories_are_dropped(sessionmaker):
+async def test_low_confidence_memories_are_dropped(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     payload = _payload(
         memories=[
@@ -318,13 +319,13 @@ async def test_low_confidence_memories_are_dropped(sessionmaker):
         ]
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         assert (await session.execute(select(Memory))).scalars().all() == []
 
 
-async def test_high_confidence_memories_are_written_with_source_extractor(sessionmaker):
+async def test_high_confidence_memories_are_written_with_source_extractor(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     payload = _payload(
         memories=[
@@ -333,7 +334,7 @@ async def test_high_confidence_memories_are_written_with_source_extractor(sessio
         ]
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(Memory))).scalars().all()
@@ -350,7 +351,7 @@ async def test_high_confidence_memories_are_written_with_source_extractor(sessio
     assert changes[0].old_value is None
 
 
-async def test_extractor_writes_are_deduped(sessionmaker):
+async def test_extractor_writes_are_deduped(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
         session.add(Memory(kind="identity", text="пользователь живёт в Лилле", source="user"))
@@ -362,14 +363,14 @@ async def test_extractor_writes_are_deduped(sessionmaker):
              "confidence": 0.95}
         ]
     )
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(Memory))).scalars().all()
     assert len(rows) == 1
 
 
-async def test_a_valid_supersede_retires_the_old_memory(sessionmaker):
+async def test_a_valid_supersede_retires_the_old_memory(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
         old = Memory(kind="identity", text="пользователь живёт в Лилле", source="user")
@@ -384,7 +385,7 @@ async def test_a_valid_supersede_retires_the_old_memory(sessionmaker):
              "confidence": 0.95}
         ]
     )
-    await _run(sessionmaker, FakeLLMProvider(text=payload), memory_ids=[old_id])
+    await _run(sessionmaker, FakeLLMProvider(text=payload), memory_ids=[old_id], clock=clock)
 
     async with sessionmaker() as session:
         old = await session.get(Memory, old_id)
@@ -405,21 +406,21 @@ async def test_a_valid_supersede_retires_the_old_memory(sessionmaker):
         "почта пользователя nick@example.com",
     ],
 )
-async def test_redaction_rejects_secrets_before_any_write(sessionmaker, text):
+async def test_redaction_rejects_secrets_before_any_write(sessionmaker, clock, text):
     await _seed(sessionmaker, 1)
     payload = _payload(
         journal=text,
         memories=[{"kind": "identity", "text": text, "supersedes_id": None, "confidence": 0.99}],
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         assert (await session.execute(select(Memory))).scalars().all() == []
         assert (await session.execute(select(Journal))).scalars().all() == []
 
 
-async def test_ordinary_text_is_not_redacted(sessionmaker):
+async def test_ordinary_text_is_not_redacted(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     payload = _payload(
         journal="Поговорили про отчёт.",
@@ -429,7 +430,7 @@ async def test_ordinary_text_is_not_redacted(sessionmaker):
         ],
     )
 
-    await _run(sessionmaker, FakeLLMProvider(text=payload))
+    await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         assert len((await session.execute(select(Memory))).scalars().all()) == 1
@@ -439,9 +440,9 @@ async def test_ordinary_text_is_not_redacted(sessionmaker):
 # --- journal, ledger, cap ---
 
 
-async def test_journal_row_is_written_with_the_local_date(sessionmaker):
+async def test_journal_row_is_written_with_the_local_date(sessionmaker, clock):
     await _seed(sessionmaker, 1)
-    await _run(sessionmaker, FakeLLMProvider(text=_payload(journal="Поговорили про отчёт.")))
+    await _run(sessionmaker, FakeLLMProvider(text=_payload(journal="Поговорили про отчёт.")), clock=clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(Journal))).scalars().all()
@@ -449,9 +450,9 @@ async def test_journal_row_is_written_with_the_local_date(sessionmaker):
     assert rows[0].text == "Поговорили про отчёт."
 
 
-async def test_the_call_is_ledgered_under_extractor(sessionmaker):
+async def test_the_call_is_ledgered_under_extractor(sessionmaker, clock):
     await _seed(sessionmaker, 1)
-    await _run(sessionmaker, FakeLLMProvider(text=_payload(), model="cydonia-fake"))
+    await _run(sessionmaker, FakeLLMProvider(text=_payload(), model="cydonia-fake"), clock=clock)
 
     async with sessionmaker() as session:
         rows = (await session.execute(select(SpendLedger))).scalars().all()
@@ -459,28 +460,28 @@ async def test_the_call_is_ledgered_under_extractor(sessionmaker):
     assert rows[0].category == "extractor"
 
 
-async def test_at_the_cap_the_extractor_is_skipped_entirely(sessionmaker):
+async def test_at_the_cap_the_extractor_is_skipped_entirely(sessionmaker, clock):
     """Plan section 12: at the cap the extractor is skipped. Unlike a
     scene summary it is not deferred -- the exchange will have aged out
     of the transcript by tomorrow."""
     await _seed(sessionmaker, 1)
     provider = FakeLLMProvider(text=_payload(journal="что-то"))
 
-    await _run(sessionmaker, provider, settings=_settings(DAILY_USD_CAP=0.0))
+    await _run(sessionmaker, provider, settings=_settings(DAILY_USD_CAP=0.0), clock=clock)
 
     assert provider.calls == 0
     async with sessionmaker() as session:
         assert (await session.execute(select(Journal))).scalars().all() == []
 
 
-async def test_a_schema_is_sent_with_the_call(sessionmaker):
+async def test_a_schema_is_sent_with_the_call(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     provider = FakeLLMProvider(text=_payload())
-    await _run(sessionmaker, provider)
+    await _run(sessionmaker, provider, clock=clock)
     assert provider.received_schemas == [extract.EXTRACT_SCHEMA]
 
 
-async def test_the_extractor_sees_memory_ids_but_the_chat_model_does_not(sessionmaker):
+async def test_the_extractor_sees_memory_ids_but_the_chat_model_does_not(sessionmaker, clock):
     """The one place a model is shown memory ids, because supersedes_id
     requires it (plan section 7's rule is about the *chat* model)."""
     await _seed(sessionmaker, 1)
@@ -492,25 +493,25 @@ async def test_the_extractor_sees_memory_ids_but_the_chat_model_does_not(session
         memory_id = row.id
 
     provider = FakeLLMProvider(text=_payload())
-    await _run(sessionmaker, provider, memory_ids=[memory_id])
+    await _run(sessionmaker, provider, memory_ids=[memory_id], clock=clock)
 
     sent = "\n".join(m.content for m in provider.received_messages[0])
     assert f"{memory_id} — пользователь живёт в Лилле" in sent
 
 
-async def test_only_one_proposal_is_pending_at_a_time(sessionmaker):
+async def test_only_one_proposal_is_pending_at_a_time(sessionmaker, clock):
     """Plan section 8: a new proposal expires the outstanding one."""
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
         first, _ = await proposal.create(
-            session, field="due_action", value="старое действие", reason=None
+            session, clock, field="due_action", value="старое действие", reason=None
         )
         first_id = first.id
 
     payload = _payload(
         proposals=[{"field": "due_action", "value": "новое действие", "reason": "r"}]
     )
-    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload))
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
 
     async with sessionmaker() as session:
         old = await session.get(Proposal, first_id)
@@ -571,7 +572,7 @@ async def _jobs(sessionmaker):
         return (await session.execute(select(Job))).scalars().all()
 
 
-async def test_a_delivered_in_character_turn_enqueues_the_extractor(sessionmaker):
+async def test_a_delivered_in_character_turn_enqueues_the_extractor(sessionmaker, clock):
     from app.core import turn
 
     update_id = 8001
@@ -585,7 +586,7 @@ async def test_a_delivered_in_character_turn_enqueues_the_extractor(sessionmaker
 
     await turn.run(
         sessionmaker, bot, _settings(), FakeLLMProvider(text="Принято."),
-        chat_id=4242, update_id=update_id, user_text="я сегодня думал про Лилль",
+        clock=clock, chat_id=4242, update_id=update_id, user_text="я сегодня думал про Лилль",
     )
 
     jobs = await _jobs(sessionmaker)
@@ -598,7 +599,7 @@ async def test_a_delivered_in_character_turn_enqueues_the_extractor(sessionmaker
     assert memory_id in extract_jobs[0].payload["memory_ids"]
 
 
-async def test_a_neutral_turn_does_not_enqueue_the_extractor(sessionmaker):
+async def test_a_neutral_turn_does_not_enqueue_the_extractor(sessionmaker, clock):
     """Plan section 8: never after OOC/neutral turns."""
     from app.core import turn
 
@@ -607,13 +608,13 @@ async def test_a_neutral_turn_does_not_enqueue_the_extractor(sessionmaker):
 
     await turn.run(
         sessionmaker, bot, _settings(), FakeLLMProvider(text="Хорошо."),
-        chat_id=4242, update_id=update_id, user_text="привет",
+        clock=clock, chat_id=4242, update_id=update_id, user_text="привет",
     )
 
     assert [j for j in await _jobs(sessionmaker) if j.kind == "extract"] == []
 
 
-async def test_a_pause_word_does_not_enqueue_the_extractor(sessionmaker):
+async def test_a_pause_word_does_not_enqueue_the_extractor(sessionmaker, clock):
     """Never after a canned reply."""
     from app.core import turn
 
@@ -622,16 +623,16 @@ async def test_a_pause_word_does_not_enqueue_the_extractor(sessionmaker):
 
     await turn.run(
         sessionmaker, bot, _settings(), FakeLLMProvider(text="не должно вызваться"),
-        chat_id=4242, update_id=update_id, user_text="пурпурный",
+        clock=clock, chat_id=4242, update_id=update_id, user_text="пурпурный",
     )
 
     assert [j for j in await _jobs(sessionmaker) if j.kind == "extract"] == []
 
 
-async def test_a_capped_turn_does_not_enqueue_the_extractor(sessionmaker):
+async def test_a_capped_turn_does_not_enqueue_the_extractor(sessionmaker, clock):
     from app.core import turn
     from app.db.models import SpendLedger as Ledger
-    from app.core.spend import local_date_for
+    from app.core.clock import local_date as clock_local_date
     import decimal
 
     update_id = 8004
@@ -639,7 +640,7 @@ async def test_a_capped_turn_does_not_enqueue_the_extractor(sessionmaker):
     async with sessionmaker() as session:
         session.add(
             Ledger(
-                local_date=local_date_for(TIMEZONE),
+                local_date=clock_local_date(clock, TIMEZONE),
                 category="chat",
                 usd_cost=decimal.Decimal("99"),
             )
@@ -648,13 +649,13 @@ async def test_a_capped_turn_does_not_enqueue_the_extractor(sessionmaker):
 
     await turn.run(
         sessionmaker, bot, _settings(DAILY_USD_CAP=1.0), FakeLLMProvider(text="не вызовется"),
-        chat_id=4242, update_id=update_id, user_text="привет, как дела",
+        clock=clock, chat_id=4242, update_id=update_id, user_text="привет, как дела",
     )
 
     assert [j for j in await _jobs(sessionmaker) if j.kind == "extract"] == []
 
 
-async def test_a_failed_turn_does_not_enqueue_the_extractor(sessionmaker):
+async def test_a_failed_turn_does_not_enqueue_the_extractor(sessionmaker, clock):
     """The extractor describes a delivered exchange; there isn't one."""
     from app.core import turn
     from app.llm.provider import LLMError
@@ -664,13 +665,13 @@ async def test_a_failed_turn_does_not_enqueue_the_extractor(sessionmaker):
 
     await turn.run(
         sessionmaker, bot, _settings(), FakeLLMProvider(raises=[LLMError("boom")]),
-        chat_id=4242, update_id=update_id, user_text="привет, как дела",
+        clock=clock, chat_id=4242, update_id=update_id, user_text="привет, как дела",
     )
 
     assert [j for j in await _jobs(sessionmaker) if j.kind == "extract"] == []
 
 
-async def test_a_replayed_turn_enqueues_one_extract_job(sessionmaker):
+async def test_a_replayed_turn_enqueues_one_extract_job(sessionmaker, clock):
     from app.core import turn
 
     update_id = 8006
@@ -680,13 +681,13 @@ async def test_a_replayed_turn_enqueues_one_extract_job(sessionmaker):
     for _ in range(2):
         await turn.run(
             sessionmaker, bot, _settings(), provider,
-            chat_id=4242, update_id=update_id, user_text="привет, как дела",
+            clock=clock, chat_id=4242, update_id=update_id, user_text="привет, как дела",
         )
 
     assert len([j for j in await _jobs(sessionmaker) if j.kind == "extract"]) == 1
 
 
-async def test_the_worker_runs_the_extract_job_and_sends_the_proposal(sessionmaker):
+async def test_the_worker_runs_the_extract_job_and_sends_the_proposal(sessionmaker, clock):
     """End to end through the worker: claim -> extract -> proposal message."""
     from aiogram import Bot
 
@@ -706,7 +707,7 @@ async def test_the_worker_runs_the_extract_job_and_sends_the_proposal(sessionmak
     fake = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake)
 
-    assert await process_one_job(sessionmaker, _settings(), FakeLLMProvider(text=payload), bot)
+    assert await process_one_job(sessionmaker, _settings(), FakeLLMProvider(text=payload), clock, bot)
 
     async with sessionmaker() as session:
         stored = (await session.execute(select(Proposal))).scalars().one()

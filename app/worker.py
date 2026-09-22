@@ -18,6 +18,20 @@ Inbound updates are claimed **first**: a job is only looked for when
 the update queue is empty, so background work can never delay a reply
 the user is waiting on. Concurrency stays 1 across both queues, which
 keeps ordering total -- a job and an update never run at once.
+
+3a stamps the inbound counters here rather than in a router
+middleware (phase-3 plan section 4). This function is the only caller
+of dp.feed_update in the repo, so it is the one place every inbound
+update must pass: plain text, a slash command, a button press, and
+even an update no handler matches. A middleware on the message
+observer would miss callback queries, and "the user tapped a button"
+is the user being present just as much as a sentence is.
+
+It is recorded **before** feed_update, not after. The counters say
+"the user was here", which is already true by the time the row is
+claimed, and stamping first means a handler that raises still clears
+the back-off -- a crash on the user's message must not leave Anchor
+counting them as ignoring it.
 """
 
 from __future__ import annotations
@@ -31,7 +45,9 @@ from aiogram.types import Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.core.clock import Clock
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
+from app.core.outbound import record_inbound
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
@@ -46,7 +62,7 @@ RECOVER_INTERVAL_SECONDS = 60
 
 
 async def process_one_update(
-    sessionmaker: async_sessionmaker[AsyncSession], dp: Dispatcher, bot: Bot
+    sessionmaker: async_sessionmaker[AsyncSession], dp: Dispatcher, bot: Bot, clock: Clock
 ) -> bool:
     """Claim and process a single update. Returns True iff a row was claimed.
 
@@ -58,6 +74,9 @@ async def process_one_update(
 
     if row is None:
         return False
+
+    async with sessionmaker() as session:
+        await record_inbound(session, clock)
 
     started_at = time.monotonic()
     try:
@@ -93,6 +112,7 @@ async def _run_job(
     settings: Settings,
     cheap_provider: LLMProvider,
     bot: Bot,
+    clock: Clock,
     kind: str,
     payload: dict,
 ) -> ExtractOutcome:
@@ -111,6 +131,7 @@ async def _run_job(
             settings,
             cheap_provider,
             scene_id=payload["scene_id"],
+            clock=clock,
             timezone=user_state.timezone,
         )
         return ExtractOutcome()
@@ -122,6 +143,7 @@ async def _run_job(
             cheap_provider,
             update_id=payload["update_id"],
             memory_ids=payload.get("memory_ids") or [],
+            clock=clock,
             timezone=user_state.timezone,
             intensity=user_state.intensity,
             focus_on=user_state.focus_on,
@@ -135,6 +157,7 @@ async def process_one_job(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     cheap_provider: LLMProvider,
+    clock: Clock,
     bot: Bot | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
@@ -155,7 +178,7 @@ async def process_one_job(
     try:
         async with sessionmaker() as session:
             outcome = await _run_job(
-                session, settings, cheap_provider, bot, kind, payload
+                session, settings, cheap_provider, bot, clock, kind, payload
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -229,12 +252,13 @@ async def _claim_loop(
     bot: Bot,
     settings: Settings,
     cheap_provider: LLMProvider,
+    clock: Clock,
 ) -> None:
     """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
-        if await process_one_update(sessionmaker, dp, bot):
+        if await process_one_update(sessionmaker, dp, bot, clock):
             continue
-        if await process_one_job(sessionmaker, settings, cheap_provider, bot):
+        if await process_one_job(sessionmaker, settings, cheap_provider, clock, bot):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
 
@@ -257,10 +281,12 @@ async def run_worker(
     bot: Bot,
     settings: Settings,
     cheap_provider: LLMProvider,
+    clock: Clock,
 ) -> list[asyncio.Task]:
     """Start the claim loop and the recovery sweep as two background tasks."""
     claim_task = asyncio.create_task(
-        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider), name="anchor-claim-loop"
+        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider, clock),
+        name="anchor-claim-loop",
     )
     recover_task = asyncio.create_task(_recover_loop(sessionmaker), name="anchor-recover-loop")
     return [claim_task, recover_task]

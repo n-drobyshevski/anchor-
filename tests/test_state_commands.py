@@ -112,13 +112,13 @@ async def test_due_writes_state_change_with_source_command(sessionmaker):
     assert {r.field for r in rows} >= {"due_action", "due_set_at"}
 
 
-async def test_due_expires_a_pending_proposal_for_the_same_field(sessionmaker):
+async def test_due_expires_a_pending_proposal_for_the_same_field(sessionmaker, clock):
     """A direct command outranks an outstanding suggestion -- otherwise a
     live Принять would later overwrite what the user just typed."""
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
         created, _ = await proposal.create(
-            session, field="due_action", value="что-то другое", reason=None
+            session, clock, field="due_action", value="что-то другое", reason=None
         )
         proposal_id = created.id
         await proposal.set_message_id(session, proposal_id, 900)
@@ -133,10 +133,10 @@ async def test_due_expires_a_pending_proposal_for_the_same_field(sessionmaker):
     assert fake.edits[0].reply_markup is None
 
 
-async def test_due_leaves_a_proposal_for_a_different_field_alone(sessionmaker):
+async def test_due_leaves_a_proposal_for_a_different_field_alone(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
-        created, _ = await proposal.create(session, field="focus_on", value="on", reason=None)
+        created, _ = await proposal.create(session, clock, field="focus_on", value="on", reason=None)
         proposal_id = created.id
 
     dp, bot, fake = _build_dp(sessionmaker)
@@ -198,10 +198,10 @@ async def test_focus_with_nonsense_explains_rather_than_guessing(sessionmaker):
     assert (await _state(sessionmaker)).focus_on is False
 
 
-async def test_focus_expires_a_pending_focus_proposal(sessionmaker):
+async def test_focus_expires_a_pending_focus_proposal(sessionmaker, clock):
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
-        created, _ = await proposal.create(session, field="focus_on", value="on", reason=None)
+        created, _ = await proposal.create(session, clock, field="focus_on", value="on", reason=None)
         proposal_id = created.id
         await proposal.set_message_id(session, proposal_id, 900)
 
@@ -275,22 +275,23 @@ async def test_state_with_nothing_set_reads_cleanly(sessionmaker):
     assert "Помню: 0 записей" in text
 
 
-async def test_spend_by_category_sums_per_category(sessionmaker):
+async def test_spend_by_category_sums_per_category(sessionmaker, clock):
     from app.core.spend import today_by_category
-    from app.core.spend import local_date_for
+    from app.core.clock import SystemClock
+    from app.core.clock import local_date as clock_local_date
 
     await _seed(sessionmaker)
     async with sessionmaker() as session:
         for category, cost in (("chat", "0.02"), ("chat", "0.03"), ("summary", "0.01")):
             session.add(
                 SpendLedger(
-                    local_date=local_date_for(TIMEZONE),
+                    local_date=clock_local_date(SystemClock(), TIMEZONE),
                     category=category,
                     usd_cost=decimal.Decimal(cost),
                 )
             )
         await session.commit()
-        totals = await today_by_category(session, TIMEZONE)
+        totals = await today_by_category(session, clock, TIMEZONE)
 
     assert totals == {"chat": decimal.Decimal("0.050000"), "summary": decimal.Decimal("0.010000")}
     assert list(totals) == ["chat", "summary"], "largest first"

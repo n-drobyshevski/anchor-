@@ -31,6 +31,7 @@ which a rolled-back-per-test transaction would hide from each other.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 import random
 import shutil
@@ -58,6 +59,7 @@ from aiogram.methods import (
 from aiogram.types import Message as TgMessage
 from sqlalchemy import text
 
+from app.core.clock import FrozenClock, SystemClock, combine_local
 from app.db.session import create_engine_and_sessionmaker
 from app.llm.provider import LLMResponse, LLMUsage
 
@@ -370,3 +372,49 @@ class FakeLLMProvider:
 @pytest.fixture()
 def fake_llm_provider() -> FakeLLMProvider:
     return FakeLLMProvider()
+
+
+# --- 3a: the clock (phase-3 plan section 3) ---------------------------
+#
+# Every time-dependent function under app/core/ now takes a Clock. Most
+# tests do not care what time it is and just need *a* clock, so `clock`
+# hands them the real one. Tests that do care build a FrozenClock at the
+# instant they mean -- `frozen_clock` is the factory for that, and the
+# Paris DST dates live in tests/test_clock.py.
+
+
+@pytest.fixture()
+def clock() -> SystemClock:
+    """The real clock, for tests whose behaviour does not depend on time."""
+    return SystemClock()
+
+
+@pytest.fixture()
+def frozen_clock():
+    """Factory: `frozen_clock(2026, 10, 25, 9, 0, tz="Europe/Paris")`.
+
+    Takes a *local* wall-clock reading in `tz` and returns a FrozenClock
+    pinned to the matching instant, because every Phase 3 rule is stated
+    in local time ("09:00", "quiet from 22:30") and converting by hand in
+    each test is where the DST bugs would hide.
+    """
+
+    def _make(
+        year: int,
+        month: int,
+        day: int,
+        hour: int = 0,
+        minute: int = 0,
+        second: int = 0,
+        *,
+        tz: str = "Europe/Paris",
+    ) -> FrozenClock:
+        return FrozenClock(
+            combine_local(
+                datetime.date(year, month, day),
+                datetime.time(hour, minute, second),
+                tz,
+            )
+        )
+
+    return _make

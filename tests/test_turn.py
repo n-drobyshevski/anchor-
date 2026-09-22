@@ -12,14 +12,14 @@ import datetime
 import decimal
 import re
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy import select
 
 from app.config import Settings
 from app.core import prompt, turn
-from app.core.spend import local_date_for
+from app.core.clock import SystemClock
+from app.core.clock import local_date as clock_local_date
 from app.core.state import get_state
 from app.db.models import Message, SpendLedger, StateChange, TelegramUpdate, UserState
 from app.llm.openrouter import OpenRouterProvider
@@ -78,7 +78,7 @@ async def _ledger_rows(sessionmaker) -> list[SpendLedger]:
         return list(result.scalars().all())
 
 
-async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(sessionmaker):
+async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(sessionmaker, clock):
     update_id = 1
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -90,6 +90,7 @@ async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(session
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="привет",
@@ -117,13 +118,13 @@ async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(session
     ledger = await _ledger_rows(sessionmaker)
     assert len(ledger) == 1
     assert ledger[0].usd_cost == assistant.usd_cost
-    assert ledger[0].local_date == local_date_for(TIMEZONE)
+    assert ledger[0].local_date == clock_local_date(SystemClock(), TIMEZONE)
     assert ledger[0].category == "chat"
 
     await bot.session.close()
 
 
-async def test_resend_when_sent_at_is_null(sessionmaker):
+async def test_resend_when_sent_at_is_null(sessionmaker, clock):
     """Simulates a crash between generating the reply and sending it:
     the assistant row exists with sent_at NULL. turn.run() must resend
     the stored content without calling the provider again.
@@ -151,6 +152,7 @@ async def test_resend_when_sent_at_is_null(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="привет ещё раз",
@@ -166,7 +168,7 @@ async def test_resend_when_sent_at_is_null(sessionmaker):
     await bot.session.close()
 
 
-async def test_no_regeneration_when_assistant_row_already_sent(sessionmaker):
+async def test_no_regeneration_when_assistant_row_already_sent(sessionmaker, clock):
     update_id = 3
     await _seed(sessionmaker, update_id=update_id)
     sent_at = datetime.datetime.now(datetime.timezone.utc)
@@ -191,6 +193,7 @@ async def test_no_regeneration_when_assistant_row_already_sent(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="привет снова",
@@ -202,11 +205,11 @@ async def test_no_regeneration_when_assistant_row_already_sent(sessionmaker):
     await bot.session.close()
 
 
-async def test_over_cap_makes_zero_provider_calls_and_writes_no_ledger_row(sessionmaker):
+async def test_over_cap_makes_zero_provider_calls_and_writes_no_ledger_row(sessionmaker, clock):
     update_id = 4
     await _seed(sessionmaker, update_id=update_id)
     settings = Settings(DAILY_USD_CAP=0.50)
-    today = local_date_for(TIMEZONE)
+    today = clock_local_date(SystemClock(), TIMEZONE)
     async with sessionmaker() as session:
         session.add(SpendLedger(local_date=today, category="chat", usd_cost=decimal.Decimal("0.50")))
         await session.commit()
@@ -219,6 +222,7 @@ async def test_over_cap_makes_zero_provider_calls_and_writes_no_ledger_row(sessi
         bot,
         settings,
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="ещё один вопрос",
@@ -241,7 +245,7 @@ async def test_over_cap_makes_zero_provider_calls_and_writes_no_ledger_row(sessi
     await bot.session.close()
 
 
-async def test_provider_non_retryable_failure_stores_no_assistant_row(sessionmaker):
+async def test_provider_non_retryable_failure_stores_no_assistant_row(sessionmaker, clock):
     update_id = 5
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -252,6 +256,7 @@ async def test_provider_non_retryable_failure_stores_no_assistant_row(sessionmak
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="сообщение",
@@ -267,7 +272,7 @@ async def test_provider_non_retryable_failure_stores_no_assistant_row(sessionmak
     await bot.session.close()
 
 
-async def test_provider_retries_exhausted_stores_no_assistant_row(sessionmaker):
+async def test_provider_retries_exhausted_stores_no_assistant_row(sessionmaker, clock):
     update_id = 6
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -284,6 +289,7 @@ async def test_provider_retries_exhausted_stores_no_assistant_row(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="сообщение",
@@ -297,7 +303,7 @@ async def test_provider_retries_exhausted_stores_no_assistant_row(sessionmaker):
     await bot.session.close()
 
 
-async def test_provider_retries_then_succeeds(sessionmaker):
+async def test_provider_retries_then_succeeds(sessionmaker, clock):
     update_id = 7
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -311,6 +317,7 @@ async def test_provider_retries_then_succeeds(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="сообщение",
@@ -325,7 +332,7 @@ async def test_provider_retries_then_succeeds(sessionmaker):
     await bot.session.close()
 
 
-async def test_no_double_user_message_across_two_turns(sessionmaker):
+async def test_no_double_user_message_across_two_turns(sessionmaker, clock):
     """End-to-end regression: run two real turns and inspect exactly
     what was sent to the provider on the second call. The second
     call's transcript must contain the first turn's user+assistant
@@ -341,6 +348,7 @@ async def test_no_double_user_message_across_two_turns(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=10,
         user_text="первое сообщение",
@@ -356,6 +364,7 @@ async def test_no_double_user_message_across_two_turns(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=11,
         user_text="второе сообщение",
@@ -378,7 +387,7 @@ async def test_no_double_user_message_across_two_turns(sessionmaker):
 # --- 1d: pause words, neutral mode, /out and /in (plan section 7 / 16) ---
 
 
-async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessionmaker):
+async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessionmaker, clock):
     update_id = 100
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -389,6 +398,7 @@ async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessi
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="Пурпурный!!",
@@ -410,7 +420,7 @@ async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessi
     await bot.session.close()
 
 
-async def test_pause_word_through_the_search_path_still_pauses_with_zero_provider_calls(sessionmaker):
+async def test_pause_word_through_the_search_path_still_pauses_with_zero_provider_calls(sessionmaker, clock):
     """1f: web_search=True must not bypass step 0 (pause.match()) -- a
     pause word sent via /search still pauses and never reaches the model."""
     update_id = 150
@@ -423,6 +433,7 @@ async def test_pause_word_through_the_search_path_still_pauses_with_zero_provide
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="пурпурный",
@@ -440,7 +451,7 @@ async def test_pause_word_through_the_search_path_still_pauses_with_zero_provide
     await bot.session.close()
 
 
-async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change(sessionmaker):
+async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change(sessionmaker, clock):
     update_id = 101
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
@@ -451,6 +462,7 @@ async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="красный",
@@ -471,7 +483,7 @@ async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change
     await bot.session.close()
 
 
-async def test_soft_pause_word_decrements_intensity_and_flag_reaches_prompt(sessionmaker):
+async def test_soft_pause_word_decrements_intensity_and_flag_reaches_prompt(sessionmaker, clock):
     update_id = 102
     await _seed(sessionmaker, update_id=update_id, intensity=3)
     bot, fake_session = _bot()
@@ -482,6 +494,7 @@ async def test_soft_pause_word_decrements_intensity_and_flag_reaches_prompt(sess
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="жёлтый",
@@ -508,7 +521,7 @@ async def test_soft_pause_word_decrements_intensity_and_flag_reaches_prompt(sess
     await bot.session.close()
 
 
-async def test_soft_pause_word_at_intensity_one_still_runs_with_flag(sessionmaker):
+async def test_soft_pause_word_at_intensity_one_still_runs_with_flag(sessionmaker, clock):
     update_id = 103
     await _seed(sessionmaker, update_id=update_id, intensity=1)
     bot, fake_session = _bot()
@@ -519,6 +532,7 @@ async def test_soft_pause_word_at_intensity_one_still_runs_with_flag(sessionmake
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="желтый",
@@ -536,7 +550,7 @@ async def test_soft_pause_word_at_intensity_one_still_runs_with_flag(sessionmake
     await bot.session.close()
 
 
-async def test_neutral_mode_uses_neutral_prompt_ooc_context_and_ooc_category(sessionmaker):
+async def test_neutral_mode_uses_neutral_prompt_ooc_context_and_ooc_category(sessionmaker, clock):
     update_id = 104
     await _seed(sessionmaker, update_id=update_id, persona_active=False)
 
@@ -556,6 +570,7 @@ async def test_neutral_mode_uses_neutral_prompt_ooc_context_and_ooc_category(ses
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=update_id,
         user_text="как дела",
@@ -583,7 +598,7 @@ async def test_neutral_mode_uses_neutral_prompt_ooc_context_and_ooc_category(ses
     await bot.session.close()
 
 
-async def test_paused_bot_stays_paused_across_several_turns(sessionmaker):
+async def test_paused_bot_stays_paused_across_several_turns(sessionmaker, clock):
     await _seed(sessionmaker, update_id=1000, persona_active=False)
     bot, fake_session = _bot()
     provider = FakeLLMProvider(text="Нейтрально.")
@@ -597,6 +612,7 @@ async def test_paused_bot_stays_paused_across_several_turns(sessionmaker):
             bot,
             Settings(),
             provider,
+            clock=clock,
             chat_id=TEST_CHAT_ID,
             update_id=uid,
             user_text=f"сообщение {uid}",
@@ -611,12 +627,12 @@ async def test_paused_bot_stays_paused_across_several_turns(sessionmaker):
     await bot.session.close()
 
 
-async def test_run_resume_sets_persona_active_true_and_does_not_restore_intensity(sessionmaker):
+async def test_run_resume_sets_persona_active_true_and_does_not_restore_intensity(sessionmaker, clock):
     update_id = 108
     await _seed(sessionmaker, update_id=update_id, persona_active=False, intensity=2)
     bot, fake_session = _bot()
 
-    await turn.run_resume(sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=update_id)
+    await turn.run_resume(sessionmaker, bot, clock=clock, chat_id=TEST_CHAT_ID, update_id=update_id)
 
     assert fake_session.sent[0].text == turn.RESUME_REPLY_TEXT
 
@@ -639,7 +655,7 @@ async def test_run_resume_sets_persona_active_true_and_does_not_restore_intensit
     await bot.session.close()
 
 
-async def test_state_change_source_distinguishes_command_from_pause_word(sessionmaker):
+async def test_state_change_source_distinguishes_command_from_pause_word(sessionmaker, clock):
     """/out and a HARD pause word both switch the persona off, but the
     audit log must record which one did it (plan section 5's
     command|pause|system enum). Collapsing them onto one value throws
@@ -650,7 +666,7 @@ async def test_state_change_source_distinguishes_command_from_pause_word(session
 
     # /out goes through the router's call site: an explicit command.
     await turn.run_hard_pause(
-        sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=1, source="command"
+        sessionmaker, bot, clock=clock, chat_id=TEST_CHAT_ID, update_id=1, source="command"
     )
 
     async with sessionmaker() as session:
@@ -664,6 +680,7 @@ async def test_state_change_source_distinguishes_command_from_pause_word(session
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=TEST_CHAT_ID,
         update_id=2,
         user_text="пурпурный",
@@ -684,14 +701,14 @@ async def test_state_change_source_distinguishes_command_from_pause_word(session
     await bot.session.close()
 
 
-async def test_run_hard_pause_is_zero_call_and_reusable_outside_run(sessionmaker):
+async def test_run_hard_pause_is_zero_call_and_reusable_outside_run(sessionmaker, clock):
     """run_hard_pause is the function /out calls directly, with no
     prior turn.run() involvement -- exercise it exactly that way."""
     update_id = 109
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
 
-    await turn.run_hard_pause(sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=update_id)
+    await turn.run_hard_pause(sessionmaker, bot, clock=clock, chat_id=TEST_CHAT_ID, update_id=update_id)
 
     assert fake_session.sent[0].text == turn.PAUSE_REPLY_TEXT
     async with sessionmaker() as session:

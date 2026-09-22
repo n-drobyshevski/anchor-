@@ -33,7 +33,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
 from app.core import export, purge
-from app.core.spend import local_date_for
+from app.core import clock as clock_module
+from app.core.clock import Clock, SystemClock
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
 
 logger = logging.getLogger(__name__)
@@ -78,14 +79,16 @@ def is_fresh(issued_at: int, *, now: float | None = None) -> bool:
     return 0 <= now - issued_at <= CONFIRM_TTL
 
 
-async def run_export(sessionmaker, bot: Bot, *, chat_id: int, timezone: str) -> bool:
+async def run_export(
+    sessionmaker, bot: Bot, clock: Clock, *, chat_id: int, timezone: str
+) -> bool:
     """Build and send the export. Returns False if it was too large to send.
 
     Only sizes and row counts are logged (plan section 11: "Never logs
     contents"). The rows go into the file and nowhere else.
     """
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     data = export.to_bytes(payload)
     counts = export.row_counts(payload)
@@ -100,8 +103,10 @@ async def run_export(sessionmaker, bot: Bot, *, chat_id: int, timezone: str) -> 
         bot,
         chat_id,
         data,
-        export.export_filename(timezone),
-        caption=EXPORT_CAPTION.format(date=local_date_for(timezone).isoformat()),
+        export.export_filename(clock, timezone),
+        caption=EXPORT_CAPTION.format(
+            date=clock_module.local_date(clock, timezone).isoformat()
+        ),
     )
     logger.info("export sent", extra={"count": len(data), "event": "export"})
     logger.info("export row counts", extra={"count": sum(counts.values())})
@@ -112,6 +117,7 @@ async def handle_delete_callback(
     sessionmaker,
     bot: Bot,
     settings: Settings,
+    clock: Clock | None = None,
     *,
     callback_id: str,
     chat_id: int,
@@ -119,6 +125,7 @@ async def handle_delete_callback(
     data: str,
 ) -> None:
     """`d:yes:<epoch>` / `d:no`."""
+    clock = clock or SystemClock()
     await answer_callback(bot, callback_id)
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -139,6 +146,6 @@ async def handle_delete_callback(
         return
 
     async with sessionmaker() as session:
-        await purge.delete_everything(session, settings)
+        await purge.delete_everything(session, settings, clock)
 
     await edit_keyboard(bot, chat_id, message_id, DELETED_TEXT, None)

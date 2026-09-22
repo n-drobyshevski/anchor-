@@ -222,7 +222,7 @@ async def test_recover_leaves_freshly_locked_jobs_alone(sessionmaker):
 # --- the worker's job path (app/worker.py) ---
 
 
-async def test_process_one_job_runs_the_handler_and_completes(sessionmaker):
+async def test_process_one_job_runs_the_handler_and_completes(sessionmaker, clock):
     """The worker's job half, end to end: claim -> dispatch -> complete."""
     from app.config import Settings
     from app.core.scene import MIN_MESSAGES_FOR_SUMMARY, ensure_open_scene
@@ -233,7 +233,7 @@ async def test_process_one_job_runs_the_handler_and_completes(sessionmaker):
     async with sessionmaker() as session:
         session.add(UserState(id=1, chat_id=4242, timezone="Europe/Paris"))
         await session.commit()
-        scene_id = await ensure_open_scene(session, idle_hours=6)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=6)
         for i in range(MIN_MESSAGES_FOR_SUMMARY):
             session.add(
                 Message(
@@ -250,7 +250,7 @@ async def test_process_one_job_runs_the_handler_and_completes(sessionmaker):
         )
 
     provider = FakeLLMProvider(text="Обсуждали отчёт.")
-    processed = await process_one_job(sessionmaker, Settings(), provider)
+    processed = await process_one_job(sessionmaker, Settings(), provider, clock)
 
     assert processed is True
     async with sessionmaker() as session:
@@ -261,15 +261,15 @@ async def test_process_one_job_runs_the_handler_and_completes(sessionmaker):
     assert job.status == "done"
 
 
-async def test_process_one_job_returns_false_when_no_job_is_due(sessionmaker):
+async def test_process_one_job_returns_false_when_no_job_is_due(sessionmaker, clock):
     from app.config import Settings
     from app.worker import process_one_job
     from conftest import FakeLLMProvider
 
-    assert await process_one_job(sessionmaker, Settings(), FakeLLMProvider()) is False
+    assert await process_one_job(sessionmaker, Settings(), FakeLLMProvider(), clock) is False
 
 
-async def test_an_unknown_job_kind_fails_the_row_rather_than_vanishing(sessionmaker):
+async def test_an_unknown_job_kind_fails_the_row_rather_than_vanishing(sessionmaker, clock):
     from app.config import Settings
     from app.db.models import UserState
     from app.worker import process_one_job
@@ -280,7 +280,7 @@ async def test_an_unknown_job_kind_fails_the_row_rather_than_vanishing(sessionma
         await session.commit()
         await enqueue_job(session, "not_a_real_kind", {}, dedup_key="bogus:1")
 
-    assert await process_one_job(sessionmaker, Settings(), FakeLLMProvider()) is True
+    assert await process_one_job(sessionmaker, Settings(), FakeLLMProvider(), clock) is True
 
     async with sessionmaker() as session:
         job = (await session.execute(select(Job))).scalar_one()
@@ -289,10 +289,11 @@ async def test_an_unknown_job_kind_fails_the_row_rather_than_vanishing(sessionma
     assert job.error == "ValueError"
 
 
-async def test_a_deferred_job_is_rescheduled_not_failed(sessionmaker):
+async def test_a_deferred_job_is_rescheduled_not_failed(sessionmaker, clock):
     """Over the cap, the worker must defer rather than burn a retry."""
     from app.config import Settings
-    from app.core.scene import MIN_MESSAGES_FOR_SUMMARY, ensure_open_scene, next_local_midnight
+    from app.core.clock import next_local_midnight
+    from app.core.scene import MIN_MESSAGES_FOR_SUMMARY, ensure_open_scene
     from app.db.models import Message, UserState
     from app.worker import process_one_job
     from conftest import FakeLLMProvider
@@ -300,7 +301,7 @@ async def test_a_deferred_job_is_rescheduled_not_failed(sessionmaker):
     async with sessionmaker() as session:
         session.add(UserState(id=1, chat_id=4242, timezone="Europe/Paris"))
         await session.commit()
-        scene_id = await ensure_open_scene(session, idle_hours=6)
+        scene_id = await ensure_open_scene(session, clock, idle_hours=6)
         for i in range(MIN_MESSAGES_FOR_SUMMARY):
             session.add(
                 Message(role="user", content=f"реплика {i}", ooc=False, kind="chat",
@@ -312,7 +313,7 @@ async def test_a_deferred_job_is_rescheduled_not_failed(sessionmaker):
         )
 
     provider = FakeLLMProvider(text="сводка")
-    assert await process_one_job(sessionmaker, Settings(DAILY_USD_CAP=0.0), provider) is True
+    assert await process_one_job(sessionmaker, Settings(DAILY_USD_CAP=0.0), provider, clock) is True
 
     async with sessionmaker() as session:
         job = (await session.execute(select(Job))).scalar_one()
@@ -321,4 +322,4 @@ async def test_a_deferred_job_is_rescheduled_not_failed(sessionmaker):
     assert job.status == "pending"
     assert job.attempts == 0
     assert job.error is None
-    assert abs((job.run_after - next_local_midnight("Europe/Paris")).total_seconds()) < 1
+    assert abs((job.run_after - next_local_midnight(clock, "Europe/Paris")).total_seconds()) < 1

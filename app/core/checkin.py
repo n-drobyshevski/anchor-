@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import datetime
 import logging
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.spend import local_date_for
+from app.core import clock as clock_module
+from app.core.clock import Clock
 from app.core.state import STATE_ID, get_state, update_state
 from app.db.models import Checkin, UserState
 
@@ -44,11 +44,11 @@ async def get_for_date(session: AsyncSession, local_date: datetime.date) -> Chec
     return result.scalars().first()
 
 
-async def today(session: AsyncSession, timezone: str) -> Checkin | None:
-    return await get_for_date(session, local_date_for(timezone))
+async def today(session: AsyncSession, clock: Clock, timezone: str) -> Checkin | None:
+    return await get_for_date(session, clock_module.local_date(clock, timezone))
 
 
-async def start(session: AsyncSession, timezone: str) -> Checkin:
+async def start(session: AsyncSession, clock: Clock, timezone: str) -> Checkin:
     """Upsert today's row with the answer fields cleared.
 
     Plan section 9: "A second check-in the same day overwrites the
@@ -56,7 +56,7 @@ async def start(session: AsyncSession, timezone: str) -> Checkin:
     otherwise a restarted check-in would keep yesterday's answers for
     any step the user does not reach this time.
     """
-    local_date = local_date_for(timezone)
+    local_date = clock_module.local_date(clock, timezone)
     stmt = (
         pg_insert(Checkin)
         .values(local_date=local_date)
@@ -114,10 +114,12 @@ async def set_note(session: AsyncSession, checkin_id: int, note: str | None) -> 
 def _local_date_of(moment: datetime.datetime | None, timezone: str) -> datetime.date | None:
     if moment is None:
         return None
-    return moment.astimezone(ZoneInfo(timezone)).date()
+    return clock_module.local_date_of(moment, timezone)
 
 
-async def finish(session: AsyncSession, timezone: str) -> tuple[Checkin | None, int]:
+async def finish(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> tuple[Checkin | None, int]:
     """Apply the streak and stamp last_checkin_at. Returns (row, streak).
 
     Plan section 9's three cases, decided from `last_checkin_at` -- which
@@ -132,7 +134,7 @@ async def finish(session: AsyncSession, timezone: str) -> tuple[Checkin | None, 
     two-day gap lands on 1 as well, which is the reset section 9 asks
     for.
     """
-    local_date = local_date_for(timezone)
+    local_date = clock_module.local_date(clock, timezone)
     row = await get_for_date(session, local_date)
     if row is None:
         return None, 0
@@ -148,7 +150,7 @@ async def finish(session: AsyncSession, timezone: str) -> tuple[Checkin | None, 
 
     if streak != previous:
         await update_state(session, "streak", streak, "command")
-    await update_state(session, "last_checkin_at", datetime.datetime.now(datetime.timezone.utc), "command")
+    await update_state(session, "last_checkin_at", clock.now_utc(), "command")
     await clear_awaiting(session)
 
     logger.info("checkin finished", extra={"checkin_id": row.id, "count": streak})
@@ -195,7 +197,9 @@ async def clear_awaiting(session: AsyncSession) -> None:
     await update_state(session, "awaiting_ref", None, "command")
 
 
-async def pending_note_checkin(session: AsyncSession, timezone: str) -> Checkin | None:
+async def pending_note_checkin(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> Checkin | None:
     """The check-in whose note step is open, or None.
 
     Returns None -- and clears the flag -- when the pending check-in is
@@ -210,7 +214,7 @@ async def pending_note_checkin(session: AsyncSession, timezone: str) -> Checkin 
         return None
 
     row = await session.get(Checkin, state.awaiting_ref)
-    if row is None or row.local_date != local_date_for(timezone):
+    if row is None or row.local_date != clock_module.local_date(clock, timezone):
         logger.info("stale checkin note step cleared", extra={"checkin_id": state.awaiting_ref})
         await clear_awaiting(session)
         return None

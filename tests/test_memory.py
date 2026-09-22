@@ -231,12 +231,12 @@ async def test_superseded_pins_are_not_pinned_memories(sessionmaker):
 # --- mark_used ---
 
 
-async def test_mark_used_sets_timestamp_and_increments(sessionmaker):
+async def test_mark_used_sets_timestamp_and_increments(sessionmaker, clock):
     async with sessionmaker() as session:
         row = await _write(session, txt="факт")
         assert row.last_used_at is None and row.use_count == 0
 
-        await memory.mark_used(session, [row.id])
+        await memory.mark_used(session, clock, [row.id])
         await session.commit()
         await session.refresh(row)
 
@@ -244,9 +244,9 @@ async def test_mark_used_sets_timestamp_and_increments(sessionmaker):
     assert row.use_count == 1
 
 
-async def test_mark_used_with_no_ids_is_a_no_op(sessionmaker):
+async def test_mark_used_with_no_ids_is_a_no_op(sessionmaker, clock):
     async with sessionmaker() as session:
-        await memory.mark_used(session, [])
+        await memory.mark_used(session, clock, [])
 
 
 # --- write: dedupe and supersede ---
@@ -492,7 +492,7 @@ async def test_take_pending_consumes_the_row(sessionmaker):
         assert await memory.take_pending(session, pending.id) is None
 
 
-async def test_purge_pending_drops_only_stale_rows(sessionmaker):
+async def test_purge_pending_drops_only_stale_rows(sessionmaker, clock):
     async with sessionmaker() as session:
         fresh = await memory.add_pending(session, "свежий")
         stale = await memory.add_pending(session, "старый")
@@ -502,7 +502,7 @@ async def test_purge_pending_drops_only_stale_rows(sessionmaker):
         )
         await session.commit()
 
-        assert await memory.purge_pending_older_than(session, datetime.timedelta(days=1)) == 1
+        assert await memory.purge_pending_older_than(session, clock, datetime.timedelta(days=1)) == 1
         assert await memory.take_pending(session, fresh.id) == "свежий"
 
 
@@ -515,12 +515,13 @@ async def _persona(tmp_path):
     return path
 
 
-async def test_prompt_section_order_matches_plan_section_7(sessionmaker, tmp_path):
+async def test_prompt_section_order_matches_plan_section_7(sessionmaker, tmp_path, clock):
     from app.core.prompt import build_messages
 
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -545,7 +546,7 @@ async def test_prompt_section_order_matches_plan_section_7(sessionmaker, tmp_pat
     assert messages[-1].content == "новое сообщение"
 
 
-async def test_empty_sections_are_omitted_not_emitted_as_bare_headers(sessionmaker, tmp_path):
+async def test_empty_sections_are_omitted_not_emitted_as_bare_headers(sessionmaker, tmp_path, clock):
     """An empty heading is noise to the model and churns the byte-stable
     prefix the ordering exists to protect."""
     from app.core.prompt import build_messages
@@ -553,6 +554,7 @@ async def test_empty_sections_are_omitted_not_emitted_as_bare_headers(sessionmak
     async with sessionmaker() as session:
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -571,7 +573,7 @@ async def test_empty_sections_are_omitted_not_emitted_as_bare_headers(sessionmak
     assert [m.role for m in messages] == ["system", "system", "user"]
 
 
-async def test_memory_ids_never_reach_the_chat_prompt(sessionmaker, tmp_path):
+async def test_memory_ids_never_reach_the_chat_prompt(sessionmaker, tmp_path, clock):
     """Plan section 7: "Memory IDs are never shown to the chat model.
     Only the extractor sees IDs." build_messages takes strings, not
     rows, which is what makes this structural rather than incidental."""
@@ -584,6 +586,7 @@ async def test_memory_ids_never_reach_the_chat_prompt(sessionmaker, tmp_path):
         ]
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -607,7 +610,7 @@ async def test_memory_ids_never_reach_the_chat_prompt(sessionmaker, tmp_path):
     assert "Memory" not in inspect.getsource(prompt_module)
 
 
-async def test_persona_transcript_excludes_welfare_and_canned_rows(sessionmaker, tmp_path):
+async def test_persona_transcript_excludes_welfare_and_canned_rows(sessionmaker, tmp_path, clock):
     """Plan section 7 item 4. Welfare rows are excluded by kind here and
     by ooc elsewhere -- one filter failing must not be enough to leak a
     welfare exchange into the persona's context."""
@@ -628,6 +631,7 @@ async def test_persona_transcript_excludes_welfare_and_canned_rows(sessionmaker,
 
         messages = await build_messages(
             session,
+            clock=clock,
             timezone="Europe/Paris",
             intensity=3,
             user_text="новое сообщение",
@@ -705,7 +709,7 @@ async def _turn_setup(sessionmaker, update_id: int):
     return Bot(token="123456:TESTTOKEN", session=fake), fake
 
 
-async def test_a_delivered_turn_marks_its_injected_memories_used(sessionmaker):
+async def test_a_delivered_turn_marks_its_injected_memories_used(sessionmaker, clock):
     from app.config import Settings
     from app.core import turn
     from conftest import FakeLLMProvider
@@ -723,6 +727,7 @@ async def test_a_delivered_turn_marks_its_injected_memories_used(sessionmaker):
         bot,
         Settings(),
         FakeLLMProvider(text="Принято."),
+        clock=clock,
         chat_id=4242,
         update_id=update_id,
         user_text="я сегодня думал про чай без сахара и про Лилль",
@@ -736,7 +741,7 @@ async def test_a_delivered_turn_marks_its_injected_memories_used(sessionmaker):
             assert row.last_used_at is not None
 
 
-async def test_a_failed_generation_does_not_mark_memories_used(sessionmaker):
+async def test_a_failed_generation_does_not_mark_memories_used(sessionmaker, clock):
     """Section 6 says "after the turn is delivered". A model failure is
     not a delivery."""
     from app.config import Settings
@@ -754,6 +759,7 @@ async def test_a_failed_generation_does_not_mark_memories_used(sessionmaker):
         bot,
         Settings(),
         FakeLLMProvider(raises=[LLMError("boom")]),
+        clock=clock,
         chat_id=4242,
         update_id=update_id,
         user_text="я сегодня думал про Лилль",
@@ -765,7 +771,7 @@ async def test_a_failed_generation_does_not_mark_memories_used(sessionmaker):
     assert row.last_used_at is None
 
 
-async def test_a_failed_send_does_not_mark_memories_used(sessionmaker):
+async def test_a_failed_send_does_not_mark_memories_used(sessionmaker, clock):
     """mark_used sits downstream of send_reply, so a send that raises
     never reaches it."""
     from app.config import Settings
@@ -791,6 +797,7 @@ async def test_a_failed_send_does_not_mark_memories_used(sessionmaker):
                 bot,
                 Settings(),
                 FakeLLMProvider(text="Принято."),
+                clock=clock,
                 chat_id=4242,
                 update_id=update_id,
                 user_text="я сегодня думал про Лилль",
@@ -804,7 +811,7 @@ async def test_a_failed_send_does_not_mark_memories_used(sessionmaker):
     assert row.last_used_at is None
 
 
-async def test_a_replayed_delivered_turn_does_not_double_increment(sessionmaker):
+async def test_a_replayed_delivered_turn_does_not_double_increment(sessionmaker, clock):
     """A replay returns at step 2 without rebuilding the prompt, so the
     injected ids do not exist on that path and mark_used cannot run
     twice for one update_id."""
@@ -824,6 +831,7 @@ async def test_a_replayed_delivered_turn_does_not_double_increment(sessionmaker)
             bot,
             Settings(),
             provider,
+            clock=clock,
             chat_id=4242,
             update_id=update_id,
             user_text="я сегодня думал про Лилль",
@@ -835,7 +843,7 @@ async def test_a_replayed_delivered_turn_does_not_double_increment(sessionmaker)
     assert row.use_count == 1, "nor increment use_count again"
 
 
-async def test_a_neutral_turn_does_no_memory_work(sessionmaker):
+async def test_a_neutral_turn_does_no_memory_work(sessionmaker, clock):
     """Retrieval sits inside the persona branch, so neutral mode neither
     injects nor marks anything."""
     from app.config import Settings
@@ -861,6 +869,7 @@ async def test_a_neutral_turn_does_no_memory_work(sessionmaker):
         bot,
         Settings(),
         provider,
+        clock=clock,
         chat_id=4242,
         update_id=update_id,
         user_text="я сегодня думал про Лилль",

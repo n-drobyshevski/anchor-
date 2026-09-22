@@ -107,10 +107,10 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
 # --- contents ---
 
 
-async def test_export_contains_all_nine_tables_with_rows(sessionmaker):
+async def test_export_contains_all_nine_tables_with_rows(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     expected = {m.__tablename__ for m in export.EXPORTED_MODELS}
     assert set(payload["tables"]) == expected
@@ -119,33 +119,33 @@ async def test_export_contains_all_nine_tables_with_rows(sessionmaker):
         assert rows, f"{name} exported empty despite being seeded"
 
 
-async def test_export_omits_the_plumbing_tables(sessionmaker):
+async def test_export_omits_the_plumbing_tables(sessionmaker, clock):
     """telegram_update, job and pending_memory are transport and queue;
     their only real content is message text `messages` already carries."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     for name in ("telegram_update", "job", "pending_memory", "persona_version"):
         assert name not in payload["tables"]
 
 
-async def test_the_bytes_are_valid_json_and_round_trip(sessionmaker):
+async def test_the_bytes_are_valid_json_and_round_trip(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
     assert set(parsed["tables"]) == set(payload["tables"])
     assert parsed["tables"]["memory"][0]["text"] == SECRET_TEXT
 
 
-async def test_money_survives_exactly_as_a_string(sessionmaker):
+async def test_money_survives_exactly_as_a_string(sessionmaker, clock):
     """usd_cost is Numeric(10, 6). Through a float it would quietly stop
     being the number that was stored."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
     parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
 
     value = parsed["tables"]["spend_ledger"][0]["usd_cost"]
@@ -153,10 +153,10 @@ async def test_money_survives_exactly_as_a_string(sessionmaker):
     assert decimal.Decimal(value) == decimal.Decimal("0.000108")
 
 
-async def test_datetimes_and_dates_are_iso(sessionmaker):
+async def test_datetimes_and_dates_are_iso(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
     parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
 
     created = parsed["tables"]["memory"][0]["created_at"]
@@ -167,30 +167,30 @@ async def test_datetimes_and_dates_are_iso(sessionmaker):
     assert datetime.date.fromisoformat(local_date) == datetime.date.today()
 
 
-async def test_cyrillic_is_readable_not_escaped(sessionmaker):
+async def test_cyrillic_is_readable_not_escaped(sessionmaker, clock):
     """The file is meant to be opened and read, not only re-imported."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     raw = export.to_bytes(payload).decode("utf-8")
     assert SECRET_TEXT in raw
     assert "\\u0436" not in raw
 
 
-async def test_an_empty_database_still_exports_every_table(sessionmaker):
+async def test_an_empty_database_still_exports_every_table(sessionmaker, clock):
     async with sessionmaker() as session:
-        payload = await export.build_export(session)
+        payload = await export.build_export(session, clock)
 
     assert set(payload["tables"]) == {m.__tablename__ for m in export.EXPORTED_MODELS}
     assert all(rows == [] for rows in payload["tables"].values())
 
 
-async def test_filename_uses_the_local_date():
+async def test_filename_uses_the_local_date(clock):
     expected = datetime.datetime.now(
         __import__("zoneinfo").ZoneInfo(TIMEZONE)
     ).strftime("%Y%m%d")
-    assert export.export_filename(TIMEZONE) == f"anchor-export-{expected}.json"
+    assert export.export_filename(clock, TIMEZONE) == f"anchor-export-{expected}.json"
 
 
 # --- the command ---

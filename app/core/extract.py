@@ -38,8 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core import memory, proposal, redact
 from app.core.prompt import PERSONA_TRANSCRIPT_KINDS
-from app.core.scene import Deferred, next_local_midnight
-from app.core.spend import check_cap, compute_cost, local_date_for
+from app.core import clock as clock_module
+from app.core.clock import Clock
+from app.core.scene import Deferred
+from app.core.spend import check_cap, compute_cost
 from app.db.models import Journal, Memory, Message, SpendLedger, StateChange
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
 
@@ -306,6 +308,7 @@ class ExtractOutcome:
 async def _apply(
     session: AsyncSession,
     settings: Settings,
+    clock: Clock,
     result: dict,
     *,
     local_date,
@@ -350,7 +353,7 @@ async def _apply(
         if item["kind"] == proposal.RULE:
             # Never auto-written at any confidence (plan section 8).
             created, expired = await proposal.create(
-                session, field=proposal.RULE, value=item["text"], reason=None
+                session, clock, field=proposal.RULE, value=item["text"], reason=None
             )
             outcome.created.append(created.id)
             if expired is not None:
@@ -386,7 +389,7 @@ async def _apply(
             logger.info("proposal rejected by redaction", extra={"event": secret})
             continue
         created, expired = await proposal.create(
-            session, field=item["field"], value=item["value"], reason=item["reason"]
+            session, clock, field=item["field"], value=item["value"], reason=item["reason"]
         )
         outcome.created.append(created.id)
         if expired is not None:
@@ -402,6 +405,7 @@ async def run_extract(
     *,
     update_id: int,
     memory_ids: list[int],
+    clock: Clock,
     timezone: str,
     intensity: int,
     focus_on: bool,
@@ -414,7 +418,7 @@ async def run_extract(
     describes will have aged out of the transcript by tomorrow -- so it
     is dropped rather than deferred.
     """
-    if await check_cap(session, settings, timezone):
+    if await check_cap(session, settings, clock, timezone):
         logger.info("extract skipped, daily cap reached", extra={"update_id": update_id})
         return ExtractOutcome()
 
@@ -456,7 +460,7 @@ async def run_extract(
     usd_cost = compute_cost(response.usage, settings, model=response.model)
     session.add(
         SpendLedger(
-            local_date=local_date_for(timezone),
+            local_date=clock_module.local_date(clock, timezone),
             category=EXTRACT_CATEGORY,
             model=response.model,
             tokens_in=response.usage.input_tokens,
@@ -473,7 +477,13 @@ async def run_extract(
         return ExtractOutcome()
 
     result = validate(payload, offered_ids=offered_ids)
-    outcome = await _apply(session, settings, result, local_date=local_date_for(timezone))
+    outcome = await _apply(
+        session,
+        settings,
+        clock,
+        result,
+        local_date=clock_module.local_date(clock, timezone),
+    )
     logger.info(
         "extract applied",
         extra={
@@ -497,7 +507,6 @@ __all__ = [
     "ExtractOutcome",
     "Deferred",
     "build_input",
-    "next_local_midnight",
     "parse_json",
     "run_extract",
     "validate",
