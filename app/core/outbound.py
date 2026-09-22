@@ -26,6 +26,7 @@ Three responsibilities:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import logging
 
@@ -272,3 +273,40 @@ async def cancel_outbound(session: AsyncSession, clock: Clock) -> int:
     if cancelled:
         logger.info("outbound cancelled", extra={"count": len(cancelled)})
     return len(cancelled)
+
+
+# --- /state (plan section 10) ------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class StateSummary:
+    """Everything /state shows about the proactive side.
+
+    Assembled in one place so the command handler does no querying of
+    its own -- the same split the gate has, for the same reason.
+    """
+
+    sent_today: int
+    max_per_day: int
+    ignored_in_row: int
+    quiet_until: datetime.datetime | None
+    next_kind: str | None
+    next_planned_for: datetime.datetime | None
+    last_skip_reason: str | None
+
+
+async def load_state_summary(
+    session: AsyncSession, clock: Clock, settings: Settings, state: UserState
+) -> StateSummary:
+    """One round of queries for the whole /state outbound block."""
+    today = clock_module.local_date(clock, state.timezone)
+    upcoming = await next_planned(session)
+    return StateSummary(
+        sent_today=await sent_today(session, today),
+        max_per_day=settings.MAX_UNSOLICITED_PER_DAY,
+        ignored_in_row=state.ignored_in_row,
+        quiet_until=state.quiet_until,
+        next_kind=upcoming.kind if upcoming is not None else None,
+        next_planned_for=upcoming.planned_for if upcoming is not None else None,
+        last_skip_reason=await last_skip_reason(session, today),
+    )

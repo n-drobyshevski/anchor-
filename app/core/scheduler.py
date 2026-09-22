@@ -27,9 +27,14 @@ the highest-priority one whose *timing* is due:
 `evening_nag > morning > silence`. If that one's gate refuses, nothing
 is planned this tick and the lower ones wait -- plan section 6 is
 explicit that the others retry on later heartbeats and usually hit
-`min_gap` or the budget, "which is intended". In practice the two
-fixed intents' windows never overlap, so the rule mostly decides
-whether a silence nudge may be considered at all this minute.
+`min_gap` or the budget, "which is intended".
+
+In practice the two fixed intents' windows never overlap, so the rule
+mostly decides whether the silence nudge may be considered this
+minute. The nudge has no time window at all -- it is evaluated on
+every heartbeat and gated entirely on elapsed silence (48h with focus
+on) -- so without the priority rule it would race the morning message
+for the same minute on a day the user has been quiet.
 
 **A failed planning gate inserts nothing.** Not a `skipped` row: the
 next heartbeat tries again, so lifting `/quiet` at 10:00 still lets the
@@ -120,27 +125,48 @@ def _is_due(
     return target <= now < grace_end
 
 
+def _ceiling(
+    kind: Kind, settings: Settings, clock: Clock, timezone: str
+) -> datetime.datetime:
+    """The latest instant a send may be scheduled for.
+
+    Two limits, whichever is tighter:
+
+    - the kind's own grace window, for the fixed intents;
+    - the start of quiet hours, for **every** kind.
+
+    Quiet hours bound everything because planning only happens outside
+    them (gate row 4), so a plan made at 22:25 is legitimate -- but its
+    jitter must not carry the send across the boundary, where the
+    send-time gate would refuse it.
+    """
+    today = clock_module.local_date(clock, timezone)
+    ceiling = clock_module.combine_local(today, settings.QUIET_START, timezone)
+
+    window = _window(kind, settings, clock, timezone)
+    if window is not None:
+        ceiling = min(ceiling, window[1])
+    return ceiling
+
+
 def _planned_for(
     kind: Kind, settings: Settings, clock: Clock, timezone: str
 ) -> datetime.datetime:
-    """When to actually send: now plus jitter, clamped inside the window.
+    """When to actually send: now plus jitter, clamped to the ceiling.
 
     The jitter exists so Anchor does not arrive at exactly 09:00:00
     every single day. The clamp exists because without it a plan made
     at 22:29 with 15 minutes of jitter would be scheduled for 22:44 --
     inside quiet hours, where the send-time gate would refuse it. The
-    message would be silently skipped rather than sent late, which is
-    the worse of the two outcomes.
+    message would be silently skipped rather than sent late, and late
+    is the better of the two.
     """
     now = clock.now_utc()
     jitter_seconds = random.randint(0, max(0, settings.JITTER_MAX_MIN) * 60)
     planned_for = now + datetime.timedelta(seconds=jitter_seconds)
 
-    window = _window(kind, settings, clock, timezone)
-    if window is not None:
-        latest = window[1] - datetime.timedelta(seconds=1)
-        planned_for = min(planned_for, max(now, latest))
-    return planned_for
+    latest = _ceiling(kind, settings, clock, timezone) - datetime.timedelta(seconds=1)
+    return min(planned_for, max(now, latest))
 
 
 async def _already_exists(
@@ -231,10 +257,6 @@ async def heartbeat(
     config = config_from_settings(settings)
 
     for kind in PRIORITY:
-        if kind == SILENCE:
-            # TODO(phase-3c): the silence nudge ships with /quiet and
-            # the back-off controls. Until then the loop stops here.
-            continue
         if not _is_due(kind, settings, clock, timezone):
             continue
         if await _already_exists(session, kind, today):

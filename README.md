@@ -1,4 +1,4 @@
-# Anchor — Milestone 3b (Anchor speaks first)
+# Anchor — Milestone 3c (the controls)
 
 A private, single-user Telegram bot.
 
@@ -209,6 +209,71 @@ when no check-in happened that day.
   answer is 22:44 — inside quiet hours, where the send-time gate would
   refuse it, so the message would be silently dropped rather than sent
   slightly late. The clamp picks "late" over "never".
+
+Milestone 3c is the half that stops a bot which can now speak first
+from becoming a bot that will not stop.
+
+- **The silence nudge.** After 48 hours of quiet with focus on, one
+  calm question. Unlike the two fixed intents it has no time window —
+  it is evaluated on every heartbeat and gated entirely on elapsed
+  silence. That is what the priority rule is really for: without
+  `evening_nag > morning > silence`, the nudge would race the morning
+  message for the same 09:00 tick on a day the user has been quiet.
+
+  Dedup is `(kind, local_date, bucket)`, which on its own would allow a
+  fresh nudge every midnight. The 48-hour rule is what actually keeps
+  them apart.
+
+- **`/quiet <N>m|h|d`** and **`/quiet off`**. The parser
+  (`app/core/quiet.py`) is pure, so its grammar is a table. It accepts
+  Russian suffixes (`30м`, `4ч`, `2д`) alongside the Latin ones —
+  every other string in this bot is Russian and a Cyrillic keyboard
+  makes those the natural thing to type — and reads a bare number as
+  minutes. Over `QUIET_MAX_DAYS` is **clamped, not rejected**:
+  `/quiet 30d` means "not for a long time", and answering with a usage
+  error would leave the bot talking, which is the opposite of what was
+  asked. The reply states the real end time, so the clamp is visible.
+
+  `/quiet` both **blocks and cancels**. The gate's `quiet_cmd` check
+  stops new planning; `cancel_outbound` revokes the message already
+  sitting in the queue with its jitter running. Either alone leaves a
+  hole, and the hole is the case that matters — `/quiet` at 08:55 when
+  the morning message is planned for 09:07.
+
+- **`/tz <IANA>`**, validated by actually constructing the `ZoneInfo`
+  rather than by matching a pattern. The tz database is the only
+  authority on what is a real zone, and an unknown-but-plausible name
+  is exactly the input that would otherwise be accepted and then crash
+  every local-time computation afterwards. Changing it moves the fixed
+  intents with it — there is a test for `/tz America/New_York` doing
+  precisely that.
+
+- **The back-off and the welfare cooldown** were already rows in the
+  gate's truth table since 3a. What 3c adds is end-to-end proof that
+  the heartbeat honours them: `test_three_unanswered_messages_then_
+  silence_then_recovery` walks the whole loop a user would actually
+  experience — three proactive messages over three days with no reply,
+  then nothing at all, not even a fixed intent, then one word from the
+  user and the bot is back.
+
+- **`/state` grew three lines**: quiet-until, unanswered-in-a-row,
+  sent-today against the cap, the next planned message with its local
+  time, and today's last refusal reason. The reason code is the whole
+  point of the gate recording one — "why didn't it write?" should be
+  answerable without reading the logs.
+
+### The jitter ceiling is quiet hours, for every kind
+
+3b clamped the evening nag's jitter to `QUIET_START`. 3c generalises
+that to every kind, because the silence nudge has no grace window of
+its own and could be planned at 22:25 with fifteen minutes of jitter.
+
+Planning only happens outside quiet hours — that is gate row 4 — so a
+plan made at 22:25 is legitimate. What must not happen is its jitter
+carrying the send across the boundary, where the send-time gate would
+refuse it and mark the row `skipped`. Since `_already_exists` counts
+*any* status, that would burn the day's nudge entirely. The ceiling
+picks "slightly early" over "never".
 
 ### Generation happens once; sending may repeat
 

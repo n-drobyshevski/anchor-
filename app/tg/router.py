@@ -46,6 +46,7 @@ pool) is shared across every turn.
 
 from __future__ import annotations
 
+
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -60,6 +61,10 @@ from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import memory as memory_core
 from app.core import proposal as proposal_core
+from app.core.outbound import cancel_outbound, load_state_summary
+from app.core.quiet import OFF as QUIET_OFF
+from app.core.quiet import clamp as clamp_quiet
+from app.core.quiet import parse as parse_quiet
 from app.core.spend import today_by_category, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
@@ -91,9 +96,29 @@ BOT_COMMANDS = [
     BotCommand(command="checkin", description="Чек-ин за день"),
     BotCommand(command="due", description="Главное действие"),
     BotCommand(command="focus", description="Фокус вкл/выкл"),
+    BotCommand(command="quiet", description="Тишина на время"),
+    BotCommand(command="tz", description="Часовой пояс"),
     BotCommand(command="export", description="Выгрузить все данные"),
     BotCommand(command="delete", description="Удалить все данные"),
 ]
+
+QUIET_SET = "Тихо до {until}."
+QUIET_OFF_REPLY = "Снова на связи."
+QUIET_USAGE = "Сколько? /quiet 2h, /quiet 30m, /quiet 1d или /quiet off."
+QUIET_CLAMPED = "Тихо до {until} — дольше {days} дн. подряд не ставлю."
+
+TZ_SET = "Часовой пояс: {tz}. Сейчас у тебя {time}."
+TZ_UNKNOWN = "Не знаю такой пояс. Пример: Europe/Paris."
+TZ_USAGE = "Какой пояс? Пример: /tz Europe/Paris."
+
+# /state's outbound block (plan section 10).
+OUTBOUND_KIND_LABELS = {
+    "morning": "утро",
+    "evening_nag": "вечер",
+    "silence": "тишина",
+    "tick": "тик",
+}
+NOTHING = "—"
 
 DUE_CLEARED = "Главное действие снято."
 DUE_SET = "Главное действие: «{text}»."
@@ -107,8 +132,46 @@ async def register_commands(bot) -> None:
     await bot.set_my_commands(BOT_COMMANDS)
 
 
+def _format_outbound(summary, tz: ZoneInfo, now_utc) -> list[str]:
+    """/state's three proactive lines (plan section 10).
+
+    Kept beside _format_state rather than inside it because it is the
+    one block whose absence is meaningful: before 3b there was nothing
+    to say, and a summary of None still renders, as three lines of
+    "nothing yet", rather than silently disappearing.
+    """
+    if summary is None:
+        return []
+
+    if summary.quiet_until is not None and summary.quiet_until > now_utc:
+        quiet = summary.quiet_until.astimezone(tz).strftime("%d.%m %H:%M")
+    else:
+        quiet = NOTHING
+
+    if summary.next_kind is None:
+        upcoming = NOTHING
+    else:
+        label = OUTBOUND_KIND_LABELS.get(summary.next_kind, summary.next_kind)
+        when = summary.next_planned_for.astimezone(tz).strftime("%H:%M")
+        upcoming = f"{label} в {when}"
+
+    return [
+        f"Тихо до: {quiet} · Без ответа подряд: {summary.ignored_in_row}",
+        f"Сам написал сегодня: {summary.sent_today} / {summary.max_per_day}",
+        f"Следующее: {upcoming} · Последний отказ: "
+        f"{summary.last_skip_reason or NOTHING}",
+    ]
+
+
 def _format_state(
-    user_state, spend, settings: Settings, clock: Clock, *, by_category=None, memories=0
+    user_state,
+    spend,
+    settings: Settings,
+    clock: Clock,
+    *,
+    by_category=None,
+    memories=0,
+    outbound=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -146,6 +209,7 @@ def _format_state(
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
         "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
         "Главное действие: {due}\n"
+        "{outbound}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -157,6 +221,9 @@ def _format_state(
         streak=user_state.streak,
         last_checkin=last_checkin,
         due=due,
+        outbound="".join(
+            line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
+        ),
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -208,6 +275,7 @@ def build_router(
                 session, clock, user_state.timezone
             )
             memories = await memory_core.count_active(session)
+            outbound = await load_state_summary(session, clock, settings, user_state)
         await message.answer(
             _format_state(
                 user_state,
@@ -216,6 +284,7 @@ def build_router(
                 clock,
                 by_category=by_category,
                 memories=memories,
+                outbound=outbound,
             )
         )
 
@@ -404,6 +473,76 @@ def build_router(
         )
 
     # --- 2f: data control (plan section 11) ---
+
+    @router.message(Command("quiet"))
+    async def quiet(message: Message, event_update: Update, command: CommandObject) -> None:
+        """/quiet <N>m|h|d and /quiet off (plan section 10).
+
+        Setting quiet cancels what is already planned as well as
+        blocking what would be: the gate's `quiet_cmd` check stops new
+        planning, and cancel_outbound revokes the message that may
+        already be sitting in the queue with its jitter running. Either
+        alone would leave a hole.
+        """
+        parsed = parse_quiet(command.args or "")
+
+        if parsed is None:
+            await _reply_once(message, event_update.update_id, QUIET_USAGE)
+            return
+
+        if parsed == QUIET_OFF:
+            async with sessionmaker() as session:
+                await update_state(session, "quiet_until", None, "command")
+            await _reply_once(message, event_update.update_id, QUIET_OFF_REPLY)
+            return
+
+        capped = clamp_quiet(parsed, settings.QUIET_MAX_DAYS)
+        until = clock.now_utc() + capped
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            await update_state(session, "quiet_until", until, "command")
+            await cancel_outbound(session, clock)
+
+        local = until.astimezone(ZoneInfo(user_state.timezone)).strftime("%d.%m %H:%M")
+        template = QUIET_CLAMPED if capped < parsed else QUIET_SET
+        await _reply_once(
+            message,
+            event_update.update_id,
+            template.format(until=local, days=settings.QUIET_MAX_DAYS),
+        )
+
+    @router.message(Command("tz"))
+    async def timezone_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """/tz <IANA> (plan section 10).
+
+        Validated by actually constructing the ZoneInfo rather than by
+        matching a pattern: the tz database is the only authority on
+        what is a real zone, and an unknown-but-plausible name is
+        exactly the input that would otherwise be accepted and then
+        crash every local-time computation afterwards.
+        """
+        raw = (command.args or "").strip()
+        if not raw:
+            await _reply_once(message, event_update.update_id, TZ_USAGE)
+            return
+
+        try:
+            zone = ZoneInfo(raw)
+        except Exception:  # noqa: BLE001 - ZoneInfoNotFoundError, ValueError, OSError
+            await _reply_once(message, event_update.update_id, TZ_UNKNOWN)
+            return
+
+        async with sessionmaker() as session:
+            await update_state(session, "timezone", raw, "command")
+
+        now_there = clock.now_utc().astimezone(zone).strftime("%H:%M")
+        await _reply_once(
+            message,
+            event_update.update_id,
+            TZ_SET.format(tz=raw, time=now_there),
+        )
 
     @router.message(Command("export"))
     async def export_command(message: Message, event_update: Update) -> None:
