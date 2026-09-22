@@ -393,7 +393,8 @@ class SafetyEvent(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('welfare', 'extractor', 'tick')", name="ck_safety_event_kind"
+            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search')",
+            name="ck_safety_event_kind",
         ),
         CheckConstraint(
             "outcome in ('ok', 'parse_fail', 'timeout', 'error', 'fallback_hit')",

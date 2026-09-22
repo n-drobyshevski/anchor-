@@ -16,7 +16,7 @@ from aiogram.types import Update
 from sqlalchemy import select
 
 from app.config import Settings
-from app.core import memory, proposal
+from app.core import memory, proposal, safety_events
 from app.db.models import (
     Proposal,
     SafetyEvent,
@@ -338,3 +338,63 @@ async def test_spend_by_category_sums_per_category(sessionmaker, clock):
 
     assert totals == {"chat": decimal.Decimal("0.050000"), "summary": decimal.Decimal("0.010000")}
     assert list(totals) == ["chat", "summary"], "largest first"
+
+
+# --- the research line (4d fixes) ---------------------------------------
+
+
+async def _record(sessionmaker, clock, kind: str, outcome: str, times: int = 1) -> None:
+    for _ in range(times):
+        await safety_events.record(
+            sessionmaker, clock=clock, timezone=TIMEZONE, kind=kind, outcome=outcome
+        )
+
+
+async def test_state_has_no_research_line_before_any_research_ran(sessionmaker, clock):
+    """Unlike the welfare line: the welfare check runs on ordinary turns,
+    so zeroes there mean it has stopped. Research only runs when asked,
+    so a permanent «0 · 0» would be noise for someone who never uses it."""
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/state"))
+
+    assert "Исследования" not in fake.sent[0].text
+
+
+async def test_state_shows_the_research_line_once_there_is_something_to_show(
+    sessionmaker, clock
+):
+    """The number that matters is the failures. A distiller returning
+    unparseable JSON makes `done` jobs with no cards, which reads as a
+    quiet week of unhelpful pages until this line says otherwise."""
+    await _seed(sessionmaker, 1)
+    await _record(sessionmaker, clock, safety_events.DISTILL, "ok", times=3)
+    await _record(sessionmaker, clock, safety_events.DISTILL, safety_events.PARSE_FAIL, times=2)
+    await _record(sessionmaker, clock, safety_events.SEARCH, "ok")
+    await _record(sessionmaker, clock, safety_events.SEARCH, "error", times=4)
+
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+
+    line = next(
+        row for row in fake.sent[0].text.splitlines() if row.startswith("Исследования")
+    )
+    assert "разбор ok 3 · сбои 2" in line
+    assert "поиск ok 1 · сбои 4" in line
+
+
+async def test_the_research_line_does_not_disturb_the_welfare_line(sessionmaker, clock):
+    """Two separate rollups over the same table; neither may count the
+    other's rows."""
+    await _seed(sessionmaker, 1)
+    await _record(sessionmaker, clock, safety_events.DISTILL, safety_events.PARSE_FAIL, times=5)
+
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+
+    welfare = next(
+        row for row in fake.sent[0].text.splitlines()
+        if row.startswith("Проверка благополучия")
+    )
+    assert "ok 0 · сбои 0" in welfare

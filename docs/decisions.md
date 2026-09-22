@@ -505,6 +505,8 @@ table was added for in H2.
 **Revisit in 4c**, where `/study` adds two more distill calls per job
 and the blind spot gets proportionally larger.
 
+*(4c did not revisit it; see the post-4d entry below, which does.)*
+
 ---
 
 ## 4c — the `web` plugin is attached in exactly one function
@@ -785,3 +787,49 @@ filter you stop trusting is worse than the one that is merely narrow.
 
 The jailbreak vocabulary with one meaning stays: `DAN mode`,
 `jailbreak`, `developer mode`, «режим разработчика», `do anything now`.
+
+---
+
+## Post-4d — the `safety_event` blind spot is closed
+
+The 4b entry above promised a 4c revisit. 4c instead made the gap
+bigger — `/study` added a search plus a second distill per job — and
+this is the revisit.
+
+`ck_safety_event_kind` now admits `distill` and `search` alongside H2's
+three. The outcome vocabulary is unchanged and needed no widening: a
+distill that will not parse is `parse_fail`, exactly as it is for the
+extractor, and a search that comes back with nothing usable is `error`
+— the plugin did not do its job, which is what that outcome has always
+meant here.
+
+**Two kinds, not one.** They fail differently and for different
+reasons, and folding them together would make the one number worth
+watching unreadable.
+
+**A search that was never made records nothing.** When the budget is
+spent there is no call, and a row saying a search failed when none was
+attempted would be the same species of lie as the interrupted-job
+branch two entries up.
+
+The rollup is on `/state`, and shown only once there is something to
+show — unlike the welfare line. The welfare check runs on ordinary
+turns, so a line of zeroes there means it has stopped; research runs
+only when asked, so a permanent «0 · 0» would be noise for someone who
+never uses `/study` or `/read`.
+
+What this buys, concretely: a distiller that starts returning
+unparseable JSON produces `done` jobs with zero cards, over and over,
+which is indistinguishable from a run of genuinely unhelpful pages.
+`study_job.error_code` carried that per job and nothing aggregated it.
+Now `/state` can say the extractor is fine and the distiller has failed
+forty times this week.
+
+Recording is staged in the job's own transaction via `record_in`, the
+way `app/core/extract.py` stages its own, and never raises —
+observability that can fail the job it observes is a worse bug than the
+blindness it replaces.
+
+**This would be wrong if** the two kinds turn out to move together in
+practice, in which case one `research` kind would read better than two.
+Nothing yet suggests that; they have different providers behind them.

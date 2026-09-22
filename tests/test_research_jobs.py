@@ -26,7 +26,15 @@ from sqlalchemy import func, select
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import FrozenClock
-from app.db.models import Job, SpendLedger, StudyCard, StudyClip, StudyJob
+from app.core import safety_events
+from app.db.models import (
+    Job,
+    SafetyEvent,
+    SpendLedger,
+    StudyCard,
+    StudyClip,
+    StudyJob,
+)
 from app import worker
 from app.llm.provider import LLMResponse, LLMUsage
 from app.research import distill, errors, jobs, search
@@ -1260,3 +1268,139 @@ async def test_a_stale_failed_url_is_offered_to_search_again(sessionmaker, clock
     )
 
     assert stale not in searcher.seen[0]["recent_urls"]
+
+
+# --- the safety_event rollup (H2's table, widened for phase 4) --------
+
+
+async def _events(sessionmaker, kind: str) -> list[tuple[str, str]]:
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(SafetyEvent.kind, SafetyEvent.outcome).where(SafetyEvent.kind == kind)
+            )
+        ).all()
+    return [(k, o) for k, o in rows]
+
+
+async def test_a_distill_that_parsed_records_ok(sessionmaker, clock):
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+
+    async with sessionmaker() as session:
+        await jobs.run_research_job(
+            session, settings, FakeLLMProvider(text=_one_card(SENTENCE1)),
+            job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+
+    assert await _events(sessionmaker, "distill") == [("distill", "ok")]
+
+
+async def test_a_distill_that_would_not_parse_records_parse_fail(sessionmaker, clock):
+    """The blind spot this closes: unparseable JSON makes a `done` job
+    with zero cards, which is indistinguishable from a run of genuinely
+    unhelpful pages until something aggregates it."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, FakeLLMProvider(text="не json вовсе"),
+            job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+
+    # Still `done` with no cards -- that behaviour is plan section 7's
+    # and does not change. What changes is that the fault is now visible.
+    assert outcome.status == "done"
+    assert outcome.visible_cards == 0
+    assert await _events(sessionmaker, "distill") == [("distill", "parse_fail")]
+
+
+async def test_a_search_that_found_nothing_records_an_error(sessionmaker, clock):
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(error_code=search.NO_RESULTS, calls=2),
+        fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    assert await _events(sessionmaker, "search") == [("search", "error")]
+
+
+async def test_a_search_that_found_candidates_records_ok(sessionmaker, clock):
+    settings = _study_settings(RESEARCH_MAX_PINS=1)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a = "https://reddit.com/r/a"
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a), fetch_fn=_fetch_by_url({a: _clip(url=a)}),
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert await _events(sessionmaker, "search") == [("search", "ok")]
+    assert await _events(sessionmaker, "distill") == [("distill", "ok")]
+
+
+async def test_a_search_never_made_records_nothing(sessionmaker, clock):
+    """No call, no outcome. A row saying a search failed when none was
+    attempted would be the same lie the interrupted-job branch used to
+    tell."""
+    settings = _study_settings(RESEARCH_MAX_SEARCHES=0)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(error_code=search.NO_RESULTS, calls=0),
+        fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    assert await _events(sessionmaker, "search") == []
+
+
+async def test_the_row_carries_no_page_content(sessionmaker, clock):
+    """Plan section 12. The table records that a call happened and how it
+    ended, and nothing a page or a card said."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+
+    async with sessionmaker() as session:
+        await jobs.run_research_job(
+            session, settings, FakeLLMProvider(text=_one_card(SENTENCE1)),
+            job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+        [row] = (
+            await session.execute(select(SafetyEvent).where(SafetyEvent.kind == "distill"))
+        ).scalars().all()
+
+    assert row.model == "cydonia-fake"
+    for column in ("url", "text", "quote", "topic", "domain"):
+        assert not hasattr(row, column)
+
+
+async def test_an_observability_failure_cannot_fail_the_job(sessionmaker, clock):
+    """H2's rule, inherited: a row that could raise would be able to
+    fail the job it observes, which is worse than the blindness."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+
+    async with sessionmaker() as session:
+        await safety_events.record_in(
+            session, clock=clock, timezone=TIMEZONE,
+            kind="not-a-real-kind", outcome="ok",
+        )
+        # The bad row is staged, not raised. It will fail at flush, which
+        # is why record() exists for callers that cannot afford that --
+        # here the point is only that staging itself never raises.
+        session.expunge_all()
+        outcome = await jobs.run_research_job(
+            session, settings, FakeLLMProvider(text=_one_card(SENTENCE1)),
+            job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+    assert outcome.status == "done"

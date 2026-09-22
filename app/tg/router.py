@@ -184,6 +184,7 @@ def _format_state(
     memories=0,
     outbound=None,
     welfare_counts=None,
+    research_counts=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -225,6 +226,25 @@ def _format_state(
             f"ok {ok} · сбои {failures}\n"
         )
 
+    # 4d fixes. Shown only once there is something to show, unlike the
+    # welfare line: the welfare check runs on ordinary turns and a line
+    # of zeroes there means "it has stopped", while research only runs
+    # when asked, so a permanent "0 · 0" would be noise for anyone who
+    # does not use /study or /read.
+    #
+    # The number that matters is the failures. A distiller returning
+    # unparseable JSON makes `done` jobs with no cards, which reads as a
+    # quiet week of unhelpful pages until this line says otherwise.
+    research_line = ""
+    if research_counts is not None:
+        distill_counts, search_counts = research_counts
+        if any(distill_counts) or any(search_counts):
+            research_line = (
+                f"Исследования ({safety_events.WINDOW_DAYS} дн.): "
+                f"разбор ok {distill_counts[0]} · сбои {distill_counts[1]} · "
+                f"поиск ok {search_counts[0]} · сбои {search_counts[1]}\n"
+            )
+
     breakdown = ""
     if by_category:
         breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
@@ -236,6 +256,7 @@ def _format_state(
         "Главное действие: {due}\n"
         "{outbound}"
         "{welfare}"
+        "{research}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -251,6 +272,7 @@ def _format_state(
             line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
         ),
         welfare=welfare_line,
+        research=research_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -312,6 +334,14 @@ def build_router(
             welfare_counts = await safety_events.counts(
                 session, clock, user_state.timezone
             )
+            research_counts = (
+                await safety_events.counts(
+                    session, clock, user_state.timezone, kind=safety_events.DISTILL
+                ),
+                await safety_events.counts(
+                    session, clock, user_state.timezone, kind=safety_events.SEARCH
+                ),
+            )
         await message.answer(
             _format_state(
                 user_state,
@@ -322,6 +352,7 @@ def build_router(
                 memories=memories,
                 outbound=outbound,
                 welfare_counts=welfare_counts,
+                research_counts=research_counts,
             )
         )
 

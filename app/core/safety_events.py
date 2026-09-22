@@ -1,16 +1,18 @@
 """Recording and reading safety-model outcomes (H2).
 
-Three calls decide things the persona must not: the welfare classifier,
-the post-turn extractor and the tick decision. Each can fail in a way
+Five calls decide things the persona must not: the welfare classifier,
+the post-turn extractor, the tick decision, and -- since phase 4 -- the
+research distiller and the research search. Each can fail in a way
 that leaves no trace -- a timeout writes no spend_ledger row, an
 unparseable reply is a silent no-op -- so a check that has stopped
 working looks exactly like one with nothing to report.
 
 This module is the trace. One row per call outcome, no content ever:
 which check ran, how it ended, which model served it, when. That is
-enough to answer the only question worth asking of it -- "is the
-welfare check actually running?" -- and not enough to reconstruct
-anything the user said (plan sections 10 and 13).
+enough to answer the only question worth asking of it -- "is this
+check actually running?" -- and not enough to reconstruct anything the
+user said, or anything a fetched page said (plan sections 10 and 13,
+and phase-4 plan section 12).
 
 **Writes are best-effort, by design.** `record()` swallows its own
 failures. An observability row that could raise would be able to fail
@@ -38,7 +40,18 @@ logger = logging.getLogger(__name__)
 WELFARE = "welfare"
 EXTRACTOR = "extractor"
 TICK = "tick"
-KINDS = (WELFARE, EXTRACTOR, TICK)
+# Phase 4's two. `distill` is the call that turns a fetched page into
+# cards -- strict JSON, so `parse_fail` means exactly what it means for
+# the extractor. `search` is the `web` plugin call; it parses nothing,
+# and its failure is coming back with no usable URL at all, which is
+# `error`: the call did not do its job.
+#
+# Two kinds rather than one because they fail differently and for
+# different reasons, and folding them together would make the one
+# number worth watching unreadable.
+DISTILL = "distill"
+SEARCH = "search"
+KINDS = (WELFARE, EXTRACTOR, TICK, DISTILL, SEARCH)
 
 # The outcomes that count as a failure on /state. A `fallback_hit` is
 # deliberately neither: it is the keyword backstop doing its job, and
@@ -148,9 +161,11 @@ async def counts(
 
 
 __all__ = [
+    "DISTILL",
     "EXTRACTOR",
     "FAILURE_OUTCOMES",
     "KINDS",
+    "SEARCH",
     "TICK",
     "WELFARE",
     "WINDOW_DAYS",

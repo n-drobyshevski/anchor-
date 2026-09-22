@@ -63,6 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import safety_events
 from app.core.clock import Clock
 from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
@@ -548,6 +549,22 @@ async def _distill_into_cards(
     await session.commit()
 
     payload = distill.parse_json(response.text)
+    # H2's table, widened for phase 4. Without this a distiller that has
+    # started returning unparseable JSON produces `done` jobs with zero
+    # cards, over and over, which looks exactly like a run of genuinely
+    # unhelpful pages. Staged in this job's transaction the way
+    # app/core/extract.py stages its own, and never raising -- an
+    # observability row must not be able to fail the job it observes.
+    await safety_events.record_in(
+        session,
+        clock=clock,
+        timezone=timezone,
+        kind=safety_events.DISTILL,
+        outcome=safety_events.PARSE_FAIL if payload is None else "ok",
+        model=response.model,
+    )
+    await session.commit()
+
     distilled = distill.validate(
         payload, clip_text=clip.text, max_cards=settings.RESEARCH_CARDS_MAX
     )
@@ -823,6 +840,20 @@ async def _run_study(
     for response in outcome.responses:
         await _ledger(session, settings, clock, timezone, job, response)
     job.searches_used = outcome.calls
+    if outcome.responses:
+        # `error`, not `parse_fail`: a search parses nothing. Coming back
+        # with no usable URL after both attempts means the plugin did not
+        # do its job, which is what `error` has always meant in this
+        # table. A search that was never made (no budget left) records
+        # nothing -- there is no call to have an outcome.
+        await safety_events.record_in(
+            session,
+            clock=clock,
+            timezone=timezone,
+            kind=safety_events.SEARCH,
+            outcome="error" if not outcome.urls else "ok",
+            model=outcome.responses[-1].model,
+        )
     await session.commit()
 
     if outcome.error_code is not None or not outcome.urls:
