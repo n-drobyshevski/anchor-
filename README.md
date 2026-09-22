@@ -1,4 +1,4 @@
-# Anchor — Milestone 3e (the eval harness) · Phase 3 complete
+# Anchor — Milestone 4a (the research fetcher) · Phase 3 complete
 
 A private, single-user Telegram bot.
 
@@ -600,211 +600,75 @@ Both numbers live in `app/core/memory.py` with the measurements that
 justify them; `tests/test_memory.py` asserts ranking and separation, not
 the floats.
 
-## Hardening H2 — the safety model split
+## Milestone 4a — `/search` is gone, and the fetcher that replaces it
 
-Three calls decide things the persona must not: the welfare classifier,
-the post-turn extractor, and the tick decision. All three ran on
-`LLM_MODEL_CHEAP`, which defaults to the same Cydonia roleplay fine-tune
-as the persona itself. They now run on `LLM_MODEL_SAFETY`
-(`google/gemini-2.5-flash-lite`), chosen for schema compliance rather
-than voice. Scene summaries stay on the cheap model, because a summary
-is prose.
-
-Background spend went **down**: roughly $0.021/day to $0.009/day at
-current volumes.
-
-### Why not the cheapest nano-class model
-
-`openai/gpt-5-nano` is cheaper per token and was the first choice. Its
-live OpenRouter endpoints say it accepts **no `temperature`** — not on
-OpenAI, not on Azure. `OpenRouterProvider.complete()` always sends one,
-and `require_parameters` is already set for every `json_schema` call, so
-routing would have found zero eligible endpoints and the welfare check
-would have failed 100% of the time. Its reasoning is also mandatory,
-which is a latency risk against the 8-second `WELFARE_TIMEOUT_SECONDS`.
-Checking the endpoint list before writing the code is the only reason
-that did not ship.
-
-### The bug underneath: `none` meant two things
-
-`welfare.parse()` returned `Verdict('none', 0.0)` for unparseable output
-*and* for a genuine "nothing wrong". The caller could not tell them
-apart, so a classifier failing on every single turn looked exactly like
-a quiet week.
-
-`classify()` now returns a `Classification(verdict, response, outcome)`,
-where outcome is `ok | parse_fail | timeout | error`. Failing open is
-unchanged — that is what plan section 10 requires — but it is no longer
-silent.
-
-### The backstop
-
-When, and only when, the classifier produced nothing usable,
-`app/core/welfare_terms.py` checks the user's message and the two turns
-before it against a fixed list of self-harm and suicide terms in
-Russian, French and English. A hit is treated exactly as `level="real"`
-and reuses the existing welfare reply, buttons and persona-off path —
-the backstop decides *whether*, never *what*.
-
-It returns a bool and nothing else. There is deliberately no API that
-reveals which term matched, so no caller can log one by accident.
-
-Precision is traded away on purpose. It runs only after the model has
-already failed, so the alternative is no check at all, and the two
-errors are not symmetric: a false positive is a warm message and a
-button; a false negative is the persona pushing someone who just said
-they want to die.
-
-### `safety_event`, and why it is not a `spend_ledger` column
-
-A column was the obvious choice and it does not work.
-`turn.py::_ledger_only()` returns early when the response is `None`, so
-a classifier that **timed out writes no ledger row at all** — the very
-outcome most worth recording is the one that table structurally cannot
-hold. Going the other way is no better: a timeout, an error and a
-`fallback_hit` cost nothing, so recording them as zero-cost rows would
-pollute `today_by_category()` and the daily-cap query — and the cap is
-row 5 of the outbound gate, so noise there silences proactive messages.
-
-So: a separate table, six columns, no content ever. Both vocabularies
-are constrained in SQL (unlike `spend_ledger.category`, which is
-deliberately open because it records money already spent and a rejected
-row would lose the record), and a test pins the constants against the
-constraints.
-
-The write is best-effort at every call site. Observability that can fail
-the turn it observes is a worse bug than the blindness it replaces.
-
-`/state` gained one line:
+`/search` let the persona model reach the web in the middle of a turn.
+Phase 4 replaces it with a gated pipeline where nothing from the web
+touches the persona until you have personally approved it:
 
 ```
-Проверка благополучия (7 дн.): ok N · сбои M
+/study or /read  ->  search (URLs only)  ->  fetch (ours, SSRF-safe)
+                 ->  distill (isolated)  ->  pending cards
+                 ->  code risk rules     ->  /notes  ->  you adopt or reject
+                 ->  adopted card = memory(kind=technique)
 ```
 
-`сбои` sums `parse_fail`, `timeout` and `error`. A `fallback_hit` is
-counted as neither — it is the backstop working, and folding it into
-either column would hide the one event most worth seeing.
+4a ships the first half of the floor and none of the behaviour:
+`/search` and its three settings are deleted, `app/research/` holds the
+fetcher, and `study_job` / `study_clip` / `study_card` exist and are
+empty. `RESEARCH_ENABLED` stays `false` until 4d, and nothing calls the
+fetcher yet.
 
-### Two things found while wiring it
+### The fetcher refuses first and asks questions never
 
-`require_parameters` — which this pass set out to add — turned out to
-already exist at `app/llm/openrouter.py:216`, set for every call
-carrying a `json_schema`. It was left exactly as it is.
+Every byte this project reads from the web goes through
+`app/research/fetch.py` — pages `/study` finds, URLs you hand `/read`,
+and `robots.txt` itself. In order: scheme and userinfo checked, DNS
+resolved and **every** returned address vetted, the vetted addresses
+pinned, `robots.txt` consulted, then one GET with redirects followed by
+hand so each hop restarts the whole check.
 
-The test suite's `TRUNCATE` list was hand-written and had gone stale
-twice: `outbound` (3a) survived only because it has a foreign key to
-`message` and got caught by `CASCADE`, and `safety_event` has no foreign
-key at all, so its rows leaked between tests in the same file and made
-assertions pass or fail depending on test order. The list is now derived
-from `Base.metadata.sorted_tables`.
+The address policy is an allowlist, not a denylist — see
+[`docs/decisions.md`](docs/decisions.md) for why, and for the four
+address families `ipaddress.is_global` calls global that are not.
+`http://127.0.0.1:5432`, `http://169.254.169.254/` and a URL that
+redirects to either are all refused, and the refusal is a short code
+from `app/research/errors.py`. Never a message from a stranger's
+server: that text would end up in the database and the logs, and plan
+section 12 allows ids, domains, codes, counts and cost there and
+nothing else.
 
-## Hardening H4 — truthful cost accounting
+When a site blocks us, that is the answer. There is no User-Agent
+fallback, no proxy and no mirror lookup anywhere in `app/research/`.
 
-The review said cost accounting ignored OpenRouter's reported figure. It
-does not, and never did: `compute_cost` has always preferred
-`usage.cost_usd` when present. What was missing was *provenance*, and
-one real bug underneath it.
+### Two invariants the schema states by itself
 
-### `cost_source`
+`study_card` carries three risk columns, not one — what the distill
+model claimed, what the code rules found, and the max that governs —
+so "the rules caught something the model missed" stays distinguishable
+from "both agreed". On top of that the table refuses, in SQL, to hold a
+card that phase 4 says cannot exist:
 
-`spend_ledger` rows carried two different kinds of number under one
-column. One is what OpenRouter says it charged. The other is our
-arithmetic over token counts, at prices from config that can quietly go
-stale. A row that does not say which it is cannot be audited — "the
-totals look wrong" has no answer, because a drifted price setting and a
-vendor change produce the same symptom.
+- `ck_study_card_high_is_hidden` — a `risk_final='high'` card must be
+  `status='hidden'`, so a bug in `app/research/` cannot leave one in a
+  status `/notes` would list.
+- `ck_study_card_adopted_has_memory` — an adopted card must carry the
+  memory id it wrote, because that row is adoption's entire effect.
 
-So rows now carry `cost_source`: `'vendor'` or `'computed'`. Nullable,
-and deliberately **not** backfilled — rows written before H4 genuinely
-do not know, and stamping them with a guess is the false certainty the
-column exists to remove.
+### `/export` gained two tables it should have had since 3a
 
-### The web-search fee was on the wrong branch
+Adding the coverage test that `purge.py` already had found `outbound`
+and `safety_event` purged by `/delete` but never exported. Both are
+user data by the repo's own reasoning, so both are exported now, along
+with the three study tables. The four deliberate omissions are named,
+with a reason each, in `tests/test_export.py`.
 
-Exa's "auto" mode, which `app/llm/openrouter.py` asks for, costs **$0.007
-per request** including up to 10 results (we ask for 5). Verified
-2026-09-22 on [OpenRouter's web-search docs](https://openrouter.ai/docs/features/web-search).
+## Decisions
 
-`LLM_WEB_SEARCH_PRICE_USD` defaulted to `0.0`, and `compute_cost` added
-it to *both* the vendor and the computed branch. That made `0.0` the
-only value that could not double-bill — the setting was a placeholder
-for an unanswered question, not a price.
-
-The question is now answered.
-[OpenRouter's usage-accounting docs](https://openrouter.ai/docs/use-cases/usage-accounting)
-define `cost` as *"the total amount charged to your account"*, stated as
-distinct from `cost_details.upstream_inference_cost`, *"the actual cost
-charged by the upstream AI provider"*. The two fields exist separately
-precisely because the first is broader than inference, and the Exa fee
-is charged to the same OpenRouter credits. So:
-
-- **vendor branch** — the fee is already inside the reported figure.
-  Adding it again would double-bill the one path where we have the real
-  number.
-- **computed branch** — the fee is not there, and is ours to add.
-
-Which means the default can be the real price: `0.007`, applied to the
-computed branch only. The old `0.0` was not neutral — it made the
-fallback path silently **under**-bill every searched turn, which is the
-dangerous direction for a setting the daily cap depends on.
-
-This reading is falsifiable on live data, and the way to falsify it is
-already in the tree: `scripts/smoke.py` prints the reported-cost delta
-between an unsearched and a searched call. A delta near $0.007 confirms
-it; a delta near zero refutes it, and then the fee belongs on both
-branches after all.
-
-With `/search` off since H3, none of this is live billing today — it is
-the accounting being right before the feature comes back in phase 4.
-
-### Price audit
-
-Every declared price re-checked against OpenRouter's live model
-endpoints on 2026-09-22. All three sets matched — Cydonia at
-$0.30/$0.15/$0.50 and Flash-Lite at $0.10/$0.01/$0.40 — so nothing
-changed but the dated citations saying so. The model prices are a
-fallback in any case: when OpenRouter reports a cost, that figure wins
-and the config prices are never consulted, which `cost_source` now makes
-visible per row.
-
-## Hardening H3 — `/search` is off
-
-`/search` reached the tree with milestone 1f without a plan behind it, and
-it defaulted **on**. It is the only path in this bot that sends the user's
-words to a third party (Exa, through OpenRouter's `web` plugin), so
-`LLM_WEB_SEARCH` now defaults to `false`. Disabled, the handler answers
-«Поиск пока выключен.» and makes no model call at all — it takes the same
-zero-cost canned-reply path as an empty query, so nothing is billed and
-nothing reaches the persona transcript.
-
-The feature is not deleted. It carries a `TODO(phase-4)` marker: what
-replaces it should be an explicit, budgeted, logged research step, not a
-raw plugin bolted onto a persona turn.
-
-### The test asserts a property, not five call sites
-
-`tests/test_web_search_isolation.py` guards this from two directions,
-because "the current call sites all pass False" is not the guarantee that
-matters — "no future call site can pass True by accident" is.
-
-An AST walk over all of `app/` finds every call passing a truthy
-`web_search=` and asserts the only one is the `/search` handler. Three
-`web_search=web_search` pass-throughs in `turn.py` are skipped as
-non-origins, which is safe only because a companion check asserts that
-*every* function declaring the parameter defaults it to `False` — flip one
-default and the whole bot would search without a single call site
-changing. Both detectors have a guard-the-guard test, the convention
-`tests/test_core_clock_discipline.py` set.
-
-Alongside that, an ordinary chat turn, an outbound message and each
-background job are driven through a recording provider under **both**
-values of `LLM_WEB_SEARCH`. The setting is parametrized deliberately: it
-gates whether `/search` is allowed and must never be mistaken for
-something that gates the rest of the bot.
-
-The wire below that seam was already pinned in `tests/test_openrouter.py`
-— `web_search=False` sends no `plugins`, no `tools`, no `tool_choice` and
-no `functions`.
+The `## Hardening H*` sections that used to live here have moved to
+[`docs/decisions.md`](docs/decisions.md), along with 4a's decisions.
+This file is how to run and understand Anchor; that one is why it is
+shaped the way it is.
 
 ## Local setup
 
@@ -867,11 +731,10 @@ uv run python scripts/smoke.py
 
 The one place allowed to touch the network. Prints, on live data: which
 provider served the call, whether `LLM_DATA_COLLECTION` routed, token
-counts, OpenRouter's reported cost vs. ours, the web-search fee delta,
-a real scene summary through the background model, and a strict
-`json_schema` probe. Read the `STRUCTURED OUTPUTS:` verdict line before
-starting milestone 2c — the extractor and welfare classifier depend on
-it.
+counts, OpenRouter's reported cost vs. ours, a real scene summary
+through the background model, and a strict `json_schema` probe. Read
+the `STRUCTURED OUTPUTS:` verdict line before starting milestone 2c —
+the extractor and welfare classifier depend on it.
 
 ## Deploy (Railway)
 
@@ -892,3 +755,8 @@ No message text, prompt, completion, or raw update payload is ever
 logged — only IDs, counts, and latency (see `app/log.py`). Secrets live
 only in environment variables; `.env` is gitignored and must never be
 committed.
+
+As of 4a the same rule covers the web: logs may carry a domain, an HTTP
+status, an error code, a count and a cost, and never a URL path or
+query, page text, card text, a quote or a topic. A path can carry
+personal information as easily as a message can.

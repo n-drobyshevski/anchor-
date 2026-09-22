@@ -80,7 +80,6 @@ def build_providers(settings: Settings):
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
         # No structured_outputs here on purpose: no main-model call ever
         # passes a json_schema, so the constructor default is unreachable
@@ -93,7 +92,6 @@ def build_providers(settings: Settings):
         max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
         temperature=settings.LLM_CHEAP_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
@@ -103,7 +101,6 @@ def build_providers(settings: Settings):
         max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
         temperature=settings.LLM_SAFETY_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )

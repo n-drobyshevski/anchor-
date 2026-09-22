@@ -35,6 +35,9 @@ from app.db.models import (
     Scene,
     SpendLedger,
     StateChange,
+    StudyCard,
+    StudyClip,
+    StudyJob,
     TelegramUpdate,
     UserState,
 )
@@ -143,6 +146,40 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     model="fake-safety",
                 ),
             ]
+        )
+        await session.commit()
+
+        # 4a: the research loop's three tables (phase-4 plan section 4).
+        # study_clip holds text fetched from the web and study_card
+        # holds quotes from it -- the most content-bearing thing /delete
+        # has had to wipe since `message`. Added last because the clip
+        # and the card need the ids above them.
+        job = StudyJob(kind="read", local_date=today, status="done")
+        session.add(job)
+        await session.flush()
+        clip = StudyClip(
+            job_id=job.id,
+            url="https://example.com/sleep",
+            domain="example.com",
+            title="Как высыпаться",
+            text="Ложитесь спать в одно и то же время каждый день.",
+            http_status=200,
+            fetched_at=now,
+        )
+        session.add(clip)
+        await session.flush()
+        session.add(
+            StudyCard(
+                job_id=job.id,
+                clip_id=clip.id,
+                kind="technique",
+                text="Ложиться в одно и то же время.",
+                quote="Ложитесь спать в одно и то же время каждый день.",
+                source_url="https://example.com/sleep",
+                risk_model="low",
+                risk_rules="low",
+                risk_final="low",
+            )
         )
         await session.commit()
 

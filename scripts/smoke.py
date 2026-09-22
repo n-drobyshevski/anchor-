@@ -10,14 +10,14 @@ every automated test uses FakeLLMProvider.
 Makes one real call directly through the raw AsyncOpenAI client (via
 app.llm.openrouter.build_client) to read the top-level `provider` field
 OpenRouter puts on the response body -- the only way to see which
-provider actually served the request -- and two calls through
-OpenRouterProvider.complete() to exercise the seam itself: one plain,
-one with web_search=True. Prints, for each: the model, the serving
-provider (raw call only), the reply text, token counts, OpenRouter's
-own reported cost (usage.cost, when present) and our computed cost
-(app/core/spend.py's compute_cost), so the two can be compared on live
-data -- exactly the thing no fake provider can verify. Also prints
-whether LLM_DATA_COLLECTION="deny" routed the call successfully.
+provider actually served the request -- and one call through
+OpenRouterProvider.complete() to exercise the seam itself. Prints, for
+each: the model, the serving provider (raw call only), the reply text,
+token counts, OpenRouter's own reported cost (usage.cost, when present)
+and our computed cost (app/core/spend.py's compute_cost), so the two
+can be compared on live data -- exactly the thing no fake provider can
+verify. Also prints whether LLM_DATA_COLLECTION="deny" routed the call
+successfully.
 
 2a adds two more checks, both about the background ("cheap") model:
 a plain scene-summary call through the cheap provider, and a strict
@@ -28,20 +28,11 @@ strict-schema calls, OpenRouter's model API declares Cydonia's provider
 not a verified one -- a 24B roleplay finetune under grammar-constrained
 decoding is exactly where that can come apart. Run this before 2c and
 read the STRUCTURED OUTPUTS verdict line.
-
-1f: the two OpenRouterProvider calls (unsearched vs. searched) exist
-specifically to answer the open question in app/config.py's
-LLM_WEB_SEARCH_PRICE_USD comment -- whether OpenRouter's reported
-usage.cost already folds in Exa's $0.007/request fee. The script
-prints the delta between the two reported costs and an explicit
-interpretation line; read that line to decide whether
-LLM_WEB_SEARCH_PRICE_USD should stay 0.0 or become 0.007.
 """
 
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 from types import SimpleNamespace
 
 from app.config import get_settings
@@ -54,10 +45,6 @@ from app.llm.provider import LLMMessage
 
 SYSTEM_TEXT = "Ты — Anchor. Отвечай по-русски, одним коротким предложением."
 USER_TEXT = "Скажи, что ты на связи."
-# Needs current data, not something the model could plausibly know from
-# training -- otherwise it might not trigger a real Exa lookup.
-SEARCH_SYSTEM_TEXT = "Отвечай по-русски, коротко, одним-двумя предложениями."
-SEARCH_USER_TEXT = "Какая сегодня дата и какая сейчас самая обсуждаемая новость в мире?"
 
 # 2a: a short but realistic scene, to see what a summary actually costs
 # and whether the summarizer describes the dialogue rather than
@@ -142,83 +129,36 @@ async def main() -> None:
     print(f"OpenRouter reported cost_usd (raw call): {raw_usage.cost_usd}")
     print(f"our computed cost_usd (raw call): {compute_cost(raw_usage, settings)}")
 
-    # 2 & 3. Same seam (OpenRouterProvider), the actual code path
-    # turn.py uses -- once without web_search, once with, so the two
-    # reported costs can be diffed to see whether OpenRouter's
-    # usage.cost already includes Exa's per-request fee.
+    # 2. Same seam (OpenRouterProvider), the actual code path turn.py uses.
     provider = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.LLM_MODEL,
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
     )
     try:
-        unsearched = await provider.complete(
+        seam_response = await provider.complete(
             [
                 LLMMessage(role="system", content=SYSTEM_TEXT),
                 LLMMessage(role="user", content=USER_TEXT),
             ],
             conversation_id="anchor-main",
         )
-        searched = await provider.complete(
-            [
-                LLMMessage(role="system", content=SEARCH_SYSTEM_TEXT),
-                LLMMessage(role="user", content=SEARCH_USER_TEXT),
-            ],
-            conversation_id="anchor-main",
-            web_search=True,
-        )
     finally:
         await provider.close()
 
-    unsearched_cost = compute_cost(unsearched.usage, settings)
-    searched_cost = compute_cost(searched.usage, settings)
+    seam_cost = compute_cost(seam_response.usage, settings)
 
     print()
-    print("--- unsearched call (via OpenRouterProvider) ---")
-    print(f"reply: {unsearched.text}")
+    print("--- call via OpenRouterProvider ---")
+    print(f"reply: {seam_response.text}")
     print(
-        f"tokens: in={unsearched.usage.input_tokens} "
-        f"cached={unsearched.usage.cached_tokens} out={unsearched.usage.output_tokens}"
+        f"tokens: in={seam_response.usage.input_tokens} "
+        f"cached={seam_response.usage.cached_tokens} out={seam_response.usage.output_tokens}"
     )
-    print(f"OpenRouter reported cost_usd: {unsearched.usage.cost_usd}")
-    print(f"our computed cost_usd: {unsearched_cost}")
-
-    print()
-    print("--- searched call, web_search=True (via OpenRouterProvider) ---")
-    print(f"reply: {searched.text}")
-    print(
-        f"tokens: in={searched.usage.input_tokens} "
-        f"cached={searched.usage.cached_tokens} out={searched.usage.output_tokens}"
-    )
-    print(f"web_search_requests: {searched.usage.web_search_requests}")
-    print(f"OpenRouter reported cost_usd: {searched.usage.cost_usd}")
-    print(f"our computed cost_usd: {searched_cost}")
-
-    print()
-    if unsearched.usage.cost_usd is not None and searched.usage.cost_usd is not None:
-        delta = searched.usage.cost_usd - unsearched.usage.cost_usd
-        print(f"delta between reported cost_usd (searched - unsearched): {delta}")
-        # Exa `auto` is $0.007/request. Token counts differ a little
-        # between the two calls (different prompts/replies), so treat
-        # anything reasonably close to 0.007 as "the fee is separate".
-        if delta >= Decimal("0.005"):
-            print(
-                "delta ~= 0.007 -> OpenRouter EXCLUDES the Exa fee from "
-                "usage.cost; set LLM_WEB_SEARCH_PRICE_USD=0.007"
-            )
-        else:
-            print(
-                "delta is well under 0.007 -> OpenRouter's reported cost_usd "
-                "already covers the search fee; leave LLM_WEB_SEARCH_PRICE_USD=0.0"
-            )
-    else:
-        print(
-            "one of the two calls returned no cost_usd -- cannot compute a "
-            "reported-cost delta; re-run once both calls report a cost."
-        )
+    print(f"OpenRouter reported cost_usd: {seam_response.usage.cost_usd}")
+    print(f"our computed cost_usd: {seam_cost}")
 
     await _smoke_cheap_model(settings)
 
@@ -240,7 +180,6 @@ async def _smoke_cheap_model(settings) -> None:
         max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
         temperature=settings.LLM_CHEAP_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
     )
     try:
         summary = await cheap.complete(
@@ -283,7 +222,6 @@ async def _smoke_cheap_model(settings) -> None:
         max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
         temperature=settings.LLM_SAFETY_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
     try:
@@ -401,7 +339,6 @@ async def _smoke_welfare(settings) -> None:
         max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
         temperature=settings.LLM_SAFETY_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
     wrong = []

@@ -46,10 +46,6 @@ class LLMUsage:
     cached_tokens: int
     output_tokens: int
     cost_usd: Decimal | None  # vendor-reported cost, when available; None otherwise
-    # Number of billable web-search requests the provider actually sent
-    # for this call (0 or 1 today) -- not whether search results came
-    # back, which is not something we ever inspect (see openrouter.py).
-    web_search_requests: int = 0
 
 
 @dataclass(frozen=True)
@@ -110,7 +106,6 @@ class LLMProvider(Protocol):
         messages: list[LLMMessage],
         *,
         conversation_id: str,
-        web_search: bool = False,
         json_schema: JSONSchema | None = None,
     ) -> LLMResponse: ...
 

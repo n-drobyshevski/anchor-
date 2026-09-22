@@ -11,6 +11,7 @@ it at once, and never print a value.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings, check_runtime_settings, missing_required
 
@@ -180,3 +181,70 @@ def test_constructing_settings_with_a_malformed_secret_no_longer_raises():
     """Settings() itself must stay quiet: it is built all over the suite,
     and a raising validator is also what leaked the value."""
     assert Settings(TELEGRAM_SECRET_TOKEN="abc\ndef").TELEGRAM_SECRET_TOKEN == "abc\ndef"
+
+
+# --- 4a: the research loop ---
+
+
+def test_research_is_off_by_default():
+    """The master switch ships false and is flipped by hand after 4d.
+
+    Every other research setting has a working default, so this one flag
+    is the only thing standing between a fresh deploy and a bot that
+    reaches the open web.
+    """
+    assert Settings(_env_file=None).RESEARCH_ENABLED is False
+
+
+def test_packets_parse_a_bare_comma_list_from_the_environment():
+    """The plan writes these as `PACKET_REF=a.org,b.org`, and a
+    tuple-typed field read from env would otherwise need JSON syntax."""
+    settings = Settings(_env_file=None, PACKET_REF="ru.wikipedia.org, en.wikipedia.org")
+    assert settings.PACKET_REF == ("ru.wikipedia.org", "en.wikipedia.org")
+
+
+def test_packet_entries_are_lowercased_and_deduped():
+    """A duplicate would silently shrink the packet; a capitalised entry
+    would never match, because the fetcher compares lowercased hosts."""
+    settings = Settings(_env_file=None, PACKET_GUIDES="Example.COM, example.com , b.org")
+    assert settings.PACKET_GUIDES == ("example.com", "b.org")
+
+
+def test_the_guides_packet_is_empty_by_default():
+    """Choosing those domains is the user's call, not a default we
+    invent. /study guides refuses until it is set."""
+    assert Settings(_env_file=None).PACKET_GUIDES == ()
+
+
+@pytest.mark.parametrize(
+    "value,reason",
+    [
+        ("https://reddit.com", "a scheme"),
+        ("reddit.com/r/anchor", "a path -- suffix matching would admit the whole site"),
+        ("reddit.com:443", "a port"),
+        ("localhost", "not a domain"),
+    ],
+)
+def test_a_packet_entry_that_is_not_a_bare_domain_is_refused(value, reason):
+    """Refused rather than stripped. `https://reddit.com/r/x` in a packet
+    means somebody expected path filtering, and quietly turning it into
+    `reddit.com` would admit far more than they asked for."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, PACKET_GUIDES=value)
+
+
+def test_the_guides_packet_is_capped_at_five_domains():
+    """Plan section 3's cap, on the one packet the user fills. An open
+    slot with no ceiling is how a packet becomes "the web"."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, PACKET_GUIDES="a.com,b.com,c.com,d.com,e.com,f.com")
+    assert len(Settings(_env_file=None, PACKET_GUIDES="a.com,b.com,c.com,d.com,e.com").PACKET_GUIDES) == 5
+
+
+def test_the_user_agent_names_us_and_no_browser():
+    """Plan section 5.9 forbids spoofing this. A default that already
+    looked like a browser would make that rule a formality."""
+    agent = Settings(_env_file=None).FETCH_USER_AGENT
+    assert agent.startswith("AnchorBot/")
+    for browser in ("Mozilla", "Chrome", "Safari", "AppleWebKit", "Gecko"):
+        assert browser not in agent

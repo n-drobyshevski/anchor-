@@ -78,44 +78,6 @@ def test_compute_cost_avoids_binary_float_price_error():
     assert decimal.Decimal(0.1) != decimal.Decimal("0.1")
 
 
-def test_compute_cost_adds_the_web_search_fee_on_the_formula_branch():
-    settings = Settings(
-        LLM_PRICE_IN=2.00, LLM_PRICE_CACHED=0.50, LLM_PRICE_OUT=6.00, LLM_WEB_SEARCH_PRICE_USD=0.007
-    )
-    base_usage = LLMUsage(input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None)
-    searched_usage = LLMUsage(
-        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None, web_search_requests=1
-    )
-
-    base_cost = compute_cost(base_usage, settings)
-    searched_cost = compute_cost(searched_usage, settings)
-
-    assert searched_cost == base_cost + decimal.Decimal("0.007")
-
-
-def test_compute_cost_does_not_add_the_web_search_fee_on_the_vendor_branch():
-    """H4 reversed this. OpenRouter documents `usage.cost` as "the total
-    amount charged to your account" -- as distinct from
-    cost_details.upstream_inference_cost, "the actual cost charged by the
-    upstream AI provider" -- and the Exa fee is charged to the same
-    credits. So the fee is already inside a vendor-reported figure, and
-    adding it again double-bills the one path where we have the real
-    number."""
-    settings = Settings(LLM_WEB_SEARCH_PRICE_USD=0.007)
-    base_usage = LLMUsage(
-        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=decimal.Decimal("0.001234")
-    )
-    searched_usage = LLMUsage(
-        input_tokens=1000,
-        cached_tokens=200,
-        output_tokens=300,
-        cost_usd=decimal.Decimal("0.001234"),
-        web_search_requests=1,
-    )
-
-    assert compute_cost(searched_usage, settings) == compute_cost(base_usage, settings)
-
-
 def test_the_cost_source_says_which_branch_priced_the_row():
     """The provenance H4 adds. Two numbers of different kinds -- one
     reported, one estimated from prices in config that can go stale --
@@ -128,24 +90,6 @@ def test_the_cost_source_says_which_branch_priced_the_row():
 
     assert priced(reported, settings) == (decimal.Decimal("0.000900"), "vendor")
     assert priced(estimated, settings).source == "computed"
-
-
-def test_the_web_search_fee_defaults_to_the_real_exa_rate():
-    """H4 changed the default from 0.0 to Exa's documented $0.007 per
-    request. 0.0 was a placeholder for an unanswered question -- whether
-    the vendor figure already included the fee -- and it made the
-    fallback path silently under-bill a searched turn. The question is
-    now answered per branch, so the number can be the real one."""
-    settings = Settings()
-    assert settings.LLM_WEB_SEARCH_PRICE_USD == 0.007
-
-    unsearched = LLMUsage(input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None)
-    searched = LLMUsage(
-        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None, web_search_requests=1
-    )
-    assert compute_cost(searched, settings) == compute_cost(
-        unsearched, settings
-    ) + decimal.Decimal("0.007")
 
 
 async def test_a_real_turn_stamps_the_ledger_row_with_its_cost_source(sessionmaker, clock):
@@ -183,34 +127,6 @@ async def test_a_real_turn_stamps_the_ledger_row_with_its_cost_source(sessionmak
     async with sessionmaker() as session:
         rows = (await session.execute(select(SpendLedger))).scalars().all()
     assert [r.cost_source for r in rows] == ["computed"]
-
-
-async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker, clock):
-    """The fee lands in spend_ledger.usd_cost like any other cost, so
-    check_cap sees it through today_usd -- exercised end to end against
-    the real ledger table rather than just compute_cost in isolation."""
-    settings = Settings(
-        DAILY_USD_CAP=0.01,
-        LLM_WEB_SEARCH_PRICE_USD=0.007,
-        LLM_PRICE_IN=5.00,
-        LLM_PRICE_CACHED=5.00,
-        LLM_PRICE_OUT=5.00,
-    )
-    # The computed branch: no vendor figure, so the fee is ours to add.
-    # 1000 tokens at $5/M is $0.005, plus the $0.007 search fee.
-    usage = LLMUsage(
-        input_tokens=1000, cached_tokens=0, output_tokens=0, cost_usd=None, web_search_requests=1
-    )
-    cost = compute_cost(usage, settings)
-    assert cost == decimal.Decimal("0.012000")
-
-    today = clock_local_date(SystemClock(), "Europe/Paris")
-    async with sessionmaker() as session:
-        session.add(SpendLedger(local_date=today, category="chat", usd_cost=cost))
-        await session.commit()
-
-    async with sessionmaker() as session:
-        assert await check_cap(session, settings, clock, "Europe/Paris") is True
 
 
 def test_local_date_for_paris_matches_current_zoneinfo_date():
@@ -351,7 +267,6 @@ def test_compute_cost_uses_the_cheap_triple_when_given_the_cheap_model():
         LLM_MODEL="main/model", LLM_MODEL_CHEAP="cheap/model",
         LLM_PRICE_IN=0.30, LLM_PRICE_CACHED=0.15, LLM_PRICE_OUT=0.50,
         LLM_CHEAP_PRICE_IN=1.25, LLM_CHEAP_PRICE_CACHED=0.20, LLM_CHEAP_PRICE_OUT=2.50,
-        LLM_WEB_SEARCH_PRICE_USD=0.0,
     )
     usage = LLMUsage(input_tokens=1_000_000, cached_tokens=0, output_tokens=0, cost_usd=None)
 

@@ -2,10 +2,11 @@
 
 One transaction, one TRUNCATE, then a reset of the singleton state row.
 
-**Why TRUNCATE without CASCADE.** The schema has exactly three foreign
-keys (message -> telegram_update, message -> scene, memory -> memory),
-none of them with ondelete=, and nothing outside PURGED_TABLES points
-into it. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
+**Why TRUNCATE without CASCADE.** Nothing outside PURGED_TABLES points
+into it: every foreign key in the schema either stays inside that list
+(message -> telegram_update, message -> scene, memory -> memory,
+study_card -> study_clip -> study_job, study_card -> memory) or belongs
+to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
 not itself listed here, the statement fails loudly instead of silently
 skipping it -- which is the direction rule 7 wants. A delete that
@@ -63,6 +64,18 @@ PURGED_TABLES = (
     # record of when this user was talked to and how the checks behaved
     # while they were -- which "delete all my data" covers.
     "safety_event",
+    # 4a: the research loop's three tables (phase-4 plan section 4).
+    # study_clip holds text fetched from the web and study_card holds
+    # quotes from it, so this is the most content-bearing addition since
+    # `message`. Listed child-first, which TRUNCATE does not require but
+    # which keeps the order readable against the foreign keys.
+    #
+    # Their FKs do carry ondelete=CASCADE, unlike the three the docstring
+    # above describes -- that cascade is for deleting one job, not for
+    # this statement, which names all three tables anyway.
+    "study_card",
+    "study_clip",
+    "study_job",
 )
 
 # user_state is reset in place, never dropped. persona_version is a

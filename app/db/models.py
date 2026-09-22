@@ -60,7 +60,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -672,4 +672,192 @@ class Outbound(Base):
         # cancel_outbound sweeps them, /state shows the next one.
         Index("ix_outbound_status_planned_for", "status", "planned_for"),
         Index("ix_outbound_local_date", "local_date"),
+    )
+
+
+class StudyJob(Base):
+    """One research request: a /study topic or a /read URL (phase-4 plan section 4).
+
+    `error_code` is a code from app/research/errors.py, never a message
+    from a stranger's web server -- plan section 12 keeps free text from
+    the web out of the database as firmly as it keeps it out of the logs.
+
+    `local_date` is the day the quota counts against, stamped from the
+    user's timezone by the caller rather than derived here, because
+    "today" is a clock question and app/core/clock.py owns those.
+    """
+
+    __tablename__ = "study_job"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    packet: Mapped[str | None] = mapped_column(String)
+    query: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="queued", server_default=text("'queued'")
+    )
+    searches_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    pins_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    usd_cost: Mapped[decimal.Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=decimal.Decimal("0"), server_default=text("0")
+    )
+    error_code: Mapped[str | None] = mapped_column(String)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("kind in ('study', 'read')", name="ck_study_job_kind"),
+        CheckConstraint(
+            "status in ('queued', 'searching', 'fetching', 'distilling', "
+            "'done', 'failed', 'cancelled')",
+            name="ck_study_job_status",
+        ),
+        CheckConstraint("char_length(query) <= 200", name="ck_study_job_query_length"),
+        # /study's daily quota counts rows for one local date; /notes and
+        # the completion message look up a job by id. Nothing else reads
+        # this table, so one index is one more than none and enough.
+        Index("ix_study_job_local_date", "local_date"),
+    )
+
+
+class StudyClip(Base):
+    """One page we fetched, with its extracted main text (plan section 4).
+
+    `url` is the URL *after* redirects -- the page we actually read, not
+    the one we were pointed at -- because that is what a card's
+    `source_url` has to mean and what the packet allowlist was checked
+    against on the final hop.
+
+    `text` is nulled 30 days after `fetched_at` by the retention sweep
+    (plan section 4). The metadata stays: a clip's domain and status are
+    how a later job knows not to re-read the same page, and they carry
+    nothing from the page itself. An adopted card keeps its own copy of
+    the sentence it needed.
+
+    `fetch_error` and `text` are mutually exclusive in practice but not
+    by constraint: a fetch that failed after reading a partial body is
+    still a fetch we want a record of.
+    """
+
+    __tablename__ = "study_clip"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("study_job.id", ondelete="CASCADE"), nullable=False
+    )
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    domain: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str | None] = mapped_column(String)
+    text: Mapped[str | None] = mapped_column(String)
+    text_sha256: Mapped[str | None] = mapped_column(String)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    fetch_error: Mapped[str | None] = mapped_column(String)
+    fetched_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("char_length(title) <= 300", name="ck_study_clip_title_length"),
+        # The dedupe query in plan section 6 is "have we clipped this URL
+        # in the last 30 days"; the retention sweep is "clips older than
+        # 30 days that still have text". Both are (url|fetched_at)-shaped.
+        Index("ix_study_clip_url_fetched_at", "url", "fetched_at"),
+        Index("ix_study_clip_job_id", "job_id"),
+    )
+
+
+class StudyCard(Base):
+    """A candidate technique, pending the user's decision (plan section 4).
+
+    Three risk columns, not one, because they answer different questions
+    and the difference is the audit trail. `risk_model` is what the
+    distill model claimed; `risk_rules` is what app/research/risk.py
+    found; `risk_final` is the max of the two. Keeping the model's claim
+    means a later look can tell "the rules caught something the model
+    missed" from "both agreed", which is the only way to know whether
+    the rule list is earning its keep.
+
+    `source_url` is copied from the clip by code and is never taken from
+    model output (plan section 12). `rule_hits` holds rule ids only --
+    never the matched text, which would put page content in a column
+    that /export dumps.
+
+    As in `Memory` above, the `text` column shadows sqlalchemy's
+    `text()` for the rest of this class body, so the server_defaults use
+    `sa.text(...)`.
+
+    A `risk_final='high'` card is stored with `status='hidden'`: never
+    listed, never adoptable. Stored rather than dropped so that "the
+    filter is working" is observable in /export rather than inferred
+    from an absence.
+    """
+
+    __tablename__ = "study_card"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("study_job.id", ondelete="CASCADE"), nullable=False
+    )
+    clip_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("study_clip.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    quote: Mapped[str] = mapped_column(String, nullable=False)
+    source_url: Mapped[str] = mapped_column(String, nullable=False)
+    risk_model: Mapped[str] = mapped_column(String, nullable=False)
+    risk_rules: Mapped[str] = mapped_column(String, nullable=False)
+    risk_final: Mapped[str] = mapped_column(String, nullable=False)
+    rule_hits: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=sa.text("'pending'")
+    )
+    memory_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('technique', 'routine', 'checkin_format', 'definition')",
+            name="ck_study_card_kind",
+        ),
+        CheckConstraint('char_length("text") <= 300', name="ck_study_card_text_length"),
+        CheckConstraint("char_length(quote) <= 240", name="ck_study_card_quote_length"),
+        CheckConstraint(
+            "risk_model in ('low', 'medium', 'high')", name="ck_study_card_risk_model"
+        ),
+        CheckConstraint(
+            "risk_rules in ('low', 'medium', 'high')", name="ck_study_card_risk_rules"
+        ),
+        CheckConstraint(
+            "risk_final in ('low', 'medium', 'high')", name="ck_study_card_risk_final"
+        ),
+        CheckConstraint(
+            "status in ('pending', 'adopted', 'rejected', 'hidden', 'expired')",
+            name="ck_study_card_status",
+        ),
+        # Both invariants the schema can state: a high card is hidden,
+        # and an adopted card has the memory it wrote. Stating them here
+        # means a bug in app/research/ cannot leave an adoptable card
+        # that section 12 says must never exist.
+        CheckConstraint(
+            "risk_final <> 'high' or status = 'hidden'", name="ck_study_card_high_is_hidden"
+        ),
+        CheckConstraint(
+            "status <> 'adopted' or memory_id is not null",
+            name="ck_study_card_adopted_has_memory",
+        ),
+        # /notes pages pending cards newest first; the expiry sweep reads
+        # the same two columns.
+        Index("ix_study_card_status_created_at", "status", "created_at"),
+        Index("ix_study_card_job_id", "job_id"),
     )

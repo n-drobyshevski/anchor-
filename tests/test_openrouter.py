@@ -14,7 +14,6 @@ import pytest
 from openai.types.chat import ChatCompletion
 
 from app.llm.openrouter import (
-    WEB_SEARCH_PROMPT,
     OpenRouterProvider,
     _extract_text,
     _extract_usage,
@@ -138,7 +137,6 @@ def _provider_returning(response) -> OpenRouterProvider:
         max_tokens=700,
         temperature=0.9,
         data_collection="deny",
-        web_search_max_results=5,
     )
     provider._client = _FakeClient(response)
     return provider
@@ -166,9 +164,6 @@ async def test_successful_call_through_complete_returns_the_reply():
     assert response.usage.cost_usd == Decimal("0.000123")
 
 
-# --- 1f: web search (opt-in via the `web` plugin) ---
-
-
 class _CapturingCompletions:
     def __init__(self, response):
         self._response = response
@@ -191,7 +186,6 @@ def _provider_and_client(response) -> tuple[OpenRouterProvider, _CapturingClient
         max_tokens=700,
         temperature=0.9,
         data_collection="deny",
-        web_search_max_results=5,
     )
     client = _CapturingClient(response)
     provider._client = client
@@ -199,6 +193,10 @@ def _provider_and_client(response) -> tuple[OpenRouterProvider, _CapturingClient
 
 
 async def test_ordinary_call_sends_no_plugins_and_no_tools():
+    """Safety invariant 4: this bot has no tool-calling surface, and
+    (since milestone 4a removed /search) no request-shaping surface
+    either -- an ordinary call sends none of plugins/tools/tool_choice/
+    functions, unconditionally."""
     provider, client = _provider_and_client(_ok_response())
     await provider.complete([LLMMessage(role="user", content="привет")], conversation_id="anchor-main")
 
@@ -207,38 +205,3 @@ async def test_ordinary_call_sends_no_plugins_and_no_tools():
     assert "tools" not in kwargs
     assert "tool_choice" not in kwargs
     assert "functions" not in kwargs
-
-
-async def test_searched_call_sends_the_web_plugin_and_still_no_tools():
-    provider, client = _provider_and_client(_ok_response())
-    await provider.complete(
-        [LLMMessage(role="user", content="привет")], conversation_id="anchor-main", web_search=True
-    )
-
-    kwargs = client.chat.completions.received_kwargs
-    plugins = kwargs["extra_body"]["plugins"]
-    assert plugins == [
-        {
-            "id": "web",
-            "engine": "exa",
-            "max_results": 5,
-            "search_prompt": WEB_SEARCH_PROMPT,
-        }
-    ]
-    assert "tools" not in kwargs
-    assert "tool_choice" not in kwargs
-    assert "functions" not in kwargs
-
-
-async def test_web_search_requests_is_one_when_searched_zero_otherwise():
-    provider, _ = _provider_and_client(_ok_response())
-    unsearched = await provider.complete(
-        [LLMMessage(role="user", content="привет")], conversation_id="anchor-main"
-    )
-    assert unsearched.usage.web_search_requests == 0
-
-    provider, _ = _provider_and_client(_ok_response())
-    searched = await provider.complete(
-        [LLMMessage(role="user", content="привет")], conversation_id="anchor-main", web_search=True
-    )
-    assert searched.usage.web_search_requests == 1

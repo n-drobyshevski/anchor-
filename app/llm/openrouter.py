@@ -51,21 +51,12 @@ logger = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 REQUEST_TIMEOUT_SECONDS = 90.0
 
-# A constant, not a setting: Exa is the only search engine OpenRouter's
-# `web` plugin is used with here, and adding a knob for it would only
-# grow the config surface without a second value ever exercising it.
+# Retained for the Phase 4 research search module (app/research/search.py,
+# milestone 4c); unused since milestone 4a removed /search. Kept as a
+# constant rather than a setting: Exa is the only search engine that
+# module will use, and a knob for it would only grow the config surface
+# without a second value ever exercising it.
 WEB_SEARCH_ENGINE = "exa"
-
-# Overrides OpenRouter's default search_prompt, which instructs the
-# model to cite sources as markdown links. This is a persona bot: a
-# reply that suddenly prints "[some site](https://...)" breaks
-# character on every searched turn, so the model is told to use the
-# facts naturally instead and never surface the search mechanics.
-WEB_SEARCH_PROMPT = (
-    "Ниже приведены свежие результаты поиска в интернете на сегодня; "
-    "используй факты из них естественно, как будто ты уже это знаешь, "
-    "и никогда не печатай ссылки, URL, домены или сноски-цитаты."
-)
 
 
 def build_client(api_key: str) -> AsyncOpenAI:
@@ -128,13 +119,7 @@ def _raise_for_body_error(response) -> None:
     raise LLMError(f"openrouter body error code={code}")
 
 
-def _extract_usage(response, *, web_search_requests: int = 0) -> LLMUsage:
-    """`web_search_requests` is set by the caller from what WE SENT (whether
-    the `web` plugin was in the request), never from anything in the
-    response -- annotations coming back or not is irrelevant to what we
-    were billed for, and we don't want a flaky "no results found" case
-    to silently under-report a request that OpenRouter still charged us for.
-    """
+def _extract_usage(response) -> LLMUsage:
     usage = getattr(response, "usage", None)
     if usage is None:
         return LLMUsage(
@@ -142,7 +127,6 @@ def _extract_usage(response, *, web_search_requests: int = 0) -> LLMUsage:
             cached_tokens=0,
             output_tokens=0,
             cost_usd=None,
-            web_search_requests=web_search_requests,
         )
     # prompt_tokens_details is itself optional on some responses/models.
     details = getattr(usage, "prompt_tokens_details", None)
@@ -157,7 +141,6 @@ def _extract_usage(response, *, web_search_requests: int = 0) -> LLMUsage:
         cached_tokens=cached_tokens,
         output_tokens=getattr(usage, "completion_tokens", 0) or 0,
         cost_usd=cost_usd,
-        web_search_requests=web_search_requests,
     )
 
 
@@ -181,7 +164,6 @@ class OpenRouterProvider:
         max_tokens: int,
         temperature: float,
         data_collection: str,
-        web_search_max_results: int,
         client: AsyncOpenAI | None = None,
         structured_outputs: bool = True,
     ) -> None:
@@ -191,7 +173,6 @@ class OpenRouterProvider:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._data_collection = data_collection
-        self._web_search_max_results = web_search_max_results
         self._structured_outputs = structured_outputs
 
     async def complete(
@@ -199,7 +180,6 @@ class OpenRouterProvider:
         messages: list[LLMMessage],
         *,
         conversation_id: str,
-        web_search: bool = False,
         json_schema: JSONSchema | None = None,
     ) -> LLMResponse:
         # conversation_id is part of the Protocol's call shape but unused
@@ -222,15 +202,6 @@ class OpenRouterProvider:
                     "schema": json_schema.schema,
                 },
             }
-        if web_search:
-            extra_body["plugins"] = [
-                {
-                    "id": "web",
-                    "engine": WEB_SEARCH_ENGINE,
-                    "max_results": self._web_search_max_results,
-                    "search_prompt": WEB_SEARCH_PROMPT,
-                }
-            ]
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,
@@ -243,11 +214,7 @@ class OpenRouterProvider:
                 # are optional OpenRouter attribution headers that would
                 # list this private bot on OpenRouter's public
                 # leaderboard. Never pass `tools` either -- this bot has
-                # no tool-calling surface (safety invariant 4). `plugins`
-                # (above, opt-in only) is NOT `tools`: OpenRouter performs
-                # the web search itself and injects the excerpts straight
-                # into the prompt, so the model is never offered a
-                # callable and safety invariant 4 stays intact.
+                # no tool-calling surface (safety invariant 4).
             )
         except openai.APIConnectionError:
             # Covers both APIConnectionError and its subclass
@@ -268,7 +235,7 @@ class OpenRouterProvider:
         # non-retryable LLMError.
         _raise_for_body_error(response)
         text = _extract_text(response)
-        usage = _extract_usage(response, web_search_requests=1 if web_search else 0)
+        usage = _extract_usage(response)
         return LLMResponse(text=text, usage=usage, model=self._model)
 
     async def close(self) -> None:

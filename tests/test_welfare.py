@@ -51,9 +51,9 @@ class ScriptedWelfare(FakeLLMProvider):
         self.verdict_json = f'{{"level": "{level}", "confidence": {confidence}}}'
         self.reply = reply
 
-    async def complete(self, messages, *, conversation_id, web_search=False, json_schema=None):
+    async def complete(self, messages, *, conversation_id, json_schema=None):
         response = await super().complete(
-            messages, conversation_id=conversation_id, web_search=web_search,
+            messages, conversation_id=conversation_id,
             json_schema=json_schema,
         )
         system = messages[0].content
@@ -232,7 +232,7 @@ async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker, clock):
     """Plan section 10: fail open for chat."""
 
     class SlowClassifier(FakeLLMProvider):
-        async def complete(self, messages, *, conversation_id, web_search=False, json_schema=None):
+        async def complete(self, messages, *, conversation_id, json_schema=None):
             await asyncio.sleep(5)
             raise AssertionError("should have been cancelled")
 
@@ -248,7 +248,7 @@ async def test_a_classifier_timeout_sends_the_normal_reply(sessionmaker, clock):
 
 async def test_a_classifier_error_sends_the_normal_reply(sessionmaker, clock):
     class BrokenClassifier(FakeLLMProvider):
-        async def complete(self, messages, *, conversation_id, web_search=False, json_schema=None):
+        async def complete(self, messages, *, conversation_id, json_schema=None):
             raise RuntimeError("upstream is on fire")
 
     bot, fake = await _seed(sessionmaker, 1)
@@ -465,7 +465,7 @@ async def test_a_failed_welfare_reply_still_sends_something_with_the_numbers(ses
     """The persona is off by this point. Silence is not an option."""
 
     class ClassifiesThenBreaks(FakeLLMProvider):
-        async def complete(self, messages, *, conversation_id, web_search=False, json_schema=None):
+        async def complete(self, messages, *, conversation_id, json_schema=None):
             if messages[0].content.startswith("Определи"):
                 response = await super().complete(
                     messages, conversation_id=conversation_id, json_schema=json_schema

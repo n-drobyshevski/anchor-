@@ -1,10 +1,9 @@
 """aiogram Router: commands, text (persona turn), and a catch-all.
 
 Handler registration order follows plan section 6.4:
-1. Commands: /start, /state (1b); /out, /in (1d); /search (1f) --
-   registered before the F.text handler so aiogram's first-match-wins
-   routes it as a command turn.run() call (web_search=True), never the
-   plain-text branch.
+1. Commands: /start, /state (1b); /out, /in (1d) -- registered before
+   the F.text handler so aiogram's first-match-wins routes each one to
+   its own handler, never the plain-text branch.
 2. Text: turn.run() — the idempotent persona turn (plan section 8),
    which now owns storing the user message too (moved into core/
    turn.py in 1c; see that module), and, as of 1d, the pause-word
@@ -88,7 +87,6 @@ BOT_COMMANDS = [
     BotCommand(command="state", description="Текущее состояние"),
     BotCommand(command="out", description="Пауза, выйти из роли"),
     BotCommand(command="in", description="Вернуться в роль"),
-    BotCommand(command="search", description="Найти в сети и ответить"),
     BotCommand(command="remember", description="Запомнить факт"),
     BotCommand(command="memories", description="Что я помню"),
     BotCommand(command="forget", description="Забыть запись по id"),
@@ -347,60 +345,6 @@ def build_router(
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             scene_id=scene_id,
-        )
-
-    # TODO(phase-4): replace with gated research loop.
-    #
-    # H3 left this handler standing but turned it off (LLM_WEB_SEARCH now
-    # defaults to False). It is the one path that sends the user's words to
-    # a third party, and it reached the tree without a plan behind it --
-    # so what replaces it should be deliberate: an explicit, budgeted,
-    # logged research step rather than a raw plugin on a persona turn.
-    @router.message(Command("search"))
-    async def search(message: Message, event_update: Update, command: CommandObject) -> None:
-        """/search <query>: opt-in web search (plan milestone 1f).
-
-        Routes through the same turn.run() the text handler uses, with
-        web_search=True and the query as user_text -- never a hand-rolled
-        model call here, so pause words, idempotency, the spend cap and
-        neutral mode all still apply exactly as they do to an ordinary turn.
-        """
-        if not settings.LLM_WEB_SEARCH:
-            await turn.run_search_canned_reply(
-                sessionmaker,
-                message.bot,
-                clock=clock,
-                chat_id=message.chat.id,
-                update_id=event_update.update_id,
-                text=turn.SEARCH_DISABLED_REPLY_TEXT,
-                scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
-            )
-            return
-
-        query = (command.args or "").strip()
-        if not query:
-            await turn.run_search_canned_reply(
-                sessionmaker,
-                message.bot,
-                clock=clock,
-                chat_id=message.chat.id,
-                update_id=event_update.update_id,
-                text=turn.SEARCH_EMPTY_REPLY_TEXT,
-                scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
-            )
-            return
-
-        await turn.run(
-            sessionmaker,
-            message.bot,
-            settings,
-            provider,
-            clock=clock,
-            chat_id=message.chat.id,
-            update_id=event_update.update_id,
-            user_text=query,
-            web_search=True,
-            safety_provider=safety_provider,
         )
 
     # --- 2d: clearing `awaiting` on any command (plan section 9) ---

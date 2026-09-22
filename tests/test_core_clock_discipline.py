@@ -31,6 +31,12 @@ import ast
 import pathlib
 
 CORE = pathlib.Path("app/core")
+# 4a. app/research/ is outside app/core/ but under the same rule and
+# for the same reason: a study job's local_date decides which day a
+# quota is spent against, and a module that reads the clock for
+# itself makes that untestable. The fetcher measures elapsed time
+# with time.monotonic(), which is allowed -- see FORBIDDEN_DOTTED.
+RESEARCH = pathlib.Path("app/research")
 
 # clock.py is the one module allowed to read the clock: it *is* the
 # abstraction. Everything else asks it.
@@ -80,7 +86,9 @@ def _violations(path: pathlib.Path) -> list[str]:
 
 
 def _core_modules() -> list[pathlib.Path]:
-    return sorted(p for p in CORE.glob("*.py") if p.name not in EXEMPT)
+    modules = [p for p in CORE.glob("*.py") if p.name not in EXEMPT]
+    modules.extend(RESEARCH.glob("*.py"))
+    return sorted(modules)
 
 
 def test_there_are_core_modules_to_check():
@@ -90,6 +98,7 @@ def test_there_are_core_modules_to_check():
     assert len(modules) > 5
     assert any(p.name == "turn.py" for p in modules)
     assert any(p.name == "outbound_gate.py" for p in modules)
+    assert any(p.name == "fetch.py" for p in modules), "app/research/ is not being scanned"
 
 
 def test_no_module_in_core_reads_the_wall_clock():
@@ -97,8 +106,8 @@ def test_no_module_in_core_reads_the_wall_clock():
     for path in _core_modules():
         offenders.extend(_violations(path))
     assert offenders == [], (
-        "app/core/ must take the time from the injected Clock "
-        "(phase-3 plan section 3), not read it directly:\n  "
+        "app/core/ and app/research/ must take the time from the injected "
+        "Clock (phase-3 plan section 3), not read it directly:\n  "
         + "\n  ".join(offenders)
     )
 

@@ -151,23 +151,15 @@ def priced(usage: LLMUsage, settings: Settings, model: str | None = None) -> Pri
     means the main model, so every Phase 1 call site keeps its exact
     previous behaviour without being touched.
 
-    **The web-search fee is added to the computed branch only** (H4).
-    OpenRouter documents `usage.cost` as "the total amount charged to
-    your account", as distinct from `cost_details.upstream_inference_cost`,
-    "the actual cost charged by the upstream AI provider" -- the two
-    fields exist separately precisely because the first is broader than
-    inference, and the Exa fee is charged to the same OpenRouter credits.
-    So when the vendor gives us a number, the fee is already inside it
-    and adding it again would double-bill; when it does not, the fee is
-    ours to add. Before H4 it was added to both, which was safe only
-    because the default was 0.0 and therefore wrong in the other
-    direction -- a searched turn on the fallback path was under-billed.
+    VENDOR vs COMPUTED (H4) records which kind of number a row carries:
+    when OpenRouter reports `usage.cost` we use it as-is and mark it
+    VENDOR; otherwise we fall back to the section 10 token-price formula
+    and mark it COMPUTED. That provenance is what makes "our total looks
+    wrong" answerable -- a row states which arithmetic produced it.
 
-    Checked 2026-09-22 against
-    https://openrouter.ai/docs/use-cases/usage-accounting. The claim is
-    falsifiable on live data: scripts/smoke.py prints the reported-cost
-    delta between an unsearched and a searched call, and a delta of about
-    $0.007 confirms it while a delta of roughly zero refutes it.
+    A per-request provider fee (the Exa web-search charge) used to be
+    added to the COMPUTED branch here; it will return, priced the same
+    way, when the Phase 4 research search path (app/research/) lands.
     """
     if usage.cost_usd is not None:
         return Priced(
@@ -181,7 +173,6 @@ def priced(usage: LLMUsage, settings: Settings, model: str | None = None) -> Pri
     cost = (
         uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out
     ) / million
-    cost += usage.web_search_requests * decimal.Decimal(str(settings.LLM_WEB_SEARCH_PRICE_USD))
     return Priced(cost.quantize(_CENTS_EXPONENT, rounding=decimal.ROUND_HALF_UP), COMPUTED)
 
 

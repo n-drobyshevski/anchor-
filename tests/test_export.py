@@ -18,6 +18,7 @@ from aiogram.types import Update
 
 from app.config import Settings
 from app.core import export
+from app.db import models
 from app.db.models import (
     Checkin,
     Journal,
@@ -99,7 +100,52 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 SpendLedger(
                     local_date=today, category="chat", usd_cost=decimal.Decimal("0.000108")
                 ),
+                # 3a and H2. Both reached /export only in 4a, when the
+                # coverage test at the bottom of this file found them
+                # missing.
+                models.Outbound(
+                    kind="morning",
+                    local_date=today,
+                    bucket=0,
+                    planned_for=now,
+                    status="sent",
+                    sent_at=now,
+                ),
+                models.SafetyEvent(
+                    local_date=today, kind="welfare", outcome="ok", model="fake-safety"
+                ),
             ]
+        )
+        await session.commit()
+
+    # 4a. Added in a second flush because study_clip and study_card need
+    # the ids of the rows above them.
+    async with sessionmaker() as session:
+        job = models.StudyJob(kind="read", local_date=today, status="done")
+        session.add(job)
+        await session.flush()
+        clip = models.StudyClip(
+            job_id=job.id,
+            url="https://example.com/sleep",
+            domain="example.com",
+            title="Как высыпаться",
+            text="Ложитесь спать в одно и то же время каждый день.",
+            http_status=200,
+        )
+        session.add(clip)
+        await session.flush()
+        session.add(
+            models.StudyCard(
+                job_id=job.id,
+                clip_id=clip.id,
+                kind="technique",
+                text="Ложиться в одно и то же время.",
+                quote="Ложитесь спать в одно и то же время каждый день.",
+                source_url="https://example.com/sleep",
+                risk_model="low",
+                risk_rules="low",
+                risk_final="low",
+            )
         )
         await session.commit()
 
@@ -107,14 +153,13 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
 # --- contents ---
 
 
-async def test_export_contains_all_nine_tables_with_rows(sessionmaker, clock):
+async def test_export_contains_every_exported_table_with_rows(sessionmaker, clock):
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
         payload = await export.build_export(session, clock)
 
     expected = {m.__tablename__ for m in export.EXPORTED_MODELS}
     assert set(payload["tables"]) == expected
-    assert len(expected) == 9
     for name, rows in payload["tables"].items():
         assert rows, f"{name} exported empty despite being seeded"
 
@@ -262,3 +307,40 @@ async def test_an_oversized_export_explains_instead_of_failing(sessionmaker):
 
     assert fake.documents == []
     assert fake.sent[-1].text.startswith("Слишком много данных")
+
+
+# --- coverage ---
+
+# Tables deliberately left out of /export, each with the reason. A new
+# table must be added to EXPORTED_MODELS or named here; there is no
+# third option, and that is the whole point of the test below.
+NOT_EXPORTED = {
+    "telegram_update": "transport: Telegram's own envelope around text `messages` carries",
+    "job": "queue plumbing; payloads reference rows that are exported",
+    "pending_memory": "unclassified /remember text, exported once it becomes a memory",
+    "persona_version": "a hash of a file in this repo, not user data",
+}
+
+
+async def test_every_table_is_either_exported_or_deliberately_omitted():
+    """The same pressure tests/test_delete.py puts on purge.py.
+
+    Without this, EXPORTED_MODELS was only ever checked against itself:
+    a new table added to models.py would be silently missing from
+    /export, and the two tests above would still pass because both
+    derive their expectation from EXPORTED_MODELS. That is a data-control
+    promise failing quietly, which is the one way it must not fail.
+    """
+    exported = {m.__tablename__ for m in export.EXPORTED_MODELS}
+    unaccounted = set(models.Base.metadata.tables) - exported - set(NOT_EXPORTED)
+    assert not unaccounted, (
+        "new table(s) in models.py are neither exported nor listed in "
+        f"NOT_EXPORTED: {sorted(unaccounted)}"
+    )
+
+
+async def test_the_omission_list_does_not_name_a_table_that_is_exported():
+    """Guards the guard: a stale NOT_EXPORTED entry would hide a real gap."""
+    exported = {m.__tablename__ for m in export.EXPORTED_MODELS}
+    assert not (exported & set(NOT_EXPORTED))
+    assert set(NOT_EXPORTED) <= set(models.Base.metadata.tables)

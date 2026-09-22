@@ -1,12 +1,17 @@
 """Building the /export file (plan section 11).
 
-Nine tables, named by section 11: state, messages, memories, scenes,
-check-ins, proposals, journal, state_change, spend_ledger. The three the
-database also holds -- telegram_update, job, pending_memory -- are
-transport and queue plumbing, and their only real content is message
-text that `messages` already carries in full. Including them would
-double the file with Telegram's own envelope format and make it harder
-to read, not more complete.
+Section 11 named nine tables: state, messages, memories, scenes,
+check-ins, proposals, journal, state_change, spend_ledger. Later
+milestones added `outbound`, `safety_event` and 4a's three study
+tables, and they are here too -- see the comment on EXPORTED_MODELS.
+
+What stays out is transport and queue plumbing -- telegram_update, job,
+pending_memory -- whose only real content is message text that
+`messages` already carries in full, plus persona_version, which is a
+hash of a file in this repo. Including them would double the file with
+Telegram's own envelope format and make it harder to read, not more
+complete. tests/test_export.py keeps that list of four honest: a table
+is exported or it is named there, and nothing may be neither.
 
 **Nothing here is ever logged.** The caller records byte counts and row
 counts; the rows themselves go into the file and nowhere else.
@@ -27,12 +32,17 @@ from app.core.clock import Clock
 from app.db.models import (
     Checkin,
     Journal,
+    Outbound,
     Memory,
     Message,
     Proposal,
+    SafetyEvent,
     Scene,
     SpendLedger,
     StateChange,
+    StudyCard,
+    StudyClip,
+    StudyJob,
     UserState,
 )
 
@@ -49,6 +59,29 @@ EXPORTED_MODELS = (
     Journal,
     StateChange,
     SpendLedger,
+    # 4a: the research loop (phase-4 plan section 4, which says /export
+    # includes all three). Unlike telegram_update and job, these are not
+    # plumbing whose content another table already carries: study_clip
+    # holds page text that exists nowhere else, and study_card holds the
+    # proposals the user accepted or refused.
+    # 3a and H2. Both were purged by /delete from the day they were
+    # added and neither reached /export, because EXPORTED_MODELS was
+    # only ever checked against itself -- see
+    # tests/test_export.py::test_every_table_is_either_exported_or_
+    # deliberately_omitted, the 4a test that found this.
+    #
+    # Both are user data by the repo's own reasoning: purge.py calls
+    # `outbound` "a record of what the bot said to this user and when"
+    # and `safety_event` "a record of when this user was talked to".
+    # "Give me all my data" is the mirror of "delete all my data", so a
+    # table cannot be user data for one and plumbing for the other.
+    # `outbound` also holds what `message` cannot: the proactive
+    # messages that were planned and then skipped or cancelled.
+    Outbound,
+    SafetyEvent,
+    StudyJob,
+    StudyClip,
+    StudyCard,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

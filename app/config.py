@@ -74,44 +74,6 @@ class Settings(BaseSettings):
     LLM_PRICE_IN: float = 0.30
     LLM_PRICE_CACHED: float = 0.15
     LLM_PRICE_OUT: float = 0.50
-    # 1f: opt-in web search via OpenRouter's `web` plugin, triggered only
-    # by the /search command (app/tg/router.py) -- never on an ordinary turn.
-    #
-    # H3: defaults to False. /search was never in a plan -- it arrived with
-    # milestone 1f and defaulted on -- and it is the only path in this bot
-    # that sends the user's words to a third party (Exa, via the plugin).
-    # The feature stays in the tree for phase 4; it is simply not live
-    # until someone turns it on deliberately. When it is False the handler
-    # answers SEARCH_DISABLED_REPLY_TEXT and makes no model call at all.
-    LLM_WEB_SEARCH: bool = False
-    LLM_WEB_SEARCH_MAX_RESULTS: int = 5
-    # Exa's "auto" mode, the engine app/llm/openrouter.py asks for, at
-    # $0.007 per request including up to 10 results. Verified 2026-09-22
-    # at https://openrouter.ai/docs/features/web-search (we request 5).
-    #
-    # H4 answered the question this setting used to carry. It defaulted
-    # to 0.0 because nobody knew whether OpenRouter's reported
-    # `usage.cost` already included the fee, and compute_cost added it to
-    # both the vendor and the computed branch -- so 0.0 was the only
-    # value that could not double-bill. That made the *fallback* path
-    # silently under-bill every searched turn instead.
-    #
-    # The answer, from https://openrouter.ai/docs/use-cases/usage-accounting
-    # (checked 2026-09-22): `cost` is "the total amount charged to your
-    # account", stated as distinct from cost_details.upstream_inference_cost,
-    # "the actual cost charged by the upstream AI provider". The two
-    # fields are separate precisely because the first is broader than
-    # inference, and the Exa fee is charged to the same OpenRouter
-    # credits. So the fee is inside a vendor-reported figure and outside
-    # a computed one, and app/core/spend.py now adds it to the computed
-    # branch only -- which lets this be the real price rather than a
-    # placeholder.
-    #
-    # Still falsifiable on live data: scripts/smoke.py prints the
-    # reported-cost delta between an unsearched and a searched call. A
-    # delta near $0.007 confirms this reading; a delta near zero refutes
-    # it, and then the fee belongs on both branches.
-    LLM_WEB_SEARCH_PRICE_USD: float = 0.007
     # Lowered from 3.00 to 1.00 in 3a, by decision: phase-3 plan
     # section 12 budgets the whole proactive day (morning + evening
     # nag + at most one tick, plus ~6 tick decisions) at about
@@ -325,6 +287,120 @@ class Settings(BaseSettings):
     # The ceiling on a single /quiet, so a fat-fingered "/quiet 30d"
     # cannot mute the bot for a month.
     QUIET_MAX_DAYS: int = 7
+
+    # --- 4a: the research loop (phase-4 plan section 3) ---
+    #
+    # The master switch. Everything in phase 4 no-ops when it is false,
+    # and it stays false through milestones 4a-4c: the tables, the
+    # fetcher and the commands all ship dark and get flipped on once
+    # 4d's eval cases pass.
+    RESEARCH_ENABLED: bool = False
+
+    # Two quotas, because the two commands cost differently. A /study
+    # job is one or two search calls plus two distills; a /read is a
+    # single distill on a page the user already chose.
+    RESEARCH_JOBS_PER_DAY: int = 1
+    RESEARCH_READS_PER_DAY: int = 3
+    # Per /study job. A search that finds nothing gets one reformulation
+    # (plan section 6), so the floor for a useful job is 2.
+    RESEARCH_MAX_SEARCHES: int = 4
+    # Pages fetched per /study job. Two clips at ~5k input tokens each
+    # is the bulk of a job's cost.
+    RESEARCH_MAX_PINS: int = 2
+    # Per job, and additionally counted against DAILY_USD_CAP -- a job
+    # that hits either one stops and keeps the cards it already made
+    # (plan section 12).
+    RESEARCH_JOB_USD_CAP: float = 0.10
+
+    RESEARCH_CARDS_MIN: int = 3
+    RESEARCH_CARDS_MAX: int = 6
+    # A pending card is a question waiting for an answer. After two
+    # weeks the answer is "no" by default: the sweep marks it expired
+    # rather than leaving /notes to accumulate forever.
+    RESEARCH_CARD_TTL_DAYS: int = 14
+    # Adopted techniques injected per turn. Kept small on purpose --
+    # these compete with retrieved memories for the same attention, and
+    # the persona is not a reference manual.
+    RESEARCH_TECHNIQUES_IN_PROMPT: int = 2
+
+    # The three /study packets. Comma-separated domains, parsed by the
+    # validator below. GUIDES ships empty and /study guides refuses
+    # until it is set -- picking those domains is the user's call, not a
+    # default we invent.
+    PACKET_FORUMS: Annotated[tuple[str, ...], NoDecode] = ("reddit.com",)
+    PACKET_REF: Annotated[tuple[str, ...], NoDecode] = (
+        "ru.wikipedia.org",
+        "fr.wikipedia.org",
+        "en.wikipedia.org",
+    )
+    PACKET_GUIDES: Annotated[tuple[str, ...], NoDecode] = ()
+
+    # Fetcher limits (plan section 5). These are the numbers
+    # app/research/fetch.py enforces; it takes them as arguments rather
+    # than reading Settings, so the whole module stays testable without
+    # an environment.
+    FETCH_TIMEOUT_S: float = 10.0
+    FETCH_MAX_BYTES: int = 2_000_000
+    FETCH_MAX_REDIRECTS: int = 3
+    # Characters of extracted text passed to distill. Roughly 5k tokens
+    # of Russian, which is the input side of the cost estimate in plan
+    # section 13.
+    FETCH_MAX_CHARS: int = 15_000
+    # Honest and identifiable, with no browser string anywhere in it.
+    # Plan section 5.9 forbids spoofing this when a site blocks us.
+    FETCH_USER_AGENT: str = (
+        "AnchorBot/1.0 (personal, single-user; contact via repo owner)"
+    )
+
+    @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
+    @classmethod
+    def _parse_packet(cls, value):
+        """Accept "a.com,b.com" from the environment, and refuse junk loudly.
+
+        Same NoDecode problem as TICK_HOURS: pydantic-settings wants
+        JSON list syntax for a tuple-typed field read from env, and the
+        plan writes these as bare comma-separated domains.
+
+        Lowercased and deduped, order preserved, because
+        app/research/addresses.py compares against these case-
+        insensitively and a duplicate would silently shrink the packet.
+        A scheme or a path in a packet entry is refused rather than
+        stripped: `https://reddit.com/r/x` in a packet means somebody
+        expected path filtering, and quietly turning it into
+        `reddit.com` would admit the whole site instead.
+        """
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+        elif isinstance(value, (list, tuple)):
+            parts = [str(part).strip() for part in value if str(part).strip()]
+        else:
+            return value
+        domains: list[str] = []
+        for part in parts:
+            domain = part.lower().rstrip(".")
+            if "/" in domain or ":" in domain:
+                raise ValueError(
+                    f"packet entries must be bare domains, got {part!r} -- "
+                    "no scheme, port or path"
+                )
+            if "." not in domain:
+                raise ValueError(f"packet entries must be domains, got {part!r}")
+            if domain not in domains:
+                domains.append(domain)
+        return tuple(domains)
+
+    @field_validator("PACKET_GUIDES")
+    @classmethod
+    def _cap_guides(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Plan section 3 caps this packet at five domains.
+
+        Only this one: forums and ref are fixed lists this repo chose,
+        while guides is the open slot the user fills, and an open slot
+        with no ceiling is how a packet becomes "the web".
+        """
+        if len(value) > 5:
+            raise ValueError(f"PACKET_GUIDES takes at most 5 domains, got {len(value)}")
+        return value
 
     @field_validator("TICK_HOURS", mode="before")
     @classmethod

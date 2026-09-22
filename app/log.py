@@ -67,7 +67,6 @@ class _JsonFormatter(logging.Formatter):
             "tokens_cached",
             "tokens_out",
             "usd_cost",
-            "search",
             # 2a
             "scene_id",
             "job_id",
