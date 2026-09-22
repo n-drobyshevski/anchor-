@@ -63,7 +63,20 @@ class Settings(BaseSettings):
     LLM_PRICE_IN: float = 0.30
     LLM_PRICE_CACHED: float = 0.15
     LLM_PRICE_OUT: float = 0.50
-    DAILY_USD_CAP: float = 1.00
+    # 1f: opt-in web search via OpenRouter's `web` plugin, triggered only
+    # by the /search command (app/tg/router.py) -- never on an ordinary turn.
+    LLM_WEB_SEARCH: bool = True
+    LLM_WEB_SEARCH_MAX_RESULTS: int = 5
+    # OpenRouter's docs do not say whether the Exa search fee ($0.007/req)
+    # is already folded into the `usage.cost` OpenRouter reports, and
+    # compute_cost (app/core/spend.py) prefers that vendor-reported cost
+    # outright. Adding a non-zero price here on top of a cost that
+    # already includes the fee would double-bill every searched turn.
+    # Default to 0.0 (trust the vendor); scripts/smoke.py measures the
+    # actual delta between a searched and unsearched call on live data --
+    # set this to 0.007 only if that shows OpenRouter excludes the fee.
+    LLM_WEB_SEARCH_PRICE_USD: float = 0.0
+    DAILY_USD_CAP: float = 3.00
     TZ_DEFAULT: str = "Europe/Paris"
     TRANSCRIPT_TURNS: int = 30
 

@@ -248,11 +248,13 @@ class FakeLLMProvider:
         self.closed = False
         self.received_messages: list[list] = []
         self.received_conversation_ids: list[str] = []
+        self.received_web_search: list[bool] = []
 
-    async def complete(self, messages, *, conversation_id: str) -> LLMResponse:
+    async def complete(self, messages, *, conversation_id: str, web_search: bool = False) -> LLMResponse:
         self.calls += 1
         self.received_messages.append(messages)
         self.received_conversation_ids.append(conversation_id)
+        self.received_web_search.append(web_search)
         if self._raises:
             raise self._raises.pop(0)
         return LLMResponse(text=self.text, usage=self.usage, model=self.model)

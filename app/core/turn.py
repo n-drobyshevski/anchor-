@@ -23,6 +23,13 @@ and never spends a cent. run_hard_pause() and run_resume() are the
 module functions behind /out, /in, and the HARD word branch of
 run() -- both idempotent through the same reply_to_update mechanism as
 the rest of this file, via _send_canned_reply().
+
+1f adds `web_search`, threaded from run() down to the single provider
+call: it is opt-in only, set by app/tg/router.py's /search handler and
+nowhere else, so an ordinary text turn never sends OpenRouter's `web`
+plugin. run_search_canned_reply() covers the two /search cases that
+never reach the model at all (empty query, search disabled), via the
+same _send_canned_reply() idempotency as every other canned reply here.
 """
 
 from __future__ import annotations
@@ -67,6 +74,10 @@ FAILURE_REPLY_TEXT = "Связь с моделью упала, попробуй 
 PAUSE_REPLY_TEXT = "Ок, выхожу из роли. Всё на паузе, никаких сообщений от меня. Вернуться — /in."
 RESUME_REPLY_TEXT = "Возвращаюсь."
 YELLOW_FLAG = "Пользователь сказал «жёлтый»: снизь интенсивность прямо сейчас, мягче, без давления."
+
+# 1f: /search canned replies -- neither ever reaches the model.
+SEARCH_EMPTY_REPLY_TEXT = "Что поискать? Напиши так: /search вопрос."
+SEARCH_DISABLED_REPLY_TEXT = "Поиск сейчас выключен."
 
 CHAT_CATEGORY = "chat"
 OOC_CATEGORY = "ooc"
@@ -174,7 +185,9 @@ async def _insert_assistant_row(
     return message_id
 
 
-async def _complete_with_retries(provider: LLMProvider, messages, *, update_id: int):
+async def _complete_with_retries(
+    provider: LLMProvider, messages, *, update_id: int, web_search: bool = False
+):
     """Call provider.complete, retrying retryable errors up to MAX_RETRIES times.
 
     Returns the LLMResponse on success, or None once retries (or a
@@ -185,7 +198,9 @@ async def _complete_with_retries(provider: LLMProvider, messages, *, update_id: 
     attempt = 0
     while True:
         try:
-            return await provider.complete(messages, conversation_id=CONVERSATION_ID)
+            return await provider.complete(
+                messages, conversation_id=CONVERSATION_ID, web_search=web_search
+            )
         except LLMRetryableError as exc:
             if attempt >= MAX_RETRIES:
                 logger.warning(
@@ -241,6 +256,30 @@ async def _send_canned_reply(
         async with sessionmaker() as session:
             row = await _get_assistant_row(session, update_id)
             await _mark_sent(session, row.id)
+
+
+async def run_search_canned_reply(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    *,
+    chat_id: int,
+    update_id: int,
+    text: str,
+) -> None:
+    """The two /search cases that never reach the model: an empty query
+    (SEARCH_EMPTY_REPLY_TEXT) or LLM_WEB_SEARCH=false
+    (SEARCH_DISABLED_REPLY_TEXT). `text` picks which. Uses the same
+    _send_canned_reply idempotency as every other canned reply in this
+    module, so a queue replay of the same update_id sends at most once.
+    """
+    await _send_canned_reply(
+        sessionmaker,
+        bot,
+        chat_id=chat_id,
+        update_id=update_id,
+        text=text,
+        category=OOC_CATEGORY,
+    )
 
 
 async def run_hard_pause(
@@ -317,6 +356,7 @@ async def run(
     chat_id: int,
     update_id: int,
     user_text: str,
+    web_search: bool = False,
 ) -> None:
     """Run one idempotent chat turn. See module and plan sections 7/8 docs.
 
@@ -324,6 +364,12 @@ async def run(
     user_state is read *before* step 1 (rather than at the old step 3),
     because step 1 now needs persona_active to decide whether this
     user message belongs in the persona transcript at all.
+
+    1f: `web_search` is opt-in, set only by app/tg/router.py's /search
+    handler. It flows straight through every existing gate (pause words,
+    idempotency, the spend cap, neutral mode) to the single provider
+    call at step 6 -- it changes nothing about how the turn is run,
+    only whether that one call asks OpenRouter to search first.
     """
 
     # Step 0: a pause word is matched in code, before anything else.
@@ -403,7 +449,9 @@ async def run(
                     update_id=update_id,
                 )
         started_at = time.monotonic()
-        response = await _complete_with_retries(provider, messages, update_id=update_id)
+        response = await _complete_with_retries(
+            provider, messages, update_id=update_id, web_search=web_search
+        )
     finally:
         await stop_typing(typing_task)
 
@@ -422,6 +470,7 @@ async def run(
             "tokens_cached": response.usage.cached_tokens,
             "tokens_out": response.usage.output_tokens,
             "usd_cost": str(usd_cost),
+            "search": web_search,
         },
     )
 

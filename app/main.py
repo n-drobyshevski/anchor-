@@ -50,6 +50,7 @@ def build_provider(settings: Settings) -> LLMProvider:
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
     )
 
 

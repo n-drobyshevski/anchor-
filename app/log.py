@@ -59,6 +59,7 @@ class _JsonFormatter(logging.Formatter):
             "tokens_cached",
             "tokens_out",
             "usd_cost",
+            "search",
         ):
             if hasattr(record, key):
                 base[key] = getattr(record, key)

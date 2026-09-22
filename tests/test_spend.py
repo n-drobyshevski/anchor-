@@ -75,6 +75,73 @@ def test_compute_cost_avoids_binary_float_price_error():
     assert decimal.Decimal(0.1) != decimal.Decimal("0.1")
 
 
+def test_compute_cost_adds_the_web_search_fee_on_the_formula_branch():
+    settings = Settings(
+        LLM_PRICE_IN=2.00, LLM_PRICE_CACHED=0.50, LLM_PRICE_OUT=6.00, LLM_WEB_SEARCH_PRICE_USD=0.007
+    )
+    base_usage = LLMUsage(input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None)
+    searched_usage = LLMUsage(
+        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None, web_search_requests=1
+    )
+
+    base_cost = compute_cost(base_usage, settings)
+    searched_cost = compute_cost(searched_usage, settings)
+
+    assert searched_cost == base_cost + decimal.Decimal("0.007")
+
+
+def test_compute_cost_adds_the_web_search_fee_on_the_vendor_cost_branch():
+    settings = Settings(LLM_WEB_SEARCH_PRICE_USD=0.007)
+    base_usage = LLMUsage(
+        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=decimal.Decimal("0.001234")
+    )
+    searched_usage = LLMUsage(
+        input_tokens=1000,
+        cached_tokens=200,
+        output_tokens=300,
+        cost_usd=decimal.Decimal("0.001234"),
+        web_search_requests=1,
+    )
+
+    base_cost = compute_cost(base_usage, settings)
+    searched_cost = compute_cost(searched_usage, settings)
+
+    assert searched_cost == base_cost + decimal.Decimal("0.007")
+
+
+def test_compute_cost_web_search_fee_defaults_to_a_no_op():
+    """Default LLM_WEB_SEARCH_PRICE_USD=0.0: a searched call must cost
+    exactly the same as an unsearched one unless the operator opts in
+    to a non-zero fee (see the config comment for why 0.0 is the default)."""
+    settings = Settings()
+    unsearched = LLMUsage(input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None)
+    searched = LLMUsage(
+        input_tokens=1000, cached_tokens=200, output_tokens=300, cost_usd=None, web_search_requests=1
+    )
+
+    assert compute_cost(unsearched, settings) == compute_cost(searched, settings)
+
+
+async def test_web_search_fee_is_counted_against_the_daily_cap(sessionmaker):
+    """The fee lands in spend_ledger.usd_cost like any other cost, so
+    check_cap sees it through today_usd -- exercised end to end against
+    the real ledger table rather than just compute_cost in isolation."""
+    settings = Settings(DAILY_USD_CAP=0.01, LLM_WEB_SEARCH_PRICE_USD=0.007)
+    usage = LLMUsage(
+        input_tokens=0, cached_tokens=0, output_tokens=0, cost_usd=decimal.Decimal("0.005000"), web_search_requests=1
+    )
+    cost = compute_cost(usage, settings)
+    assert cost == decimal.Decimal("0.012000")
+
+    today = local_date_for("Europe/Paris")
+    async with sessionmaker() as session:
+        session.add(SpendLedger(local_date=today, category="chat", usd_cost=cost))
+        await session.commit()
+
+    async with sessionmaker() as session:
+        assert await check_cap(session, settings, "Europe/Paris") is True
+
+
 def test_local_date_for_paris_matches_current_zoneinfo_date():
     from zoneinfo import ZoneInfo
 

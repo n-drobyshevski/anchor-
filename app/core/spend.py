@@ -76,4 +76,10 @@ def compute_cost(usage: LLMUsage, settings: Settings) -> decimal.Decimal:
         cost = (
             uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out
         ) / million
+    # Applies to both branches above deliberately: a web search can
+    # accompany either a vendor-reported cost or a formula fallback, and
+    # the fee is independent of which one priced the tokens. Defaults to
+    # zero -- see the LLM_WEB_SEARCH_PRICE_USD comment in app/config.py
+    # for why (OpenRouter may already include the Exa fee in cost_usd).
+    cost += usage.web_search_requests * decimal.Decimal(str(settings.LLM_WEB_SEARCH_PRICE_USD))
     return cost.quantize(_CENTS_EXPONENT, rounding=decimal.ROUND_HALF_UP)

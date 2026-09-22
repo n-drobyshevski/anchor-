@@ -410,6 +410,36 @@ async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessi
     await bot.session.close()
 
 
+async def test_pause_word_through_the_search_path_still_pauses_with_zero_provider_calls(sessionmaker):
+    """1f: web_search=True must not bypass step 0 (pause.match()) -- a
+    pause word sent via /search still pauses and never reaches the model."""
+    update_id = 150
+    await _seed(sessionmaker, update_id=update_id)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider()
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="пурпурный",
+        web_search=True,
+    )
+
+    assert provider.calls == 0
+    assert len(fake_session.sent) == 1
+    assert fake_session.sent[0].text == turn.PAUSE_REPLY_TEXT
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.persona_active is False
+
+    await bot.session.close()
+
+
 async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change(sessionmaker):
     update_id = 101
     await _seed(sessionmaker, update_id=update_id)
@@ -715,6 +745,7 @@ async def test_ordinary_chat_turns_never_send_tools_to_the_model():
         max_tokens=700,
         temperature=0.9,
         data_collection="deny",
+        web_search_max_results=5,
     )
     provider._client = _FakeClient()
 
@@ -726,6 +757,8 @@ async def test_ordinary_chat_turns_never_send_tools_to_the_model():
     assert "tools" not in captured_kwargs
     assert "tool_choice" not in captured_kwargs
     assert "functions" not in captured_kwargs
+    # 1f: an ordinary (non-/search) turn must never send the `web` plugin.
+    assert "plugins" not in captured_kwargs["extra_body"]
 
 
 async def test_only_run_resume_sets_persona_active_true():
