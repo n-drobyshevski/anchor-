@@ -71,6 +71,7 @@ from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
+from app.research.jobs import RESEARCH, run_research_job
 from app.tg.proposals import send_proposal
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,22 @@ async def _run_job(
             bot,
             clock=clock,
             outbound_id=payload["outbound_id"],
+        )
+        return ExtractOutcome()
+
+    if kind == RESEARCH:
+        # 4b: a /read job's fetch-then-distill run. Distill is a strict-
+        # schema call over a stranger's page text, so it runs on the
+        # safety model like every other H2 job here -- never the main
+        # model, which is reserved for in-character generation.
+        await run_research_job(
+            session,
+            settings,
+            safety_provider or cheap_provider,
+            job_id=payload["job_id"],
+            url=payload["url"],
+            clock=clock,
+            timezone=user_state.timezone,
         )
         return ExtractOutcome()
 

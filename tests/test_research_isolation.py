@@ -21,10 +21,12 @@ with the rest of its family, not here.
 from __future__ import annotations
 
 import ast
+import inspect
 import pathlib
 
 import pytest
 
+from app import log as log_module
 from app.research import errors, fetch
 
 RESEARCH = pathlib.Path("app/research")
@@ -166,18 +168,101 @@ def test_every_error_constant_is_in_the_closed_set():
     assert declared == set(errors.FETCH_ERROR_CODES)
 
 
-@pytest.mark.parametrize("path", _modules(), ids=lambda p: p.name)
-def test_no_research_module_logs_anything_yet(path):
-    """4a has nothing to say. When 4b starts logging, the allowlist in
-    app/log.py decides what survives -- and a key like `url` or `topic`
-    is not in it, so this test is the reminder to think before adding
-    one rather than a permanent ban on logging."""
+# 4b: app/research/jobs.py is the one module in this package allowed to
+# log, because it is the one module that writes the database and can
+# say "job 9 failed with dns_error" without saying anything about the
+# page. Every other module stays silent -- the fetcher, the distiller
+# and the risk rules run on data the caller must not describe, and the
+# discipline that kept 4a's tree log-free is still worth keeping where
+# nothing yet needs otherwise.
+LOGGING_ALLOWED = {"jobs.py"}
+
+
+@pytest.mark.parametrize(
+    "path", [p for p in _modules() if p.name not in LOGGING_ALLOWED], ids=lambda p: p.name
+)
+def test_no_other_research_module_logs_anything(path):
+    """4a has nothing to say, and 4b gave logging to jobs.py alone. The
+    allowlist in app/log.py decides what a jobs.py log line keeps --
+    see test_research_jobs_logging_uses_only_the_log_allowlist -- and a
+    key like `url` or `topic` is not in it, which is why every other
+    module here still has nothing to log at all."""
     code = _code_without_docstrings(path)
     assert "logging.getLogger" not in code, (
         f"{path}: before logging from research, check app/log.py's allowlist -- "
         "plan section 12 permits ids, domains, codes, counts and cost, and "
         "nothing else"
     )
+
+
+def test_research_jobs_logging_uses_only_the_log_allowlist():
+    """Every `extra={...}` key app/research/jobs.py logs must be one
+    app/log.py's formatter actually keeps (plan section 12).
+
+    Checked against `log.SAFE_EXTRA_KEYS` itself, not against a
+    substring search of that module: `_REDACTED_KEYS` also lives there,
+    so searching the source for `"text"` would have found it and passed
+    a log line carrying page content -- the exact thing this is for.
+
+    Every logger level is scanned, not just `.info`: a key is no safer
+    for being logged as a warning.
+
+    A static check on literal dict keys. Every call site in jobs.py
+    uses a literal `extra={...}`, and the assertion below fails if that
+    stops being true.
+    """
+    source = pathlib.Path("app/research/jobs.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    keys: set[str] = set()
+    call_sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", "") not in ("debug", "info", "warning", "error", "critical"):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "extra":
+                continue
+            call_sites += 1
+            assert isinstance(keyword.value, ast.Dict), (
+                "a non-literal extra= dict in jobs.py: this scanner cannot see "
+                "through it, so it must not exist"
+            )
+            for key_node in keyword.value.keys:
+                assert isinstance(key_node, ast.Constant) and isinstance(key_node.value, str), (
+                    "a computed log key in jobs.py: the allowlist cannot be "
+                    "checked against it"
+                )
+                keys.add(key_node.value)
+
+    assert call_sites, "no logger call with extra= found -- the scanner is broken"
+    unknown = keys - set(log_module.SAFE_EXTRA_KEYS)
+    assert not unknown, (
+        f"app/research/jobs.py logs keys app/log.py drops: {sorted(unknown)}. "
+        "Add them to SAFE_EXTRA_KEYS only if they are an id, a code, a count, "
+        "a domain or a cost -- never a path, a topic or any page text."
+    )
+
+
+def test_the_log_allowlist_and_the_redaction_set_do_not_overlap():
+    """Guards the guard. If a redacted spelling ever reached
+    SAFE_EXTRA_KEYS, the test above would happily approve a log line
+    carrying it, and the formatter would print it."""
+    assert not (set(log_module.SAFE_EXTRA_KEYS) & log_module._REDACTED_KEYS)
+
+
+def test_the_allowlist_holds_no_key_that_could_carry_free_text():
+    """A key named for content rather than for an identifier is a
+    preview waiting to happen. Names, not values -- this cannot see what
+    a caller passes, only what the allowlist invites."""
+    forbidden_substrings = ("text", "content", "body", "url", "path", "query", "topic",
+                            "quote", "title", "message", "payload", "prompt")
+    offenders = [
+        key
+        for key in log_module.SAFE_EXTRA_KEYS
+        if any(part in key for part in forbidden_substrings)
+    ]
+    assert not offenders, f"allowlist invites free text under: {offenders}"
 
 
 def test_the_fetcher_takes_its_limits_as_arguments_not_from_settings():

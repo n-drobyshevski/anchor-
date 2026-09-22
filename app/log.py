@@ -39,6 +39,49 @@ class RedactionFilter(logging.Filter):
         return True
 
 
+# Extras that may reach a log line. This tuple is what actually
+# enforces the privacy rule -- RedactionFilter above only strips the
+# three literal spellings text/content/payload, so a key like
+# "memory_text" would sail straight through it. Everything here must be
+# an id, a kind, a count, a duration, a domain or a flag. Never a
+# preview, never a truncated string, never a URL path or query.
+# (2a's scene_id/job_id/kind were missing and were therefore silently
+# dropped from every 2a log line.)
+#
+# Module-level and public since 4b, so a caller's log keys can be
+# checked against it by a test rather than by grepping this file --
+# tests/test_research_isolation.py does exactly that, and a substring
+# search over this module would have matched _REDACTED_KEYS and passed
+# a log line carrying `text`.
+SAFE_EXTRA_KEYS: tuple[str, ...] = (
+
+    "update_id",
+    "chat_id",
+    "latency_ms",
+    "attempts",
+    "event",
+    "count",
+    "tokens_in",
+    "tokens_cached",
+    "tokens_out",
+    "usd_cost",
+    # 2a
+    "scene_id",
+    "job_id",
+    "kind",
+    # 2b
+    "memory_id",
+    "superseded_id",
+    "pinned",
+    # 4b
+    "clip_id",
+    "domain",
+    "error_code",
+    "cards",
+    "dropped",
+)
+
+
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         base = {
@@ -47,35 +90,9 @@ class _JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         # Only include known-safe extras; never dump __dict__ wholesale,
-        # since that could reintroduce a redacted key under a new spelling.
-        #
-        # This allowlist is what actually enforces the privacy rule --
-        # RedactionFilter above only strips the three literal spellings
-        # text/content/payload, so a key like "memory_text" would sail
-        # straight through it. Everything added here must be an id, a
-        # kind, a count, a duration or a flag. Never a preview, never a
-        # truncated string. (2a's scene_id/job_id/kind were missing and
-        # were therefore silently dropped from every 2a log line.)
-        for key in (
-            "update_id",
-            "chat_id",
-            "latency_ms",
-            "attempts",
-            "event",
-            "count",
-            "tokens_in",
-            "tokens_cached",
-            "tokens_out",
-            "usd_cost",
-            # 2a
-            "scene_id",
-            "job_id",
-            "kind",
-            # 2b
-            "memory_id",
-            "superseded_id",
-            "pinned",
-        ):
+        # since that could reintroduce a redacted key under a new
+        # spelling. See SAFE_EXTRA_KEYS.
+        for key in SAFE_EXTRA_KEYS:
             if hasattr(record, key):
                 base[key] = getattr(record, key)
         return json.dumps(base, default=str)
