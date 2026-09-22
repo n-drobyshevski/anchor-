@@ -20,6 +20,7 @@ import decimal
 import json
 
 import pytest
+import sqlalchemy
 from sqlalchemy import func, select
 
 from app.config import Settings
@@ -905,3 +906,163 @@ async def test_the_cap_mid_job_stops_it_and_keeps_the_cards_already_made(session
     async with sessionmaker() as session:
         cards = (await session.execute(select(StudyCard))).scalars().all()
     assert len(cards) == 1
+
+
+# --- /delete cancelling a job mid-run (plan section 9) ----------------
+
+
+async def test_a_study_job_cancelled_mid_run_stops_writing(sessionmaker, clock):
+    """`/delete` cancels queued and running jobs, then purges.
+
+    `run_research_job` reads the status once at the top, which stops a
+    job that has not started. This is the other half: a job already
+    mid-flight must notice too, or its writes land after the purge --
+    and because /delete uses RESTART IDENTITY, they can attach to a
+    brand-new job that reused the id.
+    """
+    settings = _study_settings(RESEARCH_MAX_PINS=2)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a, b = "https://reddit.com/r/a", "https://reddit.com/r/b"
+
+    # Fetch the first candidate, then cancel the way /delete does,
+    # before the second.
+    class _CancellingFetch:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, raw_url, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                async with sessionmaker() as other:
+                    job = await other.get(StudyJob, job_id)
+                    job.status = "cancelled"
+                    await other.commit()
+            return _clip(url=raw_url)
+
+    fetcher = _CancellingFetch()
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a, b), fetch_fn=fetcher,
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert outcome.status == "cancelled"
+    assert fetcher.calls == 1, "the second candidate is never fetched"
+    async with sessionmaker() as session:
+        clips = (await session.execute(select(StudyClip))).scalars().all()
+    # The in-flight clip was flushed but never committed, so it rolls
+    # back with the session. That is the right outcome and not merely a
+    # tolerable one: the job is being deleted, and a half-run's clip is
+    # exactly the stray row this check exists to prevent. Spend is the
+    # one thing that must survive, and it does -- _distill_into_cards
+    # commits its ledger row before any card is written.
+    assert clips == []
+
+
+async def test_a_job_whose_id_was_reused_after_a_purge_stops(sessionmaker, clock):
+    """The dangerous case, and the reason the check is not status-only.
+
+    /delete uses RESTART IDENTITY, so a study_job created after the
+    purge takes id 1 again. Its status is 'queued', not 'cancelled' --
+    a status-only check would wave the old run straight through and
+    file its clips and cards under a job the user had just started.
+    `created_at` is what tells the two apart.
+    """
+    settings = _study_settings(RESEARCH_MAX_PINS=2)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a, b = "https://reddit.com/r/a", "https://reddit.com/r/b"
+
+    class _PurgeAndRecreate:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, raw_url, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # What /delete does, compressed: the row goes, and a new
+                # job lands on the same id.
+                async with sessionmaker() as other:
+                    await other.execute(sqlalchemy.delete(StudyJob))
+                    await other.execute(
+                        sqlalchemy.text("ALTER SEQUENCE study_job_id_seq RESTART WITH 1")
+                    )
+                    other.add(
+                        StudyJob(
+                            kind="study", packet="forums", query="совсем другая тема",
+                            local_date=datetime.date(2026, 9, 22), status="queued",
+                        )
+                    )
+                    await other.commit()
+            return _clip(url=raw_url)
+
+    fetcher = _PurgeAndRecreate()
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a, b), fetch_fn=fetcher,
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert outcome.status == "cancelled"
+    assert fetcher.calls == 1, "the old run stops rather than continuing into the new job"
+    async with sessionmaker() as session:
+        fresh = (await session.execute(select(StudyJob))).scalars().all()
+        clips = (await session.execute(select(StudyClip))).scalars().all()
+        cards = (await session.execute(select(StudyCard))).scalars().all()
+    assert len(fresh) == 1 and fresh[0].query == "совсем другая тема"
+    assert clips == [], "no stray clip attached to the new job"
+    assert cards == [], "no stray card attached to the new job"
+
+
+async def test_spend_already_made_survives_a_cancellation(sessionmaker, clock):
+    """The one thing a cancelled run must not lose. A distill that ran
+    was paid for whether or not the job it belonged to still exists, and
+    a ledger that forgets it under-reports the day."""
+    settings = _study_settings(RESEARCH_MAX_PINS=2)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a, b = "https://reddit.com/r/a", "https://reddit.com/r/b"
+
+    class _CancelAfterFirstDistill:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, raw_url, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                async with sessionmaker() as other:
+                    job = await other.get(StudyJob, job_id)
+                    job.status = "cancelled"
+                    await other.commit()
+            return _clip(url=raw_url)
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a, b), fetch_fn=_CancelAfterFirstDistill(),
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert outcome.status == "cancelled"
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(SpendLedger))).scalars().all()
+    assert len(rows) == 2, "the search and the one distill that ran are both ledgered"
+
+
+async def test_a_read_job_cancelled_before_distill_makes_no_provider_call(sessionmaker, clock):
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+
+    async def _fetch_then_cancel(raw_url, **kwargs):
+        async with sessionmaker() as other:
+            job = await other.get(StudyJob, job_id)
+            job.status = "cancelled"
+            await other.commit()
+        return _clip()
+
+    provider = FakeLLMProvider(text=_one_card(SENTENCE1))
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, provider, job_id=job_id, url=URL, clock=clock,
+            timezone=TIMEZONE, fetch_fn=_fetch_then_cancel,
+        )
+
+    assert outcome.status == "cancelled"
+    assert provider.calls == 0, "a cancelled job must not spend money on a distill"

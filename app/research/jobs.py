@@ -96,6 +96,9 @@ EMPTY_PACKET = "empty_packet"
 TOPIC_TOO_LONG = "topic_too_long"
 EMPTY_TOPIC = "empty_topic"
 
+# study_job.status, set by app/core/purge.py when /delete runs.
+CANCELLED = "cancelled"
+
 # The three packet names /study accepts (plan section 9). Not a config
 # value: the names are the command's vocabulary, and only the domains
 # behind each one are the user's to set.
@@ -321,6 +324,66 @@ async def _recent_clip_urls(session: AsyncSession, clock: Clock, *, days: int = 
         select(StudyClip.url).where(StudyClip.fetched_at.is_(None) | (StudyClip.fetched_at >= since))
     )
     return set(result.scalars().all())
+
+
+async def _still_ours(session: AsyncSession, job_id: int, created_at) -> bool:
+    """False once /delete has cancelled or purged this job out from under us.
+
+    `run_research_job` reads `study_job.status` once, at the top, which
+    is enough to stop a job that has not started. It is not enough for
+    one already mid-fetch or mid-distill: `app/core/purge.py`'s
+    `cancel_research_jobs` flips the row to `'cancelled'` and the
+    TRUNCATE then removes it, while this coroutine carries on and
+    writes clips and cards for a job that no longer exists.
+
+    Most of the time that write simply fails on the foreign key, which
+    is noisy but harmless. The case worth closing is narrower and
+    worse: `/delete` uses RESTART IDENTITY, so a *new* study_job
+    created after the purge takes id 1 again, and a stray write from
+    the old run attaches its clips and cards to it. The user would see
+    cards in /notes from a job they deleted.
+
+    So the row is re-read before every write-heavy step, and **the
+    check is on `created_at` as well as on status**. Status alone would
+    miss exactly the case worth closing: a job created after the purge
+    is `'queued'`, not `'cancelled'`, so a status-only check would wave
+    the old run straight through into the new job's rows. `created_at`
+    is what tells the two apart.
+
+    A missing row counts as cancelled too -- if the job is gone,
+    whatever we were doing for it is no longer wanted.
+
+    Re-read rather than refreshed: the purge commits in another
+    transaction, and this module commits between steps, so a fresh
+    query is the only thing guaranteed to see it.
+
+    Not a complete guard, and deliberately not claimed as one. A row
+    that vanishes *between* this check and the write it guards still
+    produces a foreign-key violation on the flush -- noisy, and safe:
+    the write is refused rather than misfiled, which is the property
+    that matters.
+    """
+    row = (
+        await session.execute(
+            select(StudyJob.status, StudyJob.created_at).where(StudyJob.id == job_id)
+        )
+    ).first()
+    if row is None:
+        return False
+    status, current_created_at = row
+    return status != CANCELLED and current_created_at == created_at
+
+
+def _cancelled_outcome(job_id: int, visible: int, hidden: int) -> ResearchOutcome:
+    """Stop without touching the database -- the row may already be gone."""
+    logger.info("research job cancelled mid-run", extra={"job_id": job_id})
+    return ResearchOutcome(
+        job_id=job_id,
+        status=CANCELLED,
+        error_code=None,
+        visible_cards=visible,
+        hidden_cards=hidden,
+    )
 
 
 async def _ledger(
@@ -603,6 +666,10 @@ async def _run_read(
     `allowed_domains=None` -- a /read accepts any public domain the user
     supplies (plan section 5). The address and robots rules still apply.
     """
+    # Captured before anything commits, so a later check can tell this
+    # job from a new one that reused its id after a purge.
+    job_created_at = job.created_at
+
     job.status = "fetching"
     await session.commit()
 
@@ -615,6 +682,8 @@ async def _run_read(
             session, clock, job, status="failed", error_code=error, visible=0, hidden=0
         )
 
+    if not await _still_ours(session, job.id, job_created_at):
+        return _cancelled_outcome(job.id, 0, 0)
     if await _capped(session, settings, clock, timezone, job):
         return await _finish(
             session, clock, job, status="failed", error_code=CAP, visible=0, hidden=0
@@ -659,6 +728,8 @@ async def _run_study(
             session, clock, job, status="failed", error_code=EMPTY_PACKET, visible=0, hidden=0
         )
 
+    job_created_at = job.created_at
+
     job.status = "searching"
     await session.commit()
 
@@ -667,6 +738,8 @@ async def _run_study(
             session, clock, job, status="failed", error_code=CAP, visible=0, hidden=0
         )
 
+    if not await _still_ours(session, job.id, job_created_at):
+        return _cancelled_outcome(job.id, 0, 0)
     recent = await _recent_clip_urls(session, clock)
     outcome = await search_fn(
         provider,
@@ -696,6 +769,11 @@ async def _run_study(
     for candidate in outcome.urls:
         if job.pins_used >= settings.RESEARCH_MAX_PINS:
             break
+        # Re-read per candidate rather than once: a /study job makes
+        # several round trips and is the one most likely to still be
+        # running when /delete lands.
+        if not await _still_ours(session, job.id, job_created_at):
+            return _cancelled_outcome(job.id, visible, hidden)
         if await _capped(session, settings, clock, timezone, job):
             # Plan section 12: the job stops, becomes failed:cap, and
             # keeps any cards already produced.
@@ -712,6 +790,8 @@ async def _run_study(
             await session.commit()
             continue
 
+        if not await _still_ours(session, job.id, job_created_at):
+            return _cancelled_outcome(job.id, visible, hidden)
         job.pins_used = job.pins_used + 1
         job.status = "distilling"
         await session.commit()

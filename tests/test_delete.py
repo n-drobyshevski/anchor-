@@ -300,6 +300,83 @@ async def test_the_bot_still_works_after_a_wipe(sessionmaker, clock):
     assert state.chat_id == CHAT_ID
 
 
+# --- cancelling research work before the wipe (4d, plan section 9) ---
+
+
+async def test_cancel_research_jobs_marks_non_terminal_study_jobs_cancelled(sessionmaker):
+    """ck_study_job_status's seven values, all at once: the four
+    non-terminal ones must flip, the three terminal ones must not."""
+    today = datetime.date.today()
+    statuses = ("queued", "searching", "fetching", "distilling", "done", "failed", "cancelled")
+    async with sessionmaker() as session:
+        jobs = {status: StudyJob(kind="read", local_date=today, status=status) for status in statuses}
+        session.add_all(jobs.values())
+        await session.commit()
+
+        await purge.cancel_research_jobs(session)
+        await session.commit()
+
+        for job in jobs.values():
+            await session.refresh(job)
+
+    for status in ("queued", "searching", "fetching", "distilling"):
+        assert jobs[status].status == "cancelled", status
+    for status in ("done", "failed", "cancelled"):
+        assert jobs[status].status == status, status
+
+
+async def test_cancel_research_jobs_removes_only_pending_research_queue_rows(sessionmaker):
+    """A claimed (processing) research job row is left alone -- it is
+    the worker still running it that owns its fate, not this function
+    (see cancel_research_jobs' docstring on why that is an honest
+    limitation, not a bug). A pending job of any other kind is untouched
+    regardless of status."""
+    async with sessionmaker() as session:
+        pending_research = Job(kind="research", payload={}, dedup_key="research:pending")
+        processing_research = Job(
+            kind="research", payload={}, dedup_key="research:processing", status="processing"
+        )
+        pending_other = Job(kind="extract", payload={}, dedup_key="extract:pending")
+        session.add_all([pending_research, processing_research, pending_other])
+        await session.commit()
+
+        await purge.cancel_research_jobs(session)
+        await session.commit()
+
+        remaining = (await session.execute(select(Job))).scalars().all()
+
+    assert {row.dedup_key for row in remaining} == {"research:processing", "extract:pending"}
+
+
+async def test_delete_wipes_in_flight_research_work_without_erroring(sessionmaker, clock):
+    """A non-terminal study_job and a still-pending research job row must
+    not make delete_everything raise (e.g. a CHECK constraint tripped by
+    the cancel step) -- they must simply end up gone like everything
+    else, same as test_delete_wipes_every_purged_table already checks
+    for the ordinary case."""
+    today = datetime.date.today()
+    async with sessionmaker() as session:
+        session.add(StudyJob(kind="study", local_date=today, status="fetching"))
+        session.add(Job(kind="research", payload={"job_id": 1}, dedup_key="research:inflight"))
+        await session.commit()
+
+    async with sessionmaker() as session:
+        await purge.delete_everything(session, Settings(), clock)
+
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+        assert (await session.execute(select(Job))).scalars().all() == []
+
+
+async def test_the_research_job_kind_literal_matches_the_research_package():
+    """purge.py hardcodes 'research' rather than importing app.research.
+    jobs.RESEARCH (see the comment by _RESEARCH_JOB_KIND); this is what
+    keeps the two pinned together instead of silently drifting apart."""
+    from app.research.jobs import RESEARCH
+
+    assert purge._RESEARCH_JOB_KIND == RESEARCH
+
+
 # --- the two-step confirmation ---
 
 

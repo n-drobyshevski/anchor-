@@ -46,6 +46,17 @@ It is recorded **before** feed_update, not after. The counters say
 claimed, and stamping first means a handler that raises still clears
 the back-off -- a crash on the user's message must not leave Anchor
 counting them as ignoring it.
+
+4d adds `RESEARCH_SWEEP`, the daily card-expiry and clip-text-retention
+job (app/research/sweeps.py, phase-4 plan sections 9 and 4), at most
+once per local day. Unlike `TICK_DECIDE` it is *not* queued from inside
+`heartbeat()` -- `_heartbeat_loop` below queues it as a sibling step
+right after `heartbeat()` returns, so as not to perturb what
+`heartbeat()` itself inserts (see that function's call site for why).
+Like every other job kind above except `SEND_OUTBOUND`, it needs
+neither `provider` nor a bot; unlike all of them, it needs neither
+`safety_provider` either -- it is two SQL UPDATEs and a pair of log
+lines, no model call at all.
 """
 
 from __future__ import annotations
@@ -64,7 +75,7 @@ from app.core.clock import Clock, to_local, within_window
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
-from app.core.scheduler import TICK_DECIDE, heartbeat
+from app.core.scheduler import TICK_DECIDE, heartbeat, maybe_enqueue_research_sweep
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
@@ -72,6 +83,7 @@ from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_st
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.research.jobs import RESEARCH, run_research_job
+from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
 from app.tg.proposals import send_proposal
 
@@ -212,6 +224,15 @@ async def _run_job(
         )
         if bot is not None:
             await _send_research_done(bot, settings, clock, user_state, outcome)
+        return ExtractOutcome()
+
+    if kind == RESEARCH_SWEEP:
+        # 4d: card expiry + clip-text retention (plan sections 9 and 4).
+        # No provider call and no bot, unlike every other kind above --
+        # both sweeps are plain SQL housekeeping, so this needs neither
+        # `provider` nor `safety_provider` and reports nothing back to
+        # the user (there is no command this is a reply to).
+        await run_daily_sweep(session, settings, clock)
         return ExtractOutcome()
 
     if kind == TICK_DECIDE:
@@ -412,12 +433,32 @@ async def _heartbeat_loop(
     bad tick would silently stop every proactive message for the rest
     of the process's life, and the first sign would be a morning that
     never arrived.
+
+    4d adds the research sweep enqueue as a second step in the same
+    tick, right after `heartbeat()` -- deliberately not *inside*
+    `heartbeat()`. app/core/scheduler.py's module docstring has the
+    full reasoning; short version: several existing tests call
+    `heartbeat()` directly and assert an exact `job` table state
+    afterwards (e.g. "a failed planning gate inserts no row" means zero
+    job rows, not just zero outbound rows), and those tests predate 4d.
+    Running it as a sibling call here gets the same once-a-minute
+    cadence -- which is all `maybe_enqueue_research_sweep`'s dedup key
+    needs to become "once a local day" -- without touching what
+    `heartbeat()` itself does or does not insert. Both calls share the
+    broad except below for the same reason they are both here: a sweep
+    that silently stopped enqueueing would be no louder a failure than a
+    heartbeat that did, and neither deserves to take the other down with
+    it, but a single try/except is simpler than two and the failure mode
+    (log and retry next minute) is identical either way.
     """
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         try:
             async with sessionmaker() as session:
                 await heartbeat(session, settings, clock)
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_research_sweep(session, clock, state.timezone)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

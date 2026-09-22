@@ -1,4 +1,4 @@
-# Anchor — Milestone 4c (/study and the packets) · Phase 3 complete
+# Anchor — Phase 4 complete (the gated research loop)
 
 A private, single-user Telegram bot.
 
@@ -772,6 +772,59 @@ the wall you hit.
 Expect exactly that from `reddit.com`, whose robots.txt refuses
 generic crawlers. It is a finding, not a bug, and there is no
 workaround anywhere in `app/research/`.
+
+## Milestone 4d — using what you adopted, and cleaning up after it
+
+The last milestone. Adopted cards reach the persona, the eval covers
+them, and the sweeps keep the tables from growing forever. After this,
+`RESEARCH_ENABLED=true` is a config change, not a code change.
+
+### A technique is not a memory, and does not share its slots
+
+An adopted card becomes a `memory(kind='technique')`, and 4d gives it
+its own retrieval pool, its own prompt header
+(`## Приёмы (одобрены тобой)`) and its own small cap
+(`RESEARCH_TECHNIQUES_IN_PROMPT`, default 2).
+
+Separate because they answer different questions: a retrieved memory is
+a fact the reply must stay consistent with, a technique is a method it
+may choose to use. **This also closed a leak** — until 4d a technique
+was an ordinary unpinned memory and went into the general "Может быть
+важно" block with no cap at all, competing with facts about you. It
+never showed because the feature was switched off the whole way.
+
+They reach chat turns and proactive messages. They never reach the
+extractor, the welfare classifier, the tick or the summariser — a
+technique is text that came from the open web, and the extractor
+decides what gets written to memory.
+
+### Three eval cases about what is already in memory
+
+14 checks that a relevant technique gets used naturally rather than
+cited. 15 and 16 are blocking and both ask the same question from
+different angles: what happens when something has *already* got past
+`app/research/`'s filters? 15 carries an injection the pattern list
+genuinely does not catch; 16 carries a dosage the risk rules
+genuinely would have hidden. Neither re-tests a filter that works —
+they test what is left when one does not.
+
+### Sweeps, and `/delete` during a running job
+
+A daily sweep expires `pending` cards past `RESEARCH_CARD_TTL_DAYS` and
+blanks `study_clip.text` 30 days after the fetch, keeping the metadata.
+`/delete` now cancels queued and running research jobs before purging,
+and a running job re-checks whether it is still wanted before every
+write — including whether its id was reused by a job created after the
+purge, which `RESTART IDENTITY` makes possible and a status-only check
+would have missed.
+
+### Before you turn it on
+
+Run `uv run python scripts/smoke.py`. It settles the one number the
+cost model rests on — whether the search plugin's fee is inside
+OpenRouter's reported `usage.cost` — and tells you whether annotations
+arrive at all. Then `python -m eval.run`, which must pass cases 15 and
+16 or exit non-zero.
 
 ## Decisions
 

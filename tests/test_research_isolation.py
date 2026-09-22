@@ -168,14 +168,20 @@ def test_every_error_constant_is_in_the_closed_set():
     assert declared == set(errors.FETCH_ERROR_CODES)
 
 
-# 4b: app/research/jobs.py is the one module in this package allowed to
-# log, because it is the one module that writes the database and can
-# say "job 9 failed with dns_error" without saying anything about the
-# page. Every other module stays silent -- the fetcher, the distiller
-# and the risk rules run on data the caller must not describe, and the
-# discipline that kept 4a's tree log-free is still worth keeping where
-# nothing yet needs otherwise.
-LOGGING_ALLOWED = {"jobs.py"}
+# The modules in this package allowed to log, and why each one is here.
+#
+# 4b: jobs.py, because it is the module that writes the database and
+# can say "job 9 failed with dns_error" without saying anything about
+# the page.
+# 4d: sweeps.py, for the same reason -- it reports counts of rows it
+# expired or blanked, which plan section 12 permits explicitly
+# ("IDs, domains, error codes, counts and cost").
+#
+# Every other module stays silent. The fetcher, the search, the
+# distiller and the risk rules all run on data the caller must not
+# describe, and none of them has anything to say that is not about
+# that data.
+LOGGING_ALLOWED = {"jobs.py", "sweeps.py"}
 
 
 @pytest.mark.parametrize(
@@ -195,8 +201,9 @@ def test_no_other_research_module_logs_anything(path):
     )
 
 
-def test_research_jobs_logging_uses_only_the_log_allowlist():
-    """Every `extra={...}` key app/research/jobs.py logs must be one
+@pytest.mark.parametrize("name", sorted(LOGGING_ALLOWED))
+def test_research_logging_uses_only_the_log_allowlist(name):
+    """Every `extra={...}` key a logging module uses must be one
     app/log.py's formatter actually keeps (plan section 12).
 
     Checked against `log.SAFE_EXTRA_KEYS` itself, not against a
@@ -211,8 +218,9 @@ def test_research_jobs_logging_uses_only_the_log_allowlist():
     uses a literal `extra={...}`, and the assertion below fails if that
     stops being true.
     """
-    source = pathlib.Path("app/research/jobs.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    path = RESEARCH / name
+    assert path.exists(), f"{name} is in LOGGING_ALLOWED but does not exist"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     keys: set[str] = set()
     call_sites = 0
     for node in ast.walk(tree):
@@ -225,20 +233,20 @@ def test_research_jobs_logging_uses_only_the_log_allowlist():
                 continue
             call_sites += 1
             assert isinstance(keyword.value, ast.Dict), (
-                "a non-literal extra= dict in jobs.py: this scanner cannot see "
+                f"a non-literal extra= dict in {name}: this scanner cannot see "
                 "through it, so it must not exist"
             )
             for key_node in keyword.value.keys:
                 assert isinstance(key_node, ast.Constant) and isinstance(key_node.value, str), (
-                    "a computed log key in jobs.py: the allowlist cannot be "
+                    f"a computed log key in {name}: the allowlist cannot be "
                     "checked against it"
                 )
                 keys.add(key_node.value)
 
-    assert call_sites, "no logger call with extra= found -- the scanner is broken"
+    assert call_sites, f"no logger call with extra= in {name} -- the scanner is broken"
     unknown = keys - set(log_module.SAFE_EXTRA_KEYS)
     assert not unknown, (
-        f"app/research/jobs.py logs keys app/log.py drops: {sorted(unknown)}. "
+        f"app/research/{name} logs keys app/log.py drops: {sorted(unknown)}. "
         "Add them to SAFE_EXTRA_KEYS only if they are an id, a code, a count, "
         "a domain or a cost -- never a path, a topic or any page text."
     )

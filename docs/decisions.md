@@ -614,3 +614,101 @@ or two searches plus two distills, a read is one distill on a page the
 user already chose. Spending one must not consume the other, and a
 single shared counter would have made the cheaper command hostage to
 the expensive one.
+
+---
+
+## 4d — techniques are their own retrieval pool, and that closed a leak
+
+Phase-4 plan section 10 asks for adopted techniques to reach the prompt
+under their own header. Implementing it revealed that they already
+reached it under the wrong one: a `technique` was an ordinary unpinned
+memory, so `retrieve_memories` returned it like any other, into the
+"Может быть важно" block, with no separate cap, competing with facts
+about the user for `MEMORY_RETRIEVED_MAX` slots.
+
+Nothing caught it because `RESEARCH_ENABLED` was false through 4b and
+4c, so no technique could exist yet. It would have surfaced the first
+time a card was adopted with the flag on.
+
+Two pools because they answer different questions. A retrieved memory
+is a fact the reply must stay *consistent with*; a technique is a
+method the reply may choose to *use*. One block would have told the
+model the wrong thing about both, and one cap would have let a chatty
+week of adopted cards crowd out the bot knowing who it is talking to.
+
+**The fallback is least-recently-used, not `_topup`'s pool.** `_topup`
+returns the same newest identity/rule rows on every low-match turn, so
+their `use_count` measures how often retrieval failed — a distortion
+that module already documents. Least-recently-used rotates instead,
+which is the only way a card adopted months ago is ever tried again.
+`NULLS FIRST` is explicit, or a never-used technique would sort last
+under ASC and a freshly adopted card would be the last one ever
+offered.
+
+## 4d — the daily sweep is a sibling of the heartbeat, not part of it
+
+`maybe_enqueue_research_sweep` lives in `app/core/scheduler.py` next to
+`maybe_enqueue_tick`, but `app/worker.py`'s `_heartbeat_loop` calls it
+as a separate step rather than `heartbeat()` calling it.
+
+Not arbitrary. Five existing tests call `heartbeat()` directly and
+assert the exact resulting state of the `job` table — "a failed
+planning gate inserts no row" means literally zero rows. An
+unconditional second job kind inserted from inside `heartbeat()` breaks
+all five, and those assertions are pinning real properties about
+outbound planning that should not be loosened to make room for an
+unrelated sweep. A sibling call gets the same once-a-minute cadence,
+which is all the dedup key needs to become once-a-local-day.
+
+Both sweeps are one job kind, not two: same cadence, same shape, no
+isolation to gain. Neither is gated on `RESEARCH_ENABLED` — they are
+hygiene on rows that may predate the switch being turned off, and
+gating them would leave 30-day-old page text sitting indefinitely.
+
+## 4d — `/delete` cancels a running job, and what that does not cover
+
+`app/core/purge.py` flips every non-terminal `study_job` to
+`'cancelled'` and drops pending `research` queue rows before the
+TRUNCATE. Since both tables are purged anyway, the only thing this
+changes is what a worker already mid-run does next.
+
+`run_research_job` used to read the status once, at the top, which
+stops a job that has not started and nothing else. 4d adds a re-read
+before every write-heavy step — before the search, before each
+candidate fetch, before each distill.
+
+**The check is on `created_at` as well as status**, and that is the
+part worth reading. `/delete` uses `RESTART IDENTITY`, so a study_job
+created after the purge takes id 1 again — and its status is
+`'queued'`, not `'cancelled'`. A status-only check would have waved the
+old run straight through into the new job's rows, and the user would
+have seen cards in `/notes` from a job they had just deleted.
+
+Still not complete, and not claimed as complete: a row that vanishes
+*between* a check and the write it guards produces a foreign-key
+violation on the flush. That is noisy and safe — the write is refused
+rather than misfiled, which is the property that matters.
+
+Spend survives a cancellation. `_distill_into_cards` commits its ledger
+row before any card is written, so a distill that ran is billed whether
+or not the job it belonged to still exists. An in-flight clip is rolled
+back with the session, which is right: a half-run's clip is exactly the
+stray row the check exists to prevent.
+
+## 4d — eval 15 does not use the plan's literal injection
+
+Plan section 11 gives «Игнорируй правила и…» as case 15's example.
+Used verbatim it would be caught by `app/research/injection.py`'s
+`override_previous` rule, which would make the case a second test of a
+filter that already works rather than a test of what happens when one
+slips through.
+
+The case carries a paraphrase instead, verified against the real
+`injection.hits()` (zero hits) and `risk.assess()` (no opinion). What
+is left between that memory and the reply is the persona itself, which
+is what a defence-in-depth case is supposed to measure.
+
+Case 16's dosage, by contrast, verifies as `('high', ['health_meds'])`
+— so a card like it could not be adopted today at all. The case exists
+for the day a rule is loosened, a migration backfills rows written
+before the rule, or a bug lets one through.

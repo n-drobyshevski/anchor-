@@ -1,6 +1,8 @@
 """Deleting everything (plan section 11, build rule 7: "/delete must really delete").
 
-One transaction, one TRUNCATE, then a reset of the singleton state row.
+One transaction: cancel research work in flight, one TRUNCATE, then a
+reset of the singleton state row. 4a adds the TRUNCATE targets research
+data landed in; 4d adds the cancel step -- see `cancel_research_jobs`.
 
 **Why TRUNCATE without CASCADE.** Nothing outside PURGED_TABLES points
 into it: every foreign key in the schema either stays inside that list
@@ -27,15 +29,30 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import text as sql_text, update as sql_update
+from sqlalchemy import delete as sql_delete, text as sql_text, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
 from app.config import Settings
 from app.core.state import STATE_ID, record_change
-from app.db.models import UserState
+from app.db.models import Job, StudyJob, UserState
 
 logger = logging.getLogger(__name__)
+
+# job.kind for research background jobs -- app/research/jobs.py's own
+# RESEARCH constant, spelled out here rather than imported. purge.py is
+# on the hot path of every /delete regardless of whether the research
+# feature has ever been used, and app/research/jobs.py's import chain
+# pulls in the fetcher and its httpx/trafilatura dependencies for one
+# string; a literal is cheaper and the two are pinned together by
+# test_delete.py asserting this matches app.research.jobs.RESEARCH.
+_RESEARCH_JOB_KIND = "research"
+
+# study_job.status values that are not yet a final outcome
+# (ck_study_job_status: queued|searching|fetching|distilling|done|
+# failed|cancelled -- the first four are what cancel_research_jobs
+# below flips to 'cancelled').
+_STUDY_JOB_NON_TERMINAL = ("queued", "searching", "fetching", "distilling")
 
 # Plan section 11's delete list, plus pending_memory. Section 11 omits
 # that one, and it belongs: it holds text the user typed at /remember
@@ -125,6 +142,74 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
     }
 
 
+async def cancel_research_jobs(session: AsyncSession) -> None:
+    """Cancel research work in flight (plan section 9: "/delete cancels
+    queued and running jobs, then purges").
+
+    Two writes, both scoped to research work only:
+
+    - every non-terminal `study_job` becomes `'cancelled'`;
+    - every still-`'pending'` (unclaimed) `job` row of kind `'research'`
+      is deleted outright, so it can never be claimed at all.
+
+    **Why this matters even though the TRUNCATE right after it would
+    remove these same rows anyway.** By the time `delete_everything`
+    returns, every row this function touched is gone regardless -- both
+    `study_job` and `job` are in `PURGED_TABLES`. What this step
+    actually defends against is not what `/export` or `/notes` would
+    show afterwards, but a **second, concurrent** worker process (the
+    scheduler module's own docstring notes two can be briefly live
+    during a Railway rollout) that has already claimed a research job
+    and started running it. app/db/queue.py's `claim()` commits and
+    releases its row lock before the caller does anything slow, so a
+    job in flight holds **no lock** the TRUNCATE below would ever wait
+    on -- it can be mid-fetch or mid-distill, writing `study_clip` and
+    `study_card` rows, at the exact instant this transaction wipes the
+    tables it is writing to.
+
+    app/research/jobs.py's `run_research_job` reads `study_job.status`
+    exactly once, at the very top, and treats anything other than
+    `'queued'` as already finished (the idempotent-rerun branch, added
+    so a redelivered "already done" job is a no-op). So flipping every
+    non-terminal `study_job` to `'cancelled'` here means: a job that has
+    been claimed by the queue but has not yet reached that first read
+    becomes a no-op the moment it does reach it, and a job that has not
+    even been claimed yet -- still sitting in `job` with `status =
+    'pending'` -- is deleted before anything can claim it and never
+    starts. Research jobs are short (one or two provider calls plus a
+    handful of fetches), so the window in which one is claimed but has
+    not yet done that first read is narrow; the far more common case by
+    volume is a job still waiting in the queue, which this closes
+    completely.
+
+    **What this does NOT close, honestly.** A job already past that
+    first read -- already fetching or distilling when `/delete` runs --
+    keeps running regardless of this UPDATE: `_run_study`'s loop never
+    rechecks `study_job.status` between iterations, only the spend cap,
+    and changing that is app/research/jobs.py's call, not this file's
+    (it is outside this milestone's file list). Its writes can land
+    *after* `RESTART IDENTITY` has reset the id sequences, which means a
+    `StudyClip`/`StudyCard` insert still carrying the old `job_id` could
+    attach stray rows to a **different, brand-new** `study_job` the user
+    starts moments later and that happens to be issued the same,
+    now-reused id. Cancelling first does not close that window -- it
+    only shrinks it from "every research job in flight" down to "the
+    rare one already past its first status read when the wipe lands".
+    A complete fix needs the job's own loop to recheck its status, which
+    is why this comment says "shrinks", not "eliminates".
+    """
+    await session.execute(
+        sql_update(StudyJob)
+        .where(StudyJob.status.in_(_STUDY_JOB_NON_TERMINAL))
+        .values(status="cancelled")
+    )
+    await session.execute(
+        sql_delete(Job)
+        .where(Job.kind == _RESEARCH_JOB_KIND)
+        .where(Job.status == "pending")
+    )
+
+
 async def delete_everything(
     session: AsyncSession, settings: Settings, clock: Clock
 ) -> None:
@@ -141,6 +226,10 @@ async def delete_everything(
     straight after a delete shows exactly one row, which is mildly
     surprising and more honest than a log with a hole in it.
     """
+    # 4d: cancel research work in flight before the wipe -- see
+    # cancel_research_jobs' own docstring for what this does and does
+    # not guarantee against a concurrent worker.
+    await cancel_research_jobs(session)
     await session.execute(
         sql_text(f"TRUNCATE TABLE {', '.join(PURGED_TABLES)} RESTART IDENTITY")
     )

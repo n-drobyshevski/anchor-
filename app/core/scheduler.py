@@ -48,6 +48,23 @@ job runs the gate, asks the cheap model, and only then plans a row.
 So the tick enqueue is an independent side effect that happens
 *before* the priority loop -- the loop returns early when a gate
 refuses, and that must not silently suppress the tick as well.
+
+**4d adds the research lifecycle sweep, but deliberately NOT the same
+way.** `maybe_enqueue_research_sweep` below looks exactly like
+`maybe_enqueue_tick` -- same dedup-key idempotency, same "the heartbeat
+only asks, a job does the work" shape -- and the first draft of this
+milestone called it from inside `heartbeat()`, right next to
+`maybe_enqueue_tick`. That broke tests/test_scheduler.py and
+tests/test_outbound_send.py and tests/test_tick.py: several of their
+tests call `heartbeat()` directly and then assert an *exact* job-table
+state afterwards -- "a failed planning gate inserts no row" there means
+literally zero `job` rows, not zero *outbound-planning* rows. Those
+tests predate 4d and are not this milestone's to change, so the sweep
+enqueue does not belong inside `heartbeat()`. It is instead called by
+app/worker.py's `_heartbeat_loop`, once a minute, as a sibling step
+right after `heartbeat()` returns -- same cadence, same dedup-key
+idempotency, but no longer able to perturb what calling `heartbeat()`
+itself does or does not insert.
 """
 
 from __future__ import annotations
@@ -77,6 +94,7 @@ from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
 from app.db.models import Outbound
+from app.research.sweeps import RESEARCH_SWEEP
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +339,56 @@ async def maybe_enqueue_tick(
     return enqueued
 
 
+def research_sweep_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `tick_dedup_key` above."""
+    return f"research_sweep:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_research_sweep(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's research lifecycle sweep, at most once per local day.
+
+    Card expiry and clip-text retention (phase-4 plan sections 9 and 4)
+    -- app/research/sweeps.py does the actual work; this only decides
+    *whether* to ask for it. Shaped exactly like `maybe_enqueue_tick`
+    above (same dedup-keyed enqueue, same "returns True iff a row was
+    actually inserted"), but **not called from `heartbeat()`** -- see
+    the module docstring for why. app/worker.py's `_heartbeat_loop`
+    calls this directly, once a minute, right after it calls
+    `heartbeat()`.
+
+    Idempotency comes entirely from `research_sweep_dedup_key`, the same
+    ON CONFLICT DO NOTHING mechanism app/db/jobs.enqueue_job already
+    gives every dedup-keyed job: a second call the same minute, two
+    workers racing during a rollout, or a worker restart later the same
+    day all resolve to a no-op. That is also what makes this safe to run
+    twice in the sense the milestone asks for: running the *sweep
+    itself* twice is additionally safe on its own terms
+    (app/research/sweeps.py's functions are idempotent), so even a
+    dedup-key collision failing to save you would not double anything.
+
+    Deliberately has no hour window, unlike the tick: any call on a
+    local date this account has not yet swept for queues it, so the
+    exact minute depends only on when the day first rolls over, not on
+    a schedule knob nobody asked the plan for.
+
+    Deliberately **not** gated on `RESEARCH_ENABLED`. Both sweeps are
+    hygiene on rows that already exist, from before the switch was ever
+    turned off -- gating this on the switch would let 30-day-old page
+    text and a growing pile of stale pending cards sit in the database
+    for as long as the feature stays off, which is exactly what plan
+    section 4's retention rule exists to prevent.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, RESEARCH_SWEEP, {}, dedup_key=research_sweep_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("research sweep queued", extra={"event": RESEARCH_SWEEP})
+    return enqueued
+
+
 async def heartbeat(
     session: AsyncSession, settings: Settings, clock: Clock
 ) -> int | None:
@@ -329,6 +397,10 @@ async def heartbeat(
     Returning the id (rather than nothing) is for the tests and for the
     log line -- the worker ignores it. The tick enqueue is a side
     effect and is not reflected in the return value: it plans nothing.
+
+    Does **not** also enqueue the research sweep (4d) -- see the module
+    docstring for why that call deliberately lives in app/worker.py's
+    `_heartbeat_loop` instead of here.
     """
     state = await get_state(session)
     timezone = state.timezone
