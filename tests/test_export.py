@@ -24,6 +24,7 @@ from app.db.models import (
     Journal,
     Memory,
     Message,
+    NotebookEntry,
     Proposal,
     Scene,
     SpendLedger,
@@ -93,6 +94,8 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                     usd_cost=decimal.Decimal("0.000108"),
                 ),
                 Memory(kind="identity", text=SECRET_TEXT, source="user"),
+                # 5b.
+                NotebookEntry(kind="observation", text=SECRET_TEXT, source="anchor"),
                 Checkin(local_date=today, day_rating=4, due_result="partial", note="устал"),
                 Proposal(field="due_action", value="сдать отчёт", reason="договорились"),
                 Journal(local_date=today, text="Поговорили про отчёт."),

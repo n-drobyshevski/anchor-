@@ -916,6 +916,7 @@ async def run(
                     voice_lines=turn_persona_context.voice_lines,
                     mood=turn_persona_context.mood,
                     nickname_directive=turn_persona_context.nickname_directive,
+                    notebook=turn_persona_context.notebook,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1050,6 +1051,7 @@ async def run(
                 voice_lines=turn_persona_context.voice_lines,
                 mood=turn_persona_context.mood,
                 nickname_directive=turn_persona_context.nickname_directive,
+                notebook=turn_persona_context.notebook,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id

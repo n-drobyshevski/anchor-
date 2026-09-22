@@ -202,6 +202,7 @@ async def build_outbound_messages(
         voice_lines=persona_ctx.voice_lines,
         mood=persona_ctx.mood,
         nickname_directive=persona_ctx.nickname_directive,
+        notebook=persona_ctx.notebook,
     )
 
 

@@ -28,6 +28,9 @@ MODULES = [
     pathlib.Path("app/core/mood.py"),
     pathlib.Path("app/core/voice.py"),
     pathlib.Path("app/core/persona_context.py"),
+    # 5b.
+    pathlib.Path("app/core/notebook.py"),
+    pathlib.Path("app/core/screen.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -202,3 +205,104 @@ def test_voice_module_actually_has_a_user_state_update_for_this_test_to_see():
     pass above -- is what should notice."""
     names = _update_user_state_keyword_names(pathlib.Path("app/core/voice.py"))
     assert names, "no update(UserState).values(...) found in voice.py"
+
+
+# --- 5b: each module writes only its own table(s) --------------------------
+#
+# A narrower, per-module version of the same argument: not just "no
+# forbidden import", but "no write to a table this module has no
+# business touching at all". `notebook.py` writes `NotebookEntry` and
+# the shared cost ledger (`SpendLedger`, exactly like every other H2 job
+# body -- app/core/extract.py and app/core/scene.py both do the same);
+# `voice.py` writes one `UserState` column, already covered above;
+# `mood.py`, `persona_context.py` and `screen.py` write nothing at all.
+OWN_TABLE_WRITES: dict[str, set[str]] = {
+    "mood.py": set(),
+    "voice.py": {"UserState"},
+    "persona_context.py": set(),
+    "notebook.py": {"NotebookEntry", "SpendLedger"},
+    "screen.py": set(),
+}
+
+# Names a write call might be imported under -- this repo's own
+# convention (`sql_update`/`sql_delete` to dodge shadowing `text()` or a
+# builtin) plus the plain names and the Postgres dialect's `insert`.
+_WRITE_CALL_NAMES = ("insert", "pg_insert", "update", "sql_update", "delete", "sql_delete")
+
+
+def _write_targets(path: pathlib.Path) -> set[str]:
+    """Every model name this module's own code writes to.
+
+    Two shapes only, matching how this codebase actually writes:
+    `session.add(Model(...))` / `session.add_all([Model(...), ...])`,
+    and `insert(Model)` / `update(Model)` / `delete(Model)` (under any
+    of the aliases above) as the first positional argument. A model
+    reached any other way (a variable, a helper function) is not
+    something this scanner can see -- exactly like
+    `_update_user_state_keyword_names` above, this is a structural
+    check, not a full write-effect analysis.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+
+        if isinstance(func, ast.Attribute) and func.attr in ("add", "add_all"):
+            constructors = list(node.args[:1])
+            if (
+                func.attr == "add_all"
+                and node.args
+                and isinstance(node.args[0], (ast.List, ast.Tuple))
+            ):
+                constructors = list(node.args[0].elts)
+            for value in constructors:
+                if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                    targets.add(value.func.id)
+
+        if (
+            isinstance(func, ast.Name)
+            and func.id in _WRITE_CALL_NAMES
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            targets.add(node.args[0].id)
+
+    return targets
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_each_module_writes_only_its_own_tables(path):
+    allowed = OWN_TABLE_WRITES[path.name]
+    unknown = _write_targets(path) - allowed
+    assert not unknown, (
+        f"{path}: writes {sorted(unknown)}, outside its own table(s) {sorted(allowed)}"
+    )
+
+
+def test_the_own_table_write_detector_would_catch_a_violation(tmp_path):
+    """Guards the guard, using a synthetic module -- this must fail on a
+    table that is not allowed, regardless of what notebook.py happens to
+    write today."""
+    sample = tmp_path / "offender.py"
+    sample.write_text(
+        "from sqlalchemy import update as sql_update\n"
+        "from app.db.models import Memory, NotebookEntry, UserState\n"
+        "def f(session):\n"
+        "    session.add(NotebookEntry(kind='observation', text='x', source='anchor'))\n"
+        "    session.add(Memory(kind='event', text='x', source='anchor'))\n"
+        "    return session.execute(sql_update(UserState).values(intensity=1))\n"
+    )
+    targets = _write_targets(sample)
+    assert targets == {"NotebookEntry", "Memory", "UserState"}
+    unknown = targets - {"NotebookEntry"}
+    assert unknown == {"Memory", "UserState"}
+
+
+def test_notebook_module_actually_writes_notebook_entry_for_this_test_to_see():
+    """If run_notebook_reflect/add_user_intention ever stopped
+    constructing NotebookEntry directly (e.g. moved behind a helper),
+    this test -- not a silent pass above -- is what should notice."""
+    targets = _write_targets(pathlib.Path("app/core/notebook.py"))
+    assert "NotebookEntry" in targets

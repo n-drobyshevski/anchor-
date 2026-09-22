@@ -26,6 +26,7 @@ from app.db.models import (
     Job,
     Journal,
     Memory,
+    NotebookEntry,
     Outbound,
     Message,
     PendingMemory,
@@ -118,6 +119,8 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 Message(role="user", content="текст", ooc=False, kind="chat",
                         update_id=1, scene_id=scene.id),
                 Memory(kind="identity", text="факт", source="user"),
+                # 5b.
+                NotebookEntry(kind="observation", text="заметка", source="anchor"),
                 PendingMemory(text="незавершённая заметка"),
                 Checkin(local_date=today, day_rating=4),
                 Proposal(field="due_action", value="что-то"),

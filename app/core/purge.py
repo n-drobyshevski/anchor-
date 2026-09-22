@@ -61,6 +61,13 @@ _STUDY_JOB_NON_TERMINAL = ("queued", "searching", "fetching", "distilling")
 PURGED_TABLES = (
     "message",
     "memory",
+    # 5b: Anchor's own working notes plus the user's own `/mind add`
+    # intentions (phase-5 plan section 3). Listed ahead of `scene`,
+    # child-first, though `scene_id` is `ON DELETE SET NULL` rather than
+    # CASCADE -- the same "TRUNCATE the whole list in one statement"
+    # reasoning as `study_card`/`study_clip`/`study_job` below applies
+    # regardless of which FK action a column carries.
+    "notebook_entry",
     "scene",
     "checkin",
     "proposal",

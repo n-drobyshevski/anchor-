@@ -90,6 +90,7 @@ from app.core.outbound_gate import (
     config_from_settings,
     gate,
 )
+from app.core.notebook import NOTEBOOK_EXPIRY
 from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
@@ -386,6 +387,36 @@ async def maybe_enqueue_research_sweep(
     )
     if enqueued:
         logger.info("research sweep queued", extra={"event": RESEARCH_SWEEP})
+    return enqueued
+
+
+def notebook_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `research_sweep_dedup_key`."""
+    return f"notebook_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_notebook_expiry(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's notebook thread-expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_research_sweep` right above --
+    same dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a third sibling
+    step, right after the research sweep), for the same reason: several
+    tests call `heartbeat()` directly and assert an exact `job` table
+    state afterwards, and this must not perturb that.
+
+    Unlike `maybe_enqueue_research_sweep`, this one has no "deliberately
+    not gated on a feature switch" note -- the notebook has no switch to
+    gate on.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, NOTEBOOK_EXPIRY, {}, dedup_key=notebook_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("notebook expiry queued", extra={"event": NOTEBOOK_EXPIRY})
     return enqueued
 
 

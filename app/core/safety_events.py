@@ -51,7 +51,14 @@ TICK = "tick"
 # number worth watching unreadable.
 DISTILL = "distill"
 SEARCH = "search"
-KINDS = (WELFARE, EXTRACTOR, TICK, DISTILL, SEARCH)
+# 5b: the notebook reflection job (app/core/notebook.py). Same shape as
+# DISTILL -- strict JSON, so `parse_fail` means exactly what it means
+# there -- and its own kind rather than folding into EXTRACTOR, for the
+# same reason DISTILL and SEARCH are not one kind: a reflection call
+# that stops parsing must not hide inside a number that also covers the
+# unrelated post-turn extractor.
+NOTEBOOK = "notebook"
+KINDS = (WELFARE, EXTRACTOR, TICK, DISTILL, SEARCH, NOTEBOOK)
 
 # The outcomes that count as a failure on /state. A `fallback_hit` is
 # deliberately neither: it is the keyword backstop doing its job, and
@@ -165,6 +172,7 @@ __all__ = [
     "EXTRACTOR",
     "FAILURE_OUTCOMES",
     "KINDS",
+    "NOTEBOOK",
     "SEARCH",
     "TICK",
     "WELFARE",

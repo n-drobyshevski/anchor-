@@ -32,6 +32,7 @@ from app.core.clock import Clock
 from app.db.models import (
     Checkin,
     Journal,
+    NotebookEntry,
     Outbound,
     Memory,
     Message,
@@ -82,6 +83,11 @@ EXPORTED_MODELS = (
     StudyJob,
     StudyClip,
     StudyCard,
+    # 5b: Anchor's own working notes (phase-5 plan section 3). User data
+    # by the same reasoning as everything above it -- the user's own
+    # `/mind add` intentions live here, and so does whatever Anchor
+    # wrote about them.
+    NotebookEntry,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

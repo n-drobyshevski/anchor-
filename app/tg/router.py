@@ -73,6 +73,7 @@ from app.tg.send import send_keyboard
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
 from app.tg import memory as memory_ui
+from app.tg import notebook as notebook_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import welfare as welfare_ui
@@ -112,6 +113,8 @@ BOT_COMMANDS = [
     BotCommand(command="card", description="Карточка по id"),
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
+    # 5b (phase-5 plan section 6).
+    BotCommand(command="mind", description="Заметки Anchor"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -715,6 +718,30 @@ def build_router(
         )
         await _reply_once(message, event_update.update_id, reply)
 
+    # --- 5b: the notebook (plan section 6) ---
+
+    @router.message(Command("mind"))
+    async def mind(message: Message, event_update: Update, command: CommandObject) -> None:
+        args = (command.args or "").strip()
+        parts = args.split(maxsplit=1)
+        if parts and parts[0] == "add":
+            text = parts[1].strip() if len(parts) > 1 else ""
+            if not text:
+                await _reply_once(message, event_update.update_id, notebook_ui.MIND_ADD_USAGE)
+                return
+            if not await _once(event_update.update_id):
+                return
+            reply = await notebook_ui.run_mind_add(sessionmaker, settings, clock, text=text)
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
+        if not await _once(event_update.update_id):
+            return
+        await notebook_ui.run_mind(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/mind]"
+        )
+
     # --- 4b/4c: research (plan section 9) ---
     #
     # Every one of these six checks RESEARCH_ENABLED first and replies
@@ -876,6 +903,20 @@ def build_router(
         await memory_ui.handle_page_callback(
             sessionmaker,
             callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("nb:x:"))
+    async def notebook_close(callback: CallbackQuery) -> None:
+        """`nb:x:<id>` -- a `/mind` entry's [✖] button. Closes any entry,
+        including Anchor's own -- see app/tg/notebook.py's docstring."""
+        await notebook_ui.handle_close_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

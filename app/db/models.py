@@ -403,7 +403,7 @@ class SafetyEvent(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search')",
+            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search', 'notebook')",
             name="ck_safety_event_kind",
         ),
         CheckConstraint(
@@ -871,4 +871,84 @@ class StudyCard(Base):
         # the same two columns.
         Index("ix_study_card_status_created_at", "status", "created_at"),
         Index("ix_study_card_job_id", "job_id"),
+    )
+
+
+class NotebookEntry(Base):
+    """One of Anchor's own working notes (phase-5 plan sections 3 and 6).
+
+    `kind` is one of `intention` (written only by the user or, from 5d,
+    the weekly review -- never by `notebook_reflect`), `observation` or
+    `open_thread` (both written by `notebook_reflect`, never by the
+    user directly). `source` says who actually wrote this row --
+    `anchor`, `user` or `review` -- and app/core/notebook.py's own
+    validation, not this table, is what enforces that Anchor can never
+    close or edit a `user`- or `review`-sourced row (`ck_notebook_entry_
+    closed_consistent` only keeps `closed_by`/`closed_at` in step with
+    `active`, it says nothing about who may set them).
+
+    `active=false` is the only closed state; `closed_by` records who
+    closed it (`anchor`, `user` or `expiry`) and is required exactly
+    when `active` is false, never when it is true -- a closed row with
+    no author, or an active one that already carries a closer, are both
+    the kind of bug this constraint turns into a failed insert instead
+    of a silent data quality problem months later.
+
+    `scene_id` is the reflection job's own scene, kept for the
+    idempotency check (`run_notebook_reflect` looks for an existing row
+    with this `scene_id` before calling the model again) and for
+    nothing else -- ON DELETE SET NULL because purging that scene must
+    never fail the notebook wipe or leave a dangling reference.
+    """
+
+    __tablename__ = "notebook_entry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    # `sa.text(...)`, not the bare `text(...)` every other model in this
+    # file uses: this class also has a `text` *column*, and by the time
+    # this line runs, that name is already bound in the class body to
+    # the mapped_column() above -- the exact trap `Memory`'s own
+    # docstring warns about.
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.text("true")
+    )
+    closed_by: Mapped[str | None] = mapped_column(String)
+    scene_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("scene.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('intention', 'observation', 'open_thread')",
+            name="ck_notebook_entry_kind",
+        ),
+        CheckConstraint('char_length("text") <= 240', name="ck_notebook_entry_text_length"),
+        CheckConstraint(
+            "source in ('anchor', 'user', 'review')", name="ck_notebook_entry_source"
+        ),
+        CheckConstraint(
+            "closed_by is null or closed_by in ('anchor', 'user', 'expiry')",
+            name="ck_notebook_entry_closed_by",
+        ),
+        # Plan (implementation plan §"Design decisions"): active rows
+        # carry no closer, closed rows always do.
+        CheckConstraint(
+            "(active and closed_by is null and closed_at is null) or "
+            "(not active and closed_by is not null and closed_at is not null)",
+            name="ck_notebook_entry_closed_consistent",
+        ),
+        # The one query shape every reader needs: active rows of one
+        # kind (`/mind`'s grouping, the reflection job's per-kind cap,
+        # the prompt's three lines).
+        Index("ix_notebook_entry_active_kind", "active", "kind"),
     )

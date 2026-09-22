@@ -73,9 +73,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core.clock import Clock, to_local, within_window
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
+from app.core.notebook import (
+    NOTEBOOK_EXPIRY,
+    NOTEBOOK_REFLECT,
+    run_notebook_expiry,
+    run_notebook_reflect,
+)
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
-from app.core.scheduler import TICK_DECIDE, heartbeat, maybe_enqueue_research_sweep
+from app.core.scheduler import (
+    TICK_DECIDE,
+    heartbeat,
+    maybe_enqueue_notebook_expiry,
+    maybe_enqueue_research_sweep,
+)
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
@@ -233,6 +244,28 @@ async def _run_job(
         # `provider` nor `safety_provider` and reports nothing back to
         # the user (there is no command this is a reply to).
         await run_daily_sweep(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == NOTEBOOK_REFLECT:
+        # 5b: the same H2 shape as EXTRACT -- strict JSON on the safety
+        # model, never the persona one, with the same cheap-provider
+        # fallback the tests predating H2 rely on.
+        await run_notebook_reflect(
+            session,
+            settings,
+            safety_provider or cheap_provider,
+            clock=clock,
+            timezone=user_state.timezone,
+            scene_id=payload["scene_id"],
+        )
+        return ExtractOutcome()
+
+    if kind == NOTEBOOK_EXPIRY:
+        # 5b: a bulk UPDATE closing stale open_thread entries -- plain
+        # SQL housekeeping like RESEARCH_SWEEP above, so it needs
+        # neither `provider` nor `safety_provider` and reports nothing
+        # back to the user.
+        await run_notebook_expiry(session, settings, clock=clock)
         return ExtractOutcome()
 
     if kind == TICK_DECIDE:
@@ -459,6 +492,13 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_research_sweep(session, clock, state.timezone)
+            # 5b: the notebook's own daily sweep, same cadence and same
+            # "not inside heartbeat()" reasoning as the research sweep
+            # right above it -- see app/core/scheduler.py's module
+            # docstring.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_notebook_expiry(session, clock, state.timezone)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

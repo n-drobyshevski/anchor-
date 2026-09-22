@@ -37,7 +37,7 @@ from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core.outbound_send import build_outbound_messages, hidden_flag
 from app.core.prompt import build_messages, build_neutral_messages
-from app.db.models import Base, Checkin, Message, Scene, UserState
+from app.db.models import Base, Checkin, Message, NotebookEntry, Scene, UserState
 from app.llm.provider import LLMMessage
 from eval.cases import CHECKIN, NEUTRAL, OUTBOUND, Case
 
@@ -118,6 +118,26 @@ async def seed(session: AsyncSession, case: Case, clock: Clock) -> UserState:
             )
         )
     await session.commit()
+
+    # 5b: `notebook = [{kind, text, source}, ...]`, inserted directly as
+    # NotebookEntry rows -- deliberately bypassing app/core/notebook.py's
+    # own `validate()`/`screen()`, because case 20 tests the persona
+    # prompt's own backstop against an entry that should never have
+    # passed the writer in the first place (a paraphrased injection).
+    # Going through the real writer here would make that untestable: it
+    # would simply refuse to store the seed and the case would pass for
+    # the wrong reason.
+    for entry in setup.get("notebook", []):
+        session.add(
+            NotebookEntry(
+                kind=entry["kind"],
+                text=entry["text"],
+                source=entry.get("source", "anchor"),
+            )
+        )
+    if setup.get("notebook"):
+        await session.commit()
+
     await session.refresh(state)
     return state
 
@@ -175,6 +195,7 @@ async def build(
         voice_lines=persona_ctx.voice_lines,
         mood=persona_ctx.mood,
         nickname_directive=persona_ctx.nickname_directive,
+        notebook=persona_ctx.notebook,
     )
 
 

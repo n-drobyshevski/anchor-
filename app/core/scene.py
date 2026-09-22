@@ -234,9 +234,37 @@ async def run_summarize_scene(
 
     Over the daily cap the job is deferred to the next local midnight
     rather than run or dropped (plan section 12).
+
+    **5b: `notebook_reflect` is enqueued at the end of every path below
+    that has a real scene** -- the already-summarized early return, the
+    too-short no-op, and the normal model-call path alike -- never on
+    "scene is None". Reflection needs the summary as input, so it
+    cannot be enqueued from `ensure_open_scene` where the close happens;
+    it belongs here, right after (or, on the idempotent path, "after"
+    in the sense that the summary already exists). The too-short case
+    still enqueues: `run_notebook_reflect` re-checks the message count
+    itself and no-ops, which costs nothing and means this function does
+    not have to duplicate that rule. The dedup key (`nb:<scene_id>`)
+    collapses every one of these into at most one queued job per scene,
+    so a replayed summarize job is free. A local import, not a
+    module-level one: app/core/notebook.py imports several names from
+    this module, and importing it back here at module scope would be a
+    cycle.
     """
     scene = await session.get(Scene, scene_id)
-    if scene is None or scene.summary is not None:
+    if scene is None:
+        return
+
+    from app.core.notebook import NOTEBOOK_REFLECT
+
+    async def _enqueue_reflect() -> None:
+        await enqueue_job(
+            session, NOTEBOOK_REFLECT, {"scene_id": scene_id}, dedup_key=f"nb:{scene_id}"
+        )
+
+    if scene.summary is not None:
+        await _enqueue_reflect()
+        await session.commit()
         return
 
     messages = await summarizable_messages(session, scene_id)
@@ -245,6 +273,8 @@ async def run_summarize_scene(
             "scene too short to summarize",
             extra={"scene_id": scene_id, "count": len(messages)},
         )
+        await _enqueue_reflect()
+        await session.commit()
         return
 
     if await check_cap(session, settings, clock, timezone):
@@ -275,6 +305,7 @@ async def run_summarize_scene(
             cost_source=cost.source,
         )
     )
+    await _enqueue_reflect()
     await session.commit()
     logger.info(
         "scene summarized",

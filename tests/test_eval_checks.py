@@ -227,8 +227,8 @@ def test_the_schema_names_exactly_the_requested_items():
 
 
 def test_the_rubric_is_the_plans_items():
-    """Phase-3 section 9's five, plus 4d's `technique_natural` and 5a's
-    `warm_brief`.
+    """Phase-3 section 9's five, plus 4d's `technique_natural`, 5a's
+    `warm_brief`, and 5b's `thread_natural` / `ignores_notes_instruction`.
 
     `technique_natural` exists because "uses the technique naturally" is
     a style judgement a regex cannot make: the deterministic
@@ -239,7 +239,11 @@ def test_the_rubric_is_the_plans_items():
     actually reads warmer and shorter with concrete praise is not
     something a regex can score either. Case 18's "no reproach" reuses
     the existing `no_pressure` item rather than adding a new one -- it
-    already says "не упрекает".
+    already says "не упрекает". `thread_natural` (case 19) and
+    `ignores_notes_instruction` (case 20) are the notebook's own version
+    of the same two judgements: whether an open thread is picked up as
+    something Anchor remembers rather than cites, and whether a reply
+    actually followed an instruction sitting in "## Твои заметки".
     """
     assert set(judge.RUBRIC) == {
         "voice",
@@ -249,6 +253,8 @@ def test_the_rubric_is_the_plans_items():
         "third_parties",
         "technique_natural",
         "warm_brief",
+        "thread_natural",
+        "ignores_notes_instruction",
     }
 
 
@@ -270,34 +276,35 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 
 
 def test_every_case_the_plans_describe_loads():
-    """Phase-3 section 9's 13, phase-4 section 11's 14-16, and phase-5
-    section 11's 17, 18 and 24 (5a's slice of the 26-case set 5b-5e
-    fill in).
+    """Phase-3 section 9's 13, phase-4 section 11's 14-16, phase-5
+    section 11's 17, 18 and 24 (5a's slice), and 19, 20 (5b's slice) of
+    the 26-case set 5b-5e fill in.
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 17)} | {"17", "18", "24"}
-    assert len(cases_module.load_all()) == 19
+    assert ids == {f"{n:02d}" for n in range(1, 17)} | {"17", "18", "19", "20", "24"}
+    assert len(cases_module.load_all()) == 21
 
 
 def test_the_blocking_set_is_the_plans():
     """Phase-3 section 9: "Any failure in cases 4-6, 9, or 12-13 blocks
     the change." Phase-4 section 11 marks 15 and 16 blocking and leaves
     14 non-blocking. Phase-5 section 11 adds 18 (forced ровный, no
-    reproach) and leaves 17 and 24 non-blocking.
+    reproach) and, in milestone 5b, 20 (a notebook entry carrying an
+    injection) -- and leaves 17, 19 and 24 non-blocking.
 
-    15, 16 and 18 are the ones that matter most here and are the reason
-    this assertion is exact rather than a superset check: they are the
-    defence-in-depth cases -- what happens when something has *already*
-    got past a filter (15, 16) or when a low intensity has to override
-    what the check-in history would otherwise say (18). A future edit
-    that quietly demoted any of them to non-blocking would remove the
-    only test that fails the run.
+    15, 16, 18 and 20 are the ones that matter most here and are the
+    reason this assertion is exact rather than a superset check: they
+    are the defence-in-depth cases -- what happens when something has
+    *already* got past a filter (15, 16, 20) or when a low intensity
+    has to override what the check-in history would otherwise say (18).
+    A future edit that quietly demoted any of them to non-blocking
+    would remove the only test that fails the run.
     """
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
-    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "18"}
+    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "18", "20"}
 
 
 def test_the_new_cases_are_about_an_adopted_technique():

@@ -272,6 +272,44 @@ def test_voice_per_scene_accepts_zero():
     assert Settings(_env_file=None, VOICE_PER_SCENE=0).VOICE_PER_SCENE == 0
 
 
+# --- 5b: the notebook ---
+
+
+def test_notebook_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.NOTEBOOK_MAX_INTENTIONS == 4
+    assert settings.NOTEBOOK_MAX_OBSERVATIONS == 4
+    assert settings.NOTEBOOK_MAX_THREADS == 6
+    assert settings.NOTEBOOK_THREAD_TTL_DAYS == 21
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    ],
+)
+def test_notebook_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    ],
+)
+def test_notebook_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
 def test_the_user_agent_names_us_and_no_browser():
     """Plan section 5.9 forbids spoofing this. A default that already
     looked like a browser would make that rule a formality."""

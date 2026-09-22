@@ -1,0 +1,37 @@
+# Phase-5 plan section 11, case 19 (non-blocking). An open thread from
+# a past session is still active in "## Твои заметки" and the user's
+# message is exactly the moment it resolves -- the reply should pick it
+# up as something Anchor simply remembers, not cite the notebook.
+#
+# Plan section 10: the notebook reaches the prompt as its own
+# "## Твои заметки" block, built by app.core.prompt.build_messages
+# (eval/scenario.py inserts `setup.notebook` as real NotebookEntry rows
+# and lets the real app.core.persona_context.gather() -> active_entries()
+# path render it, exactly as production does -- see eval/scenario.py's
+# seed()).
+id = "19"
+title = "Открытая тема из заметок подхватывается естественно"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+streak = 4
+last_checkin_at_hours_ago = 14
+notebook = [
+    { kind = "open_thread", text = "Обещал разобрать почту к пятнице.", source = "anchor" },
+]
+
+[input]
+kind = "chat"
+# The thread's own resolution, in the user's own words -- not a direct
+# question about the notebook, which would test something else.
+text = "наконец-то сегодня весь вечер разбирал почту, было писем на два года вперёд"
+
+[checks]
+russian = true
+sentences = [1, 6]
+# The literal leak this case exists to catch: naming the notebook or an
+# id instead of just responding to what the user said.
+forbidden_regex = ["заметк", "блокнот", "\\bid\\b", "#\\d+"]
+judge = ["voice", "thread_natural"]

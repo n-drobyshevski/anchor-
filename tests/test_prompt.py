@@ -291,6 +291,32 @@ async def test_full_order_with_every_section_populated(sessionmaker, tmp_path, c
     assert now_block.index("Последний чек-ин:") < now_block.index("Обращение в этом ответе")
 
 
+async def test_notebook_omits_empty_kinds_but_keeps_populated_ones(sessionmaker, tmp_path, clock):
+    """Plan section 6: a kind with no active entries is left out entirely,
+    not rendered as an empty "Незакрытое:" line."""
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+            notebook={"intentions": ["держать темп"], "observations": [], "threads": []},
+        )
+
+    contents = "\n".join(m.content for m in messages)
+    assert "## Твои заметки" in contents
+    assert "Намерения: держать темп" in contents
+    assert "Наблюдения:" not in contents
+    assert "Незакрытое:" not in contents
+
+
 async def test_empty_new_sections_are_omitted(sessionmaker, tmp_path, clock):
     persona_path = tmp_path / "persona.md"
     persona_path.write_text("# Anchor\n", encoding="utf-8")

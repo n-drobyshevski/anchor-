@@ -25,8 +25,10 @@ different ways, and a fresh mood computation could theoretically read a
 different DB state mid-turn for no reason a user could see.
 
 `amendments`, `orders` and `notebook` are typed and default empty here
-already, even though nothing populates them until milestones 5b-5d --
-so those milestones extend this dataclass's *callers*, not its shape.
+already, even though nothing populated them before 5b -- so 5b only
+extends this module's own `gather()` (below) to fill `notebook`, and
+5c/5d will do the same for `orders`/`amendments`, without changing this
+dataclass's shape.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import mood as mood_module
+from app.core import notebook as notebook_module
 from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core import clock as clock_module
@@ -49,10 +52,12 @@ from app.db.models import UserState
 class PersonaContext:
     """Everything `gather()` computes for one persona turn.
 
-    `amendments`, `orders` and `notebook` are 5b-5d placeholders: empty
-    tuples/None here, always, until those milestones' own gatherers
-    populate them. They exist on this dataclass now so `build_messages`
-    (app/core/prompt.py) already has a stable shape to be fed from.
+    `amendments` and `orders` are 5c/5d placeholders still: empty tuples
+    here until those milestones' own gatherers populate them. `notebook`
+    is 5b's: `gather()` below fills it from `app.core.notebook.
+    active_entries()`. All three exist on this dataclass already so
+    `build_messages` (app/core/prompt.py) always has a stable shape to
+    be fed from.
     """
 
     mood: str | None
@@ -113,9 +118,22 @@ async def gather(
     # obey for a feature that was never configured.
     nickname_directive = voice_module.directive(nickname) if nicknames else None
 
+    # 5b: the notebook (plan section 6). Texts only, no ids -- "the IDs
+    # are not shown in the persona prompt" is the implementation plan's
+    # own design decision, and app/core/prompt.py's `_notebook_lines`
+    # already expects exactly this shape: a dict of the three kinds to
+    # plain text lists.
+    view = await notebook_module.active_entries(session)
+    notebook = {
+        "intentions": [text for _, text, _ in view.intentions],
+        "observations": [text for _, text, _ in view.observations],
+        "threads": [text for _, text, _ in view.threads],
+    }
+
     return PersonaContext(
         mood=computed_mood,
         voice_lines=anchors,
         nickname=nickname,
         nickname_directive=nickname_directive,
+        notebook=notebook,
     )

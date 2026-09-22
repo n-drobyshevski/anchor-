@@ -216,6 +216,35 @@ class Settings(BaseSettings):
             raise ValueError(f"VOICE_PER_SCENE must be >= 0, got {value}")
         return value
 
+    # --- 5b: the notebook (implementation plan §"Files") ---
+    # Per-kind caps on *active* entries. All four validated >= 1: a cap
+    # of 0 would mean "this kind can never hold an entry", which is a
+    # different feature (turning a kind off) wearing a cap's clothes,
+    # and app/core/notebook.py's per-kind cap assumes there is always
+    # room for at least one entry once the oldest anchor-sourced one is
+    # closed.
+    NOTEBOOK_MAX_INTENTIONS: int = 4
+    NOTEBOOK_MAX_OBSERVATIONS: int = 4
+    NOTEBOOK_MAX_THREADS: int = 6
+    # How long an open_thread may sit unresolved before the daily sweep
+    # (app/core/notebook.py's run_notebook_expiry) closes it with
+    # closed_by='expiry'. Intentions and observations have no TTL --
+    # only a thread is "something to ask about later", which is exactly
+    # the shape that goes stale.
+    NOTEBOOK_THREAD_TTL_DAYS: int = 21
+
+    @field_validator(
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    )
+    @classmethod
+    def _notebook_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6

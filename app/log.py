@@ -79,6 +79,11 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "error_code",
     "cards",
     "dropped",
+    # 5b: notebook reflect/expiry counts only, never text (app/core/
+    # notebook.py).
+    "added",
+    "closed",
+    "updated",
 )
 
 

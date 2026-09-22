@@ -255,7 +255,14 @@ async def test_process_one_job_runs_the_handler_and_completes(sessionmaker, cloc
     assert processed is True
     async with sessionmaker() as session:
         scene = await session.get(Scene, scene_id)
-        job = (await session.execute(select(Job))).scalar_one()
+        # 5b: run_summarize_scene now also enqueues notebook_reflect
+        # right after writing the summary (app/core/scene.py), so the
+        # job table holds two rows after this; this test is the
+        # summarize half only, and tests/test_notebook.py covers the
+        # enqueue itself.
+        job = (
+            await session.execute(select(Job).where(Job.kind == "summarize_scene"))
+        ).scalar_one()
 
     assert scene.summary == "Обсуждали отчёт."
     assert job.status == "done"
