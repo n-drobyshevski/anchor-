@@ -21,7 +21,7 @@ from app.llm.provider import LLMUsage
 
 
 def test_compute_cost_uses_formula_when_no_vendor_cost():
-    settings = Settings(XAI_PRICE_IN=2.00, XAI_PRICE_CACHED=0.50, XAI_PRICE_OUT=6.00)
+    settings = Settings(LLM_PRICE_IN=2.00, LLM_PRICE_CACHED=0.50, LLM_PRICE_OUT=6.00)
     # 1000 input tokens, 200 of them cached; 300 output tokens (already
     # inclusive of reasoning tokens -- usage carries no separate
     # reasoning count to add on top).
@@ -39,7 +39,7 @@ def test_compute_cost_uses_formula_when_no_vendor_cost():
 
 
 def test_compute_cost_prefers_vendor_reported_cost_when_present():
-    settings = Settings(XAI_PRICE_IN=999.0, XAI_PRICE_CACHED=999.0, XAI_PRICE_OUT=999.0)
+    settings = Settings(LLM_PRICE_IN=999.0, LLM_PRICE_CACHED=999.0, LLM_PRICE_OUT=999.0)
     usage = LLMUsage(
         input_tokens=1000,
         cached_tokens=200,
@@ -59,7 +59,7 @@ def test_compute_cost_quantizes_with_round_half_up_at_six_decimals():
     "banker's rounding") would give 0.123456 since 6 is even -- so this
     also guards against silently picking up the wrong rounding mode.
     """
-    settings = Settings(XAI_PRICE_IN=2.46913, XAI_PRICE_CACHED=0.0, XAI_PRICE_OUT=0.0)
+    settings = Settings(LLM_PRICE_IN=2.46913, LLM_PRICE_CACHED=0.0, LLM_PRICE_OUT=0.0)
     usage = LLMUsage(input_tokens=50000, cached_tokens=0, output_tokens=0, cost_usd=None)
 
     cost = compute_cost(usage, settings)

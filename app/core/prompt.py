@@ -6,7 +6,10 @@ sync_persona_version() calls load_persona() internally instead of
 hashing the file itself, without changing its own signature (tests/
 test_startup.py calls it directly).
 
-Prompt order, stable prefix first so xAI's prompt cache hits:
+Prompt order, stable prefix first for cache-friendliness in general
+(Cydonia, the current model, has no implicit caching -- see
+app/llm/openrouter.py -- but the ordering costs nothing and keeps the
+door open for a future model that does cache):
   1. system  -- persona.md body, byte-identical every call.
   2. transcript -- last TRANSCRIPT_TURNS `message` rows with ooc=false,
      oldest first, excluding the row(s) belonging to the current
@@ -159,9 +162,9 @@ async def build_neutral_messages(
     `limit` ooc=True rows (oldest first, excluding this update), then
     the user's text. No persona, no "## Сейчас" block. A separate
     function rather than a flag on build_messages(), which is built
-    around a byte-stable persona prefix for xAI's prompt cache --
-    bending that function to sometimes drop the persona would fight
-    that design instead of extending it.
+    around a byte-stable persona prefix kept for cache-friendliness in
+    general -- bending that function to sometimes drop the persona
+    would fight that design instead of extending it.
     """
     transcript = await _load_transcript(session, ooc=True, update_id=update_id, limit=limit)
 

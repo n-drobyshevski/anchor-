@@ -2,12 +2,12 @@
 
 Step numbers below match the plan's list.
 
-Retries live here, not in the SDK or app/llm/xai.py: this is the only
-way FakeLLMProvider (tests/conftest.py) can exercise "fails twice, then
-succeeds" and "fails until exhausted" without a network, and it keeps
-the retry budget in one visible place instead of splitting it between
-this loop and a hidden SDK default. app/llm/xai.py builds its client
-with max_retries=0 for exactly this reason.
+Retries live here, not in the SDK or app/llm/openrouter.py: this is the
+only way FakeLLMProvider (tests/conftest.py) can exercise "fails twice,
+then succeeds" and "fails until exhausted" without a network, and it
+keeps the retry budget in one visible place instead of splitting it
+between this loop and a hidden SDK default. app/llm/openrouter.py
+builds its client with max_retries=0 for exactly this reason.
 
 Crash-safety is the point of the step ordering: dying between step 5
 (provider call) and step 6 (DB write) re-runs the whole turn and wastes
@@ -50,8 +50,11 @@ from app.tg.send import send_reply, start_typing, stop_typing
 
 logger = logging.getLogger(__name__)
 
-# A single-user bot has exactly one conversation; xAI's prompt cache is
-# keyed on this string (the Responses API's prompt_cache_key field).
+# A single-user bot has exactly one conversation. OpenRouter has no
+# prompt-cache-key field (unlike xAI's Responses API), so this string
+# is retained only as the seam's conversation identifier -- it is part
+# of the LLMProvider.complete() call shape but currently unused by
+# OpenRouterProvider.
 CONVERSATION_ID = "anchor-main"
 
 MAX_RETRIES = 2

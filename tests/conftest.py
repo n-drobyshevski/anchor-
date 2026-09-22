@@ -235,7 +235,7 @@ class FakeLLMProvider:
         self,
         text: str = "Тестовый ответ Anchor.",
         usage: LLMUsage | None = None,
-        model: str = "grok-4.7-fake",
+        model: str = "cydonia-fake",
         raises: list[Exception] | None = None,
     ) -> None:
         self.calls = 0

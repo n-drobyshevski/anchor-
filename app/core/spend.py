@@ -69,9 +69,9 @@ def compute_cost(usage: LLMUsage, settings: Settings) -> decimal.Decimal:
         cost = usage.cost_usd
     else:
         uncached = usage.input_tokens - usage.cached_tokens
-        price_in = decimal.Decimal(str(settings.XAI_PRICE_IN))
-        price_cached = decimal.Decimal(str(settings.XAI_PRICE_CACHED))
-        price_out = decimal.Decimal(str(settings.XAI_PRICE_OUT))
+        price_in = decimal.Decimal(str(settings.LLM_PRICE_IN))
+        price_cached = decimal.Decimal(str(settings.LLM_PRICE_CACHED))
+        price_out = decimal.Decimal(str(settings.LLM_PRICE_OUT))
         million = decimal.Decimal(1_000_000)
         cost = (
             uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out

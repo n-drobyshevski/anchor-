@@ -22,7 +22,8 @@ from app.core import prompt, turn
 from app.core.spend import local_date_for
 from app.core.state import get_state
 from app.db.models import Message, SpendLedger, StateChange, TelegramUpdate, UserState
-from app.llm.provider import LLMError, LLMRetryableError, LLMUsage
+from app.llm.openrouter import OpenRouterProvider
+from app.llm.provider import LLMError, LLMMessage, LLMRetryableError, LLMUsage
 from conftest import FakeLLMProvider, FakeSession
 
 TEST_CHAT_ID = 4242
@@ -82,7 +83,7 @@ async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(session
     await _seed(sessionmaker, update_id=update_id)
     bot, fake_session = _bot()
     usage = LLMUsage(input_tokens=120, cached_tokens=20, output_tokens=40, cost_usd=None)
-    provider = FakeLLMProvider(text="Принято. Дальше.", usage=usage, model="grok-4.7-fake")
+    provider = FakeLLMProvider(text="Принято. Дальше.", usage=usage, model="cydonia-fake")
 
     await turn.run(
         sessionmaker,
@@ -106,7 +107,7 @@ async def test_successful_turn_stores_rows_sends_reply_and_writes_ledger(session
     assistant = await _assistant_row(sessionmaker, update_id)
     assert assistant is not None
     assert assistant.content == "Принято. Дальше."
-    assert assistant.model == "grok-4.7-fake"
+    assert assistant.model == "cydonia-fake"
     assert assistant.tokens_in == 120
     assert assistant.tokens_cached == 20
     assert assistant.tokens_out == 40
@@ -670,17 +671,61 @@ async def test_run_hard_pause_is_zero_call_and_reusable_outside_run(sessionmaker
     await bot.session.close()
 
 
-def test_ordinary_chat_turns_never_send_tools_to_the_model():
-    """Safety invariant 4: the xAI request builder must never pass a
-    `tools` argument. There is no tools support anywhere in this
-    codebase (LLMMessage/LLMProvider carry no such concept), so this is
-    a static guard against ever adding one to this call site by
-    accident."""
-    xai_source = (Path(__file__).resolve().parent.parent / "app" / "llm" / "xai.py").read_text(
-        encoding="utf-8"
+async def test_ordinary_chat_turns_never_send_tools_to_the_model():
+    """Safety invariant 4: the OpenRouter request builder must never pass
+    a `tools`/`tool_choice`/`functions` argument. There is no
+    tools support anywhere in this codebase (LLMMessage/LLMProvider
+    carry no such concept). This is a behavioural test rather than a
+    source-grep: it stubs OpenRouterProvider's internal client, drives
+    a real `complete()` call, and asserts on the kwargs the client
+    actually received -- so it survives a rename and can't be fooled by
+    a comment that merely mentions the word "tools"."""
+    captured_kwargs: dict = {}
+
+    class _FakeMessage:
+        content = "ok"
+
+    class _FakeChoice:
+        message = _FakeMessage()
+
+    class _FakeUsage:
+        prompt_tokens = 10
+        completion_tokens = 5
+        prompt_tokens_details = None
+        cost = None
+
+    class _FakeResponse:
+        choices = [_FakeChoice()]
+        usage = _FakeUsage()
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    provider = OpenRouterProvider(
+        api_key="test-key",
+        model="thedrummer/cydonia-24b-v4.1",
+        max_tokens=700,
+        temperature=0.9,
+        data_collection="deny",
     )
-    assert "tools=" not in xai_source
-    assert "tools" not in xai_source
+    provider._client = _FakeClient()
+
+    response = await provider.complete(
+        [LLMMessage(role="user", content="hi")], conversation_id="anchor-main"
+    )
+
+    assert response.text == "ok"
+    assert "tools" not in captured_kwargs
+    assert "tool_choice" not in captured_kwargs
+    assert "functions" not in captured_kwargs
 
 
 async def test_only_run_resume_sets_persona_active_true():

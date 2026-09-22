@@ -4,9 +4,10 @@ A private, single-user Telegram bot. Milestone 1a proves the intake path
 is safe and exactly-once: a secret-verified webhook that accepts updates
 only from `ALLOWED_CHAT_ID` in a private chat, stores them durably with
 dedup, and a single-concurrency worker that drains the queue into
-aiogram and echoes the text back. No LLM, no persona yet — see
-`app/config.py` and inline `# TODO(phase-N):` comments for what is
-deliberately deferred.
+aiogram, runs the persona turn against OpenRouter (model
+`thedrummer/cydonia-24b-v4.1`), and replies — with pause-word/`/out`
+handling and a daily USD spend cap in place. See `app/config.py` and
+inline `# TODO(phase-N):` comments for what is deliberately deferred.
 
 ## Local setup
 

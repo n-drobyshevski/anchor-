@@ -29,8 +29,8 @@ from aiohttp import web
 
 from app.config import Settings, get_settings
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
+from app.llm.openrouter import OpenRouterProvider
 from app.llm.provider import LLMProvider
-from app.llm.xai import XAIProvider
 from app.log import setup_logging
 from app.startup import run_startup_tasks
 from app.tg.polling import run_polling
@@ -44,10 +44,12 @@ WEBHOOK_PATH = "/telegram/webhook"
 
 
 def build_provider(settings: Settings) -> LLMProvider:
-    return XAIProvider(
-        api_key=settings.XAI_API_KEY,
-        model=settings.XAI_MODEL,
-        reasoning_effort=settings.XAI_REASONING_EFFORT,
+    return OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL,
+        max_tokens=settings.LLM_MAX_TOKENS,
+        temperature=settings.LLM_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
     )
 
 

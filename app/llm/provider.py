@@ -1,13 +1,14 @@
 """The LLM seam: vendor-agnostic dataclasses and the `LLMProvider` Protocol.
 
-This file deliberately imports nothing from `openai`. All xAI field-name
-knowledge (Responses API shape, usage field names, error types) stays in
-`xai.py`; this module only knows about `LLMMessage` / `LLMUsage` /
-`LLMResponse`, so `FakeLLMProvider` (tests/conftest.py) is trivial to
-write and swapping vendors later touches one file, not turn.py or
-prompt.py (plan section 2's "one-file change" requirement).
+This file deliberately imports nothing from `openai`. All vendor
+field-name knowledge (request/response shape, usage field names, error
+types) stays in `openrouter.py`; this module only knows about
+`LLMMessage` / `LLMUsage` / `LLMResponse`, so `FakeLLMProvider` (tests/
+conftest.py) is trivial to write and swapping vendors later touches one
+file, not turn.py or prompt.py (plan section 2's "one-file change"
+requirement -- exercised for real in 1e's xAI -> OpenRouter swap).
 
-Retries are NOT implemented here or in xai.py — they live in
+Retries are NOT implemented here or in openrouter.py — they live in
 `core/turn.py` (see that module's docstring for why). This module only
 defines the exceptions turn.py's retry loop catches.
 """
@@ -29,11 +30,16 @@ class LLMMessage:
 
 @dataclass(frozen=True)
 class LLMUsage:
-    """Normalized usage. `output_tokens` already includes reasoning tokens.
+    """Normalized usage. `output_tokens` already includes reasoning tokens,
+    for any future provider whose model reports them separately (the
+    current model, Cydonia, does not support a reasoning parameter and
+    reports none).
 
     Never add a separate reasoning-token count on top of output_tokens
-    when computing cost — see xai.py's docstring for the double-billing
-    trap this shape is designed to avoid.
+    when computing cost -- that double-bills. This convention dates
+    back to the original xAI integration, whose Responses API returned
+    output_tokens as reasoning-inclusive; it is kept as the shape's
+    contract regardless of vendor.
     """
 
     input_tokens: int

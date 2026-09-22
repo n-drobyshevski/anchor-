@@ -72,7 +72,7 @@ def _format_state(user_state, spend, settings: Settings) -> str:
         tz=user_state.timezone,
         spend=spend,
         cap=settings.DAILY_USD_CAP,
-        model=settings.XAI_MODEL,
+        model=settings.LLM_MODEL,
     )
 
 

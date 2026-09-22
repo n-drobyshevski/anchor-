@@ -65,7 +65,7 @@ async def test_start_replies_with_fixed_text(sessionmaker):
 
 async def test_state_reflects_persona_intensity_model_and_timezone(sessionmaker):
     timezone = "America/New_York"
-    settings = Settings(XAI_MODEL="grok-4.7", DAILY_USD_CAP=1.00)
+    settings = Settings(LLM_MODEL="thedrummer/cydonia-24b-v4.1", DAILY_USD_CAP=1.00)
 
     async with sessionmaker() as session:
         session.add(
@@ -103,7 +103,7 @@ async def test_state_reflects_persona_intensity_model_and_timezone(sessionmaker)
     assert "вкл" in text
     assert "4/5" in text
     assert timezone in text
-    assert "grok-4.7" in text
+    assert "thedrummer/cydonia-24b-v4.1" in text
     assert "1.00" in text  # the cap
     assert "0.22" in text  # sum of the two ledger rows, formatted to 2dp
 
