@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import re
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy import select
 
 from app.config import Settings
-from app.core import turn
+from app.core import prompt, turn
 from app.core.spend import local_date_for
-from app.db.models import Message, SpendLedger, TelegramUpdate, UserState
+from app.core.state import get_state
+from app.db.models import Message, SpendLedger, StateChange, TelegramUpdate, UserState
 from app.llm.provider import LLMError, LLMRetryableError, LLMUsage
 from conftest import FakeLLMProvider, FakeSession
 
@@ -26,9 +29,24 @@ TEST_CHAT_ID = 4242
 TIMEZONE = "Europe/Paris"
 
 
-async def _seed(sessionmaker, *, chat_id: int = TEST_CHAT_ID, update_id: int, intensity: int = 3) -> None:
+async def _seed(
+    sessionmaker,
+    *,
+    chat_id: int = TEST_CHAT_ID,
+    update_id: int,
+    intensity: int = 3,
+    persona_active: bool = True,
+) -> None:
     async with sessionmaker() as session:
-        session.add(UserState(id=1, chat_id=chat_id, timezone=TIMEZONE, intensity=intensity))
+        session.add(
+            UserState(
+                id=1,
+                chat_id=chat_id,
+                timezone=TIMEZONE,
+                intensity=intensity,
+                persona_active=persona_active,
+            )
+        )
         await session.commit()
         session.add(TelegramUpdate(update_id=update_id, payload={}))
         await session.commit()
@@ -354,3 +372,339 @@ async def test_no_double_user_message_across_two_turns(sessionmaker):
     assert second_call_messages[-1].content == "второе сообщение"
 
     await bot.session.close()
+
+
+# --- 1d: pause words, neutral mode, /out and /in (plan section 7 / 16) ---
+
+
+async def test_hard_pause_word_makes_zero_provider_calls_and_no_ledger_row(sessionmaker):
+    update_id = 100
+    await _seed(sessionmaker, update_id=update_id)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider()
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="Пурпурный!!",
+    )
+
+    assert provider.calls == 0
+    assert len(fake_session.sent) == 1
+    assert fake_session.sent[0].text == turn.PAUSE_REPLY_TEXT
+
+    assistant = await _assistant_row(sessionmaker, update_id)
+    assert assistant is not None
+    assert assistant.usd_cost == decimal.Decimal("0")
+    assert assistant.sent_at is not None
+    assert await _ledger_rows(sessionmaker) == []
+
+    user_rows = await _user_rows(sessionmaker, update_id)
+    assert user_rows[0].ooc is True  # the safeword itself never enters the persona transcript
+
+    await bot.session.close()
+
+
+async def test_hard_pause_word_sets_persona_active_false_with_pause_state_change(sessionmaker):
+    update_id = 101
+    await _seed(sessionmaker, update_id=update_id)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider()
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="красный",
+    )
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.persona_active is False
+
+    async with sessionmaker() as session:
+        result = await session.execute(select(StateChange))
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    assert rows[0].field == "persona_active"
+    assert rows[0].source == "pause"
+    assert rows[0].new_value == "False"
+
+    await bot.session.close()
+
+
+async def test_soft_pause_word_decrements_intensity_and_flag_reaches_prompt(sessionmaker):
+    update_id = 102
+    await _seed(sessionmaker, update_id=update_id, intensity=3)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider(text="Помягче отвечаю.")
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="жёлтый",
+    )
+
+    assert provider.calls == 1
+    contents = [m.content for m in provider.received_messages[0]]
+    assert any(turn.YELLOW_FLAG in content for content in contents)
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.intensity == 2
+
+    async with sessionmaker() as session:
+        result = await session.execute(select(StateChange).where(StateChange.field == "intensity"))
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    assert rows[0].source == "pause"
+    assert rows[0].old_value == "3"
+    assert rows[0].new_value == "2"
+
+    assert fake_session.sent[0].text == "Помягче отвечаю."
+
+    await bot.session.close()
+
+
+async def test_soft_pause_word_at_intensity_one_still_runs_with_flag(sessionmaker):
+    update_id = 103
+    await _seed(sessionmaker, update_id=update_id, intensity=1)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider(text="Ответ на минимуме.")
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="желтый",
+    )
+
+    assert provider.calls == 1
+    contents = [m.content for m in provider.received_messages[0]]
+    assert any(turn.YELLOW_FLAG in content for content in contents)
+    assert fake_session.sent[0].text == "Ответ на минимуме."
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.intensity == 1  # max(1, 1-1) == 1, clamped, turn still ran
+
+    await bot.session.close()
+
+
+async def test_neutral_mode_uses_neutral_prompt_ooc_context_and_ooc_category(sessionmaker):
+    update_id = 104
+    await _seed(sessionmaker, update_id=update_id, persona_active=False)
+
+    async with sessionmaker() as session:
+        session.add(TelegramUpdate(update_id=900, payload={}))
+        session.add(TelegramUpdate(update_id=901, payload={}))
+        await session.commit()
+        session.add(Message(role="user", content="в роли история", update_id=900, ooc=False))
+        session.add(Message(role="user", content="прошлый ooc", update_id=901, ooc=True))
+        await session.commit()
+
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider(text="Нейтральный ответ.")
+
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=update_id,
+        user_text="как дела",
+    )
+
+    assert provider.calls == 1
+    messages = provider.received_messages[0]
+    assert messages[0].role == "system"
+    assert messages[0].content == prompt.NEUTRAL_SYSTEM_PROMPT
+
+    contents = [m.content for m in messages]
+    assert "прошлый ooc" in contents
+    assert "в роли история" not in contents
+
+    user_rows = await _user_rows(sessionmaker, update_id)
+    assert user_rows[0].ooc is True
+
+    assistant = await _assistant_row(sessionmaker, update_id)
+    assert assistant.ooc is True
+
+    ledger = await _ledger_rows(sessionmaker)
+    assert len(ledger) == 1
+    assert ledger[0].category == "ooc"
+
+    await bot.session.close()
+
+
+async def test_paused_bot_stays_paused_across_several_turns(sessionmaker):
+    await _seed(sessionmaker, update_id=1000, persona_active=False)
+    bot, fake_session = _bot()
+    provider = FakeLLMProvider(text="Нейтрально.")
+
+    for uid in (105, 106, 107):
+        async with sessionmaker() as session:
+            session.add(TelegramUpdate(update_id=uid, payload={}))
+            await session.commit()
+        await turn.run(
+            sessionmaker,
+            bot,
+            Settings(),
+            provider,
+            chat_id=TEST_CHAT_ID,
+            update_id=uid,
+            user_text=f"сообщение {uid}",
+        )
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.persona_active is False
+    assert provider.calls == 3
+    assert len(fake_session.sent) == 3
+
+    await bot.session.close()
+
+
+async def test_run_resume_sets_persona_active_true_and_does_not_restore_intensity(sessionmaker):
+    update_id = 108
+    await _seed(sessionmaker, update_id=update_id, persona_active=False, intensity=2)
+    bot, fake_session = _bot()
+
+    await turn.run_resume(sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=update_id)
+
+    assert fake_session.sent[0].text == turn.RESUME_REPLY_TEXT
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.persona_active is True
+    assert state.intensity == 2  # not restored
+
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(StateChange).where(StateChange.field == "persona_active")
+        )
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    # /in is a typed command, never a pause word -- the audit log has to
+    # say so, or it cannot answer "how did the persona come back on".
+    assert rows[0].source == "command"
+    assert rows[0].new_value == "True"
+
+    await bot.session.close()
+
+
+async def test_state_change_source_distinguishes_command_from_pause_word(sessionmaker):
+    """/out and a HARD pause word both switch the persona off, but the
+    audit log must record which one did it (plan section 5's
+    command|pause|system enum). Collapsing them onto one value throws
+    away the only evidence that tells them apart.
+    """
+    await _seed(sessionmaker, update_id=1)
+    bot, _ = _bot()
+
+    # /out goes through the router's call site: an explicit command.
+    await turn.run_hard_pause(
+        sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=1, source="command"
+    )
+
+    async with sessionmaker() as session:
+        session.add(TelegramUpdate(update_id=2, payload={}))
+        await session.commit()
+
+    # A HARD pause word takes run()'s step-3 branch, which defaults to "pause".
+    provider = FakeLLMProvider()
+    await turn.run(
+        sessionmaker,
+        bot,
+        Settings(),
+        provider,
+        chat_id=TEST_CHAT_ID,
+        update_id=2,
+        user_text="пурпурный",
+    )
+
+    assert provider.calls == 0
+
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(StateChange)
+            .where(StateChange.field == "persona_active")
+            .order_by(StateChange.id)
+        )
+        rows = result.scalars().all()
+
+    assert [r.source for r in rows] == ["command", "pause"]
+
+    await bot.session.close()
+
+
+async def test_run_hard_pause_is_zero_call_and_reusable_outside_run(sessionmaker):
+    """run_hard_pause is the function /out calls directly, with no
+    prior turn.run() involvement -- exercise it exactly that way."""
+    update_id = 109
+    await _seed(sessionmaker, update_id=update_id)
+    bot, fake_session = _bot()
+
+    await turn.run_hard_pause(sessionmaker, bot, chat_id=TEST_CHAT_ID, update_id=update_id)
+
+    assert fake_session.sent[0].text == turn.PAUSE_REPLY_TEXT
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.persona_active is False
+
+    await bot.session.close()
+
+
+def test_ordinary_chat_turns_never_send_tools_to_the_model():
+    """Safety invariant 4: the xAI request builder must never pass a
+    `tools` argument. There is no tools support anywhere in this
+    codebase (LLMMessage/LLMProvider carry no such concept), so this is
+    a static guard against ever adding one to this call site by
+    accident."""
+    xai_source = (Path(__file__).resolve().parent.parent / "app" / "llm" / "xai.py").read_text(
+        encoding="utf-8"
+    )
+    assert "tools=" not in xai_source
+    assert "tools" not in xai_source
+
+
+async def test_only_run_resume_sets_persona_active_true():
+    """Non-behavioural enforcement of safety invariant 2: run_resume
+    must be the only place in the whole repo that flips persona_active
+    back on. Grepping the source, not just testing behaviour, catches
+    a future call site added anywhere else in app/."""
+    app_dir = Path(__file__).resolve().parent.parent / "app"
+    pattern = re.compile(r'"persona_active"\s*,\s*True')
+
+    hits = []
+    for path in app_dir.rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            if pattern.search(line):
+                hits.append((path, lineno))
+
+    assert len(hits) == 1, f"expected exactly one persona_active=True call site, found: {hits}"
+    path, _ = hits[0]
+    assert path.name == "turn.py"
+
+    source = path.read_text(encoding="utf-8")
+    run_resume_start = source.index("async def run_resume")
+    run_start = source.index("\nasync def run(")
+    (hit_path, hit_line) = hits[0]
+    hit_offset = sum(len(line) + 1 for line in source.splitlines(keepends=False)[: hit_line - 1])
+    assert run_resume_start < hit_offset < run_start

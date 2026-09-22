@@ -43,6 +43,15 @@ from app.llm.provider import LLMMessage
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PERSONA_PATH = REPO_ROOT / "persona" / "persona.md"
 
+# Plan section 7, verbatim. Deliberately minimal -- no persona, no
+# "## Сейчас" block -- unlike build_messages()'s byte-stable prefix,
+# there is nothing here that needs to be cache-friendly, since neutral
+# mode is meant to be rare and short-lived.
+NEUTRAL_SYSTEM_PROMPT = (
+    "Ты нейтральный ассистент. Роль Anchor сейчас выключена. Отвечай спокойно и по делу, "
+    "на языке пользователя. Не возвращайся в роль; если спросят как вернуться — подскажи команду /in."
+)
+
 # strftime("%A") depends on a ru_RU locale that is not installed in the
 # container, so the weekday name is a hardcoded lookup instead
 # (datetime.weekday(): Monday == 0).
@@ -86,12 +95,20 @@ def build_now_block(*, timezone: str, intensity: int, flags: list[str] | None = 
 
 
 async def _load_transcript(
-    session: AsyncSession, *, update_id: int | None, limit: int
+    session: AsyncSession, *, ooc: bool, update_id: int | None, limit: int
 ) -> list[Message]:
-    """The last `limit` non-OOC message rows, oldest first, excluding `update_id`."""
+    """The last `limit` message rows with `ooc=ooc`, oldest first, excluding `update_id`.
+
+    Shared by build_messages() (ooc=False, the persona transcript) and
+    build_neutral_messages() (ooc=True, plan section 7's neutral-mode
+    context) -- one query, one exclusion rule. `is_distinct_from`, not
+    `!=`: plain `!=` silently drops any historical row whose update_id
+    is NULL (NULL != x is NULL/unknown in SQL, which excludes rather
+    than includes it).
+    """
     stmt = (
         select(Message)
-        .where(Message.ooc.is_(False))
+        .where(Message.ooc.is_(ooc))
         .where(Message.update_id.is_distinct_from(update_id))
         .order_by(Message.id.desc())
         .limit(limit)
@@ -115,7 +132,7 @@ async def build_messages(
 ) -> list[LLMMessage]:
     """Assemble the full message list for one turn, in plan section 9's order."""
     persona_body, _ = load_persona(persona_path)
-    transcript = await _load_transcript(session, update_id=update_id, limit=transcript_turns)
+    transcript = await _load_transcript(session, ooc=False, update_id=update_id, limit=transcript_turns)
 
     messages = [LLMMessage(role="system", content=persona_body)]
     messages.extend(LLMMessage(role=row.role, content=row.content) for row in transcript)
@@ -125,5 +142,30 @@ async def build_messages(
             content=build_now_block(timezone=timezone, intensity=intensity, flags=flags),
         )
     )
+    messages.append(LLMMessage(role="user", content=user_text))
+    return messages
+
+
+async def build_neutral_messages(
+    session: AsyncSession,
+    *,
+    user_text: str,
+    update_id: int | None,
+    limit: int = 10,
+) -> list[LLMMessage]:
+    """Assemble the neutral-mode message list (plan section 7).
+
+    Deliberately minimal: the neutral system prompt, then the last
+    `limit` ooc=True rows (oldest first, excluding this update), then
+    the user's text. No persona, no "## Сейчас" block. A separate
+    function rather than a flag on build_messages(), which is built
+    around a byte-stable persona prefix for xAI's prompt cache --
+    bending that function to sometimes drop the persona would fight
+    that design instead of extending it.
+    """
+    transcript = await _load_transcript(session, ooc=True, update_id=update_id, limit=limit)
+
+    messages = [LLMMessage(role="system", content=NEUTRAL_SYSTEM_PROMPT)]
+    messages.extend(LLMMessage(role=row.role, content=row.content) for row in transcript)
     messages.append(LLMMessage(role="user", content=user_text))
     return messages

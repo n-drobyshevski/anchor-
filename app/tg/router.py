@@ -1,10 +1,13 @@
 """aiogram Router: commands, text (persona turn), and a catch-all.
 
 Handler registration order follows plan section 6.4:
-1. Commands: /start, /state in 1b (/out, /in land in 1d).
+1. Commands: /start, /state (1b); /out, /in (1d).
 2. Text: turn.run() — the idempotent persona turn (plan section 8),
    which now owns storing the user message too (moved into core/
-   turn.py in 1c; see that module).
+   turn.py in 1c; see that module), and, as of 1d, the pause-word
+   branch (plan section 7) as well. That branch is not handled here:
+   it lives in turn.run() so it inherits the turn's idempotency
+   rather than needing its own.
 3. Anything else (stickers, photos, voice): a fixed "text only" reply,
    no LLM call.
 
@@ -44,6 +47,8 @@ START_TEXT = (
 BOT_COMMANDS = [
     BotCommand(command="start", description="Начать"),
     BotCommand(command="state", description="Текущее состояние"),
+    BotCommand(command="out", description="Пауза, выйти из роли"),
+    BotCommand(command="in", description="Вернуться в роль"),
 ]
 
 
@@ -93,13 +98,27 @@ def build_router(
             spend = await today_usd(session, user_state.timezone)
         await message.answer(_format_state(user_state, spend, settings))
 
-    # TODO(phase-1d): /out (hard pause, section 7) and /in (resume) command
-    # handlers go here, registered before the text handler below.
+    @router.message(Command("out"))
+    async def out(message: Message, event_update: Update) -> None:
+        # source="command": /out is a typed command, not a pause word.
+        # The state_change audit log is the only record of which one
+        # switched the persona off.
+        await turn.run_hard_pause(
+            sessionmaker,
+            message.bot,
+            chat_id=message.chat.id,
+            update_id=event_update.update_id,
+            source="command",
+        )
+
+    @router.message(Command("in"))
+    async def resume(message: Message, event_update: Update) -> None:
+        await turn.run_resume(
+            sessionmaker, message.bot, chat_id=message.chat.id, update_id=event_update.update_id
+        )
 
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
-        # TODO(phase-1d): pause.match(message.text) branch goes here,
-        # before turn.run() (plan section 6.4 step 2, section 7).
         await turn.run(
             sessionmaker,
             message.bot,
