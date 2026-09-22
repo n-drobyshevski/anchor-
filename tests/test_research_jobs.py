@@ -16,6 +16,7 @@ a `risk_final='high'` card is never anything but `status='hidden'`.
 from __future__ import annotations
 
 import datetime
+import decimal
 import json
 
 import pytest
@@ -26,7 +27,8 @@ from app.core import clock as clock_module
 from app.core.clock import FrozenClock
 from app.db.models import Job, SpendLedger, StudyCard, StudyClip, StudyJob
 from app import worker
-from app.research import distill, errors, jobs
+from app.llm.provider import LLMResponse, LLMUsage
+from app.research import distill, errors, jobs, search
 from app.research.fetch import Clip, FetchFailure
 from conftest import FakeLLMProvider
 
@@ -518,3 +520,388 @@ async def test_the_done_line_ignores_the_outbound_switch_and_the_cap():
     settings = _settings()
     settings = settings.model_copy(update={"OUTBOUND_ENABLED": False, "DAILY_USD_CAP": 0.0})
     assert worker._may_report_now(settings, _at(12), _State()) is True
+
+
+# --- /study: enqueue (plan sections 3, 9) -----------------------------
+
+TOPIC = "как высыпаться"
+FORUMS = ("reddit.com",)
+
+
+def _study_settings(**kw) -> Settings:
+    base = dict(
+        RESEARCH_JOBS_PER_DAY=1,
+        RESEARCH_MAX_SEARCHES=4,
+        RESEARCH_MAX_PINS=2,
+        PACKET_FORUMS="reddit.com",
+        PACKET_REF="ru.wikipedia.org,en.wikipedia.org",
+        PACKET_GUIDES="",
+    )
+    base.update(kw)
+    return _settings(**base)
+
+
+async def _enqueue_study(sessionmaker, clock, settings, *, packet="forums", topic=TOPIC):
+    async with sessionmaker() as session:
+        result = await jobs.enqueue_study(
+            session, settings, clock, timezone=TIMEZONE, packet=packet, topic=topic
+        )
+        await session.commit()
+        return result
+
+
+async def test_study_enqueue_refuses_when_disabled(sessionmaker, clock):
+    settings = _study_settings(RESEARCH_ENABLED=False)
+    assert await _enqueue_study(sessionmaker, clock, settings) == (None, jobs.DISABLED)
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_study_enqueue_refuses_an_unknown_packet(sessionmaker, clock):
+    settings = _study_settings()
+    assert await _enqueue_study(sessionmaker, clock, settings, packet="twitter") == (
+        None,
+        jobs.UNKNOWN_PACKET,
+    )
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_study_enqueue_refuses_a_known_but_unconfigured_packet(sessionmaker, clock):
+    """A different refusal from an unknown name: plan section 9 answers
+    «Пакеты: forums, guides, ref.» to one and «Пакет guides пока не
+    настроен.» to the other."""
+    settings = _study_settings()
+    assert await _enqueue_study(sessionmaker, clock, settings, packet="guides") == (
+        None,
+        jobs.EMPTY_PACKET,
+    )
+    await _assert_nothing_queued(sessionmaker)
+
+
+@pytest.mark.parametrize("packet", ["forums", "ref"])
+async def test_study_enqueue_accepts_each_configured_packet(sessionmaker, clock, packet):
+    settings = _study_settings()
+    job_id, refusal = await _enqueue_study(sessionmaker, clock, settings, packet=packet)
+    assert refusal is None and job_id is not None
+    async with sessionmaker() as session:
+        row = await session.get(StudyJob, job_id)
+        assert row.kind == "study"
+        assert row.packet == packet
+        assert row.query == TOPIC
+
+
+async def test_study_enqueue_refuses_an_empty_topic(sessionmaker, clock):
+    settings = _study_settings()
+    assert await _enqueue_study(sessionmaker, clock, settings, topic="   ") == (
+        None,
+        jobs.EMPTY_TOPIC,
+    )
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_study_enqueue_refuses_a_topic_past_the_column_limit(sessionmaker, clock):
+    """Refused, never truncated: a truncated topic searches for
+    something the user did not ask about."""
+    settings = _study_settings()
+    long_topic = "с" * (jobs.QUERY_MAX + 1)
+    assert await _enqueue_study(sessionmaker, clock, settings, topic=long_topic) == (
+        None,
+        jobs.TOPIC_TOO_LONG,
+    )
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_study_enqueue_refuses_a_second_job_the_same_day(sessionmaker, clock):
+    settings = _study_settings(RESEARCH_JOBS_PER_DAY=1)
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] is None
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] == jobs.QUOTA
+
+
+async def test_study_and_read_quotas_are_separate(sessionmaker, clock):
+    """Plan section 3 gives them different allowances because they cost
+    differently. Spending one must not consume the other."""
+    settings = _study_settings(RESEARCH_JOBS_PER_DAY=1, RESEARCH_READS_PER_DAY=1)
+
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] is None
+    async with sessionmaker() as session:
+        _, refusal = await jobs.enqueue_read(
+            session, settings, clock, timezone=TIMEZONE, url=URL
+        )
+        await session.commit()
+    assert refusal is None, "a used study quota must not block a read"
+
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] == jobs.QUOTA
+    async with sessionmaker() as session:
+        _, refusal = await jobs.enqueue_read(
+            session, settings, clock, timezone=TIMEZONE, url=URL
+        )
+    assert refusal == jobs.QUOTA
+
+
+# --- /study: the run (plan sections 6, 12) ----------------------------
+
+
+class _Search:
+    """A scripted stand-in for app.research.search.find_urls."""
+
+    def __init__(self, *urls: str, error_code=None, calls: int = 1) -> None:
+        self._urls = urls
+        self._error = error_code
+        self._calls = calls
+        self.seen: list[dict] = []
+
+    async def __call__(self, provider, **kwargs):
+        self.seen.append(kwargs)
+        usage = LLMUsage(
+            input_tokens=4000, cached_tokens=0, output_tokens=3,
+            cost_usd=decimal.Decimal("0.0081"),
+        )
+        responses = tuple(
+            LLMResponse(text="", usage=usage, model="fake-safety") for _ in range(self._calls)
+        )
+        return search.SearchOutcome(
+            urls=tuple(self._urls), error_code=self._error, responses=responses
+        )
+
+
+def _fetch_by_url(mapping):
+    """A fetch seam that answers per URL, so a study job can meet a mix
+    of readable and refusing pages."""
+
+    async def _fetch(raw_url, **kwargs):
+        _fetch.seen.append((raw_url, kwargs.get("allowed_domains")))
+        return mapping[raw_url]
+
+    _fetch.seen = []
+    return _fetch
+
+
+def _one_card(sentence: str) -> str:
+    return _payload(
+        [{"kind": "technique", "text": "Совет со страницы.", "quote": sentence, "risk": "low"}]
+    )
+
+
+async def _run_study(sessionmaker, clock, settings, job_id, *, search_fn, fetch_fn, provider):
+    async with sessionmaker() as session:
+        return await jobs.run_research_job(
+            session, settings, provider, job_id=job_id, clock=clock, timezone=TIMEZONE,
+            fetch_fn=fetch_fn, search_fn=search_fn,
+        )
+
+
+async def test_a_study_job_searches_then_reads_its_candidates(sessionmaker, clock):
+    settings = _study_settings(RESEARCH_MAX_PINS=2)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    a, b = "https://reddit.com/r/a", "https://reddit.com/r/b"
+    searcher = _Search(a, b)
+    fetcher = _fetch_by_url({a: _clip(url=a), b: _clip(url=b, text=CLIP_TEXT)})
+    provider = FakeLLMProvider(text=_one_card(SENTENCE1))
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=searcher, fetch_fn=fetcher, provider=provider,
+    )
+
+    assert outcome.status == "done"
+    assert provider.calls == 2, "one distill per fetched page"
+    async with sessionmaker() as session:
+        job = await session.get(StudyJob, job_id)
+        clips = (await session.execute(select(StudyClip).where(StudyClip.job_id == job_id))).scalars().all()
+    assert job.pins_used == 2
+    assert job.searches_used == 1
+    assert len(clips) == 2
+
+
+async def test_the_packet_allowlist_reaches_every_fetch(sessionmaker, clock):
+    """The fetcher re-applies the allowlist at every redirect hop, but
+    it can only do that if the job hands it the packet in the first
+    place."""
+    settings = _study_settings(RESEARCH_MAX_PINS=1)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a = "https://reddit.com/r/a"
+    fetcher = _fetch_by_url({a: _clip(url=a)})
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a), fetch_fn=fetcher,
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert fetcher.seen == [(a, FORUMS)]
+
+
+async def test_more_candidates_than_pins_stops_at_the_pin_cap(sessionmaker, clock):
+    settings = _study_settings(RESEARCH_MAX_PINS=2)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    urls = [f"https://reddit.com/r/{n}" for n in range(5)]
+    fetcher = _fetch_by_url({u: _clip(url=u) for u in urls})
+    provider = FakeLLMProvider(text=_one_card(SENTENCE1))
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(*urls), fetch_fn=fetcher, provider=provider,
+    )
+
+    assert len(fetcher.seen) == 2
+    assert provider.calls == 2
+
+
+async def test_a_refusing_candidate_is_recorded_and_the_next_one_is_tried(sessionmaker, clock):
+    """Plan section 5.9 forbids working around a refusal, not noticing
+    it. A packet whose first result disallows robots should still yield
+    cards from the second."""
+    settings = _study_settings(RESEARCH_MAX_PINS=1)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    blocked, good = "https://reddit.com/r/blocked", "https://reddit.com/r/good"
+    fetcher = _fetch_by_url(
+        {
+            blocked: FetchFailure(error=errors.ROBOTS_DISALLOW, domain="reddit.com"),
+            good: _clip(url=good),
+        }
+    )
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(blocked, good), fetch_fn=fetcher,
+        provider=FakeLLMProvider(text=_one_card(SENTENCE1)),
+    )
+
+    assert outcome.status == "done"
+    async with sessionmaker() as session:
+        clips = (
+            await session.execute(select(StudyClip).where(StudyClip.job_id == job_id))
+        ).scalars().all()
+        job = await session.get(StudyJob, job_id)
+    assert {c.fetch_error for c in clips} == {errors.ROBOTS_DISALLOW, None}
+    assert job.pins_used == 1, "a refused page does not spend a pin"
+
+
+async def test_every_candidate_refusing_reports_the_wall_not_an_absence(sessionmaker, clock):
+    """The acceptance checklist asks /study to "report clearly that
+    Reddit blocked the fetch". An empty result would not be that."""
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    urls = ["https://reddit.com/r/a", "https://reddit.com/r/b"]
+    fetcher = _fetch_by_url(
+        {u: FetchFailure(error=errors.ROBOTS_DISALLOW, domain="reddit.com") for u in urls}
+    )
+    provider = FakeLLMProvider()
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(*urls), fetch_fn=fetcher, provider=provider,
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == errors.ROBOTS_DISALLOW
+    assert provider.calls == 0, "nothing to distill, so nothing was spent on distilling"
+
+
+async def test_a_search_that_finds_nothing_fails_the_job(sessionmaker, clock):
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(error_code=search.NO_RESULTS, calls=2),
+        fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == search.NO_RESULTS
+    async with sessionmaker() as session:
+        job = await session.get(StudyJob, job_id)
+    assert job.searches_used == 2
+
+
+async def test_every_search_call_is_ledgered_even_a_fruitless_one(sessionmaker, clock):
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(error_code=search.NO_RESULTS, calls=2),
+        fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(SpendLedger))).scalars().all()
+        job = await session.get(StudyJob, job_id)
+    assert len(rows) == 2
+    assert {r.category for r in rows} == {"research"}
+    assert job.usd_cost == sum(r.usd_cost for r in rows)
+
+
+async def test_the_search_fee_rides_in_the_vendor_cost(sessionmaker, clock):
+    """Plan section 6: "the fee is taken from the provider-reported
+    cost". A row priced from the vendor figure records that, so a run
+    that fell back to the token formula -- and therefore under-counts
+    the plugin fee -- is visible rather than silently wrong."""
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(error_code=search.NO_RESULTS, calls=1),
+        fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    async with sessionmaker() as session:
+        [row] = (await session.execute(select(SpendLedger))).scalars().all()
+    assert row.cost_source == "vendor"
+    assert row.usd_cost == decimal.Decimal("0.008100")
+
+
+async def test_the_recent_clip_set_reaches_the_search(sessionmaker, clock):
+    """Plan section 6's dedupe: a page clipped in the last 30 days is
+    not offered again."""
+    settings = _study_settings()
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    old = "https://reddit.com/r/already-read"
+    async with sessionmaker() as session:
+        prior = StudyJob(kind="read", local_date=datetime.date(2026, 9, 1), status="done")
+        session.add(prior)
+        await session.flush()
+        session.add(
+            StudyClip(job_id=prior.id, url=old, domain="reddit.com", fetched_at=clock.now_utc())
+        )
+        await session.commit()
+
+    searcher = _Search(error_code=search.NO_RESULTS)
+    await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=searcher, fetch_fn=_fetch_by_url({}), provider=FakeLLMProvider(),
+    )
+
+    assert old in searcher.seen[0]["recent_urls"]
+    assert searcher.seen[0]["allowed_domains"] == FORUMS
+    assert searcher.seen[0]["max_calls"] == settings.RESEARCH_MAX_SEARCHES
+
+
+async def test_the_cap_mid_job_stops_it_and_keeps_the_cards_already_made(sessionmaker, clock):
+    """Plan section 12: the job stops, becomes failed:cap, and keeps any
+    cards already produced."""
+    settings = _study_settings(RESEARCH_MAX_PINS=2, RESEARCH_JOB_USD_CAP=0.01)
+    job_id, _ = await _enqueue_study(sessionmaker, clock, settings)
+    a, b = "https://reddit.com/r/a", "https://reddit.com/r/b"
+    fetcher = _fetch_by_url({a: _clip(url=a), b: _clip(url=b)})
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_Search(a, b), fetch_fn=fetcher,
+        provider=FakeLLMProvider(
+            text=_one_card(SENTENCE1),
+            usage=LLMUsage(
+                input_tokens=5000, cached_tokens=0, output_tokens=600,
+                cost_usd=decimal.Decimal("0.02"),
+            ),
+        ),
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == jobs.CAP
+    assert outcome.visible_cards == 1, "the first page's card survives the stop"
+    async with sessionmaker() as session:
+        cards = (await session.execute(select(StudyCard))).scalars().all()
+    assert len(cards) == 1

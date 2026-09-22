@@ -204,7 +204,9 @@ async def _run_job(
             settings,
             safety_provider or cheap_provider,
             job_id=payload["job_id"],
-            url=payload["url"],
+            # A /read job carries its URL here; a /study job carries
+            # its topic and packet on the study_job row instead.
+            url=payload.get("url"),
             clock=clock,
             timezone=user_state.timezone,
         )

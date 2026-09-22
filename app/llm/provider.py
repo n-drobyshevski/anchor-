@@ -8,6 +8,12 @@ conftest.py) is trivial to write and swapping vendors later touches one
 file, not turn.py or prompt.py (plan section 2's "one-file change"
 requirement -- exercised for real in 1e's xAI -> OpenRouter swap).
 
+4c adds `WebSearch` and `Citation`. They live here rather than in
+`app/research/` for the same reason everything else in this file does:
+the research package must not know how a search request is spelled on
+the wire. Only one call site in the whole tree may pass a `WebSearch`
+at all, and tests/test_web_search_isolation.py names it.
+
 Retries are NOT implemented here or in openrouter.py — they live in
 `core/turn.py` (see that module's docstring for why). This module only
 defines the exceptions turn.py's retry loop catches.
@@ -49,10 +55,43 @@ class LLMUsage:
 
 
 @dataclass(frozen=True)
+class WebSearch:
+    """A request for **URL discovery**, not for grounded prose (4c).
+
+    Vendor-agnostic on purpose, like `JSONSchema`: `openrouter.py` turns
+    this into the `web` plugin's request shape and a future vendor would
+    turn it into whatever that vendor wants.
+
+    `include_domains` is passed to the provider as a hint and is never
+    trusted: `app/research/search.py` re-filters every returned URL
+    against the packet allowlist in code, because a provider-side filter
+    is a request and the allowlist is a rule (phase-4 plan section 2).
+    """
+
+    max_results: int = 5
+    include_domains: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Citation:
+    """One source the provider says it consulted.
+
+    The **only** part of a searched response `app/research/search.py`
+    keeps. The model's prose is discarded entirely (plan section 6), so
+    no text a search engine chose ever reaches a prompt with state in
+    it -- and no URL ever comes from something the model wrote.
+    """
+
+    url: str
+    title: str | None = None
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     text: str
     usage: LLMUsage
     model: str
+    citations: tuple[Citation, ...] = ()
 
 
 class LLMError(Exception):
@@ -107,6 +146,7 @@ class LLMProvider(Protocol):
         *,
         conversation_id: str,
         json_schema: JSONSchema | None = None,
+        web_search: WebSearch | None = None,
     ) -> LLMResponse: ...
 
     async def close(self) -> None: ...

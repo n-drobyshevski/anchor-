@@ -19,6 +19,11 @@ can be compared on live data -- exactly the thing no fake provider can
 verify. Also prints whether LLM_DATA_COLLECTION="deny" routed the call
 successfully.
 
+4c adds a real `web` plugin call: an unsearched and a searched
+completion on the same model, so the reported-cost delta settles
+whether the Exa fee is inside `usage.cost` -- the one load-bearing
+claim in H4 that OpenRouter's docs imply but never state.
+
 2a adds two more checks, both about the background ("cheap") model:
 a plain scene-summary call through the cheap provider, and a strict
 `json_schema` structured-output probe. The second one is the gate on
@@ -33,6 +38,7 @@ read the STRUCTURED OUTPUTS verdict line.
 from __future__ import annotations
 
 import asyncio
+import decimal
 from types import SimpleNamespace
 
 from app.config import get_settings
@@ -40,8 +46,14 @@ from app.core.extract import EXTRACT_PROMPT, EXTRACT_SCHEMA, build_input, parse_
 from app.core import welfare
 from app.core.scene import SUMMARY_PROMPT
 from app.core.spend import compute_cost
-from app.llm.openrouter import OpenRouterProvider, _extract_usage, build_client
-from app.llm.provider import LLMMessage
+from app.llm.openrouter import (
+    WEB_SEARCH_ENGINE,
+    OpenRouterProvider,
+    _extract_usage,
+    build_client,
+)
+from app.llm.provider import LLMMessage, WebSearch
+from app.research.search import build_prompt, filter_citations
 
 SYSTEM_TEXT = "Ты — Anchor. Отвечай по-русски, одним коротким предложением."
 USER_TEXT = "Скажи, что ты на связи."
@@ -303,6 +315,7 @@ async def _smoke_cheap_model(settings) -> None:
     )
 
     await _smoke_welfare(settings)
+    await smoke_search(settings)
 
 
 # 2e: three messages whose correct verdicts a person would not argue
@@ -385,6 +398,108 @@ async def _smoke_welfare(settings) -> None:
             "Tune WELFARE_MIN_CONF for over-calling; a miss means the model "
             "or the prompt, not the threshold."
         )
+
+
+SEARCH_TOPIC = "как наладить режим сна"
+SEARCH_DOMAINS = ("ru.wikipedia.org", "en.wikipedia.org")
+
+
+async def smoke_search(settings) -> None:
+    """4c: the `web` plugin against the real API (phase-4 plan section 13).
+
+    Three things no fake provider can tell us, and all three are
+    assumptions the research loop is built on:
+
+    1. **Does the plugin fee show up in `usage.cost`?** H4 reasoned that
+       it must -- OpenRouter documents `cost` as "the total amount
+       charged to your account", as distinct from
+       `cost_details.upstream_inference_cost`, and Exa is charged to the
+       same credits -- but the docs never say it outright, and
+       app/core/spend.py has carried that as a stated inference since
+       2026-09-22. This prints an unsearched and a searched call side by
+       side on the same model. **A reported-cost delta of roughly
+       $0.007 confirms it; a delta of roughly zero refutes it**, and
+       refuted means every search is being under-billed and
+       RESEARCH_JOB_USD_CAP is not doing its job.
+
+    2. **Do annotations actually arrive?** app/research/search.py keeps
+       the `url_citation` annotations and nothing else, so zero
+       annotations means the whole module silently returns no
+       candidates. Worth knowing before RESEARCH_ENABLED is flipped.
+
+    3. **Does `include_domains` do anything?** It is a hint that code
+       re-filters regardless, so a provider that ignores it costs us
+       relevance and not safety -- but if every result is off-packet,
+       /study will burn both searches and report no_results every time.
+    """
+    print()
+    print("=== 4c: the web plugin (real search) ===")
+    print(f"model: {settings.LLM_MODEL_SAFETY} · engine: {WEB_SEARCH_ENGINE}")
+
+    provider = OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_SAFETY,
+        max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
+        temperature=settings.LLM_SAFETY_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+    )
+    prompt = build_prompt(SEARCH_TOPIC, SEARCH_DOMAINS)
+    try:
+        plain = await provider.complete(
+            [LLMMessage(role="user", content=prompt)],
+            conversation_id="smoke-search-plain",
+        )
+        searched = await provider.complete(
+            [LLMMessage(role="user", content=prompt)],
+            conversation_id="smoke-search-web",
+            web_search=WebSearch(max_results=5, include_domains=SEARCH_DOMAINS),
+        )
+    finally:
+        await provider.close()
+
+    print()
+    print(f"unsearched: reported cost {plain.usage.cost_usd}  "
+          f"(in {plain.usage.input_tokens} / out {plain.usage.output_tokens})")
+    print(f"searched:   reported cost {searched.usage.cost_usd}  "
+          f"(in {searched.usage.input_tokens} / out {searched.usage.output_tokens})")
+
+    if plain.usage.cost_usd is None or searched.usage.cost_usd is None:
+        print()
+        print("FEE: UNKNOWN -- OpenRouter reported no cost on at least one call.")
+        print("  -> app/core/spend.py falls back to the token formula there, which "
+              "knows nothing about the plugin fee. Every search would be under-billed.")
+    else:
+        delta = searched.usage.cost_usd - plain.usage.cost_usd
+        print(f"delta:      {delta}")
+        print()
+        if delta >= decimal.Decimal("0.004"):
+            print(f"FEE: OK -- the plugin fee is inside usage.cost (delta {delta}).")
+            print("  -> H4's inference holds; app/core/research/jobs.py's ledger is honest.")
+        else:
+            print(f"FEE: REFUTED -- delta is only {delta}, well under Exa's $0.007.")
+            print("  -> usage.cost is NOT carrying the plugin fee. Every /study "
+                  "under-bills, and RESEARCH_JOB_USD_CAP is not counting what it "
+                  "thinks it is. Fix before RESEARCH_ENABLED goes true.")
+
+    print()
+    print(f"annotations: {len(searched.citations)}")
+    for citation in searched.citations:
+        print(f"  {citation.url}")
+    kept = filter_citations(searched.citations, allowed_domains=list(SEARCH_DOMAINS))
+    print(f"after the code-side allowlist: {len(kept)} of {len(searched.citations)}")
+
+    print()
+    if not searched.citations:
+        print("SEARCH: FAILED -- no annotations at all. app/research/search.py "
+              "would return no candidates for every /study.")
+    elif not kept:
+        print("SEARCH: PARTIAL -- annotations arrived but none survived the packet "
+              "allowlist. include_domains is being ignored; /study would spend both "
+              "searches and report no_results.")
+    else:
+        print(f"SEARCH: OK -- {len(kept)} usable candidate(s).")
+    print()
+    print(f"discarded prose ({len(searched.text)} chars) -- search.py never reads it.")
 
 
 if __name__ == "__main__":

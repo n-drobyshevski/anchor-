@@ -1,4 +1,4 @@
-# Anchor — Milestone 4b (/read, cards, /notes) · Phase 3 complete
+# Anchor — Milestone 4c (/study and the packets) · Phase 3 complete
 
 A private, single-user Telegram bot.
 
@@ -719,6 +719,59 @@ A `risk_final='high'` card is stored `hidden` and answers «Нет такой
 карточки.» to every command and both buttons, exactly as a card that
 does not exist would. Distinguishing the two would be showing it, in
 the only way that matters.
+
+## Milestone 4c — `/study`, and the one place a search may happen
+
+`/study <forums|guides|ref> <тема>` searches for pages on a topic
+inside a packet of domains you chose, reads up to `RESEARCH_MAX_PINS`
+of them with the same fetcher `/read` uses, and leaves cards in
+`/notes`. `RESEARCH_ENABLED` is still `false` — 4d turns it on.
+
+### The search is for URLs, and for nothing else
+
+`app/research/search.py` asks a model with OpenRouter's `web` plugin
+attached to look for pages, and then keeps exactly one thing from the
+answer: the URLs in the `url_citation` annotations. The model's prose
+is discarded. The search engine's page excerpts are discarded — never
+even carried out of the provider module, because plan section 2 says
+the provider's snippets are never distill input and we fetch the page
+ourselves.
+
+**This is the only module in the tree that may ask for a web search**,
+and `tests/test_web_search_isolation.py` names it. That allowlist was
+empty from 4a until now and must never hold two entries: a second call
+site is a second place your words leave for a third party.
+
+The packet is sent to the provider as `include_domains` because it
+makes the results better, and every URL that comes back is filtered
+against the packet again in code — matched on label boundaries, so
+`reddit.com.evil.io` is refused however well it ranked. An empty
+packet admits nothing rather than everything.
+
+### What it costs, and the one number still unverified
+
+A `/study` job is one or two searches plus up to two distills. The
+search's Exa fee is $0.007 per request, and **the whole cost model
+assumes that fee is inside OpenRouter's reported `usage.cost`** —
+which their docs imply but never state.
+
+`scripts/smoke.py` now settles it: it makes an unsearched and a
+searched call on the same model and prints the delta. Near $0.007
+confirms it; near zero means every `/study` is under-billed and
+`RESEARCH_JOB_USD_CAP` is not counting what it thinks. **Run it before
+flipping `RESEARCH_ENABLED`.**
+
+### When a site says no
+
+A candidate that disallows robots is recorded and skipped, and the job
+moves to the next one — a packet of five results should still yield
+cards from four of them. When every candidate refuses, the job fails
+with that refusal rather than with "nothing found", so the reply names
+the wall you hit.
+
+Expect exactly that from `reddit.com`, whose robots.txt refuses
+generic crawlers. It is a finding, not a bug, and there is no
+workaround anywhere in `app/research/`.
 
 ## Decisions
 

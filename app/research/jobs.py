@@ -53,6 +53,7 @@ only unobserved by /state's per-day rollup.
 
 from __future__ import annotations
 
+import datetime
 import decimal
 import logging
 from dataclasses import dataclass
@@ -67,7 +68,7 @@ from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
 from app.db.models import SpendLedger, StudyCard, StudyClip, StudyJob
 from app.llm.provider import LLMProvider
-from app.research import distill
+from app.research import distill, search
 from app.research.addresses import parse_target
 from app.research.fetch import Clip, FetchFailure, fetch as default_fetch, make_robots_cache
 
@@ -89,6 +90,21 @@ DISABLED = "disabled"
 QUOTA = "quota"
 CAP = "cap"
 BAD_URL = "bad_url"
+# 4c, /study only.
+UNKNOWN_PACKET = "unknown_packet"
+EMPTY_PACKET = "empty_packet"
+TOPIC_TOO_LONG = "topic_too_long"
+EMPTY_TOPIC = "empty_topic"
+
+# The three packet names /study accepts (plan section 9). Not a config
+# value: the names are the command's vocabulary, and only the domains
+# behind each one are the user's to set.
+PACKETS = ("forums", "guides", "ref")
+
+# ck_study_job_query_length. A /study topic goes in `query`, and a topic
+# past this is refused at enqueue rather than truncated -- truncation
+# would search for something the user did not ask about.
+QUERY_MAX = 200
 
 # The topic handed to distill.call when a fetched page has no <title>
 # (or trafilatura found none). Neutral on purpose: distill.py folds it
@@ -114,6 +130,84 @@ class ResearchOutcome:
     error_code: str | None
     visible_cards: int
     hidden_cards: int
+
+
+def packet_domains(settings: Settings, packet: str | None) -> tuple[str, ...] | None:
+    """The allowlist behind a packet name, or None if the name is unknown.
+
+    An empty tuple is a *known* packet with nothing configured, which is
+    a different refusal: plan section 9 answers «Пакеты: forums, guides,
+    ref.» to a name it does not recognise and «Пакет guides пока не
+    настроен.» to one it recognises and cannot use.
+    """
+    if packet not in PACKETS:
+        return None
+    return {
+        "forums": settings.PACKET_FORUMS,
+        "guides": settings.PACKET_GUIDES,
+        "ref": settings.PACKET_REF,
+    }[packet]
+
+
+async def _quota_used(session: AsyncSession, kind: str, local_date) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(StudyJob)
+        .where(StudyJob.kind == kind, StudyJob.local_date == local_date)
+    )
+    return result.scalar_one()
+
+
+async def enqueue_study(
+    session: AsyncSession,
+    settings: Settings,
+    clock: Clock,
+    *,
+    timezone: str,
+    packet: str,
+    topic: str,
+) -> tuple[int | None, str | None]:
+    """Queue a /study job, or refuse it (plan section 9's /study row).
+
+    Checks in the order the plan lists them: disabled, the packet name,
+    the packet's contents, the daily quota, then the spend cap.
+
+    **The quota is per kind.** `/study` and `/read` have separate daily
+    allowances (RESEARCH_JOBS_PER_DAY and RESEARCH_READS_PER_DAY,
+    plan section 3), because they cost differently -- a study job is
+    one or two searches plus two distills, a read is one distill on a
+    page the user already chose. Using up one must not consume the
+    other.
+    """
+    if not settings.RESEARCH_ENABLED:
+        return None, DISABLED
+
+    domains = packet_domains(settings, packet)
+    if domains is None:
+        return None, UNKNOWN_PACKET
+    if not domains:
+        return None, EMPTY_PACKET
+
+    topic = topic.strip()
+    if not topic:
+        return None, EMPTY_TOPIC
+    if len(topic) > QUERY_MAX:
+        return None, TOPIC_TOO_LONG
+
+    local_date = clock_module.local_date(clock, timezone)
+    if await _quota_used(session, STUDY, local_date) >= settings.RESEARCH_JOBS_PER_DAY:
+        return None, QUOTA
+    if await check_cap(session, settings, clock, timezone):
+        return None, CAP
+
+    job = StudyJob(
+        kind=STUDY, status="queued", packet=packet, query=topic, local_date=local_date
+    )
+    session.add(job)
+    await session.flush()
+    await enqueue_job(session, RESEARCH, {"job_id": job.id}, dedup_key=f"research:{job.id}")
+    logger.info("study job queued", extra={"job_id": job.id})
+    return job.id, None
 
 
 async def _read_quota_used(session: AsyncSession, local_date) -> int:
@@ -210,133 +304,48 @@ def _topic_for(clip: StudyClip) -> str:
     return clip.title or UNTITLED_TOPIC
 
 
-async def run_research_job(
+async def _recent_clip_urls(session: AsyncSession, clock: Clock, *, days: int = 30) -> set[str]:
+    """URLs already clipped recently, for search's dedupe (plan section 6).
+
+    Re-reading a page we read last week spends a fetch and a distill to
+    produce cards the user has already seen and already decided about.
+    Matched on `study_clip.url`, which `app/research/addresses.py`
+    normalised on the way in, so two spellings of one page count as one.
+
+    Failed fetches are included deliberately: a page that refused us on
+    Monday is not a better candidate on Tuesday, and retrying it would
+    burn the job's one or two pins on the same refusal.
+    """
+    since = clock.now_utc() - datetime.timedelta(days=days)
+    result = await session.execute(
+        select(StudyClip.url).where(StudyClip.fetched_at.is_(None) | (StudyClip.fetched_at >= since))
+    )
+    return set(result.scalars().all())
+
+
+async def _ledger(
     session: AsyncSession,
     settings: Settings,
-    provider: LLMProvider,
-    *,
-    job_id: int,
-    url: str,
     clock: Clock,
     timezone: str,
-    fetch_fn=None,
-) -> ResearchOutcome:
-    """Run one /read job to completion: fetch, distill, validate, write.
+    job: StudyJob,
+    response,
+) -> None:
+    """Record one provider call against the day and against the job.
 
-    `url` comes from the queue row's payload, not from the `study_job`
-    row -- see the module docstring on where a /read URL lives.
+    Every call, including a search that found nothing usable: it still
+    cost a plugin fee and a promptful of input tokens, and an accounting
+    that only counted useful calls would under-report exactly the runs
+    worth noticing.
 
-    Idempotent: a job not found, or not `status='queued'`, is reported
-    on without doing any work -- the queue can redeliver a completed
-    job (a worker restart between `complete_job` and its ack, say) and
-    this must not fetch or spend twice.
-
-    `fetch_fn` defaults to app.research.fetch.fetch and exists purely
-    as a test seam (plan section 14: "no real network").
+    The search plugin's fee is inside `usage.cost` rather than added
+    here -- OpenRouter charges it to the same credits and reports
+    `cost` as "the total amount charged to your account" (H4, and
+    phase-4 plan section 6: "the fee is taken from the provider-reported
+    cost"). `cost_source` on the row records which branch priced it, so
+    a run that fell back to the token formula is visible as one that
+    under-counts the fee rather than silently wrong.
     """
-    fetch_fn = fetch_fn or default_fetch
-
-    job = await session.get(StudyJob, job_id)
-    if job is None:
-        return ResearchOutcome(
-            job_id=job_id, status="failed", error_code="not_found",
-            visible_cards=0, hidden_cards=0,
-        )
-    if job.status != "queued":
-        visible, hidden = await _card_counts(session, job.id)
-        return ResearchOutcome(
-            job_id=job.id, status=job.status, error_code=job.error_code,
-            visible_cards=visible, hidden_cards=hidden,
-        )
-
-    job.status = "fetching"
-    await session.commit()
-
-    robots = make_robots_cache(
-        timeout_s=settings.FETCH_TIMEOUT_S,
-        max_redirects=settings.FETCH_MAX_REDIRECTS,
-        user_agent=settings.FETCH_USER_AGENT,
-    )
-    result = await fetch_fn(
-        url,
-        timeout_s=settings.FETCH_TIMEOUT_S,
-        max_bytes=settings.FETCH_MAX_BYTES,
-        max_redirects=settings.FETCH_MAX_REDIRECTS,
-        max_chars=settings.FETCH_MAX_CHARS,
-        user_agent=settings.FETCH_USER_AGENT,
-        allowed_domains=None,  # /read accepts any public domain (plan section 5)
-        robots=robots,
-    )
-
-    if isinstance(result, FetchFailure):
-        # A failed fetch still gets a clip row -- study_clip.fetch_error
-        # exists for exactly this (plan section 4).
-        session.add(
-            StudyClip(
-                job_id=job.id,
-                url=url,
-                domain=result.domain or "",
-                http_status=result.http_status,
-                fetch_error=result.error,
-            )
-        )
-        job.status = "failed"
-        job.error_code = result.error
-        job.finished_at = clock.now_utc()
-        await session.commit()
-        logger.info(
-            "read job failed at fetch",
-            extra={"job_id": job.id, "domain": result.domain or "", "error_code": result.error},
-        )
-        return ResearchOutcome(
-            job_id=job.id, status="failed", error_code=result.error,
-            visible_cards=0, hidden_cards=0,
-        )
-
-    clip: Clip = result
-    study_clip = StudyClip(
-        job_id=job.id,
-        url=clip.url,
-        domain=clip.domain,
-        title=clip.title,
-        text=clip.text,
-        text_sha256=clip.text_sha256,
-        http_status=clip.http_status,
-        fetched_at=clock.now_utc(),
-    )
-    session.add(study_clip)
-    await session.flush()  # need study_clip.id before distill.call
-
-    # Re-check both caps before the one call that costs money (plan
-    # section 12: "the job stops, becomes failed:cap, and keeps any
-    # cards already produced" -- there are none yet, but the clip stays).
-    if await check_cap(session, settings, clock, timezone) or _job_cap_hit(job, settings):
-        job.status = "failed"
-        job.error_code = CAP
-        job.finished_at = clock.now_utc()
-        await session.commit()
-        logger.info(
-            "read job stopped at cap",
-            extra={"job_id": job.id, "clip_id": study_clip.id},
-        )
-        return ResearchOutcome(
-            job_id=job.id, status="failed", error_code=CAP,
-            visible_cards=0, hidden_cards=0,
-        )
-
-    job.status = "distilling"
-    await session.commit()
-
-    response = await distill.call(
-        provider,
-        topic=_topic_for(study_clip),
-        title=study_clip.title,
-        text=study_clip.text,
-        clip_id=study_clip.id,
-        min_cards=settings.RESEARCH_CARDS_MIN,
-        max_cards=settings.RESEARCH_CARDS_MAX,
-    )
-
     cost = priced(response.usage, settings, model=response.model)
     session.add(
         SpendLedger(
@@ -351,23 +360,116 @@ async def run_research_job(
         )
     )
     job.usd_cost = job.usd_cost + cost.usd
+
+
+async def _capped(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str, job: StudyJob
+) -> bool:
+    """Either budget exhausted? Checked before every call that costs money."""
+    return await check_cap(session, settings, clock, timezone) or _job_cap_hit(job, settings)
+
+
+async def _fetch_into_clip(
+    session: AsyncSession,
+    settings: Settings,
+    clock: Clock,
+    job: StudyJob,
+    url: str,
+    *,
+    allowed_domains,
+    robots,
+    fetch_fn,
+) -> tuple[StudyClip, str | None]:
+    """Fetch one URL and write its clip row. `(clip, error_code)`.
+
+    A failed fetch still gets a row -- `study_clip.fetch_error` exists
+    for exactly that (plan section 4), and it is also what makes "Reddit
+    blocked us" a finding the user can be told about rather than an
+    absence they have to infer.
+    """
+    result = await fetch_fn(
+        url,
+        timeout_s=settings.FETCH_TIMEOUT_S,
+        max_bytes=settings.FETCH_MAX_BYTES,
+        max_redirects=settings.FETCH_MAX_REDIRECTS,
+        max_chars=settings.FETCH_MAX_CHARS,
+        user_agent=settings.FETCH_USER_AGENT,
+        allowed_domains=allowed_domains,
+        robots=robots,
+    )
+    if isinstance(result, FetchFailure):
+        clip = StudyClip(
+            job_id=job.id,
+            url=url,
+            domain=result.domain or "",
+            http_status=result.http_status,
+            fetch_error=result.error,
+        )
+        session.add(clip)
+        await session.flush()
+        return clip, result.error
+
+    fetched: Clip = result
+    clip = StudyClip(
+        job_id=job.id,
+        url=fetched.url,
+        domain=fetched.domain,
+        title=fetched.title,
+        text=fetched.text,
+        text_sha256=fetched.text_sha256,
+        http_status=fetched.http_status,
+        fetched_at=clock.now_utc(),
+    )
+    session.add(clip)
+    await session.flush()
+    return clip, None
+
+
+async def _distill_into_cards(
+    session: AsyncSession,
+    settings: Settings,
+    provider: LLMProvider,
+    clock: Clock,
+    timezone: str,
+    job: StudyJob,
+    clip: StudyClip,
+    *,
+    topic: str,
+) -> tuple[int, int]:
+    """One distill call over one clip, then the cards it earned.
+
+    Returns `(visible, hidden)`. Zero of both is an ordinary outcome:
+    a page can simply have nothing in it worth a card, and plan section
+    7 says that is `done`, not a failure.
+    """
+    response = await distill.call(
+        provider,
+        topic=topic,
+        title=clip.title,
+        text=clip.text,
+        clip_id=clip.id,
+        min_cards=settings.RESEARCH_CARDS_MIN,
+        max_cards=settings.RESEARCH_CARDS_MAX,
+    )
+    await _ledger(session, settings, clock, timezone, job, response)
     await session.commit()
 
     payload = distill.parse_json(response.text)
-    distilled = distill.validate(payload, clip_text=study_clip.text, max_cards=settings.RESEARCH_CARDS_MAX)
+    distilled = distill.validate(
+        payload, clip_text=clip.text, max_cards=settings.RESEARCH_CARDS_MAX
+    )
 
-    visible = 0
-    hidden = 0
+    visible = hidden = 0
     for card in distilled.cards:
         session.add(
             StudyCard(
                 job_id=job.id,
-                clip_id=study_clip.id,
+                clip_id=clip.id,
                 kind=card.kind,
                 text=card.text,
                 quote=card.quote,
                 # Set by code, never from model output (plan section 12).
-                source_url=study_clip.url,
+                source_url=clip.url,
                 risk_model=card.risk_model,
                 risk_rules=card.risk_rules,
                 risk_final=card.risk_final,
@@ -379,41 +481,276 @@ async def run_research_job(
             hidden += 1
         else:
             visible += 1
-
-    job.status = "done"
-    job.pins_used = 1
-    job.finished_at = clock.now_utc()
-    await session.commit()
-
     logger.info(
-        "read job done",
+        "clip distilled",
         extra={
             "job_id": job.id,
-            "clip_id": study_clip.id,
-            "domain": study_clip.domain,
+            "clip_id": clip.id,
+            "domain": clip.domain,
             "cards": visible + hidden,
             "dropped": sum(distilled.dropped.values()),
+        },
+    )
+    return visible, hidden
+
+
+async def _finish(
+    session: AsyncSession,
+    clock: Clock,
+    job: StudyJob,
+    *,
+    status: str,
+    error_code: str | None,
+    visible: int,
+    hidden: int,
+) -> ResearchOutcome:
+    job.status = status
+    job.error_code = error_code
+    job.finished_at = clock.now_utc()
+    await session.commit()
+    logger.info(
+        "research job finished",
+        extra={
+            "job_id": job.id,
+            "kind": job.kind,
+            "error_code": error_code or "",
+            "cards": visible + hidden,
             "usd_cost": str(job.usd_cost),
         },
     )
-    # Zero surviving cards is still `done` with error_code=None (plan
-    # section 7); the wording for "nothing useful" belongs to whichever
-    # command sends the completion message, not to this module.
     return ResearchOutcome(
-        job_id=job.id, status="done", error_code=None,
-        visible_cards=visible, hidden_cards=hidden,
+        job_id=job.id,
+        status=status,
+        error_code=error_code,
+        visible_cards=visible,
+        hidden_cards=hidden,
     )
+
+
+async def run_research_job(
+    session: AsyncSession,
+    settings: Settings,
+    provider: LLMProvider,
+    *,
+    job_id: int,
+    url: str | None = None,
+    clock: Clock,
+    timezone: str,
+    fetch_fn=None,
+    search_fn=None,
+) -> ResearchOutcome:
+    """Run one research job to completion.
+
+    Two shapes behind one entry point. A `/read` job fetches the single
+    URL it was given and distills it. A `/study` job searches for
+    candidates first (plan section 6), then fetches and distills up to
+    `RESEARCH_MAX_PINS` of them.
+
+    `url` comes from the queue row's payload and is required for a
+    `/read` -- see the module docstring on where a /read URL lives. A
+    `/study` job carries its topic in `study_job.query` and its
+    allowlist in `study_job.packet`, so it needs neither.
+
+    Idempotent: a job not found, or not `status='queued'`, is reported
+    on without doing any work -- the queue can redeliver a completed
+    job (a worker restart between `complete_job` and its ack, say) and
+    this must not fetch or spend twice.
+
+    `fetch_fn` and `search_fn` default to the real implementations and
+    exist purely as test seams (plan section 14: "no real network").
+    """
+    fetch_fn = fetch_fn or default_fetch
+    search_fn = search_fn or search.find_urls
+
+    job = await session.get(StudyJob, job_id)
+    if job is None:
+        return ResearchOutcome(
+            job_id=job_id, status="failed", error_code="not_found",
+            visible_cards=0, hidden_cards=0,
+        )
+    if job.status != "queued":
+        visible, hidden = await _card_counts(session, job.id)
+        return ResearchOutcome(
+            job_id=job.id, status=job.status, error_code=job.error_code,
+            visible_cards=visible, hidden_cards=hidden,
+        )
+
+    robots = make_robots_cache(
+        timeout_s=settings.FETCH_TIMEOUT_S,
+        max_redirects=settings.FETCH_MAX_REDIRECTS,
+        user_agent=settings.FETCH_USER_AGENT,
+    )
+    if job.kind == READ:
+        if not url:
+            return await _finish(
+                session, clock, job, status="failed", error_code=BAD_URL, visible=0, hidden=0
+            )
+        return await _run_read(
+            session, settings, provider, clock, timezone, job, url,
+            robots=robots, fetch_fn=fetch_fn,
+        )
+    return await _run_study(
+        session, settings, provider, clock, timezone, job,
+        robots=robots, fetch_fn=fetch_fn, search_fn=search_fn,
+    )
+
+
+async def _run_read(
+    session, settings, provider, clock, timezone, job, url, *, robots, fetch_fn
+) -> ResearchOutcome:
+    """One URL the user chose: fetch it, distill it, done.
+
+    `allowed_domains=None` -- a /read accepts any public domain the user
+    supplies (plan section 5). The address and robots rules still apply.
+    """
+    job.status = "fetching"
+    await session.commit()
+
+    clip, error = await _fetch_into_clip(
+        session, settings, clock, job, url,
+        allowed_domains=None, robots=robots, fetch_fn=fetch_fn,
+    )
+    if error is not None:
+        return await _finish(
+            session, clock, job, status="failed", error_code=error, visible=0, hidden=0
+        )
+
+    if await _capped(session, settings, clock, timezone, job):
+        return await _finish(
+            session, clock, job, status="failed", error_code=CAP, visible=0, hidden=0
+        )
+
+    job.status = "distilling"
+    await session.commit()
+    visible, hidden = await _distill_into_cards(
+        session, settings, provider, clock, timezone, job, clip, topic=_topic_for(clip)
+    )
+    job.pins_used = 1
+    return await _finish(
+        session, clock, job, status="done", error_code=None, visible=visible, hidden=hidden
+    )
+
+
+async def _run_study(
+    session, settings, provider, clock, timezone, job, *, robots, fetch_fn, search_fn
+) -> ResearchOutcome:
+    """Search for candidates, then read up to RESEARCH_MAX_PINS of them.
+
+    **A candidate that refuses us is not the end of the job.** Plan
+    section 5.9 forbids working around a refusal, not noticing it: the
+    clip row records the code and the loop moves to the next candidate,
+    because a packet of five results whose first entry disallows robots
+    should still produce cards from the other four. What it must not do
+    is try forever -- so `pins_used` counts pages actually read and
+    stops at the cap, while the candidate list itself is what bounds the
+    attempts.
+
+    When every candidate refused us, the job fails with the *last*
+    refusal code, so the completion message can say which wall we hit
+    rather than "nothing found" -- the acceptance checklist asks for
+    "reports clearly that Reddit blocked the fetch", and an empty
+    result would not be that report.
+    """
+    allowed = packet_domains(settings, job.packet)
+    if not allowed:
+        # Only reachable if the packet was emptied in config between
+        # enqueue and run; enqueue_study refuses this case outright.
+        return await _finish(
+            session, clock, job, status="failed", error_code=EMPTY_PACKET, visible=0, hidden=0
+        )
+
+    job.status = "searching"
+    await session.commit()
+
+    if await _capped(session, settings, clock, timezone, job):
+        return await _finish(
+            session, clock, job, status="failed", error_code=CAP, visible=0, hidden=0
+        )
+
+    recent = await _recent_clip_urls(session, clock)
+    outcome = await search_fn(
+        provider,
+        topic=job.query or "",
+        allowed_domains=allowed,
+        recent_urls=recent,
+        job_id=job.id,
+        max_calls=settings.RESEARCH_MAX_SEARCHES,
+    )
+    for response in outcome.responses:
+        await _ledger(session, settings, clock, timezone, job, response)
+    job.searches_used = outcome.calls
+    await session.commit()
+
+    if outcome.error_code is not None or not outcome.urls:
+        return await _finish(
+            session, clock, job,
+            status="failed", error_code=outcome.error_code or search.NO_RESULTS,
+            visible=0, hidden=0,
+        )
+
+    job.status = "fetching"
+    await session.commit()
+
+    visible = hidden = 0
+    last_error: str | None = None
+    for candidate in outcome.urls:
+        if job.pins_used >= settings.RESEARCH_MAX_PINS:
+            break
+        if await _capped(session, settings, clock, timezone, job):
+            # Plan section 12: the job stops, becomes failed:cap, and
+            # keeps any cards already produced.
+            return await _finish(
+                session, clock, job, status="failed", error_code=CAP,
+                visible=visible, hidden=hidden,
+            )
+        clip, error = await _fetch_into_clip(
+            session, settings, clock, job, candidate,
+            allowed_domains=allowed, robots=robots, fetch_fn=fetch_fn,
+        )
+        if error is not None:
+            last_error = error
+            await session.commit()
+            continue
+
+        job.pins_used = job.pins_used + 1
+        job.status = "distilling"
+        await session.commit()
+        got_visible, got_hidden = await _distill_into_cards(
+            session, settings, provider, clock, timezone, job, clip, topic=job.query or ""
+        )
+        visible += got_visible
+        hidden += got_hidden
+
+    if job.pins_used == 0:
+        # Every candidate refused us. Report the wall, not an absence.
+        return await _finish(
+            session, clock, job, status="failed", error_code=last_error or search.NO_RESULTS,
+            visible=0, hidden=0,
+        )
+    return await _finish(
+        session, clock, job, status="done", error_code=None, visible=visible, hidden=hidden
+    )
+
+
 
 
 __all__ = [
     "BAD_URL",
     "CAP",
     "DISABLED",
+    "EMPTY_PACKET",
+    "EMPTY_TOPIC",
+    "PACKETS",
+    "QUERY_MAX",
     "QUOTA",
     "READ",
     "RESEARCH",
     "STUDY",
+    "TOPIC_TOO_LONG",
+    "UNKNOWN_PACKET",
     "ResearchOutcome",
     "enqueue_read",
+    "enqueue_study",
+    "packet_domains",
     "run_research_job",
 ]

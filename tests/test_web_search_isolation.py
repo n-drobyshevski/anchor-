@@ -35,10 +35,16 @@ import pathlib
 
 APP = pathlib.Path("app")
 
-# No call site is sanctioned today. This tuple gains exactly one entry,
-# ("app/research/search.py", "<its function name>"), in milestone 4c --
-# and must never gain another.
-ALLOWED_SITES: tuple[tuple[str, str], ...] = ()
+# **Exactly one sanctioned call site, and it must never gain another.**
+# A second one would be a second place where the user's words leave for
+# a third party, and the whole point of the research loop is that there
+# is one, behind a quota, discarding everything but the URLs.
+#
+# 4a emptied this tuple when /search was deleted; 4c adds the entry the
+# phase-4 plan section 12 names.
+ALLOWED_SITES: tuple[tuple[str, str], ...] = (
+    ("app/research/search.py", "find_urls"),
+)
 
 # Request-shaping keys that would hand the model a capability. They may be
 # built in exactly one module -- the provider that owns the wire format.
@@ -85,12 +91,18 @@ def _web_search_true_sites(path: pathlib.Path) -> list[tuple[str, str, int]]:
     return found
 
 
-def _web_search_defaults(path: pathlib.Path) -> list[tuple[str, str, int]]:
-    """Every function in `path` whose `web_search` parameter is not False.
+def _web_search_defaults(
+    path: pathlib.Path, *, _accept_all: bool = False
+) -> list[tuple[str, str, int]]:
+    """Every function in `path` whose `web_search` parameter is not off.
 
     A missing default counts as a violation too: a required parameter
     cannot be forgotten at a call site, but it also cannot be audited by
-    the walk above, so the rule is simply "declare it False".
+    the walk above, so the rule is simply "declare it off".
+
+    `_accept_all` reports every declaration instead of only the bad
+    ones, which is how the guard-the-guard test checks that there is
+    something here to audit at all.
     """
     tree = ast.parse(path.read_text())
     found: list[tuple[str, str, int]] = []
@@ -108,7 +120,12 @@ def _web_search_defaults(path: pathlib.Path) -> list[tuple[str, str, int]]:
         for arg, default in pairs:
             if arg.arg != "web_search":
                 continue
-            if not (isinstance(default, ast.Constant) and default.value is False):
+            # False for the old boolean spelling, None for 4c's
+            # `WebSearch | None`. Both mean "off unless asked"; nothing
+            # else does.
+            if _accept_all or not (
+                isinstance(default, ast.Constant) and default.value in (False, None)
+            ):
                 found.append((str(path), node.name, node.lineno))
     return found
 
@@ -136,20 +153,37 @@ def test_no_call_site_asks_for_a_web_search():
     )
 
 
-def test_every_web_search_parameter_defaults_to_false():
-    """Vacuously true today -- no function declares `web_search` at all --
-    but it is cheap insurance for whatever milestone 4c adds back."""
+def test_every_web_search_parameter_defaults_to_off():
+    """A `web_search` parameter must be off unless a caller asks.
+
+    Live since 4c: the provider Protocol and OpenRouterProvider both
+    declare `web_search: WebSearch | None = None`. A required parameter,
+    or one defaulting to anything else, would make searching the
+    behaviour a caller has to opt *out* of.
+    """
     offenders = [site for path in _app_modules() for site in _web_search_defaults(path)]
     assert offenders == [], (
-        "a web_search parameter must default to False:\n  "
+        "a web_search parameter must default to False or None:\n  "
         + "\n  ".join(f"{f}:{line} in {fn}()" for f, fn, line in offenders)
     )
+
+
+def test_the_provider_seam_actually_declares_the_parameter():
+    """Guards the guard above, which would pass just as happily on a
+    codebase where nothing can search at all."""
+    declared = {
+        fn
+        for path in _app_modules()
+        for _, fn, _ in _web_search_defaults(path, _accept_all=True)
+    }
+    assert "complete" in declared
 
 
 def test_the_default_detector_actually_detects(tmp_path):
     sample = tmp_path / "defaults.py"
     sample.write_text(
         "def good(a, *, web_search: bool = False): ...\n"
+        "def also_good(a, *, web_search=None): ...\n"
         "def bad_true(a, *, web_search: bool = True): ...\n"
         "def bad_required(a, *, web_search: bool): ...\n"
         "def unrelated(a, *, other=True): ...\n"

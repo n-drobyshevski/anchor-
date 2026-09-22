@@ -130,8 +130,8 @@ async def _seed_card(sessionmaker, **overrides) -> StudyCard:
 
 @pytest.mark.parametrize(
     "text",
-    ["/read " + READ_URL, "/notes", "/card 1", "/adopt 1", "/reject 1"],
-    ids=["read", "notes", "card", "adopt", "reject"],
+    ["/study forums бессонница", "/read " + READ_URL, "/notes", "/card 1", "/adopt 1", "/reject 1"],
+    ids=["study", "read", "notes", "card", "adopt", "reject"],
 )
 async def test_every_research_command_refuses_when_disabled(sessionmaker, text):
     await _seed(sessionmaker, 1)
@@ -144,7 +144,161 @@ async def test_every_research_command_refuses_when_disabled(sessionmaker, text):
 
 async def test_the_research_commands_are_registered_for_telegram():
     names = {command.command for command in BOT_COMMANDS}
-    assert {"read", "notes", "card", "adopt", "reject"} <= names
+    assert {"study", "read", "notes", "card", "adopt", "reject"} <= names
+
+
+# --- /study ----------------------------------------------------------------
+
+
+async def test_study_without_any_args_explains_usage(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, "/study"))
+
+    assert fake.sent[0].text == research_ui.STUDY_USAGE
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+
+
+async def test_study_with_a_packet_but_no_topic_explains_usage(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, "/study forums"))
+
+    assert fake.sent[0].text == research_ui.STUDY_USAGE
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+
+
+@pytest.mark.parametrize("packet", ["forums", "ref"])
+async def test_study_queues_a_job_for_each_shipped_packet(sessionmaker, packet):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, f"/study {packet} бессонница"))
+
+    assert fake.sent[0].text == research_ui.STUDY_ACCEPTED
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].kind == "study"
+    assert jobs[0].packet == packet
+    assert jobs[0].query == "бессонница"
+
+
+async def test_study_queues_a_job_for_guides_once_configured(sessionmaker):
+    await _seed(sessionmaker, 1)
+    settings = Settings(RESEARCH_ENABLED=True, PACKET_GUIDES="example.com")
+    dp, bot, fake = _build_dp(sessionmaker, settings)
+
+    await _feed(dp, bot, _command_update(1, "/study guides сон"))
+
+    assert fake.sent[0].text == research_ui.STUDY_ACCEPTED
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].kind == "study"
+    assert jobs[0].packet == "guides"
+    assert jobs[0].query == "сон"
+
+
+async def test_study_with_an_unknown_packet_is_refused(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, "/study музыка джаз"))
+
+    assert fake.sent[0].text == "Пакеты: forums, guides, ref."
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+
+
+async def test_study_guides_is_refused_while_unconfigured(sessionmaker):
+    """PACKET_GUIDES defaults to empty (app/config.py); the default
+    Settings() used everywhere else in this file is the unconfigured case."""
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, "/study guides сон"))
+
+    assert fake.sent[0].text == "Пакет guides пока не настроен."
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+
+
+async def test_study_refuses_a_topic_over_two_hundred_characters(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+    topic = "а" * 201
+
+    await _feed(dp, bot, _command_update(1, f"/study forums {topic}"))
+
+    assert fake.sent[0].text == research_ui.STUDY_TOPIC_TOO_LONG
+    async with sessionmaker() as session:
+        assert (await session.execute(select(StudyJob))).scalars().all() == []
+
+
+async def test_study_refuses_once_the_daily_job_quota_is_used(sessionmaker):
+    settings = Settings(RESEARCH_ENABLED=True, RESEARCH_JOBS_PER_DAY=1)
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build_dp(sessionmaker, settings, clock=_clock())
+
+    await _feed(dp, bot, _command_update(1, "/study forums бессонница"))
+    await _feed(dp, bot, _command_update(2, "/study ref сон"))
+
+    assert fake.sent[0].text == research_ui.STUDY_ACCEPTED
+    assert fake.sent[1].text == research_ui.QUOTA_EXHAUSTED
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert len(jobs) == 1
+
+
+async def test_a_replayed_study_queues_exactly_one_job(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    for _ in range(2):
+        await _feed(dp, bot, _command_update(1, "/study forums бессонница"))
+
+    assert len(fake.sent) == 1
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert len(jobs) == 1
+
+
+async def test_using_up_the_read_quota_does_not_block_study(sessionmaker):
+    """RESEARCH_JOBS_PER_DAY and RESEARCH_READS_PER_DAY are separate
+    quotas (app/research/jobs.enqueue_study's docstring); exhausting one
+    kind must not refuse the other."""
+    settings = Settings(RESEARCH_ENABLED=True, RESEARCH_READS_PER_DAY=1)
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build_dp(sessionmaker, settings, clock=_clock())
+
+    await _feed(dp, bot, _command_update(1, f"/read {READ_URL}"))
+    await _feed(dp, bot, _command_update(2, "/study forums бессонница"))
+
+    assert fake.sent[0].text == research_ui.READ_ACCEPTED
+    assert fake.sent[1].text == research_ui.STUDY_ACCEPTED
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert {job.kind for job in jobs} == {"read", "study"}
+
+
+async def test_using_up_the_study_quota_does_not_block_read(sessionmaker):
+    settings = Settings(RESEARCH_ENABLED=True, RESEARCH_JOBS_PER_DAY=1)
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build_dp(sessionmaker, settings, clock=_clock())
+
+    await _feed(dp, bot, _command_update(1, "/study forums бессонница"))
+    await _feed(dp, bot, _command_update(2, f"/read {READ_URL}"))
+
+    assert fake.sent[0].text == research_ui.STUDY_ACCEPTED
+    assert fake.sent[1].text == research_ui.READ_ACCEPTED
+    async with sessionmaker() as session:
+        jobs = (await session.execute(select(StudyJob))).scalars().all()
+    assert {job.kind for job in jobs} == {"study", "read"}
 
 
 # --- /read -------------------------------------------------------------

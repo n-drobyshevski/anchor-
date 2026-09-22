@@ -100,6 +100,57 @@ READ_REFUSALS = {
     research_jobs.BAD_URL: "Не понимаю эту ссылку.",
 }
 
+# --- /study (4c, plan section 9) -------------------------------------------
+
+STUDY_ACCEPTED = "Ищу. Карточки появятся в /notes."
+
+# Verbatim (plan section 9). enqueue_study's UNKNOWN_PACKET is returned
+# for anything outside app/research/jobs.PACKETS, so this one string
+# covers every bad packet name, not just the ones spelled out here.
+UNKNOWN_PACKET_REPLY = "Пакеты: forums, guides, ref."
+
+# Plan section 9 gives this exact line for an unconfigured `guides`
+# specifically. `forums` and `ref` ship configured (plan section 3's
+# defaults), but nothing in config stops an operator from emptying
+# PACKET_FORUMS or PACKET_REF too, and enqueue_study's EMPTY_PACKET
+# code does not say which packet it means -- run_study fills that in
+# from the packet name the caller already has. One template covers all
+# three the same way, and it reads identically to the plan's own
+# wording whenever `packet == "guides"`.
+EMPTY_PACKET_TEMPLATE = "Пакет {packet} пока не настроен."
+
+# Chosen; the plan states the 200-character cap on study_job.query
+# (section 4, ck_study_job_query_length) and requires a refusal rather
+# than silent truncation, but gives no wording for it. Plain and
+# specific, same register as READ_USAGE. The number is
+# research_jobs.QUERY_MAX, not a second constant, so the message can
+# never drift from the limit enqueue_study actually enforces.
+STUDY_TOPIC_TOO_LONG = (
+    f"Слишком длинная тема — уложись в {research_jobs.QUERY_MAX} символов."
+)
+
+# Chosen; the plan's table covers refusals, not a bare /study or a
+# /study with a packet and no topic. One message covers both cases,
+# the same way READ_USAGE does not distinguish "no args" from "args
+# but unusable" for /read.
+STUDY_USAGE = "Что изучить? Напиши так: /study forums бессонница."
+
+# enqueue_study's refusal codes (app/research/jobs.py). EMPTY_PACKET is
+# not here -- it needs the packet name the caller already has, so
+# run_study formats EMPTY_PACKET_TEMPLATE itself instead of looking it
+# up. EMPTY_TOPIC is here only so this dict is a total map over the
+# closed set of codes, matching READ_REFUSALS' shape; parse_study_args
+# already refuses a blank topic before enqueue_study ever runs, so the
+# router cannot actually produce it.
+STUDY_REFUSALS = {
+    research_jobs.DISABLED: DISABLED,
+    research_jobs.QUOTA: QUOTA_EXHAUSTED,
+    research_jobs.CAP: READ_REFUSALS[research_jobs.CAP],
+    research_jobs.UNKNOWN_PACKET: UNKNOWN_PACKET_REPLY,
+    research_jobs.TOPIC_TOO_LONG: STUDY_TOPIC_TOO_LONG,
+    research_jobs.EMPTY_TOPIC: STUDY_USAGE,
+}
+
 # --- job completion (worker.py sends these; this module only writes them) ---
 
 DONE_TEXT = "Готово: {n} {noun}. /notes"
@@ -279,6 +330,61 @@ async def run_read(
     if refusal is not None:
         return READ_REFUSALS.get(refusal, DISABLED)
     return READ_ACCEPTED
+
+
+def parse_study_args(raw: str | None) -> tuple[str, str] | None:
+    """Split "/study <packet> <тема...>" into `(packet, topic)`.
+
+    None means there is nothing usable to enqueue with: no args at
+    all, a packet with nothing after it, or a topic that is only
+    whitespace. The router turns None into STUDY_USAGE, the same shape
+    as memory.py's parse_id turning an unparseable id into None for a
+    usage message.
+
+    The packet name is lowercased here. app/config.py's own packet
+    domains are compared case-insensitively (`_parse_packet` lowercases
+    them too), and the three names in the plan's command table are
+    already lowercase, so this only ever helps a user who capitalizes
+    -- it never changes which packet a correctly-typed command reaches.
+    The topic is left exactly as typed; only its surrounding whitespace
+    is trimmed, since it is Russian free text, not a token.
+    """
+    if not raw:
+        return None
+    parts = raw.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    topic = parts[1].strip()
+    if not topic:
+        return None
+    return parts[0].lower(), topic
+
+
+async def run_study(
+    sessionmaker,
+    settings: Settings,
+    clock: Clock,
+    *,
+    timezone: str,
+    packet: str,
+    topic: str,
+) -> str:
+    """Enqueue a /study job. Returns the reply text; the caller sends it.
+
+    Mirrors run_read: one call into app/research/jobs.py, which owns
+    the actual check order (disabled, packet name, packet contents,
+    topic length, quota, cap -- its own docstring). This function only
+    turns the result into the Russian the plan specifies.
+    """
+    async with sessionmaker() as session:
+        _job_id, refusal = await research_jobs.enqueue_study(
+            session, settings, clock, timezone=timezone, packet=packet, topic=topic
+        )
+    if refusal == research_jobs.EMPTY_PACKET:
+        return EMPTY_PACKET_TEMPLATE.format(packet=packet)
+    if refusal is not None:
+        return STUDY_REFUSALS.get(refusal, DISABLED)
+    return STUDY_ACCEPTED
 
 
 async def run_notes(sessionmaker, bot: Bot, *, chat_id: int) -> None:

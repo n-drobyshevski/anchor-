@@ -504,3 +504,113 @@ table was added for in H2.
 
 **Revisit in 4c**, where `/study` adds two more distill calls per job
 and the blind spot gets proportionally larger.
+
+---
+
+## 4c — the `web` plugin is attached in exactly one function
+
+`tests/test_web_search_isolation.py` names `app/research/search.py`'s
+`find_urls` and nothing else, and `app/llm/openrouter.py` is the only
+module allowed to build a `plugins` payload at all. Neither rule is a
+style preference. A second search call site is a second place where the
+user's words leave for a third party, and the point of the research
+loop is that there is exactly one, behind a daily quota, discarding
+everything it gets back except the URLs.
+
+That tuple was emptied in 4a when `/search` was deleted and has one
+entry now. It must never have two.
+
+## 4c — the provider's domain filter is a request; the allowlist is a rule
+
+`include_domains` is sent because it makes the results better. Its
+answer is re-filtered in code regardless (plan section 2: "code
+**always** post-filters to the packet allowlist"), matched on label
+boundaries so `reddit.com.evil.io` is refused however it was ranked.
+
+This matters more than it looks, because the provider side is genuinely
+unreliable here. OpenRouter's docs (checked 2026-09-22) say Google's
+native search does not support domain filtering at all: with the
+default engine OpenRouter silently falls back to Exa when filters are
+set, and with `"engine": "native"` it returns a 400. `LLM_MODEL_SAFETY`
+is `google/gemini-2.5-flash-lite`, so the engine is pinned to Exa
+explicitly rather than left to default — which also makes the $0.007
+per-request fee the same whatever that setting points at next.
+
+`filter_citations` **fails closed**: an empty allowlist admits nothing
+rather than everything. A packet emptied in config must not quietly
+turn into a search of the open web at the one moment nobody is
+watching. `app/research/jobs.py` refuses such a job before the filter
+is reached; this is the second line.
+
+## 4c — the search call discards the prose, and pays less for it
+
+`app/research/search.py` keeps the `url_citation` annotations and
+throws the completion away. The `search_prompt` is overridden to ask
+for a one-word answer, because the annotations are attached by
+OpenRouter from the search itself rather than written by the model —
+nothing is lost by the model saying almost nothing, and we stop paying
+for output we discard.
+
+This does not make the call free. The plugin injects roughly 2,000–4,000
+characters of page excerpt per result into the prompt as input tokens
+either way, which is most of what a search costs beyond the fee.
+
+`_extract_citations` deliberately never reads the annotation's
+`content` field. It is a search engine's excerpt of a page, and plan
+section 2 says the provider's snippets are never distill input — we
+fetch the page ourselves, under our own rules. Not carrying it past
+that function is what makes the rule structural instead of a promise.
+
+A searched call is also allowed to return no prose at all, so
+`_extract_text`'s "never return an empty reply silently" rule — right
+for every other caller — is skipped for this one.
+
+## 4c — the plugin fee is not added by us, and smoke says whether that is right
+
+Plan section 6: "the fee is taken from the provider-reported cost".
+`app/core/spend.py` prefers `usage.cost` when OpenRouter reports one,
+and H4 reasoned that the Exa fee must be inside it — OpenRouter
+documents `cost` as "the total amount charged to your account", as
+distinct from `cost_details.upstream_inference_cost`, and Exa is
+charged to the same credits.
+
+**The docs still do not say this outright.** So the 4a decision to drop
+`LLM_WEB_SEARCH_PRICE_USD` rather than reintroduce fee arithmetic rests
+on an inference, and `scripts/smoke.py` now settles it: it makes an
+unsearched and a searched call on the same model and prints the
+reported-cost delta. A delta near $0.007 confirms it. A delta near zero
+refutes it, and refuted means every `/study` is under-billed and
+`RESEARCH_JOB_USD_CAP` is not counting what it thinks it is.
+
+`cost_source` on every ledger row records which branch priced it, so a
+run that fell back to the token formula is visible as one that
+under-counts the fee rather than silently wrong.
+
+**Run the smoke probe before flipping `RESEARCH_ENABLED`.**
+
+## 4c — a candidate that refuses us is not the end of the job
+
+Plan section 5.9 forbids working around a refusal, not noticing it. A
+packet of five results whose first entry disallows robots should still
+produce cards from the rest, so `_run_study` records the refusal in a
+`study_clip` row and moves to the next candidate. `pins_used` counts
+pages actually read, so a refusal costs no pin.
+
+When **every** candidate refused us, the job fails with the *last*
+refusal code rather than with "nothing found". The acceptance checklist
+asks `/study forums` to "report clearly that Reddit blocked the fetch",
+and an empty result would not be that report — it would look like the
+search failing, which is a different problem with a different fix.
+
+Expect this to be the common case for `reddit.com`, whose robots.txt
+refuses generic crawlers. That is a finding, and there is no
+workaround anywhere in `app/research/`.
+
+## 4c — `/study` and `/read` count against separate daily quotas
+
+`RESEARCH_JOBS_PER_DAY` and `RESEARCH_READS_PER_DAY` (plan section 3),
+counted per `study_job.kind`. They cost differently: a study job is one
+or two searches plus two distills, a read is one distill on a page the
+user already chose. Spending one must not consume the other, and a
+single shared counter would have made the cheaper command hostage to
+the expensive one.

@@ -100,11 +100,12 @@ BOT_COMMANDS = [
     BotCommand(command="tz", description="Часовой пояс"),
     BotCommand(command="export", description="Выгрузить все данные"),
     BotCommand(command="delete", description="Удалить все данные"),
-    # 4b (phase-4 plan section 9). /study is 4c's; these five are what
-    # /read's loop already supports end to end -- see the module
-    # docstring on why all five, not just /read and /notes, are worth a
-    # menu entry (mirrors /forget, /pin, /unpin above, which also take
-    # an id typed by hand rather than offering a picker).
+    # 4b (phase-4 plan section 9): read/notes/card/adopt/reject, /read's
+    # loop end to end. 4c adds /study alongside them -- see the module
+    # docstring on why all six are worth a menu entry (mirrors /forget,
+    # /pin, /unpin above, which also take an id or argument typed by
+    # hand rather than offering a picker).
+    BotCommand(command="study", description="Найти карточки по теме"),
     BotCommand(command="read", description="Прочитать страницу"),
     BotCommand(command="notes", description="Карточки исследований"),
     BotCommand(command="card", description="Карточка по id"),
@@ -663,9 +664,9 @@ def build_router(
         )
         await _reply_once(message, event_update.update_id, reply)
 
-    # --- 4b: research (plan section 9) ---
+    # --- 4b/4c: research (plan section 9) ---
     #
-    # Every one of these five checks RESEARCH_ENABLED first and replies
+    # Every one of these six checks RESEARCH_ENABLED first and replies
     # research_ui.DISABLED when it is off -- the default, until 4d. The
     # refusal check runs before argument parsing (matching /focus's
     # ordering, not /remember's) because a disabled feature should say
@@ -674,13 +675,42 @@ def build_router(
     # /adopt and /reject skip the `_once` replay gate, like /pin and
     # /unpin above: app/core/cards.py's adopt()/reject() are themselves
     # idempotent (ALREADY, no write), so there is no double-mutation for
-    # the gate to prevent. /read cannot make that claim --
-    # enqueue_read() inserts a fresh study_job row on every call -- so
-    # it keeps the manual `_once` + mark_update_handled dance /remember
-    # uses, and /notes keeps it too, purely to avoid re-sending the same
-    # keyboard message on a replay (send_keyboard bypasses
-    # send_command_reply's own per-update dedup, exactly as /remember's
-    # keyboard does).
+    # the gate to prevent. /read and /study cannot make that claim --
+    # enqueue_read()/enqueue_study() insert a fresh study_job row on
+    # every call -- so both keep the manual `_once` + mark_update_handled
+    # dance /remember uses, and /notes keeps it too, purely to avoid
+    # re-sending the same keyboard message on a replay (send_keyboard
+    # bypasses send_command_reply's own per-update dedup, exactly as
+    # /remember's keyboard does).
+
+    @router.message(Command("study"))
+    async def study_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        parsed = research_ui.parse_study_args(command.args)
+        if parsed is None:
+            await _reply_once(message, event_update.update_id, research_ui.STUDY_USAGE)
+            return
+        packet, topic = parsed
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        reply = await research_ui.run_study(
+            sessionmaker,
+            settings,
+            clock,
+            timezone=user_state.timezone,
+            packet=packet,
+            topic=topic,
+        )
+        # Same shape as /read below: run_study only enqueues, so the
+        # reply goes out through _reply_once rather than
+        # mark_update_handled.
+        await _reply_once(message, event_update.update_id, reply)
 
     @router.message(Command("read"))
     async def read_command(
