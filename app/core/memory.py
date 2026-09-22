@@ -201,8 +201,8 @@ async def mark_used(session: AsyncSession, clock: Clock, memory_ids: list[int]) 
     )
 
 
-async def _near_duplicate(
-    session: AsyncSession, text: str, *, ignore_id: int | None
+async def near_duplicate(
+    session: AsyncSession, text: str, *, ignore_id: int | None = None
 ) -> Memory | None:
     """An active memory too similar to `text` to be worth storing separately.
 
@@ -210,6 +210,16 @@ async def _near_duplicate(
     symmetric question ("are these the same fact?"), not the asymmetric
     extent question retrieval asks. The two metrics answer different
     questions and deliberately do not share a helper.
+
+    Public since 4b. `write_memory` reports only *that* a duplicate
+    exists, never which row, and app/core/cards.py needs the row: an
+    adopted card must carry a `memory_id` (`ck_study_card_adopted_has_
+    memory`), and when the technique is already known the honest id to
+    store is the existing memory's. That module asking this function
+    is what keeps "the same fact" one definition rather than two that
+    can drift -- a second copy of this query agreeing with
+    `write_memory` today and disagreeing after the next threshold
+    change would strand an adoption with no memory to point at.
     """
     score = func.similarity(Memory.text, text).label("score")
     stmt = (
@@ -259,7 +269,7 @@ async def write_memory(
         if old is None or old.superseded_by is not None:
             old = None
 
-    duplicate = await _near_duplicate(session, text, ignore_id=old.id if old else None)
+    duplicate = await near_duplicate(session, text, ignore_id=old.id if old else None)
     if duplicate is not None:
         logger.info(
             "memory not written, near-duplicate",

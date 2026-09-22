@@ -60,7 +60,7 @@ from aiogram.types import Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.core.clock import Clock
+from app.core.clock import Clock, to_local, within_window
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
@@ -72,6 +72,7 @@ from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_st
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.research.jobs import RESEARCH, run_research_job
+from app.tg import research as research_ui
 from app.tg.proposals import send_proposal
 
 logger = logging.getLogger(__name__)
@@ -198,7 +199,7 @@ async def _run_job(
         # schema call over a stranger's page text, so it runs on the
         # safety model like every other H2 job here -- never the main
         # model, which is reserved for in-character generation.
-        await run_research_job(
+        outcome = await run_research_job(
             session,
             settings,
             safety_provider or cheap_provider,
@@ -207,6 +208,8 @@ async def _run_job(
             clock=clock,
             timezone=user_state.timezone,
         )
+        if bot is not None:
+            await _send_research_done(bot, settings, clock, user_state, outcome)
         return ExtractOutcome()
 
     if kind == TICK_DECIDE:
@@ -292,6 +295,58 @@ async def process_one_job(
             await _send_proposals(sessionmaker, bot, outcome)
 
     return True
+
+
+def _may_report_now(settings: Settings, clock: Clock, user_state) -> bool:
+    """May the job-finished line be sent right now (plan section 9)?
+
+    Three checks, and deliberately not the outbound gate: a research
+    job's "done" line is a reply to a command the user typed, not an
+    unsolicited message. It does not touch the outbound counters, is
+    not counted by the gate, and is not subject to OUTBOUND_ENABLED or
+    the daily cap -- plan section 9 says so in as many words.
+
+    What it does respect is the three states that mean "not now" in the
+    user's own voice: a pause (/out, a pause word, a welfare trigger),
+    an explicit /quiet, and quiet hours. Same three the gate checks
+    second, third and fourth, for the same reasons, read the same way.
+
+    When the answer is no, nothing is sent and nothing is queued for
+    later: the cards are already in /notes, which is where the line
+    would have pointed.
+    """
+    if not user_state.persona_active:
+        return False
+    now = clock.now_utc()
+    if user_state.quiet_until is not None and user_state.quiet_until > now:
+        return False
+    local_now = to_local(now, user_state.timezone)
+    return not within_window(local_now.time(), settings.QUIET_START, settings.QUIET_END)
+
+
+async def _send_research_done(
+    bot: Bot, settings: Settings, clock: Clock, user_state, outcome
+) -> None:
+    """One short line when a /read job finishes, if it may be sent.
+
+    Out of character on purpose, like every other system reply: the
+    bot reporting on a task, not Anchor talking.
+    """
+    if not _may_report_now(settings, clock, user_state):
+        logger.info(
+            "research completion not sent", extra={"job_id": outcome.job_id, "event": "quiet"}
+        )
+        return
+    text = research_ui.completion_text(
+        status=outcome.status,
+        error_code=outcome.error_code,
+        visible_cards=outcome.visible_cards,
+    )
+    await bot.send_message(chat_id=user_state.chat_id, text=text)
+    logger.info(
+        "research completion sent",
+        extra={"job_id": outcome.job_id, "cards": outcome.visible_cards},
+    )
 
 
 async def _send_proposals(

@@ -73,6 +73,7 @@ from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
+from app.tg import research as research_ui
 from app.tg import welfare as welfare_ui
 
 NON_TEXT_REPLY = "Пока только текст."
@@ -99,6 +100,16 @@ BOT_COMMANDS = [
     BotCommand(command="tz", description="Часовой пояс"),
     BotCommand(command="export", description="Выгрузить все данные"),
     BotCommand(command="delete", description="Удалить все данные"),
+    # 4b (phase-4 plan section 9). /study is 4c's; these five are what
+    # /read's loop already supports end to end -- see the module
+    # docstring on why all five, not just /read and /notes, are worth a
+    # menu entry (mirrors /forget, /pin, /unpin above, which also take
+    # an id typed by hand rather than offering a picker).
+    BotCommand(command="read", description="Прочитать страницу"),
+    BotCommand(command="notes", description="Карточки исследований"),
+    BotCommand(command="card", description="Карточка по id"),
+    BotCommand(command="adopt", description="Принять карточку"),
+    BotCommand(command="reject", description="Отклонить карточку"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -652,6 +663,108 @@ def build_router(
         )
         await _reply_once(message, event_update.update_id, reply)
 
+    # --- 4b: research (plan section 9) ---
+    #
+    # Every one of these five checks RESEARCH_ENABLED first and replies
+    # research_ui.DISABLED when it is off -- the default, until 4d. The
+    # refusal check runs before argument parsing (matching /focus's
+    # ordering, not /remember's) because a disabled feature should say
+    # so before it says anything about how to use it.
+    #
+    # /adopt and /reject skip the `_once` replay gate, like /pin and
+    # /unpin above: app/core/cards.py's adopt()/reject() are themselves
+    # idempotent (ALREADY, no write), so there is no double-mutation for
+    # the gate to prevent. /read cannot make that claim --
+    # enqueue_read() inserts a fresh study_job row on every call -- so
+    # it keeps the manual `_once` + mark_update_handled dance /remember
+    # uses, and /notes keeps it too, purely to avoid re-sending the same
+    # keyboard message on a replay (send_keyboard bypasses
+    # send_command_reply's own per-update dedup, exactly as /remember's
+    # keyboard does).
+
+    @router.message(Command("read"))
+    async def read_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        url = (command.args or "").strip()
+        if not url:
+            await _reply_once(message, event_update.update_id, research_ui.READ_USAGE)
+            return
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        reply = await research_ui.run_read(
+            sessionmaker,
+            settings,
+            clock,
+            timezone=user_state.timezone,
+            url=url,
+        )
+        # run_read only enqueues; unlike /notes below, nothing has been
+        # sent yet, so the reply goes out through _reply_once (matching
+        # /forget's shape: gate with _once, mutate, then _reply_once) --
+        # not mark_update_handled, which is for a reply already sent by
+        # some other means.
+        await _reply_once(message, event_update.update_id, reply)
+
+    @router.message(Command("notes"))
+    async def notes_command(message: Message, event_update: Update) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        if not await _once(event_update.update_id):
+            return
+        await research_ui.run_notes(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/notes]"
+        )
+
+    @router.message(Command("card"))
+    async def card_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        card_id = memory_ui.parse_id(command.args)
+        if card_id is None:
+            await _reply_once(message, event_update.update_id, research_ui.CARD_USAGE)
+            return
+        reply = await research_ui.run_card(sessionmaker, card_id=card_id)
+        await _reply_once(message, event_update.update_id, reply)
+
+    @router.message(Command("adopt"))
+    async def adopt_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        card_id = memory_ui.parse_id(command.args)
+        if card_id is None:
+            await _reply_once(message, event_update.update_id, research_ui.ADOPT_USAGE)
+            return
+        reply = await research_ui.run_adopt(sessionmaker, clock, card_id=card_id)
+        await _reply_once(message, event_update.update_id, reply)
+
+    @router.message(Command("reject"))
+    async def reject_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.RESEARCH_ENABLED:
+            await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+            return
+        card_id = memory_ui.parse_id(command.args)
+        if card_id is None:
+            await _reply_once(message, event_update.update_id, research_ui.REJECT_USAGE)
+            return
+        reply = await research_ui.run_reject(sessionmaker, clock, card_id=card_id)
+        await _reply_once(message, event_update.update_id, reply)
+
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
         await turn.run(
@@ -747,6 +860,44 @@ def build_router(
             sessionmaker,
             callback.bot,
             clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("r:a:"))
+    async def research_adopt(callback: CallbackQuery) -> None:
+        """`r:a:<id>` -- a /notes card's [Принять] button."""
+        await research_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("r:r:"))
+    async def research_reject(callback: CallbackQuery) -> None:
+        """`r:r:<id>` -- a /notes card's [Отклонить] button."""
+        await research_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("r:p:"))
+    async def research_page(callback: CallbackQuery) -> None:
+        """`r:p:<page>` -- a /notes paging arrow."""
+        await research_ui.handle_page_callback(
+            sessionmaker,
+            callback.bot,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

@@ -15,6 +15,7 @@ a `risk_final='high'` card is never anything but `status='hidden'`.
 
 from __future__ import annotations
 
+import datetime
 import json
 
 import pytest
@@ -22,7 +23,9 @@ from sqlalchemy import func, select
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core.clock import FrozenClock
 from app.db.models import Job, SpendLedger, StudyCard, StudyClip, StudyJob
+from app import worker
 from app.research import distill, errors, jobs
 from app.research.fetch import Clip, FetchFailure
 from conftest import FakeLLMProvider
@@ -462,3 +465,56 @@ async def test_a_long_url_is_queued_rather_than_refused(sessionmaker, clock):
         queued = (await session.execute(select(Job).where(Job.kind == jobs.RESEARCH))).scalar_one()
         assert queued.payload["url"] == long_url
         assert (await session.get(StudyJob, job_id)).query is None
+
+
+# --- the job-finished line (plan section 9) ---
+
+
+class _State:
+    """The three user_state fields _may_report_now reads, and nothing else."""
+
+    def __init__(self, *, persona_active=True, quiet_until=None, timezone=TIMEZONE, chat_id=555):
+        self.persona_active = persona_active
+        self.quiet_until = quiet_until
+        self.timezone = timezone
+        self.chat_id = chat_id
+
+
+def _at(hour: int, minute: int = 0) -> FrozenClock:
+    """A clock at a given UTC hour. TIMEZONE is Europe/Paris (UTC+2 in
+    September), so 12:00 UTC is 14:00 local and 21:00 UTC is 23:00."""
+    return FrozenClock(datetime.datetime(2026, 9, 22, hour, minute, tzinfo=datetime.timezone.utc))
+
+
+async def test_the_done_line_is_sent_in_ordinary_hours():
+    assert worker._may_report_now(_settings(), _at(12), _State()) is True
+
+
+async def test_a_paused_persona_gets_no_done_line():
+    """Plan section 9: if sending is not allowed, send nothing -- the
+    cards wait in /notes, which is where the line would have pointed."""
+    assert worker._may_report_now(_settings(), _at(12), _State(persona_active=False)) is False
+
+
+async def test_an_active_quiet_command_suppresses_the_done_line():
+    until = datetime.datetime(2026, 9, 23, tzinfo=datetime.timezone.utc)
+    assert worker._may_report_now(_settings(), _at(12), _State(quiet_until=until)) is False
+
+
+async def test_an_expired_quiet_command_does_not():
+    until = datetime.datetime(2026, 9, 21, tzinfo=datetime.timezone.utc)
+    assert worker._may_report_now(_settings(), _at(12), _State(quiet_until=until)) is True
+
+
+async def test_quiet_hours_suppress_the_done_line():
+    """23:00 local, inside the default 22:30-08:00 window."""
+    assert worker._may_report_now(_settings(), _at(21), _State()) is False
+
+
+async def test_the_done_line_ignores_the_outbound_switch_and_the_cap():
+    """It is a reply to a command the user typed, not an unsolicited
+    message: plan section 9 keeps it off the outbound counters and out
+    of the gate entirely."""
+    settings = _settings()
+    settings = settings.model_copy(update={"OUTBOUND_ENABLED": False, "DAILY_USD_CAP": 0.0})
+    assert worker._may_report_now(settings, _at(12), _State()) is True

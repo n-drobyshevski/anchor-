@@ -1,4 +1,4 @@
-# Anchor — Milestone 4a (the research fetcher) · Phase 3 complete
+# Anchor — Milestone 4b (/read, cards, /notes) · Phase 3 complete
 
 A private, single-user Telegram bot.
 
@@ -662,6 +662,63 @@ and `safety_event` purged by `/delete` but never exported. Both are
 user data by the repo's own reasoning, so both are exported now, along
 with the three study tables. The four deliberate omissions are named,
 with a reason each, in `tests/test_export.py`.
+
+## Milestone 4b — `/read` end to end, and the cards you decide on
+
+4a built the floor; 4b makes it run. `/read <url>` queues a job that
+fetches the page, distills it in isolation, and leaves cards in
+`/notes` for you to accept or refuse. `RESEARCH_ENABLED` is still
+`false` — 4c adds `/study`, 4d flips the flag.
+
+### The distill call knows nothing but the page
+
+One topic, one page title, one page text. No state, no memory, no
+transcript, no persona, no tools, no plugins, on `LLM_MODEL_SAFETY` at
+temperature 0 with a strict JSON schema. What comes back is treated as
+a string a stranger's web page had a hand in writing, and six code-side
+checks decide what survives.
+
+The first is the anchor: **a card must carry a quote that is a verbatim
+substring of the page text.** A model inventing advice has to invent a
+sentence that already exists on the page it was shown. Normalisation
+folds whitespace, quote characters, dashes and ё — the things that fire
+on typography — and nothing else; case stays strict. A quote shorter
+than 24 characters is treated as no quote at all, because «сон» is a
+substring of almost any Russian article about sleep.
+
+Then: length and enum limits, the injection list, the same secret
+redactor every other write path uses, and the risk rules. `source_url`
+is not among them — it is copied from the clip by code, and `Card` has
+no field for the model to fill.
+
+### Two lists, and the words they deliberately let through
+
+`app/research/injection.py` drops a card outright; `app/research/risk.py`
+raises its risk and can hide it. Both follow one rule: **phrases for
+ambiguous words, bare patterns only for tokens that cannot occur
+innocently.**
+
+«Игнорируйте уведомления после девяти» is a real technique. «Не есть за
+три часа до сна» is good advice. «Делайте перерыв по таймеру» is the
+most ordinary card there is. A stem-matching list would eat all three,
+and a filter that hides good cards teaches you that `/notes` is noise —
+which is worse than one that is merely narrow, because your own
+decision is the last gate and it only works if you are still reading.
+So `tests/test_risk.py` and `tests/test_injection.py` each carry a
+table of cards that must **not** match, and a test that fails if a new
+rule arrives without both kinds of example.
+
+### Adopting is the one way out
+
+`[Принять]` writes exactly one `memory(kind='technique', source='adopt')`
+and a `state_change` row. Nothing else — `tests/test_cards.py` walks the
+AST to pin that `app/core/cards.py` never imports `update_state` or any
+outbound module.
+
+A `risk_final='high'` card is stored `hidden` and answers «Нет такой
+карточки.» to every command and both buttons, exactly as a card that
+does not exist would. Distinguishing the two would be showing it, in
+the only way that matters.
 
 ## Decisions
 

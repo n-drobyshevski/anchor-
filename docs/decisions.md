@@ -352,3 +352,155 @@ that should not leave the machine in a file the user can share. Neither
 holds message content; `outbound` holds a 120-character `tick_note`,
 which the bot wrote about the user and which `/export` is meant to
 disclose.
+
+---
+
+## 4b — the two pattern lists take phrases, not stems
+
+`app/research/injection.py` and `app/research/risk.py` both follow one
+rule: **phrases for ambiguous words, bare patterns only for tokens that
+cannot occur innocently.**
+
+This is where a filter list usually goes wrong, because the cards we
+want are practical advice and practical advice is full of near misses.
+«Игнорируйте уведомления после девяти» is a real sleep-hygiene
+technique, and a stem-matching list of the kind
+`app/core/welfare_terms.py` uses — which is right for its own job —
+would drop it silently. So `игнорируй` on its own is not a pattern;
+`игнорируй всё выше` is. The same applies to «не есть за три часа до
+сна» against `extreme_restriction`, «контролировать своё время» against
+`third_party`, and «таймер» against `physical_devices`.
+
+Over-matching is not the safe direction here, despite appearances. A
+rule that hides good cards teaches the user that `/notes` is full of
+noise, and the filter that gets ignored is worse than the one that is
+merely narrow — the user's own decision is the last gate, and it only
+works if they are still reading.
+
+The counterweight is in the tests: `tests/test_risk.py` and
+`tests/test_injection.py` each carry a `CLEAN` table of cards that must
+*not* match, several of them one word from a rule, and a test that
+fails if a new rule id arrives without both a positive and a negative
+example. A list only ever tested for what it catches grows wider every
+time someone adds a term.
+
+**Three rules are deliberately broad**, and are the ones to revisit
+first if `/notes` starts feeling noisy: `health_meds` matches any
+substance, dose or unit (the one category where a wrong `low` is a
+health outcome); `illegal` matches bare `drugs` in English (which is
+`high` via `health_meds` anyway); and `developer_mode` includes «без
+ограничений», which can innocently mean "unlimited".
+
+**This would be wrong if** the negative tables stop being extended
+alongside the rules, at which point the discipline is gone and only the
+appearance of it remains.
+
+## 4b — the quote is the anchor, and it has a length floor
+
+Plan section 7.1 makes every card carry a quote that is a verbatim
+substring of the clip text. That is what makes hallucination
+structurally hard rather than merely discouraged: a model inventing
+advice has to invent a sentence that already exists on the page it was
+shown.
+
+Normalisation folds whitespace, quote characters, dashes and ё, and
+nothing else. Every fold widens what counts as a match, and those four
+fire on typography — a true quote must not be rejected because the page
+wrapped a line or the model typed a straight apostrophe. **Case is not
+folded**, because case fires on content.
+
+`QUOTE_MIN = 24` characters is not in the plan and was added anyway:
+without a floor the anchor is defeatable by quoting a common word —
+«сон» is a substring of almost any Russian article about sleep — which
+would leave the strongest check in the file decorative.
+
+**This would be wrong if** 24 characters turns out to reject real short
+quotes often enough to matter. Nothing seen yet suggests it does.
+
+## 4b — a /read URL rides in the queue payload, not in `study_job.query`
+
+`query` is the topic column, capped at 200 characters by
+`ck_study_job_query_length`, and a `/read` has no topic at enqueue time
+— the topic is decided later from the fetched page's title. Storing the
+URL there was the obvious move and the wrong one: 200 characters is a
+real limit on real links. An article URL carrying campaign parameters,
+or any share link from a phone, runs past it, and there is no honest
+refusal to give for that. The URL is fine; only the column was too
+small, and refusing it as `bad_url` names the wrong cause.
+
+So the address travels in the `job` queue row's JSONB `payload`, exactly
+as `update_id`, `scene_id` and `outbound_id` already do.
+`study_clip.url` remains the authoritative record of what was actually
+read, after redirects.
+
+## 4b — the job-finished line is not an outbound
+
+Plan section 9 is explicit that it "isn't an outbound in the Phase 3
+sense: it's a reply to the user's command", so `_may_report_now` in
+`app/worker.py` deliberately does not call the outbound gate. It does
+not touch the outbound counters, is not subject to `OUTBOUND_ENABLED`,
+and is not stopped by the daily cap.
+
+What it does respect is the three states that mean "not now" in the
+user's own voice — a pause, an explicit `/quiet`, and quiet hours —
+read exactly as the gate reads them, because those three are about the
+user rather than about the budget. When the answer is no, nothing is
+sent and nothing is queued for later: the cards are already in
+`/notes`, which is where the line would have pointed.
+
+The count is pluralised. Plan section 9 writes «Готово: N карточек.
+/notes» with N as a placeholder, not as a spec for the three Russian
+plural forms, and «Готово: 1 карточек» is not a sentence a bot that is
+supposed to sound like a person sends. The wording is otherwise exactly
+the plan's.
+
+## 4b — `near_duplicate` became public rather than being copied
+
+Adopting a card must end with `study_card.memory_id` set
+(`ck_study_card_adopted_has_memory`), but `write_memory` returns `None`
+when an active memory already says the same thing, and reports only
+*that* a duplicate exists, never which row. The honest id to store in
+that case is the existing memory's — a technique a page repeats, or a
+second `/read` of a similar page, is the ordinary case dedupe exists
+for, not a reason to block the user's decision.
+
+The first implementation repeated `write_memory`'s private
+`_near_duplicate` query inside `app/core/cards.py`. That function is
+now public and called from both places instead. Two copies agreeing
+today and disagreeing after the next threshold change would strand an
+adoption with no memory to point at and fail the constraint — one
+definition of "the same fact" is worth more than the module boundary
+it crosses.
+
+This also makes a replayed adopt land correctly: the first run's memory
+is still active, `write_memory` calls it a duplicate of itself, and the
+card links to that same row rather than a fresh copy.
+
+## 4b — a hidden card and a missing card read the same to the user
+
+`/card`, `/adopt`, `/reject` and both buttons all answer «Нет такой
+карточки.» for a card that does not exist and for one that is hidden.
+Plan section 12 says a `risk_final='high'` card is never shown; a reply
+that distinguished "no such card" from "that one is too risky to show
+you" would be showing it, in the only way that matters — the user would
+know a card exists and what kind of thing it is.
+
+`app/core/cards.py` still tells the two apart internally (`GONE` versus
+`FORBIDDEN`), because the difference is worth logging even when it is
+not worth saying.
+
+## 4b — no `safety_event` row for a distill call
+
+`app/core/extract.py` records one on every run, and the research job
+does not. `ck_safety_event_kind` admits only `welfare`, `extractor` and
+`tick`, and a fourth value needs a migration the phase-4 plan does not
+call for.
+
+`study_job.error_code` carries the same signal per job, so nothing is
+lost — but `/state`'s per-day safety rollup is blind to distill, which
+means a model that starts returning unparseable JSON looks like "0
+cards" rather than like a fault. That is exactly the failure mode the
+table was added for in H2.
+
+**Revisit in 4c**, where `/study` adds two more distill calls per job
+and the blind spot gets proportionally larger.
