@@ -40,6 +40,14 @@ for the same minute on a day the user has been quiet.
 next heartbeat tries again, so lifting `/quiet` at 10:00 still lets the
 morning message go out inside its grace window. A row would make that
 impossible.
+
+**The tick (3d) is not in PRIORITY.** Plan section 6 lists it as its
+own bullet, and for a good reason: the heartbeat does not decide
+anything about it. It enqueues a `tick_decide` job and moves on; that
+job runs the gate, asks the cheap model, and only then plans a row.
+So the tick enqueue is an independent side effect that happens
+*before* the priority loop -- the loop returns early when a gate
+refuses, and that must not silently suppress the tick as well.
 """
 
 from __future__ import annotations
@@ -78,6 +86,29 @@ PRIORITY: tuple[Kind, ...] = (EVENING_NAG, MORNING, SILENCE)
 # Fixed intents and the silence nudge are one-per-local-date, so their
 # bucket is always 0. Only the tick (3d) uses it, for the local hour.
 FIXED_BUCKET = 0
+
+# 3d: the tick's decision job.
+#
+# The repo convention is that a job-kind constant lives with the job
+# body -- EXTRACT in extract.py, SUMMARIZE_SCENE in scene.py,
+# SEND_OUTBOUND in outbound_send.py. This one deviates, deliberately.
+# app/core/tick.py needs plan() and planned_for() from this module, so
+# if this module also imported tick.py for the constant the two would
+# form an import cycle. It lands here rather than there because the
+# tick is the one job kind enqueued on a *clock rule* by the scheduler
+# rather than by whoever happens to need the work done -- the
+# scheduler genuinely owns when it exists.
+TICK_DECIDE = "tick_decide"
+
+# Plan section 6: "When the local hour is in TICK_HOURS and minute < 5".
+# Five minutes rather than one so a worker that restarts at :03 still
+# catches the hour; the dedup key collapses all five into one job.
+TICK_MINUTE_WINDOW = 5
+
+
+def tick_dedup_key(local_date: datetime.date, hour: int) -> str:
+    """One decision per (local date, hour), ever."""
+    return f"tick:{local_date.isoformat()}:{hour}"
 
 
 def _window(
@@ -149,7 +180,7 @@ def _ceiling(
     return ceiling
 
 
-def _planned_for(
+def planned_for(
     kind: Kind, settings: Settings, clock: Clock, timezone: str
 ) -> datetime.datetime:
     """When to actually send: now plus jitter, clamped to the ceiling.
@@ -243,18 +274,62 @@ async def plan(
     return outbound_id
 
 
+async def maybe_enqueue_tick(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue this hour's tick decision, if this is one of its minutes.
+
+    Returns True iff a job was actually inserted.
+
+    The gate is **not** run here. Plan section 8 puts it inside the job,
+    as its first step, before any model call -- so a refused tick costs
+    one queue row and nothing else. Running it here as well would mean
+    two different answers to the same question minutes apart, and the
+    later one is the one that matters.
+
+    `local_date` and `hour` travel in the payload rather than being
+    recomputed when the job runs: the queue can run a job a minute
+    late, and the outbound row's `bucket` has to match the dedup key
+    that reserved it or the two idempotency mechanisms disagree.
+    """
+    if not settings.TICK_HOURS:
+        return False
+
+    now_local = clock_module.now_local(clock, timezone)
+    if now_local.hour not in settings.TICK_HOURS:
+        return False
+    if now_local.minute >= TICK_MINUTE_WINDOW:
+        return False
+
+    local_date = now_local.date()
+    enqueued = await enqueue_job(
+        session,
+        TICK_DECIDE,
+        {"local_date": local_date.isoformat(), "hour": now_local.hour},
+        dedup_key=tick_dedup_key(local_date, now_local.hour),
+    )
+    if enqueued:
+        logger.info("tick decision queued", extra={"event": now_local.hour})
+    return enqueued
+
+
 async def heartbeat(
     session: AsyncSession, settings: Settings, clock: Clock
 ) -> int | None:
     """One tick. Plans at most one intent; returns its id, or None.
 
     Returning the id (rather than nothing) is for the tests and for the
-    log line -- the worker ignores it.
+    log line -- the worker ignores it. The tick enqueue is a side
+    effect and is not reflected in the return value: it plans nothing.
     """
     state = await get_state(session)
     timezone = state.timezone
     today = clock_module.local_date(clock, timezone)
     config = config_from_settings(settings)
+
+    # Before the loop: see the module docstring. A refused gate below
+    # returns early, and the tick must not be collateral damage.
+    await maybe_enqueue_tick(session, settings, clock, timezone)
 
     for kind in PRIORITY:
         if not _is_due(kind, settings, clock, timezone):
@@ -280,7 +355,7 @@ async def heartbeat(
             clock,
             kind,
             local_date=today,
-            planned_for=_planned_for(kind, settings, clock, timezone),
+            planned_for=planned_for(kind, settings, clock, timezone),
         )
 
     return None

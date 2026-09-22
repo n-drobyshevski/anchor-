@@ -51,6 +51,7 @@ counting them as ignoring it.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import time
 
@@ -63,7 +64,8 @@ from app.core.clock import Clock
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
-from app.core.scheduler import heartbeat
+from app.core.scheduler import TICK_DECIDE, heartbeat
+from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
@@ -183,6 +185,20 @@ async def _run_job(
             bot,
             clock=clock,
             outbound_id=payload["outbound_id"],
+        )
+        return ExtractOutcome()
+
+    if kind == TICK_DECIDE:
+        # The cheap model decides whether there is a natural reason to
+        # write first. It plans an outbound row at most; the send-time
+        # gate still has the last word (plan section 8).
+        await run_tick_decide(
+            session,
+            settings,
+            cheap_provider,
+            clock=clock,
+            local_date=datetime.date.fromisoformat(payload["local_date"]),
+            hour=payload["hour"],
         )
         return ExtractOutcome()
 

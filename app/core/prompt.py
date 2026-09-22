@@ -239,6 +239,31 @@ async def _load_transcript(
     return rows
 
 
+async def recent_transcript(session: AsyncSession, limit: int) -> list[Message]:
+    """The last `limit` in-character messages, oldest first.
+
+    3d: the tick decision (app/core/tick.py) needs the same view of the
+    conversation the persona gets, and building a second query for it
+    would be a second place to forget that welfare and canned rows are
+    excluded. A thin wrapper rather than making _load_transcript public,
+    because the two filters that matter -- ooc=False and
+    PERSONA_TRANSCRIPT_KINDS -- are fixed here rather than left to the
+    caller to get right.
+
+    `update_id=None` means "exclude nothing", which is only correct
+    because 3b made that exclusion conditional; before then it would
+    have dropped every row whose update_id is NULL, outbound rows
+    included.
+    """
+    return await _load_transcript(
+        session,
+        ooc=False,
+        update_id=None,
+        limit=limit,
+        kinds=PERSONA_TRANSCRIPT_KINDS,
+    )
+
+
 async def build_messages(
     session: AsyncSession,
     *,

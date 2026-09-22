@@ -1,4 +1,4 @@
-# Anchor — Milestone 3c (the controls)
+# Anchor — Milestone 3d (the optional tick)
 
 A private, single-user Telegram bot.
 
@@ -261,6 +261,98 @@ from becoming a bot that will not stop.
   time, and today's last refusal reason. The reason code is the whole
   point of the gate recording one — "why didn't it write?" should be
   answerable without reading the logs.
+
+Milestone 3d adds the one intent that fires on a **judgement** rather
+than a clock rule. Every ~2h at the hours in `TICK_HOURS`, a cheap
+model is asked whether there is a natural reason to write first — an
+unclosed thread from the last conversation, a due action with a near
+deadline, something the user said they would do today. The default is
+no, and at most one tick a day actually goes out.
+
+### The model proposes, the code decides — twice
+
+This is the first place a model's output has any say in whether an
+unsolicited message is sent, so plan §11's invariant is the shape of
+the whole module. A tick passes three checks in order:
+
+1. **the planning gate**, before the model is called;
+2. **the model**, which returns only `{"send": bool, "note": "≤120 chars"}`;
+3. **the send-time gate**, minutes later, which is authoritative.
+
+The note becomes `outbound.tick_note` and is interpolated into a hidden
+flag at generation time. It cannot skip a gate, cannot change
+`intensity`, `focus_on`, `due_action`, `streak` or `persona_active`,
+and cannot make anything happen the code has not already allowed.
+
+**A refused gate means no model call.** That ordering is why the gate
+is first rather than a filter on the result: a tick the code would
+refuse anyway must cost nothing. The most common refusal is the
+cheapest one — `kind_rule:user_active`, because the user wrote in the
+last two hours, so there is nothing to re-open.
+
+**The decision is ledgered either way**, under its own category
+`tick`, including when the reply comes back as prose instead of JSON.
+The money left regardless of whether a message did — the same rule
+Phase 2 applies to a discarded welfare generation. Deciding and
+speaking are separate budget lines.
+
+### Anything short of a clean yes is a no
+
+`validate()` is pure and has one return shape for every failure, so the
+caller cannot act on half a result. `send` must be a real `True` — a
+model that returns the string `"true"` or the number `1` has not
+answered the question. The note must survive `redact.is_safe_to_store`,
+because it is stored and later re-injected into a prompt.
+
+Two cases worth naming:
+
+- **`send: true` with a blank note is dropped.** The tick's premise is
+  a natural reason; "yes, but I can't say why" is not one, and the flag
+  would otherwise render «Повод: «».»
+- **An over-long note is dropped, not truncated** — the same reasoning
+  `extract._clean_text` already carries. Half a reason is not a better
+  reason to interrupt someone, and it means
+  `ck_outbound_tick_note_length` can never be hit at runtime.
+
+### The tick is not in PRIORITY
+
+The heartbeat does not decide anything about the tick. It enqueues a
+`tick_decide` job and moves on, **before** the priority loop — because
+that loop returns early when a gate refuses, and the tick must not be
+collateral damage. Five heartbeats fall inside the `minute < 5` window
+and all five collapse into one job on the dedup key
+`tick:<local_date>:<hour>`; the five-minute width exists so a worker
+restarting at :03 still catches the hour.
+
+`local_date` and `hour` travel in the job payload rather than being
+recomputed when the job runs. The queue can run a job a minute late,
+and the row's `bucket` has to match the dedup key that reserved it or
+the two idempotency mechanisms disagree about what "this hour's tick"
+means.
+
+`TICK_HOURS=` (empty) is the off switch — no new config knob.
+
+### One deliberate break with convention
+
+Job-kind constants live with the job body everywhere else in this
+repo: `EXTRACT` in `extract.py`, `SUMMARIZE_SCENE` in `scene.py`,
+`SEND_OUTBOUND` in `outbound_send.py`. `TICK_DECIDE` lives in
+`scheduler.py` instead, because `tick.py` needs `plan()` and
+`planned_for()` from the scheduler and the two would otherwise form an
+import cycle. It lands there rather than being worked around because
+the tick is the one job enqueued on a *clock rule* by the scheduler
+rather than by whoever needs the work done — the scheduler genuinely
+owns when it exists.
+
+### The journal reaches a prompt now
+
+`Journal`'s docstring used to say it is "never retrieved into a
+prompt". Plan §8 makes that false: the last three lines go into the
+tick's input, because what has actually been happening is most of what
+separates a real reason from an invented one. The docstring is amended
+rather than quietly outgrown. It is still never retrieved into the
+*persona* prompt — only into the cheap model's decision, which produces
+a boolean and a note, never a reply.
 
 ### The jitter ceiling is quiet hours, for every kind
 

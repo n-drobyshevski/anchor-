@@ -422,10 +422,19 @@ class PendingMemory(Base):
 class Journal(Base):
     """One neutral sentence per notable exchange (phase-2 plan section 8).
 
-    Written by the extractor and nothing else. Unlike `memory` it is
-    never retrieved into a prompt -- it exists so the user can read back
-    what happened, and so later milestones have a factual spine for
-    digests. 240 characters because section 8's schema says so.
+    Written by the extractor and nothing else.
+
+    **Amended in 3d.** This docstring used to say the journal is "never
+    retrieved into a prompt". That is no longer true: phase-3 plan
+    section 8 puts the last three lines into the tick decision's input,
+    because "what has actually been happening" is most of what makes a
+    reason to write first natural rather than invented. It is still
+    never retrieved into the *persona* prompt -- only into the cheap
+    model's decision, which produces a boolean and a note, never a
+    reply. Unlike `memory` it is not ranked or retrieved by similarity;
+    the tick takes the most recent three, full stop.
+
+    240 characters because section 8's schema says so.
     """
 
     __tablename__ = "journal"
