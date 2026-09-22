@@ -84,7 +84,7 @@ async def _run(sessionmaker, bot, cheap, clock, *, update_id=1, text=DISTRESS, m
         chat_id=CHAT_ID,
         update_id=update_id,
         user_text=text,
-        cheap_provider=cheap,
+        safety_provider=cheap,
     )
 
 
@@ -371,26 +371,34 @@ async def test_a_replayed_resume_turns_it_on_once(sessionmaker):
 # --- wiring ---
 
 
-async def test_build_router_threads_the_cheap_provider_into_every_turn(sessionmaker):
-    """cheap_provider defaults to None so pre-2e tests keep their
+async def test_build_router_threads_the_safety_provider_into_every_turn(sessionmaker):
+    """safety_provider defaults to None so pre-2e tests keep their
     three-argument call. That default must never be what production
     gets: every turn.run() in the router has to pass it explicitly."""
     from app.tg import router as router_module
 
     source = inspect.getsource(router_module.build_router)
     run_calls = source.count("await turn.run(")
-    threaded = source.count("cheap_provider=cheap_provider")
+    threaded = source.count("safety_provider=safety_provider")
     assert run_calls > 0
     assert threaded == run_calls, (
-        f"{run_calls} turn.run() call sites but only {threaded} pass cheap_provider"
+        f"{run_calls} turn.run() call sites but only {threaded} pass safety_provider"
     )
 
 
-async def test_main_builds_a_dispatcher_with_the_cheap_provider(sessionmaker):
+async def test_main_builds_a_dispatcher_with_the_safety_provider(sessionmaker):
+    """H2: the router's welfare provider is the safety model, not the
+    cheap one. Pinned by source because the argument is positional --
+    handing it the wrong provider would still run, just on the wrong
+    model, which is exactly the failure this milestone is about."""
     from app import main as main_module
 
     source = inspect.getsource(main_module)
-    assert "build_dispatcher(sessionmaker, settings, provider, cheap_provider, clock)" in source
+    assert "build_dispatcher(sessionmaker, settings, provider, safety_provider, clock)" in source
+    assert (
+        "provider, cheap_provider, safety_provider, llm_client = build_providers(settings)"
+        in source
+    )
 
 
 # --- the classifier's own contract ---

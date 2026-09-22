@@ -101,12 +101,23 @@ def price_triple_for(model: str | None, settings: Settings) -> tuple[
     drag in that float's binary representation error (Decimal(0.1) is
     not 0.1), which would show up from the sixth decimal place onward.
     """
-    if model is not None and model != settings.LLM_MODEL and model == settings.LLM_MODEL_CHEAP:
-        return (
-            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_IN)),
-            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_CACHED)),
-            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_OUT)),
-        )
+    if model is not None and model != settings.LLM_MODEL:
+        if model == settings.LLM_MODEL_CHEAP:
+            return (
+                decimal.Decimal(str(settings.LLM_CHEAP_PRICE_IN)),
+                decimal.Decimal(str(settings.LLM_CHEAP_PRICE_CACHED)),
+                decimal.Decimal(str(settings.LLM_CHEAP_PRICE_OUT)),
+            )
+        # H2. Checked after cheap for the same reason cheap is checked
+        # after main: whichever setting names the model first wins, so
+        # two settings pointing at one model can never disagree about
+        # its price.
+        if model == settings.LLM_MODEL_SAFETY:
+            return (
+                decimal.Decimal(str(settings.LLM_SAFETY_PRICE_IN)),
+                decimal.Decimal(str(settings.LLM_SAFETY_PRICE_CACHED)),
+                decimal.Decimal(str(settings.LLM_SAFETY_PRICE_OUT)),
+            )
     return (
         decimal.Decimal(str(settings.LLM_PRICE_IN)),
         decimal.Decimal(str(settings.LLM_PRICE_CACHED)),

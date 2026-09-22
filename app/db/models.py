@@ -338,6 +338,57 @@ class SpendLedger(Base):
     __table_args__ = (Index("ix_spend_ledger_local_date", "local_date"),)
 
 
+class SafetyEvent(Base):
+    """One row per safety-model call outcome (H2). Never any content.
+
+    Separate from spend_ledger, not a column on it, for a reason the
+    code makes concrete: app/core/turn.py's _ledger_only() returns early
+    when the response is None, so a classifier that *timed out* writes no
+    ledger row at all -- the table is structurally unable to record the
+    outcome that matters most. The converse is just as bad: a timeout, an
+    error and a fallback_hit cost nothing, so recording them as
+    zero-cost ledger rows would pollute today_by_category() and the
+    daily-cap query, and the cap is row 5 of the outbound gate -- noise
+    there silences proactive messages.
+
+    Constrained, unlike spend_ledger.category. That column is
+    deliberately open because it records money already spent and a
+    rejected row would lose the record. Here both vocabularies are
+    closed sets of module constants (app/core/welfare.py), an
+    unrecognized value is a bug rather than a new label, and
+    tests/test_safety_event.py pins the constants against these
+    constraints. The write itself is best-effort at the call site:
+    observability must never be able to fail the turn it observes.
+    """
+
+    __tablename__ = "safety_event"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    # `kind`, not `check`: `check` is a reserved word in Postgres, and
+    # the name would need quoting in every raw constraint expression.
+    # `kind` also matches job.kind / message.kind / outbound.kind.
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str | None] = mapped_column(String)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('welfare', 'extractor', 'tick')", name="ck_safety_event_kind"
+        ),
+        CheckConstraint(
+            "outcome in ('ok', 'parse_fail', 'timeout', 'error', 'fallback_hit')",
+            name="ck_safety_event_outcome",
+        ),
+        # The only query is /state's "last 7 local days, grouped by
+        # outcome", the same shape as the ledger's daily sum.
+        Index("ix_safety_event_local_date", "local_date"),
+    )
+
+
 class Memory(Base):
     """A durable fact about the user (phase-2 plan section 4).
 

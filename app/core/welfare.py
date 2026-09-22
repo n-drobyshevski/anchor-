@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import NamedTuple
 
 from app.config import Settings
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
@@ -46,6 +47,20 @@ NONE = "none"
 SCENE = "scene"
 REAL = "real"
 LEVELS = (NONE, SCENE, REAL)
+
+# H2: what happened to the call itself, as distinct from what it
+# concluded. Before this existed, `parse()` returning Verdict() meant
+# both "the user is fine" and "the model gave us nothing", so a
+# classifier that was failing every single time looked exactly like a
+# quiet week. These are the values written to safety_event.outcome;
+# FALLBACK_HIT is set by app/core/turn.py, not here, because this
+# module never runs the keyword backstop itself.
+OK = "ok"
+PARSE_FAIL = "parse_fail"
+TIMEOUT = "timeout"
+ERROR = "error"
+FALLBACK_HIT = "fallback_hit"
+OUTCOMES = (OK, PARSE_FAIL, TIMEOUT, ERROR, FALLBACK_HIT)
 
 # How many prior messages the classifier sees (plan section 10: "the
 # last 4 messages plus the current user text").
@@ -97,19 +112,44 @@ FALLBACK_REPLY = (
 
 
 class Verdict:
-    """A classifier result, or the fail-open absence of one."""
+    """A classifier result, or the fail-open absence of one.
 
-    __slots__ = ("level", "confidence")
+    `usable` (H2) is what tells the two apart. `level` stays `none` on a
+    parse failure -- that is the fail-open behaviour plan section 10
+    requires and it must not change -- but a caller that wants to know
+    whether the model actually answered can now ask, and the keyword
+    backstop in app/core/welfare_terms.py depends on being able to.
+    """
 
-    def __init__(self, level: str = NONE, confidence: float = 0.0) -> None:
+    __slots__ = ("level", "confidence", "usable")
+
+    def __init__(
+        self, level: str = NONE, confidence: float = 0.0, usable: bool = True
+    ) -> None:
         self.level = level
         self.confidence = confidence
+        self.usable = usable
 
     def is_real(self, settings: Settings) -> bool:
         return self.level == REAL and self.confidence >= settings.WELFARE_MIN_CONF
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"Verdict({self.level!r}, {self.confidence})"
+        return f"Verdict({self.level!r}, {self.confidence}, usable={self.usable})"
+
+
+class Classification(NamedTuple):
+    """What `classify()` returns: the verdict, the billable response, and
+    what happened to the call.
+
+    A NamedTuple so the two-value unpacking that predates H2 still reads
+    naturally where only the first two matter, and so `outcome` can be
+    reached by name rather than by position. Same shape as GateResult in
+    app/core/outbound_gate.py.
+    """
+
+    verdict: Verdict
+    response: object | None
+    outcome: str
 
 
 def parse(raw: str) -> Verdict:
@@ -117,27 +157,29 @@ def parse(raw: str) -> Verdict:
 
     Anything unexpected -- prose, a missing key, a level outside the
     enum, a non-numeric confidence -- reads as `none`, which is the
-    fail-open direction: the normal reply goes out.
+    fail-open direction: the normal reply goes out. Those returns carry
+    `usable=False` (H2) so the caller can tell a failure from a genuine
+    "nothing wrong" and reach for the keyword backstop.
     """
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError):
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end <= start:
-            return Verdict()
+            return Verdict(usable=False)
         try:
             payload = json.loads(raw[start : end + 1])
         except ValueError:
-            return Verdict()
+            return Verdict(usable=False)
 
     if not isinstance(payload, dict):
-        return Verdict()
+        return Verdict(usable=False)
     level = payload.get("level")
     confidence = payload.get("confidence")
     if level not in LEVELS:
-        return Verdict()
+        return Verdict(usable=False)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-        return Verdict()
+        return Verdict(usable=False)
     return Verdict(level, float(confidence))
 
 
@@ -164,14 +206,21 @@ async def classify(
     settings: Settings,
     context: list,
     user_text: str,
-) -> tuple[Verdict, object | None]:
-    """Run the classifier. Returns (verdict, raw_response_or_None).
+) -> Classification:
+    """Run the classifier. Returns (verdict, raw_response_or_None, outcome).
 
     Never raises. A timeout, a provider error or an unparseable reply
     all produce a `none` verdict, because plan section 10 requires this
     check to fail open for chat. The raw response comes back so the
     caller can ledger what it cost even when the verdict is unusable --
     a call that was billed is a call that gets recorded.
+
+    H2 adds the third element. Failing open is still the behaviour, but
+    it is no longer silent: `outcome` says which of the four things
+    happened, app/core/turn.py records it and runs the keyword backstop
+    on anything that is not `ok`, and /state surfaces the weekly count.
+    A check that quietly stopped working was previously indistinguishable
+    from one with nothing to report.
     """
     try:
         response = await asyncio.wait_for(
@@ -184,17 +233,19 @@ async def classify(
         )
     except asyncio.TimeoutError:
         logger.warning("welfare classifier timed out", extra={"event": "TimeoutError"})
-        return Verdict(), None
+        return Classification(Verdict(usable=False), None, TIMEOUT)
     except Exception as exc:  # noqa: BLE001 - any failure fails open, by design
         logger.warning("welfare classifier failed", extra={"event": type(exc).__name__})
-        return Verdict(), None
+        return Classification(Verdict(usable=False), None, ERROR)
 
     verdict = parse(response.text)
     logger.info(
         "welfare classified",
         extra={"event": verdict.level, "confidence": verdict.confidence},
     )
-    return verdict, response
+    # The response still comes back on a parse failure: it was billed,
+    # so it is ledgered, exactly as before.
+    return Classification(verdict, response, OK if verdict.usable else PARSE_FAIL)
 
 
 async def generate_reply(provider: LLMProvider, user_text: str) -> tuple[str, object | None]:

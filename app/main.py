@@ -59,11 +59,19 @@ WEBHOOK_PATH = "/telegram/webhook"
 
 
 def build_providers(settings: Settings):
-    """The chat provider, the background provider, and the client they share.
+    """The chat, background and safety providers, and the client they share.
 
-    Returns (provider, cheap_provider, client). The caller owns `client`
-    and must close it on shutdown; calling close() on either provider is
-    a no-op, by design (app/llm/openrouter.py).
+    Returns (provider, cheap_provider, safety_provider, client). The
+    caller owns `client` and must close it on shutdown; calling close()
+    on any of the three providers is a no-op, by design
+    (app/llm/openrouter.py).
+
+    Three rather than two since H2. The split is not about cost -- the
+    safety model is cheaper than the one it replaced -- but about what
+    each call is for. `provider` and `cheap_provider` produce prose; the
+    safety provider produces strict JSON verdicts that decide whether
+    the persona speaks at all, and it is the only one whose model was
+    chosen for schema compliance instead of voice.
     """
     client = build_client(settings.OPENROUTER_API_KEY)
     provider = OpenRouterProvider(
@@ -74,6 +82,10 @@ def build_providers(settings: Settings):
         data_collection=settings.LLM_DATA_COLLECTION,
         web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
+        # No structured_outputs here on purpose: no main-model call ever
+        # passes a json_schema, so the constructor default is unreachable
+        # rather than merely unset. Said out loud because H2 exists
+        # partly to remove assumptions that were only ever implicit.
     )
     cheap_provider = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
@@ -85,19 +97,29 @@ def build_providers(settings: Settings):
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
-    return provider, cheap_provider, client
+    safety_provider = OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_SAFETY,
+        max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
+        temperature=settings.LLM_SAFETY_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
+        client=client,
+        structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+    )
+    return provider, cheap_provider, safety_provider, client
 
 
 def build_dispatcher(
     sessionmaker,
     settings: Settings,
     provider: LLMProvider,
-    cheap_provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
     clock: Clock | None = None,
 ) -> Dispatcher:
     dp = Dispatcher()
     dp.include_router(
-        build_router(sessionmaker, settings, provider, cheap_provider, clock or SystemClock())
+        build_router(sessionmaker, settings, provider, safety_provider, clock or SystemClock())
     )
     return dp
 
@@ -128,6 +150,7 @@ async def _on_startup(app: web.Application) -> None:
         app["cheap_provider"],
         app["clock"],
         app["provider"],
+        app["safety_provider"],
     )
     logger.info("startup complete", extra={"event": "startup"})
 
@@ -148,6 +171,7 @@ def build_webhook_app(
     engine,
     provider: LLMProvider,
     cheap_provider: LLMProvider,
+    safety_provider: LLMProvider,
     llm_client,
     clock: Clock,
 ) -> web.Application:
@@ -159,6 +183,7 @@ def build_webhook_app(
     app["engine"] = engine
     app["provider"] = provider
     app["cheap_provider"] = cheap_provider
+    app["safety_provider"] = safety_provider
     app["llm_client"] = llm_client
     app["clock"] = clock
 
@@ -178,6 +203,7 @@ async def _run_polling_mode(
     sessionmaker,
     engine,
     cheap_provider: LLMProvider,
+    safety_provider: LLMProvider,
     llm_client,
     clock: Clock,
     provider: LLMProvider | None = None,
@@ -188,7 +214,7 @@ async def _run_polling_mode(
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
     worker_tasks = await run_worker(
-        sessionmaker, dp, bot, settings, cheap_provider, clock, provider
+        sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
     )
     try:
         await run_polling(bot, sessionmaker, settings)
@@ -208,9 +234,9 @@ def main() -> None:
 
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-    provider, cheap_provider, llm_client = build_providers(settings)
+    provider, cheap_provider, safety_provider, llm_client = build_providers(settings)
     clock = SystemClock()
-    dp = build_dispatcher(sessionmaker, settings, provider, cheap_provider, clock)
+    dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock)
 
     if settings.MODE == "webhook":
         app = build_webhook_app(
@@ -221,6 +247,7 @@ def main() -> None:
             engine,
             provider,
             cheap_provider,
+            safety_provider,
             llm_client,
             clock,
         )
@@ -234,6 +261,7 @@ def main() -> None:
                 sessionmaker,
                 engine,
                 cheap_provider,
+                safety_provider,
                 llm_client,
                 clock,
                 provider,

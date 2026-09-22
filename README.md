@@ -600,6 +600,104 @@ Both numbers live in `app/core/memory.py` with the measurements that
 justify them; `tests/test_memory.py` asserts ranking and separation, not
 the floats.
 
+## Hardening H2 — the safety model split
+
+Three calls decide things the persona must not: the welfare classifier,
+the post-turn extractor, and the tick decision. All three ran on
+`LLM_MODEL_CHEAP`, which defaults to the same Cydonia roleplay fine-tune
+as the persona itself. They now run on `LLM_MODEL_SAFETY`
+(`google/gemini-2.5-flash-lite`), chosen for schema compliance rather
+than voice. Scene summaries stay on the cheap model, because a summary
+is prose.
+
+Background spend went **down**: roughly $0.021/day to $0.009/day at
+current volumes.
+
+### Why not the cheapest nano-class model
+
+`openai/gpt-5-nano` is cheaper per token and was the first choice. Its
+live OpenRouter endpoints say it accepts **no `temperature`** — not on
+OpenAI, not on Azure. `OpenRouterProvider.complete()` always sends one,
+and `require_parameters` is already set for every `json_schema` call, so
+routing would have found zero eligible endpoints and the welfare check
+would have failed 100% of the time. Its reasoning is also mandatory,
+which is a latency risk against the 8-second `WELFARE_TIMEOUT_SECONDS`.
+Checking the endpoint list before writing the code is the only reason
+that did not ship.
+
+### The bug underneath: `none` meant two things
+
+`welfare.parse()` returned `Verdict('none', 0.0)` for unparseable output
+*and* for a genuine "nothing wrong". The caller could not tell them
+apart, so a classifier failing on every single turn looked exactly like
+a quiet week.
+
+`classify()` now returns a `Classification(verdict, response, outcome)`,
+where outcome is `ok | parse_fail | timeout | error`. Failing open is
+unchanged — that is what plan section 10 requires — but it is no longer
+silent.
+
+### The backstop
+
+When, and only when, the classifier produced nothing usable,
+`app/core/welfare_terms.py` checks the user's message and the two turns
+before it against a fixed list of self-harm and suicide terms in
+Russian, French and English. A hit is treated exactly as `level="real"`
+and reuses the existing welfare reply, buttons and persona-off path —
+the backstop decides *whether*, never *what*.
+
+It returns a bool and nothing else. There is deliberately no API that
+reveals which term matched, so no caller can log one by accident.
+
+Precision is traded away on purpose. It runs only after the model has
+already failed, so the alternative is no check at all, and the two
+errors are not symmetric: a false positive is a warm message and a
+button; a false negative is the persona pushing someone who just said
+they want to die.
+
+### `safety_event`, and why it is not a `spend_ledger` column
+
+A column was the obvious choice and it does not work.
+`turn.py::_ledger_only()` returns early when the response is `None`, so
+a classifier that **timed out writes no ledger row at all** — the very
+outcome most worth recording is the one that table structurally cannot
+hold. Going the other way is no better: a timeout, an error and a
+`fallback_hit` cost nothing, so recording them as zero-cost rows would
+pollute `today_by_category()` and the daily-cap query — and the cap is
+row 5 of the outbound gate, so noise there silences proactive messages.
+
+So: a separate table, six columns, no content ever. Both vocabularies
+are constrained in SQL (unlike `spend_ledger.category`, which is
+deliberately open because it records money already spent and a rejected
+row would lose the record), and a test pins the constants against the
+constraints.
+
+The write is best-effort at every call site. Observability that can fail
+the turn it observes is a worse bug than the blindness it replaces.
+
+`/state` gained one line:
+
+```
+Проверка благополучия (7 дн.): ok N · сбои M
+```
+
+`сбои` sums `parse_fail`, `timeout` and `error`. A `fallback_hit` is
+counted as neither — it is the backstop working, and folding it into
+either column would hide the one event most worth seeing.
+
+### Two things found while wiring it
+
+`require_parameters` — which this pass set out to add — turned out to
+already exist at `app/llm/openrouter.py:216`, set for every call
+carrying a `json_schema`. It was left exactly as it is.
+
+The test suite's `TRUNCATE` list was hand-written and had gone stale
+twice: `outbound` (3a) survived only because it has a foreign key to
+`message` and got caught by `CASCADE`, and `safety_event` has no foreign
+key at all, so its rows leaked between tests in the same file and made
+assertions pass or fail depending on test order. The list is now derived
+from `Base.metadata.sorted_tables`.
+
 ## Hardening H3 — `/search` is off
 
 `/search` reached the tree with milestone 1f without a plan behind it, and

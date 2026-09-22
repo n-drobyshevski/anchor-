@@ -59,6 +59,10 @@ PURGED_TABLES = (
     # refuse the whole TRUNCATE -- /delete failed outright rather than
     # partially succeeding.
     "outbound",
+    # H2: one row per safety-model call outcome. No content, but it is a
+    # record of when this user was talked to and how the checks behaved
+    # while they were -- which "delete all my data" covers.
+    "safety_event",
 )
 
 # user_state is reset in place, never dropped. persona_version is a

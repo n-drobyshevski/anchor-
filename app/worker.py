@@ -138,6 +138,7 @@ async def _run_job(
     clock: Clock,
     kind: str,
     payload: dict,
+    safety_provider: LLMProvider | None = None,
 ) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
@@ -160,10 +161,13 @@ async def _run_job(
         return ExtractOutcome()
 
     if kind == EXTRACT:
+        # H2: the extractor emits a strict JSON schema that decides what
+        # gets written to memory. It runs on the safety model, not the
+        # prose one.
         return await run_extract(
             session,
             settings,
-            cheap_provider,
+            safety_provider or cheap_provider,
             update_id=payload["update_id"],
             memory_ids=payload.get("memory_ids") or [],
             clock=clock,
@@ -189,13 +193,14 @@ async def _run_job(
         return ExtractOutcome()
 
     if kind == TICK_DECIDE:
-        # The cheap model decides whether there is a natural reason to
-        # write first. It plans an outbound row at most; the send-time
-        # gate still has the last word (plan section 8).
+        # H2: the safety model decides whether there is a natural reason
+        # to write first -- another strict-schema verdict. It plans an
+        # outbound row at most; the send-time gate still has the last
+        # word (plan section 8).
         await run_tick_decide(
             session,
             settings,
-            cheap_provider,
+            safety_provider or cheap_provider,
             clock=clock,
             local_date=datetime.date.fromisoformat(payload["local_date"]),
             hour=payload["hour"],
@@ -212,6 +217,7 @@ async def process_one_job(
     clock: Clock,
     bot: Bot | None = None,
     provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
 
@@ -231,7 +237,8 @@ async def process_one_job(
     try:
         async with sessionmaker() as session:
             outcome = await _run_job(
-                session, settings, provider, cheap_provider, bot, clock, kind, payload
+                session, settings, provider, cheap_provider, bot, clock, kind, payload,
+                safety_provider,
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -307,13 +314,14 @@ async def _claim_loop(
     cheap_provider: LLMProvider,
     clock: Clock,
     provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
 ) -> None:
     """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
         if await process_one_update(sessionmaker, dp, bot, clock):
             continue
         if await process_one_job(
-            sessionmaker, settings, cheap_provider, clock, bot, provider
+            sessionmaker, settings, cheap_provider, clock, bot, provider, safety_provider
         ):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
@@ -360,10 +368,18 @@ async def run_worker(
     cheap_provider: LLMProvider,
     clock: Clock,
     provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
 ) -> list[asyncio.Task]:
-    """Start the claim loop, the recovery sweep and the heartbeat."""
+    """Start the claim loop, the recovery sweep and the heartbeat.
+
+    `safety_provider` (H2) defaults to None, and every job that needs it
+    falls back to `cheap_provider` -- which is what the tests predating
+    H2 rely on. app/main.py always supplies it.
+    """
     claim_task = asyncio.create_task(
-        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider, clock, provider),
+        _claim_loop(
+            sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
+        ),
         name="anchor-claim-loop",
     )
     recover_task = asyncio.create_task(_recover_loop(sessionmaker), name="anchor-recover-loop")

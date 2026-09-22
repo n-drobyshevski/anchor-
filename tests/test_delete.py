@@ -31,6 +31,7 @@ from app.db.models import (
     PendingMemory,
     PersonaVersion,
     Proposal,
+    SafetyEvent,
     Scene,
     SpendLedger,
     StateChange,
@@ -131,6 +132,15 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     planned_for=now,
                     status="sent",
                     sent_at=now,
+                ),
+                # H2: no content, but still a record of when this user
+                # was talked to and how the safety checks behaved while
+                # they were.
+                SafetyEvent(
+                    local_date=today,
+                    kind="welfare",
+                    outcome="ok",
+                    model="fake-safety",
                 ),
             ]
         )

@@ -60,6 +60,7 @@ from aiogram.types import Message as TgMessage
 from sqlalchemy import text
 
 from app.core.clock import FrozenClock, SystemClock, combine_local
+from app.db.models import Base
 from app.db.session import create_engine_and_sessionmaker
 from app.llm.provider import LLMResponse, LLMUsage
 
@@ -205,13 +206,15 @@ async def sessionmaker(test_database_url: str):
         yield maker
     finally:
         async with maker() as session:
+            # Derived from the metadata rather than hand-listed. The
+            # hand-written list had silently gone stale twice: `outbound`
+            # (3a) survived only because it FKs `message` and got caught
+            # by CASCADE, and `safety_event` (H2) has no FK at all, so
+            # its rows leaked between tests in the same file and made
+            # assertions pass or fail depending on test order.
+            tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
             await session.execute(
-                text(
-                    "TRUNCATE TABLE telegram_update, message, user_state, "
-                    "state_change, persona_version, spend_ledger, job, scene, "
-                    "memory, pending_memory, journal, proposal, checkin "
-                    "RESTART IDENTITY CASCADE"
-                )
+                text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE")
             )
             await session.commit()
         await engine.dispose()

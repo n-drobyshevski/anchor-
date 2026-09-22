@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import safety_events
 from app.core import redact
 from app.core.clock import Clock
 from app.core.extract import parse_json
@@ -245,7 +246,7 @@ async def run_tick_decide(
         logger.info("tick not considered", extra={"reason": verdict.reason})
         return None
 
-    # 2. Ask the cheap model.
+    # 2. Ask the safety model (H2: strict JSON, not prose).
     transcript = await recent_transcript(session, CONTEXT_MESSAGES)
     journal = await _recent_journal(session, JOURNAL_LINES)
     now_block = build_now_block(
@@ -293,7 +294,19 @@ async def run_tick_decide(
     )
     await session.commit()
 
-    send, note = validate(parse_json(response.text))
+    payload = parse_json(response.text)
+    send, note = validate(payload)
+    # H2: same record as the extractor. `send=False` from well-formed
+    # JSON is a decision, not a failure -- only unparseable output is.
+    await safety_events.record_in(
+        session,
+        clock=clock,
+        timezone=state.timezone,
+        kind=safety_events.TICK,
+        outcome=safety_events.PARSE_FAIL if payload is None else "ok",
+        model=response.model,
+    )
+    await session.commit()
     if not send:
         logger.info("tick decided against", extra={"usd_cost": str(usd_cost)})
         return None

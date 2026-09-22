@@ -105,6 +105,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import pause
 from app.core import clock as clock_module
+from app.core import safety_events, welfare_terms
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
@@ -744,7 +745,7 @@ async def run(
     web_search: bool = False,
     kind: str = CHAT_KIND,
     extra_flags: list[str] | None = None,
-    cheap_provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
 ) -> None:
     """Run one idempotent chat turn. See module and plan sections 7/8 docs.
 
@@ -912,19 +913,21 @@ async def run(
         # adds no latency at all -- the reply was already waiting on the
         # slower of the two calls.
         run_welfare = (
-            cheap_provider is not None and user_state.persona_active and level != "hard"
+            safety_provider is not None and user_state.persona_active and level != "hard"
         )
+        welfare_context = []
         if run_welfare:
             async with sessionmaker() as session:
                 welfare_context = await _welfare_context(session, update_id)
-            response, (verdict, welfare_usage) = await asyncio.gather(
+            response, (verdict, welfare_usage, welfare_outcome) = await asyncio.gather(
                 _complete_with_retries(
                     provider, messages, update_id=update_id, web_search=web_search
                 ),
-                welfare.classify(cheap_provider, settings, welfare_context, user_text),
+                welfare.classify(safety_provider, settings, welfare_context, user_text),
             )
         else:
             verdict, welfare_usage = welfare.Verdict(), None
+            welfare_outcome = None
             response = await _complete_with_retries(
                 provider, messages, update_id=update_id, web_search=web_search
             )
@@ -943,12 +946,38 @@ async def run(
                 category=welfare.WELFARE_CATEGORY,
             )
 
-    if verdict.is_real(settings):
+    # H2: the deterministic backstop. A classifier that timed out, errored
+    # or returned something unparseable produced a `none` verdict, which
+    # is the fail-open behaviour plan section 10 requires -- but failing
+    # open on the one case the check exists for is exactly the gap this
+    # hardening pass is here to close. So when, and only when, the model
+    # gave us nothing usable, the user's words and the two turns before
+    # them are checked against a fixed list of terms nobody types by
+    # accident (app/core/welfare_terms.py). A hit is treated as `real`.
+    #
+    # The backstop decides *whether*, never *what*: the reply, the
+    # buttons and the persona-off behaviour below are untouched.
+    fallback_fired = False
+    if welfare_outcome is not None and welfare_outcome != welfare.OK:
+        recent = [row.content for row in welfare_context[-2:]]
+        fallback_fired = welfare_terms.hit(user_text, *recent)
+
+    if welfare_outcome is not None:
+        await safety_events.record(
+            sessionmaker,
+            clock=clock,
+            timezone=user_state.timezone,
+            kind=safety_events.WELFARE,
+            outcome=welfare.FALLBACK_HIT if fallback_fired else welfare_outcome,
+            model=welfare_usage.model if welfare_usage is not None else None,
+        )
+
+    if fallback_fired or verdict.is_real(settings):
         await run_welfare_turn(
             sessionmaker,
             bot,
             settings,
-            cheap_provider,
+            safety_provider,
             clock=clock,
             chat_id=chat_id,
             update_id=update_id,

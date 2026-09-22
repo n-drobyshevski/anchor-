@@ -39,6 +39,7 @@ from app.config import Settings
 from app.core import memory, proposal, redact
 from app.core.prompt import PERSONA_TRANSCRIPT_KINDS
 from app.core import clock as clock_module
+from app.core import safety_events
 from app.core.clock import Clock
 from app.core.scene import Deferred
 from app.core.spend import check_cap, compute_cost
@@ -472,6 +473,18 @@ async def run_extract(
     await session.commit()
 
     payload = parse_json(response.text)
+    # H2: record whether the strict-schema call actually produced usable
+    # JSON. Staged in this job's transaction; a transport failure instead
+    # re-raises for the queue to retry, and is visible there.
+    await safety_events.record_in(
+        session,
+        clock=clock,
+        timezone=timezone,
+        kind=safety_events.EXTRACTOR,
+        outcome=safety_events.PARSE_FAIL if payload is None else "ok",
+        model=response.model,
+    )
+    await session.commit()
     if payload is None:
         logger.warning("extract returned unparseable output", extra={"update_id": update_id})
         return ExtractOutcome()

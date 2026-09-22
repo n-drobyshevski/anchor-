@@ -281,7 +281,7 @@ async def test_an_ordinary_chat_turn_never_searches(sessionmaker, clock, web_sea
         chat_id=CHAT_ID,
         update_id=9001,
         user_text="привет",
-        cheap_provider=cheap,
+        safety_provider=cheap,
     )
 
     _assert_never_searched(main, cheap)

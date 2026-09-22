@@ -34,6 +34,7 @@ _STRIPPED_FIELDS = (
     "OPENROUTER_API_KEY",
     "LLM_MODEL",
     "LLM_MODEL_CHEAP",
+    "LLM_MODEL_SAFETY",
     "LLM_MODEL_JUDGE",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
@@ -126,6 +127,42 @@ class Settings(BaseSettings):
     # calls (summary now; extractor and welfare later) want invention.
     LLM_CHEAP_MAX_TOKENS: int = 400
     LLM_CHEAP_TEMPERATURE: float = 0.3
+
+    # --- H2: the safety model (hardening pass) -------------------------
+    #
+    # The welfare classifier, the post-turn extractor and the tick
+    # decision all ran on LLM_MODEL_CHEAP, which defaults to the same
+    # Cydonia roleplay fine-tune as the persona. Three calls whose whole
+    # job is to emit a strict JSON verdict were running on a model tuned
+    # for prose, and a parse failure was indistinguishable from a clean
+    # "nothing wrong" -- so the welfare check could be dead without
+    # anything looking wrong.
+    #
+    # Scene summaries stay on the cheap model: a summary is prose, and it
+    # is the one background call that wants the persona's own voice.
+    #
+    # Why gemini-2.5-flash-lite and not a cheaper nano-class model:
+    # openai/gpt-5-nano is cheaper per token but accepts no `temperature`
+    # on any of its endpoints, and OpenRouterProvider always sends one.
+    # Combined with require_parameters (app/llm/openrouter.py), which is
+    # already set for every json_schema call, that leaves zero eligible
+    # endpoints -- the classifier would fail 100% of the time. Its
+    # reasoning is also mandatory, which is a latency risk against
+    # WELFARE_TIMEOUT_SECONDS below. Flash-Lite takes a temperature,
+    # advertises structured_outputs, and makes reasoning optional.
+    #
+    # Prices verified on OpenRouter's live model endpoint 2026-09-22:
+    # https://openrouter.ai/google/gemini-2.5-flash-lite
+    LLM_MODEL_SAFETY: str = "google/gemini-2.5-flash-lite"
+    LLM_SAFETY_PRICE_IN: float = 0.10
+    LLM_SAFETY_PRICE_CACHED: float = 0.01
+    LLM_SAFETY_PRICE_OUT: float = 0.40
+    LLM_SAFETY_MAX_TOKENS: int = 400
+    # Zero, not merely low. These three calls are classifications, and a
+    # classifier that answers differently on a re-run cannot be reasoned
+    # about -- least of all the one deciding whether someone is in real
+    # distress.
+    LLM_SAFETY_TEMPERATURE: float = 0.0
 
     # --- 3e: the eval harness's rubric judge (phase-3 plan section 9) ---
     # Empty means "use LLM_MODEL_CHEAP", which is exactly what section 9

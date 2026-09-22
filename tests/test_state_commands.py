@@ -17,7 +17,14 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import memory, proposal
-from app.db.models import Proposal, SpendLedger, StateChange, TelegramUpdate, UserState
+from app.db.models import (
+    Proposal,
+    SafetyEvent,
+    SpendLedger,
+    StateChange,
+    TelegramUpdate,
+    UserState,
+)
 from app.tg import proposals as proposals_ui
 from app.tg.router import DUE_CLEARED, DUE_SET, FOCUS_OFF, FOCUS_ON, FOCUS_USAGE, build_router
 from conftest import FakeLLMProvider, FakeSession
@@ -260,6 +267,42 @@ async def test_state_shows_every_phase_two_field(sessionmaker):
     assert "Помню: 1 записей" in text
     assert "chat 0.02" in text
     assert "extractor 0.01" in text
+
+
+async def test_state_shows_the_welfare_check_health(sessionmaker):
+    """H2's line. The point of it is the failure count: a welfare check
+    that has silently stopped working is the one failure mode nothing
+    else on this screen would show."""
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    await _seed(sessionmaker, 1)
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                SafetyEvent(local_date=today, kind="welfare", outcome="ok"),
+                SafetyEvent(local_date=today, kind="welfare", outcome="ok"),
+                SafetyEvent(local_date=today, kind="welfare", outcome="ok"),
+                SafetyEvent(local_date=today, kind="welfare", outcome="timeout"),
+                SafetyEvent(local_date=today, kind="welfare", outcome="parse_fail"),
+                # Counted as neither: the backstop worked.
+                SafetyEvent(local_date=today, kind="welfare", outcome="fallback_hit"),
+                # A different check entirely.
+                SafetyEvent(local_date=today, kind="tick", outcome="error"),
+            ]
+        )
+        await session.commit()
+
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    assert "Проверка благополучия (7 дн.): ok 3 · сбои 2" in fake.sent[0].text
+
+
+async def test_state_reads_zero_when_no_check_has_run(sessionmaker):
+    """A fresh install shows the line rather than hiding it -- an absent
+    line and a healthy one would be indistinguishable."""
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    assert "Проверка благополучия (7 дн.): ok 0 · сбои 0" in fake.sent[0].text
 
 
 async def test_state_with_nothing_set_reads_cleanly(sessionmaker):

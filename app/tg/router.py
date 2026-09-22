@@ -60,6 +60,7 @@ from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import memory as memory_core
+from app.core import safety_events
 from app.core import proposal as proposal_core
 from app.core.outbound import cancel_outbound, load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
@@ -172,6 +173,7 @@ def _format_state(
     by_category=None,
     memories=0,
     outbound=None,
+    welfare_counts=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -200,6 +202,19 @@ def _format_state(
     else:
         due = "нет"
 
+    # H2. Its own line rather than part of _format_outbound's block:
+    # that helper returns nothing at all when there is no summary, and
+    # this is not a proactive-message line -- it answers "is the welfare
+    # check actually running", which matters most on a quiet week when
+    # the outbound block has nothing to say.
+    welfare_line = ""
+    if welfare_counts is not None:
+        ok, failures = welfare_counts
+        welfare_line = (
+            f"Проверка благополучия ({safety_events.WINDOW_DAYS} дн.): "
+            f"ok {ok} · сбои {failures}\n"
+        )
+
     breakdown = ""
     if by_category:
         breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
@@ -210,6 +225,7 @@ def _format_state(
         "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
         "Главное действие: {due}\n"
         "{outbound}"
+        "{welfare}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -224,6 +240,7 @@ def _format_state(
         outbound="".join(
             line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
         ),
+        welfare=welfare_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -238,7 +255,7 @@ def build_router(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     provider: LLMProvider,
-    cheap_provider: LLMProvider | None = None,
+    safety_provider: LLMProvider | None = None,
     clock: Clock | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
@@ -247,15 +264,21 @@ def build_router(
     Router can only ever be attached to one Dispatcher — tests that
     build several Dispatchers each need their own Router instance.
 
-    `cheap_provider` (2e) is what runs the welfare classifier beside
-    each in-character generation. It defaults to None so that the many
-    tests predating 2e keep their three-argument call, and a turn
-    without it simply skips the check — but app/main.py always supplies
-    it, and tests/test_welfare.py asserts that this function threads it
-    into every turn.run() call, so production cannot quietly lose it.
+    `safety_provider` (2e, renamed in H2) is what runs the welfare
+    classifier beside each in-character generation. It defaults to None
+    so that the many tests predating 2e keep their three-argument call,
+    and a turn without it simply skips the check — but app/main.py always
+    supplies it, and tests/test_welfare.py asserts that this function
+    threads it into every turn.run() call, so production cannot quietly
+    lose it.
+
+    It was `cheap_provider` until H2, when the welfare classifier moved
+    off the shared background model onto LLM_MODEL_SAFETY. The router
+    never used it for anything else, so the old name would now describe
+    the wrong model.
     """
     # 3a: one clock for every handler in this router. Defaulted
-    # rather than required, matching cheap_provider above -- the
+    # rather than required, matching safety_provider above -- the
     # tests predating Phase 3 keep their shorter call, and
     # app/main.py always passes the real one.
     clock = clock or SystemClock()
@@ -276,6 +299,9 @@ def build_router(
             )
             memories = await memory_core.count_active(session)
             outbound = await load_state_summary(session, clock, settings, user_state)
+            welfare_counts = await safety_events.counts(
+                session, clock, user_state.timezone
+            )
         await message.answer(
             _format_state(
                 user_state,
@@ -285,6 +311,7 @@ def build_router(
                 by_category=by_category,
                 memories=memories,
                 outbound=outbound,
+                welfare_counts=welfare_counts,
             )
         )
 
@@ -373,7 +400,7 @@ def build_router(
             update_id=event_update.update_id,
             user_text=query,
             web_search=True,
-            cheap_provider=cheap_provider,
+            safety_provider=safety_provider,
         )
 
     # --- 2d: clearing `awaiting` on any command (plan section 9) ---
@@ -692,7 +719,7 @@ def build_router(
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             user_text=message.text,
-            cheap_provider=cheap_provider,
+            safety_provider=safety_provider,
         )
 
     @router.callback_query(F.data.startswith("m:k:"))
@@ -725,7 +752,7 @@ def build_router(
             callback.bot,
             settings,
             provider,
-            cheap_provider,
+            safety_provider,
             clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
