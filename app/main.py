@@ -27,7 +27,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiohttp import web
 
-from app.config import Settings, get_settings
+from app.config import Settings, check_runtime_settings, get_settings
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
 from app.llm.openrouter import OpenRouterProvider
 from app.llm.provider import LLMProvider
@@ -130,6 +130,9 @@ async def _run_polling_mode(
 def main() -> None:
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
+    # Before anything is constructed: Bot() and the LLM client both
+    # reject an empty credential, and dying here kills the healthcheck.
+    check_runtime_settings(settings)
 
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)

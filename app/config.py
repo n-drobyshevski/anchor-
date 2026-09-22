@@ -75,3 +75,63 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Build a fresh Settings instance from the current environment."""
     return Settings()
+
+
+VALID_MODES = ("webhook", "polling")
+# Credentials and connection details with no usable default. Every one
+# of these is consumed by a constructor that rejects an empty string, so
+# a missing value is a boot failure, not a degraded run.
+REQUIRED_ALWAYS = ("TELEGRAM_BOT_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY")
+# Only webhook mode serves HTTP: it verifies the secret on every request
+# and registers PUBLIC_URL with Telegram. Polling needs neither.
+REQUIRED_WEBHOOK = ("TELEGRAM_SECRET_TOKEN", "PUBLIC_URL")
+
+
+def missing_required(settings: Settings) -> list[str]:
+    """Names of settings that must be set before the app can run.
+
+    Names only, never values -- this list is printed and logged.
+    """
+    missing = [name for name in REQUIRED_ALWAYS if not getattr(settings, name)]
+    # 0 is the field default, and chat ids are never 0, so it reads as unset.
+    if settings.ALLOWED_CHAT_ID == 0:
+        missing.append("ALLOWED_CHAT_ID")
+    if settings.MODE == "webhook":
+        missing.extend(name for name in REQUIRED_WEBHOOK if not getattr(settings, name))
+    return missing
+
+
+def check_runtime_settings(settings: Settings) -> None:
+    """Exit with a message naming what is missing, before anything is built.
+
+    Deliberately NOT a pydantic validator: Settings() is constructed all
+    over the test suite with a handful of relevant fields, and a
+    validator would make every one of those raise.
+
+    It exists because the constructors that actually fail do so with
+    errors that point somewhere else. An unset OPENROUTER_API_KEY
+    surfaces as the openai SDK's "Missing credentials ... set the
+    OPENAI_API_KEY environment variable" -- a variable this app does not
+    read, naming a vendor it does not call -- and an unset
+    TELEGRAM_BOT_TOKEN as aiogram's bare "Token is invalid!". Both
+    arrive as a traceback from inside a dependency, after the process
+    has already died and taken the healthcheck with it.
+
+    Every missing name is reported at once, so a misconfigured deploy
+    takes one round trip to fix rather than one per variable.
+    """
+    if settings.MODE not in VALID_MODES:
+        raise SystemExit(
+            f"MODE must be one of {', '.join(VALID_MODES)}, got {settings.MODE!r}. "
+            "Anything else silently starts the polling transport, which serves no "
+            "HTTP and so can never answer a platform healthcheck."
+        )
+
+    missing = missing_required(settings)
+    if missing:
+        raise SystemExit(
+            "Missing required environment variables: "
+            + ", ".join(missing)
+            + ". Set them in the deployment environment (or .env locally); "
+            "see .env.example for the full list."
+        )
