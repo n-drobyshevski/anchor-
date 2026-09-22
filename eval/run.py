@@ -10,9 +10,14 @@ model change is deployed, and a failure in a blocking case stops the
 change.
 
 Exit codes: 0 all good, 1 a blocking case failed, 2 only non-blocking
-cases failed. The split matters because non-blocking failures are
+cases failed, 3 the run was refused because the judge is the model under
+test. The 1/2 split matters because non-blocking failures are
 information -- Cydonia drifting a sentence over on case 3 is worth
-seeing and is not worth halting a deploy for.
+seeing and is not worth halting a deploy for. 3 is separate from both
+because such a run did not fail; it did not *mean* anything, which is
+worse, since a green report is what someone would quote to justify
+shipping. Override with --allow-same-judge when you know what you are
+reading.
 
 Reports go to `eval/reports/<timestamp>.md` and are committed, so the
 history of how the persona behaved is in the repo next to the persona.
@@ -63,6 +68,39 @@ class Outcome:
         return out
 
 
+# H5: exit code 3, distinct from 1 (a blocking case failed) and 2 (only
+# non-blocking failures). A run whose judge is the model under test did
+# not fail -- it did not mean anything, which is worse, because a green
+# report is exactly what someone would quote to justify shipping.
+EXIT_SAME_JUDGE = 3
+
+
+def judge_model_for(settings: Settings) -> str:
+    """The judge model, falling back to the cheap one as section 9 says."""
+    return settings.LLM_MODEL_JUDGE or settings.LLM_MODEL_CHEAP
+
+
+def same_judge_warning(judge_model: str, settings: Settings) -> str | None:
+    """A loud line when the judge is the model it is grading, else None.
+
+    Shared by the dry run and the real one so the warning cannot drift
+    between them -- a dry run is where someone would check the setup
+    before spending money, and it is the cheapest place to notice.
+    """
+    if judge_model != settings.LLM_MODEL:
+        return None
+    return (
+        "\n"
+        "!!! " + "=" * 68 + "\n"
+        f"!!! ПРЕДУПРЕЖДЕНИЕ: судья и оцениваемая модель совпадают ({judge_model}).\n"
+        "!!! Модель оценивает собственные ответы. Оценка «пройдено» здесь\n"
+        "!!! не значит ничего: она не независима.\n"
+        "!!! Задай LLM_MODEL_JUDGE другой моделью, или запусти с\n"
+        "!!! --allow-same-judge, если ты понимаешь, что читаешь.\n"
+        "!!! " + "=" * 68
+    )
+
+
 def _providers(settings: Settings):
     """Main model for the candidates, judge model for the rubric.
 
@@ -70,21 +108,30 @@ def _providers(settings: Settings):
     makes 26 calls and opening two pools for them would be silly.
     """
     client = build_client(settings.OPENROUTER_API_KEY)
+    # web_search_max_results is a required positional argument of
+    # OpenRouterProvider. H5: both constructions here omitted it, so every
+    # non-dry-run invocation of this harness died with a TypeError before
+    # reaching the first API call -- which is the actual reason
+    # eval/reports/ was still empty, rather than the missing key everyone
+    # assumed. The value is irrelevant (the harness never searches) but
+    # the argument is not optional.
     main = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.LLM_MODEL,
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
     )
-    judge_model = settings.LLM_MODEL_JUDGE or settings.LLM_MODEL_CHEAP
+    judge_model = judge_model_for(settings)
     judge = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
         model=judge_model,
         max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
         temperature=settings.LLM_CHEAP_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
@@ -183,11 +230,24 @@ async def main_async(args) -> int:
     clock = SystemClock()
     started = datetime.datetime.now(datetime.timezone.utc)
 
+    # Checked before a single call is made: the point is to stop the run,
+    # not to annotate a report nobody will re-read.
+    warning = same_judge_warning(judge_model_for(settings), settings)
+    if warning is not None:
+        print(warning, flush=True)
+        blocking = [c for c in cases if c.blocking]
+        if blocking and not args.allow_same_judge and not args.dry_run:
+            print(
+                f"\nОстановлено: {len(blocking)} блокирующих кейсов и несамостоятельный судья.",
+                flush=True,
+            )
+            return EXIT_SAME_JUDGE
+
     # A dry run builds no provider: it exists precisely so the prompt
     # path can be exercised on a machine with no key and no budget.
     if args.dry_run:
         main = judge = client = None
-        judge_model = settings.LLM_MODEL_JUDGE or settings.LLM_MODEL_CHEAP
+        judge_model = judge_model_for(settings)
     else:
         main, judge, judge_model, client = _providers(settings)
 
@@ -235,6 +295,15 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="build every prompt and print it; make no API calls",
+    )
+    parser.add_argument(
+        "--allow-same-judge",
+        action="store_true",
+        help=(
+            "run blocking cases even when the judge is the model under test. "
+            "The scores are not independent; read them as 'nothing obviously "
+            "broke', never as 'verified'."
+        ),
     )
     sys.exit(asyncio.run(main_async(parser.parse_args())))
 

@@ -322,3 +322,52 @@ def test_every_case_file_is_valid_toml():
     for path in sorted(cases_module.CASES_DIR.glob("*.toml")):
         with path.open("rb") as handle:
             tomllib.load(handle)
+
+
+# --- H5: the judge must not be the model under test ----------------------
+
+
+def test_the_judge_defaults_to_a_different_model_than_the_persona():
+    """Out of the box LLM_MODEL_JUDGE was empty, which meant
+    LLM_MODEL_CHEAP, which is the same Cydonia fine-tune the harness
+    grades. Cydonia scoring Cydonia on "did it keep the voice" and "did
+    it respect the boundaries" is not a weak check, it is no check."""
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.LLM_MODEL_JUDGE
+    assert settings.LLM_MODEL_JUDGE != settings.LLM_MODEL
+    assert settings.LLM_MODEL_JUDGE != settings.LLM_MODEL_CHEAP
+
+
+def test_a_same_model_judge_warns_and_a_different_one_does_not():
+    from app.config import Settings
+    from eval.run import judge_model_for, same_judge_warning
+
+    same = Settings(_env_file=None, LLM_MODEL_JUDGE="thedrummer/cydonia-24b-v4.1")
+    warning = same_judge_warning(judge_model_for(same), same)
+    assert warning is not None
+    assert "судья" in warning
+    assert "--allow-same-judge" in warning
+
+    different = Settings(_env_file=None)
+    assert same_judge_warning(judge_model_for(different), different) is None
+
+
+def test_an_empty_judge_setting_still_falls_back_to_the_cheap_model():
+    """The fallback section 9 specifies is unchanged -- H5 added a
+    default and a guard, it did not remove the fallback."""
+    from app.config import Settings
+    from eval.run import judge_model_for
+
+    settings = Settings(_env_file=None, LLM_MODEL_JUDGE="")
+    assert judge_model_for(settings) == settings.LLM_MODEL_CHEAP
+
+
+def test_the_refusal_exit_code_is_distinct_from_the_failure_codes():
+    """3 is not 1 and not 2 on purpose: such a run did not fail, it did
+    not mean anything, and a green report is what gets quoted."""
+    from eval.run import EXIT_SAME_JUDGE
+
+    assert EXIT_SAME_JUDGE == 3
+    assert EXIT_SAME_JUDGE not in (0, 1, 2)

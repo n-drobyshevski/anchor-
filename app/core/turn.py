@@ -105,7 +105,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import pause
 from app.core import clock as clock_module
-from app.core import safety_events, welfare_terms
+from app.core import boundaries, safety_events, welfare_terms
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
@@ -999,6 +999,79 @@ async def run(
     if response is None:
         await send_reply(bot, chat_id, FAILURE_REPLY_TEXT)
         return
+
+    # H5: the code-side half of the medical/legal boundary. persona.md
+    # has always told the model to refuse; nothing checked whether it
+    # did, which on an uncensored fine-tune is a preference rather than
+    # a guarantee. The reply is read -- never the user's message -- and
+    # a hit buys exactly one retry with an explicit correction.
+    #
+    # Only in persona mode. Neutral mode is already out of character and
+    # has no persona instruction to reinforce, so a retry there would
+    # spend money to say the same thing again.
+    crossed = boundaries.check(response.text) if user_state.persona_active else None
+    if crossed is not None:
+        logger.info("boundary tripped", extra={"update_id": update_id, "event": crossed})
+        # The discarded generation was billed, so it is ledgered -- the
+        # same rule the welfare path follows for the reply it throws away.
+        async with sessionmaker() as session:
+            await _ledger_only(
+                session,
+                response=response,
+                settings=settings,
+                local_date=clock_module.local_date(clock, user_state.timezone),
+                category=category,
+            )
+        async with sessionmaker() as session:
+            retry_messages = await build_messages(
+                session,
+                clock=clock,
+                timezone=user_state.timezone,
+                intensity=user_state.intensity,
+                user_text=user_text,
+                update_id=update_id,
+                transcript_turns=settings.TRANSCRIPT_TURNS,
+                flags=[*(flags or []), boundaries.RETRY_FLAG],
+                pinned=[],
+                retrieved=[],
+                summaries=await recent_summaries(session),
+                focus_on=user_state.focus_on,
+                due_action=user_state.due_action,
+                due_set_at=user_state.due_set_at,
+                streak=user_state.streak,
+                last_checkin_at=user_state.last_checkin_at,
+            )
+        response = await _complete_with_retries(
+            provider, retry_messages, update_id=update_id
+        )
+        # A second trip, a failed retry, or an empty one: stop asking and
+        # say the thing the persona was supposed to say. Twice is enough
+        # -- a model that ignored an explicit correction will not comply
+        # on the third attempt, and the user is owed an answer.
+        if response is None or boundaries.check(response.text) is not None:
+            logger.info(
+                "boundary refused", extra={"update_id": update_id, "event": crossed}
+            )
+            if response is not None:
+                async with sessionmaker() as session:
+                    await _ledger_only(
+                        session,
+                        response=response,
+                        settings=settings,
+                        local_date=clock_module.local_date(clock, user_state.timezone),
+                        category=category,
+                    )
+            await _send_canned_reply(
+                sessionmaker,
+                bot,
+                clock=clock,
+                chat_id=chat_id,
+                update_id=update_id,
+                text=boundaries.REFUSAL_REPLY_TEXT,
+                category=category,
+                scene_id=scene_id,
+            )
+            return
 
     latency_ms = int((time.monotonic() - started_at) * 1000)
     cost = priced(response.usage, settings, model=response.model)

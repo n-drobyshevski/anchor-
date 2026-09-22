@@ -200,7 +200,24 @@ class Settings(BaseSettings):
     # with the candidate is a weak judge, and swapping it should be one
     # env var rather than a code change. Read only by eval/, never by
     # the bot.
-    LLM_MODEL_JUDGE: str = ""
+    #
+    # H5 gave it a real default. Empty meant LLM_MODEL_CHEAP, which
+    # defaults to the same Cydonia fine-tune as LLM_MODEL -- so out of
+    # the box the harness had Cydonia grading Cydonia on "did it keep the
+    # persona's voice" and "did it respect the boundaries", which is not
+    # a weak check so much as no check. gpt-4.1-nano is a different lab
+    # from both the persona model and the safety model, takes a
+    # temperature, and supports strict json_schema, which the judge needs
+    # (eval/judge.py fails closed on unusable output).
+    #
+    # Prices verified 2026-09-22 at https://openrouter.ai/openai/gpt-4.1-nano
+    # ($0.10 in / $0.40 out per million). The harness makes ~13 judge
+    # calls a run, so this is cents.
+    #
+    # eval/run.py refuses a blocking run when this resolves to LLM_MODEL
+    # anyway, so setting it back to "" does not silently restore the old
+    # behaviour -- it stops the run with exit code 3.
+    LLM_MODEL_JUDGE: str = "openai/gpt-4.1-nano"
 
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
