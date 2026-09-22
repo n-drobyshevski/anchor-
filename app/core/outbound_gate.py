@@ -119,7 +119,7 @@ class GateConfig:
     outbound_enabled: bool = True
     quiet_start: datetime.time = datetime.time(22, 30)
     quiet_end: datetime.time = datetime.time(8, 0)
-    daily_usd_cap: decimal.Decimal = decimal.Decimal("3.00")
+    daily_usd_cap: decimal.Decimal = decimal.Decimal("1.00")
     max_unsolicited_per_day: int = 3
     min_gap_unanswered_h: int = 8
     max_ignored_in_row: int = 3

@@ -80,7 +80,15 @@ class Settings(BaseSettings):
     # actual delta between a searched and unsearched call on live data --
     # set this to 0.007 only if that shows OpenRouter excludes the fee.
     LLM_WEB_SEARCH_PRICE_USD: float = 0.0
-    DAILY_USD_CAP: float = 3.00
+    # Lowered from 3.00 to 1.00 in 3a, by decision: phase-3 plan
+    # section 12 budgets the whole proactive day (morning + evening
+    # nag + at most one tick, plus ~6 tick decisions) at about
+    # $0.03-0.05 and reasons throughout against a $1 cap. The cap is
+    # the gate's row 5 as well as the chat guard now, so it is the
+    # first thing that silences unsolicited messages on a runaway
+    # day -- which is the right order: the user asked for none of
+    # them.
+    DAILY_USD_CAP: float = 1.00
     TZ_DEFAULT: str = "Europe/Paris"
     TRANSCRIPT_TURNS: int = 30
 

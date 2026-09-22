@@ -167,14 +167,14 @@ def test_row_4_quiet_hours_wrap_past_midnight(local_hour, local_minute, blocked)
 
 
 def test_row_5_the_daily_spend_cap_blocks():
-    assert run(MORNING, cnt=counts(spend_today_usd=decimal.Decimal("3.00"))) == (
+    assert run(MORNING, cnt=counts(spend_today_usd=decimal.Decimal("1.00"))) == (
         False,
         CAP,
     )
 
 
 def test_row_5_just_under_the_cap_does_not_block():
-    assert run(MORNING, cnt=counts(spend_today_usd=decimal.Decimal("2.999999"))) == (
+    assert run(MORNING, cnt=counts(spend_today_usd=decimal.Decimal("0.999999"))) == (
         True,
         OK,
     )
