@@ -30,6 +30,7 @@ _STRIPPED_FIELDS = (
     "DATABASE_URL",
     "OPENROUTER_API_KEY",
     "LLM_MODEL",
+    "LLM_MODEL_CHEAP",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
 )
@@ -79,6 +80,37 @@ class Settings(BaseSettings):
     DAILY_USD_CAP: float = 3.00
     TZ_DEFAULT: str = "Europe/Paris"
     TRANSCRIPT_TURNS: int = 30
+
+    # --- 2a: the cheap model and scenes (phase-2 plan section 2) ---
+    # The phase-2 plan names these XAI_MODEL_CHEAP / XAI_CHEAP_PRICE_*
+    # and picks grok-4.3. Milestone 1e moved this bot off xAI entirely,
+    # and the user's decision is to run the *same* model for the
+    # background calls as for chat, so the plan's names are carried over
+    # into this repo's post-1e LLM_* vocabulary and point at Cydonia.
+    #
+    # It is still a separate setting with its own price triple rather
+    # than a reuse of LLM_MODEL, because compute_cost() is model-aware
+    # (app/core/spend.py) and switching the background model later must
+    # be one env var, not a code change. Defaulting it to the same model
+    # and the same prices makes that seam free today.
+    #
+    # There is no LLM_CHEAP_REASONING_EFFORT: the plan asks for
+    # reasoning_effort=low, but Cydonia's only provider (Parasail) does
+    # not advertise that parameter, so the knob would be dead config.
+    LLM_MODEL_CHEAP: str = "thedrummer/cydonia-24b-v4.1"
+    LLM_CHEAP_PRICE_IN: float = 0.30
+    LLM_CHEAP_PRICE_CACHED: float = 0.15
+    LLM_CHEAP_PRICE_OUT: float = 0.50
+    # Background calls are bounded much tighter than a chat turn: a scene
+    # summary is capped at 5 sentences by its prompt, so 400 tokens is
+    # slack, not a target. Low temperature because none of the background
+    # calls (summary now; extractor and welfare later) want invention.
+    LLM_CHEAP_MAX_TOKENS: int = 400
+    LLM_CHEAP_TEMPERATURE: float = 0.3
+
+    # Silence longer than this closes the open scene and opens a new one
+    # (phase-2 plan section 5).
+    SCENE_IDLE_HOURS: int = 6
 
     @field_validator("DATABASE_URL")
     @classmethod

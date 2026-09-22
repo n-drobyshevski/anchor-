@@ -12,6 +12,12 @@ Telegram API call.
 Privacy: on failure only type(exc).__name__ and update_id are logged or
 stored as the queue row's error — never exception args, which could
 carry payload content.
+
+2a adds background jobs (phase-2 plan section 3) to the same loop.
+Inbound updates are claimed **first**: a job is only looked for when
+the update queue is empty, so background work can never delay a reply
+the user is waiting on. Concurrency stays 1 across both queues, which
+keeps ordering total -- a job and an update never run at once.
 """
 
 from __future__ import annotations
@@ -24,7 +30,12 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import Settings
+from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
+from app.core.state import get_state
+from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
 from app.db.queue import claim, complete, fail, recover_stuck
+from app.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +86,100 @@ async def process_one_update(
     return True
 
 
-async def _claim_loop(
-    sessionmaker: async_sessionmaker[AsyncSession], dp: Dispatcher, bot: Bot
+async def _run_job(
+    session: AsyncSession,
+    settings: Settings,
+    cheap_provider: LLMProvider,
+    kind: str,
+    payload: dict,
 ) -> None:
+    """Dispatch one claimed job to its handler.
+
+    A dict would be tidier, but handlers do not share a signature --
+    2c's `extract` needs different arguments than `summarize_scene`
+    does -- so this stays an explicit branch and an unknown kind raises
+    rather than being silently dropped.
+    """
+    if kind == SUMMARIZE_SCENE:
+        user_state = await get_state(session)
+        await run_summarize_scene(
+            session,
+            settings,
+            cheap_provider,
+            scene_id=payload["scene_id"],
+            timezone=user_state.timezone,
+        )
+        return
+    raise ValueError(f"unknown job kind: {kind}")
+
+
+async def process_one_job(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    cheap_provider: LLMProvider,
+) -> bool:
+    """Claim and run a single due job. Returns True iff a job was claimed.
+
+    Mirrors process_one_update: claim (which commits and releases the
+    lock), run outside the lock, then complete or fail. Deferred is not
+    a failure -- see app/core/scene.Deferred.
+    """
+    async with sessionmaker() as session:
+        job = await claim_job(session)
+
+    if job is None:
+        return False
+
+    job_id, kind, payload = job.id, job.kind, job.payload
+    started_at = time.monotonic()
+    try:
+        async with sessionmaker() as session:
+            await _run_job(session, settings, cheap_provider, kind, payload)
+    except Deferred as deferred:
+        async with sessionmaker() as session:
+            await defer_job(session, job_id, deferred.run_after)
+        logger.info("job deferred", extra={"job_id": job_id, "kind": kind})
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see module docstring
+        async with sessionmaker() as session:
+            await fail_job(session, job_id, type(exc).__name__)
+        logger.warning(
+            "job failed",
+            extra={
+                "job_id": job_id,
+                "kind": kind,
+                "event": type(exc).__name__,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+            },
+        )
+    else:
+        async with sessionmaker() as session:
+            await complete_job(session, job_id)
+        logger.info(
+            "job processed",
+            extra={
+                "job_id": job_id,
+                "kind": kind,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+            },
+        )
+
+    return True
+
+
+async def _claim_loop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    dp: Dispatcher,
+    bot: Bot,
+    settings: Settings,
+    cheap_provider: LLMProvider,
+) -> None:
+    """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
-        processed = await process_one_update(sessionmaker, dp, bot)
-        if not processed:
-            await asyncio.sleep(IDLE_SLEEP_SECONDS)
+        if await process_one_update(sessionmaker, dp, bot):
+            continue
+        if await process_one_job(sessionmaker, settings, cheap_provider):
+            continue
+        await asyncio.sleep(IDLE_SLEEP_SECONDS)
 
 
 async def _recover_loop(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -89,15 +187,24 @@ async def _recover_loop(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         await asyncio.sleep(RECOVER_INTERVAL_SECONDS)
         async with sessionmaker() as session:
             recovered = await recover_stuck(session)
+            recovered_jobs = await recover_stuck_jobs(session)
         if recovered:
             logger.info("recovered stuck rows", extra={"count": recovered})
+        if recovered_jobs:
+            logger.info("recovered stuck jobs", extra={"count": recovered_jobs})
 
 
 async def run_worker(
-    sessionmaker: async_sessionmaker[AsyncSession], dp: Dispatcher, bot: Bot
+    sessionmaker: async_sessionmaker[AsyncSession],
+    dp: Dispatcher,
+    bot: Bot,
+    settings: Settings,
+    cheap_provider: LLMProvider,
 ) -> list[asyncio.Task]:
     """Start the claim loop and the recovery sweep as two background tasks."""
-    claim_task = asyncio.create_task(_claim_loop(sessionmaker, dp, bot), name="anchor-claim-loop")
+    claim_task = asyncio.create_task(
+        _claim_loop(sessionmaker, dp, bot, settings, cheap_provider), name="anchor-claim-loop"
+    )
     recover_task = asyncio.create_task(_recover_loop(sessionmaker), name="anchor-recover-loop")
     return [claim_task, recover_task]
 

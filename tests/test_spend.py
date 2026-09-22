@@ -222,3 +222,69 @@ async def test_today_usd_ignores_other_dates(sessionmaker):
 
     async with sessionmaker() as session:
         assert await today_usd(session, "Europe/Paris") == decimal.Decimal("0.25")
+
+
+# --- 2a: model-aware pricing (phase-2 plan section 2) ---
+
+
+def test_price_triple_prefers_the_main_model_when_both_names_match():
+    """LLM_MODEL and LLM_MODEL_CHEAP name the same model today. The two
+    settings must never be able to disagree about its price."""
+    from app.core.spend import price_triple_for
+
+    settings = Settings(
+        LLM_MODEL="same/model",
+        LLM_MODEL_CHEAP="same/model",
+        LLM_PRICE_IN=0.30, LLM_PRICE_CACHED=0.15, LLM_PRICE_OUT=0.50,
+        LLM_CHEAP_PRICE_IN=9.99, LLM_CHEAP_PRICE_CACHED=9.99, LLM_CHEAP_PRICE_OUT=9.99,
+    )
+    assert price_triple_for("same/model", settings) == (
+        decimal.Decimal("0.30"), decimal.Decimal("0.15"), decimal.Decimal("0.50")
+    )
+
+
+def test_price_triple_uses_the_cheap_prices_for_a_distinct_cheap_model():
+    from app.core.spend import price_triple_for
+
+    settings = Settings(
+        LLM_MODEL="main/model", LLM_MODEL_CHEAP="cheap/model",
+        LLM_PRICE_IN=0.30, LLM_PRICE_CACHED=0.15, LLM_PRICE_OUT=0.50,
+        LLM_CHEAP_PRICE_IN=1.25, LLM_CHEAP_PRICE_CACHED=0.20, LLM_CHEAP_PRICE_OUT=2.50,
+    )
+    assert price_triple_for("cheap/model", settings) == (
+        decimal.Decimal("1.25"), decimal.Decimal("0.20"), decimal.Decimal("2.50")
+    )
+
+
+def test_price_triple_falls_back_to_the_main_prices_for_an_unknown_model():
+    """The conservative direction: the main model is the more expensive
+    one wherever they differ, so an unknown model is never under-billed
+    against the daily cap."""
+    from app.core.spend import price_triple_for
+
+    settings = Settings(
+        LLM_MODEL="main/model", LLM_MODEL_CHEAP="cheap/model",
+        LLM_PRICE_IN=0.30, LLM_PRICE_CACHED=0.15, LLM_PRICE_OUT=0.50,
+        LLM_CHEAP_PRICE_IN=1.25, LLM_CHEAP_PRICE_CACHED=0.20, LLM_CHEAP_PRICE_OUT=2.50,
+    )
+    assert price_triple_for("mystery/model", settings) == (
+        decimal.Decimal("0.30"), decimal.Decimal("0.15"), decimal.Decimal("0.50")
+    )
+    assert price_triple_for(None, settings) == (
+        decimal.Decimal("0.30"), decimal.Decimal("0.15"), decimal.Decimal("0.50")
+    )
+
+
+def test_compute_cost_uses_the_cheap_triple_when_given_the_cheap_model():
+    settings = Settings(
+        LLM_MODEL="main/model", LLM_MODEL_CHEAP="cheap/model",
+        LLM_PRICE_IN=0.30, LLM_PRICE_CACHED=0.15, LLM_PRICE_OUT=0.50,
+        LLM_CHEAP_PRICE_IN=1.25, LLM_CHEAP_PRICE_CACHED=0.20, LLM_CHEAP_PRICE_OUT=2.50,
+        LLM_WEB_SEARCH_PRICE_USD=0.0,
+    )
+    usage = LLMUsage(input_tokens=1_000_000, cached_tokens=0, output_tokens=0, cost_usd=None)
+
+    assert compute_cost(usage, settings, model="cheap/model") == decimal.Decimal("1.250000")
+    assert compute_cost(usage, settings, model="main/model") == decimal.Decimal("0.300000")
+    # Phase 1 call sites pass no model at all and must be unaffected.
+    assert compute_cost(usage, settings) == decimal.Decimal("0.300000")

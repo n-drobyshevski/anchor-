@@ -57,21 +57,55 @@ async def check_cap(session: AsyncSession, settings: Settings, timezone: str) ->
     return spent >= decimal.Decimal(str(settings.DAILY_USD_CAP))
 
 
-def compute_cost(usage: LLMUsage, settings: Settings) -> decimal.Decimal:
-    """usage.cost_usd (vendor-reported) when present, else the section 10 formula.
+def price_triple_for(model: str | None, settings: Settings) -> tuple[
+    decimal.Decimal, decimal.Decimal, decimal.Decimal
+]:
+    """The (input, cached, output) USD-per-million triple for `model`.
+
+    2a makes cost model-aware (phase-2 plan section 2). The main model
+    is matched first, so that when LLM_MODEL and LLM_MODEL_CHEAP name
+    the same model -- which they do today, by decision -- the main
+    triple is the one that applies and the two settings can never
+    disagree about the price of one model.
+
+    An unrecognized model (or None, which is what every Phase 1 caller
+    passes) falls back to the main triple. That is the conservative
+    direction: the main model is the more expensive of the two in every
+    configuration where they differ at all, so an unknown model is
+    never under-billed against the daily cap.
 
     Settings prices are floats and usd_cost is Numeric(10,6), so every
     price is converted via Decimal(str(price)) -- Decimal(float) would
     drag in that float's binary representation error (Decimal(0.1) is
     not 0.1), which would show up from the sixth decimal place onward.
     """
+    if model is not None and model != settings.LLM_MODEL and model == settings.LLM_MODEL_CHEAP:
+        return (
+            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_IN)),
+            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_CACHED)),
+            decimal.Decimal(str(settings.LLM_CHEAP_PRICE_OUT)),
+        )
+    return (
+        decimal.Decimal(str(settings.LLM_PRICE_IN)),
+        decimal.Decimal(str(settings.LLM_PRICE_CACHED)),
+        decimal.Decimal(str(settings.LLM_PRICE_OUT)),
+    )
+
+
+def compute_cost(
+    usage: LLMUsage, settings: Settings, model: str | None = None
+) -> decimal.Decimal:
+    """usage.cost_usd (vendor-reported) when present, else the section 10 formula.
+
+    `model` (2a) picks the price triple; it defaults to None, which
+    means the main model, so every Phase 1 call site keeps its exact
+    previous behaviour without being touched.
+    """
     if usage.cost_usd is not None:
         cost = usage.cost_usd
     else:
         uncached = usage.input_tokens - usage.cached_tokens
-        price_in = decimal.Decimal(str(settings.LLM_PRICE_IN))
-        price_cached = decimal.Decimal(str(settings.LLM_PRICE_CACHED))
-        price_out = decimal.Decimal(str(settings.LLM_PRICE_OUT))
+        price_in, price_cached, price_out = price_triple_for(model, settings)
         million = decimal.Decimal(1_000_000)
         cost = (
             uncached * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out

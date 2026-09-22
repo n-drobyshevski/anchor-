@@ -147,7 +147,16 @@ def _extract_usage(response, *, web_search_requests: int = 0) -> LLMUsage:
 
 class OpenRouterProvider:
     """`LLMProvider` backed by OpenRouter (model: thedrummer/cydonia-24b-v4.1)
-    via the openai SDK's Chat Completions API."""
+    via the openai SDK's Chat Completions API.
+
+    2a: `client` lets a second instance (the cheap/background provider)
+    share the first one's AsyncOpenAI client, and therefore one
+    connection pool, instead of opening a second one for what is the
+    same host and the same credential. When a client is injected this
+    instance does not own it, and close() is a no-op -- whoever built
+    the client closes it (app/main.py). `api_key` is then unused and may
+    be empty.
+    """
 
     def __init__(
         self,
@@ -157,8 +166,10 @@ class OpenRouterProvider:
         temperature: float,
         data_collection: str,
         web_search_max_results: int,
+        client: AsyncOpenAI | None = None,
     ) -> None:
-        self._client = build_client(api_key)
+        self._owns_client = client is None
+        self._client = build_client(api_key) if client is None else client
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -222,7 +233,9 @@ class OpenRouterProvider:
         return LLMResponse(text=text, usage=usage, model=self._model)
 
     async def close(self) -> None:
-        await self._client.close()
+        """Close the client, unless it was injected and belongs to someone else."""
+        if self._owns_client:
+            await self._client.close()
 
 
 def _retry_after(exc: openai.APIStatusError) -> float | None:

@@ -4,6 +4,15 @@
 adds the rest of the Phase 1 schema (plan section 5): message,
 user_state, state_change, persona_version, spend_ledger.
 
+2a adds the phase-2 plan's generic `job` queue (section 3) and `scene`
+(section 4), plus two columns on `message`: `scene_id` and `kind`. The
+`kind` check constraint is not in the plan's SQL, which leaves it as a
+comment -- it is added here because every other enum-shaped column in
+that plan (memory.kind, checkin.due_result, proposal.field/status) does
+carry one, and because a mistyped kind would silently defeat the
+welfare/canned exclusion that scene summaries and the transcript rely
+on. That exclusion is a privacy property, so it gets a constraint.
+
 All "text" columns from the plan's SQL use SQLAlchemy's unlimited
 String, matching TelegramUpdate.status/error above, rather than Text —
 same Postgres column type, kept for style consistency.
@@ -54,6 +63,65 @@ class TelegramUpdate(Base):
     __table_args__ = (Index("ix_telegram_update_status_update_id", "status", "update_id"),)
 
 
+class Job(Base):
+    """A unit of deferred background work (phase-2 plan section 3).
+
+    Deliberately the same column vocabulary as TelegramUpdate above --
+    status/attempts/locked_at/error -- so app/db/queue.py's generic
+    mechanics drive both tables with one implementation.
+
+    `dedup_key` is nullable and unique: an ON CONFLICT DO NOTHING insert
+    keyed on it makes enqueueing idempotent (e.g. 'scene:<id>' can only
+    ever queue one summary), while a NULL key means "no deduplication"
+    and always inserts, since NULLs do not conflict in a unique index.
+
+    `run_after` gates claiming; phase 3 will use it for scheduled kinds.
+    """
+
+    __tablename__ = "job"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # extract|summarize_scene
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    dedup_key: Mapped[str | None] = mapped_column(String, unique=True)
+    run_after: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    locked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_job_status_run_after", "status", "run_after"),)
+
+
+class Scene(Base):
+    """One conversational session (phase-2 plan section 4).
+
+    Closed by app/core/scene.py after SCENE_IDLE_HOURS of silence, at
+    which point a `summarize_scene` job fills `summary`. A scene with
+    fewer than 3 summarizable messages is never summarized and keeps
+    summary=NULL, which is a valid terminal state, not a pending one.
+    """
+
+    __tablename__ = "scene"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    summary: Mapped[str | None] = mapped_column(String)
+    message_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+
 class Message(Base):
     """A stored chat message, user or assistant side (plan section 5).
 
@@ -83,6 +151,20 @@ class Message(Base):
     usd_cost: Mapped[decimal.Decimal | None] = mapped_column(Numeric(10, 6))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    # 2a (phase-2 plan section 4). scene_id is nullable because Phase 1
+    # rows predate scenes; kind defaults to 'chat' for the same reason.
+    scene_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("scene.id"))
+    kind: Mapped[str] = mapped_column(
+        String, nullable=False, default="chat", server_default=text("'chat'")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('chat', 'checkin', 'welfare', 'canned', 'system')",
+            name="ck_message_kind",
+        ),
     )
 
 
@@ -164,7 +246,12 @@ class SpendLedger(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False)  # chat|ooc
+    # chat|ooc (Phase 1) plus 2a's extractor|summary|welfare|checkin
+    # (phase-2 plan section 2). Deliberately unconstrained, as in Phase 1:
+    # the ledger is an append-only record of money already spent, and a
+    # constraint that rejected an unrecognized category would lose the
+    # row rather than the label.
+    category: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str | None] = mapped_column(String)
     tokens_in: Mapped[int | None] = mapped_column(Integer)
     tokens_cached: Mapped[int | None] = mapped_column(Integer)

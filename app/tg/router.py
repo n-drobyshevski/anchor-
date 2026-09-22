@@ -107,18 +107,31 @@ def build_router(
         # source="command": /out is a typed command, not a pause word.
         # The state_change audit log is the only record of which one
         # switched the persona off.
+        #
+        # 2a: ensure_scene here too, not just in turn.run(). A command
+        # that produces a turn is an inbound message like any other
+        # (phase-2 plan section 5), so arriving as /out after six hours
+        # of silence must close the stale scene exactly as a chat
+        # message would.
+        scene_id = await turn.ensure_scene(sessionmaker, settings)
         await turn.run_hard_pause(
             sessionmaker,
             message.bot,
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             source="command",
+            scene_id=scene_id,
         )
 
     @router.message(Command("in"))
     async def resume(message: Message, event_update: Update) -> None:
+        scene_id = await turn.ensure_scene(sessionmaker, settings)
         await turn.run_resume(
-            sessionmaker, message.bot, chat_id=message.chat.id, update_id=event_update.update_id
+            sessionmaker,
+            message.bot,
+            chat_id=message.chat.id,
+            update_id=event_update.update_id,
+            scene_id=scene_id,
         )
 
     @router.message(Command("search"))
@@ -137,6 +150,7 @@ def build_router(
                 chat_id=message.chat.id,
                 update_id=event_update.update_id,
                 text=turn.SEARCH_DISABLED_REPLY_TEXT,
+                scene_id=await turn.ensure_scene(sessionmaker, settings),
             )
             return
 
@@ -148,6 +162,7 @@ def build_router(
                 chat_id=message.chat.id,
                 update_id=event_update.update_id,
                 text=turn.SEARCH_EMPTY_REPLY_TEXT,
+                scene_id=await turn.ensure_scene(sessionmaker, settings),
             )
             return
 

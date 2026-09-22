@@ -1,12 +1,27 @@
 """Shared test fixtures.
 
-The DB fixture reuses the already-running Postgres 16 cluster (checked
-via pg_isready). It creates a throwaway `anchor_test_<rand>` database
-for the whole test session, runs `alembic upgrade head` programmatically
+The DB fixture reuses an already-running Postgres cluster (checked via
+pg_isready). It creates a throwaway `anchor_test_<rand>` database for
+the whole test session, runs `alembic upgrade head` programmatically
 against it, and drops it at teardown. TEST_DATABASE_URL overrides the
 whole thing when set (that database's lifecycle is then not ours to
-manage). When PG16 binaries are absent, DB-dependent tests are skipped
-rather than erroring.
+manage). When no usable cluster is found, DB-dependent tests are
+skipped rather than erroring.
+
+**Postgres 18, and the locale.** Production runs Postgres 18
+(Railway's postgres-ssl:18), so the fixture targets 18 and warns when
+it finds an older major version -- Phase 1 was written against 16 and
+still passes on both, but 2b's pg_trgm work should be exercised on the
+version that actually serves it. See scripts/setup-postgres.sh.
+
+The locale matters far more than the major version, and is pinned
+explicitly: the test database is created with TEMPLATE template0 and
+LOCALE 'C.UTF-8' rather than inheriting whatever template1 happens to
+carry. Under a plain `C` locale pg_trgm silently stops seeing Cyrillic
+-- show_trgm('привет мир') returns zero trigrams and every similarity()
+is 0, with no error anywhere -- which would make 2b's memory retrieval
+quietly return nothing. Pinning the locale here means the test suite
+can never accidentally pass under a locale production does not use.
 
 Cleanup between tests is TRUNCATE, not transaction rollback: the SKIP
 LOCKED queue test needs two connections that both see committed rows,
@@ -21,6 +36,8 @@ import random
 import shutil
 import string
 import subprocess
+import urllib.parse
+import warnings
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -39,17 +56,19 @@ from app.llm.provider import LLMResponse, LLMUsage
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# Newest first: the version production runs comes first, and the search
+# falls back rather than failing outright on a machine that only has an
+# older cluster.
+PREFERRED_PG_MAJORS = (18, 17, 16)
+PRODUCTION_PG_MAJOR = 18
+
+
 def _find_pg_isready() -> str | None:
-    found = shutil.which("pg_isready")
-    if found:
-        return found
-    for candidate in (
-        "/usr/lib/postgresql/16/bin/pg_isready",
-        "/usr/lib/postgresql/*/bin/pg_isready",
-    ):
+    for major in PREFERRED_PG_MAJORS:
+        candidate = f"/usr/lib/postgresql/{major}/bin/pg_isready"
         if os.path.exists(candidate):
             return candidate
-    return None
+    return shutil.which("pg_isready")
 
 
 def _admin_dsn() -> str:
@@ -57,6 +76,18 @@ def _admin_dsn() -> str:
     return os.environ.get(
         "ANCHOR_ADMIN_DATABASE_URL", "postgresql://anchor:anchor@127.0.0.1:5432/postgres"
     )
+
+
+def _admin_host_port() -> tuple[str, int]:
+    """Host and port from the admin DSN, for the pg_isready probe.
+
+    Parsed rather than hardcoded to 127.0.0.1:5432 so that pointing
+    ANCHOR_ADMIN_DATABASE_URL at a second cluster (a Postgres 18 one on
+    5433, say) probes *that* cluster rather than reporting a different
+    one as ready.
+    """
+    parsed = urllib.parse.urlparse(_admin_dsn())
+    return parsed.hostname or "127.0.0.1", parsed.port or 5432
 
 
 def _run_alembic_upgrade(database_url: str) -> None:
@@ -99,13 +130,14 @@ def test_database_url() -> str:
 
     pg_isready = _find_pg_isready()
     if pg_isready is None:
-        pytest.skip("pg_isready not found; PostgreSQL 16 binaries are required for DB tests")
+        pytest.skip("pg_isready not found; PostgreSQL is required for DB tests")
 
+    host, port = _admin_host_port()
     ready = subprocess.run(
-        [pg_isready, "-h", "127.0.0.1", "-p", "5432"], capture_output=True, check=False
+        [pg_isready, "-h", host, "-p", str(port)], capture_output=True, check=False
     )
     if ready.returncode != 0:
-        pytest.skip("PostgreSQL is not accepting connections on 127.0.0.1:5432")
+        pytest.skip(f"PostgreSQL is not accepting connections on {host}:{port}")
 
     db_name = "anchor_test_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
     admin_dsn = _admin_dsn()
@@ -116,7 +148,18 @@ def test_database_url() -> str:
     async def _create() -> None:
         conn = await asyncpg.connect(admin_dsn)
         try:
-            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            server_major = int(conn.get_server_version().major)
+            if server_major < PRODUCTION_PG_MAJOR:
+                warnings.warn(
+                    f"tests are running on PostgreSQL {server_major}; production runs "
+                    f"{PRODUCTION_PG_MAJOR}. Run scripts/setup-postgres.sh to match it.",
+                    stacklevel=1,
+                )
+            # LOCALE/TEMPLATE pinned on purpose -- see the module docstring.
+            await conn.execute(
+                f'CREATE DATABASE "{db_name}" '
+                "TEMPLATE template0 LOCALE 'C.UTF-8' ENCODING 'UTF8'"
+            )
         finally:
             await conn.close()
 
@@ -155,7 +198,7 @@ async def sessionmaker(test_database_url: str):
             await session.execute(
                 text(
                     "TRUNCATE TABLE telegram_update, message, user_state, "
-                    "state_change, persona_version, spend_ledger "
+                    "state_change, persona_version, spend_ledger, job, scene "
                     "RESTART IDENTITY CASCADE"
                 )
             )

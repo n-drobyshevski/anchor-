@@ -24,6 +24,14 @@ module functions behind /out, /in, and the HARD word branch of
 run() -- both idempotent through the same reply_to_update mechanism as
 the rest of this file, via _send_canned_reply().
 
+2a stamps every message row with its scene (phase-2 plan sections 4/5):
+run() calls scene.ensure_open_scene() once, before step 1, and both the
+user row and the assistant row carry that scene_id and a `kind`. The
+kind is what later milestones' exclusions key on -- canned replies are
+written as kind='canned' from here on, so scene summaries and (in 2c)
+the extractor never see them. scene.message_count is incremented only
+when a row is actually inserted, so a queue replay cannot inflate it.
+
 1f adds `web_search`, threaded from run() down to the single provider
 call: it is opt-in only, set by app/tg/router.py's /search handler and
 nowhere else, so an ordinary text turn never sends OpenRouter's `web`
@@ -49,6 +57,7 @@ from app.config import Settings
 from app.core import pause
 from app.core.outbound import cancel_outbound
 from app.core.prompt import build_messages, build_neutral_messages
+from app.core.scene import bump_message_count, ensure_open_scene
 from app.core.spend import check_cap, compute_cost, local_date_for
 from app.core.state import Source, get_state, update_state
 from app.db.models import Message, SpendLedger
@@ -82,10 +91,23 @@ SEARCH_DISABLED_REPLY_TEXT = "Поиск сейчас выключен."
 CHAT_CATEGORY = "chat"
 OOC_CATEGORY = "ooc"
 
+# message.kind (phase-2 plan section 4), distinct from the ledger's
+# category above: `kind` says what sort of message this is, `category`
+# says which budget line paid for it. A canned reply has kind='canned'
+# and no ledger row at all.
+CHAT_KIND = "chat"
+CANNED_KIND = "canned"
+
 
 async def _store_user_message_once(
-    session: AsyncSession, update_id: int | None, content: str, *, ooc: bool = False
-) -> None:
+    session: AsyncSession,
+    update_id: int | None,
+    content: str,
+    *,
+    ooc: bool = False,
+    scene_id: int | None = None,
+    kind: str = CHAT_KIND,
+) -> bool:
     """Insert a `message` row for this update, unless one already exists.
 
     Moved here from app/tg/router.py in 1c: it is now step 1 of the
@@ -101,15 +123,31 @@ async def _store_user_message_once(
     persona_active is already False. Defaults to False so callers that
     predate 1d (there are none left, but the default is cheap safety)
     keep the old behaviour.
+
+    Returns True iff a row was actually inserted (2a), so the caller can
+    increment scene.message_count exactly once per real message rather
+    than once per replay.
     """
     if update_id is not None:
         existing = await session.execute(
             select(Message.id).where(Message.update_id == update_id, Message.role == "user")
         )
         if existing.scalar_one_or_none() is not None:
-            return
-    session.add(Message(role="user", content=content, update_id=update_id, ooc=ooc))
+            return False
+    session.add(
+        Message(
+            role="user",
+            content=content,
+            update_id=update_id,
+            ooc=ooc,
+            scene_id=scene_id,
+            kind=kind,
+        )
+    )
+    if scene_id is not None:
+        await bump_message_count(session, scene_id)
     await session.commit()
+    return True
 
 
 async def _get_assistant_row(session: AsyncSession, update_id: int) -> Message | None:
@@ -135,6 +173,8 @@ async def _insert_assistant_row(
     tokens_out: int | None = None,
     local_date: datetime.date | None = None,
     category: str = CHAT_CATEGORY,
+    scene_id: int | None = None,
+    kind: str = CHAT_KIND,
 ) -> int | None:
     """Insert the assistant row and, iff it was actually inserted, the
     matching spend_ledger row -- both in this one transaction.
@@ -156,6 +196,8 @@ async def _insert_assistant_row(
             ooc=(category != CHAT_CATEGORY),
             update_id=update_id,
             reply_to_update=update_id,
+            scene_id=scene_id,
+            kind=kind,
             model=model,
             tokens_in=tokens_in,
             tokens_cached=tokens_cached,
@@ -168,6 +210,11 @@ async def _insert_assistant_row(
     result = await session.execute(stmt)
     row = result.first()
     message_id = row[0] if row is not None else None
+
+    # 2a: the scene's count follows the insert, not the attempt, so an
+    # ON CONFLICT DO NOTHING no-op on replay leaves message_count alone.
+    if message_id is not None and scene_id is not None:
+        await bump_message_count(session, scene_id)
 
     if message_id is not None and local_date is not None:
         session.add(
@@ -227,6 +274,7 @@ async def _send_canned_reply(
     update_id: int,
     text: str,
     category: str,
+    scene_id: int | None = None,
 ) -> None:
     """Idempotently insert, then send, a fixed cost-zero assistant reply.
 
@@ -249,6 +297,8 @@ async def _send_canned_reply(
                 usd_cost=decimal.Decimal("0"),
                 local_date=None,
                 category=category,
+                scene_id=scene_id,
+                kind=CANNED_KIND,
             )
     if existing is None or existing.sent_at is None:
         content = existing.content if existing is not None else text
@@ -258,6 +308,21 @@ async def _send_canned_reply(
             await _mark_sent(session, row.id)
 
 
+async def ensure_scene(
+    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
+) -> int:
+    """Resolve the scene this inbound message belongs to (plan section 5).
+
+    Exposed for app/tg/router.py, whose /out, /in and canned /search
+    paths produce a turn without going through run(). Every entry point
+    that writes a message row resolves its scene through here, so the
+    "6h of silence closes the scene" rule cannot be bypassed by
+    arriving as a command rather than as chat.
+    """
+    async with sessionmaker() as session:
+        return await ensure_open_scene(session, idle_hours=settings.SCENE_IDLE_HOURS)
+
+
 async def run_search_canned_reply(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
@@ -265,6 +330,7 @@ async def run_search_canned_reply(
     chat_id: int,
     update_id: int,
     text: str,
+    scene_id: int | None = None,
 ) -> None:
     """The two /search cases that never reach the model: an empty query
     (SEARCH_EMPTY_REPLY_TEXT) or LLM_WEB_SEARCH=false
@@ -279,6 +345,7 @@ async def run_search_canned_reply(
         update_id=update_id,
         text=text,
         category=OOC_CATEGORY,
+        scene_id=scene_id,
     )
 
 
@@ -289,6 +356,7 @@ async def run_hard_pause(
     chat_id: int,
     update_id: int,
     source: Source = "pause",
+    scene_id: int | None = None,
 ) -> None:
     """HARD pause (plan section 7): shared by /out and the HARD pause-word path.
 
@@ -317,6 +385,7 @@ async def run_hard_pause(
         update_id=update_id,
         text=PAUSE_REPLY_TEXT,
         category=OOC_CATEGORY,
+        scene_id=scene_id,
     )
 
 
@@ -326,6 +395,7 @@ async def run_resume(
     *,
     chat_id: int,
     update_id: int,
+    scene_id: int | None = None,
 ) -> None:
     """/in only. The only place in this repo that sets persona_active=True
     (tests/test_turn.py enforces this by grepping app/ for the literal)."""
@@ -344,6 +414,7 @@ async def run_resume(
         update_id=update_id,
         text=RESUME_REPLY_TEXT,
         category=OOC_CATEGORY,
+        scene_id=scene_id,
     )
 
 
@@ -377,12 +448,21 @@ async def run(
     async with sessionmaker() as session:
         user_state = await get_state(session)
 
+    # Step 0b (2a): resolve the scene before anything is written, so
+    # every row this turn produces -- user, assistant, or canned --
+    # carries the same scene_id. Closing a stale scene here also queues
+    # its summary (app/core/scene.py), which is why this runs on every
+    # inbound message and not only on ones that reach the model.
+    scene_id = await ensure_scene(sessionmaker, settings)
+
     # Step 1: store the user message idempotently. A safeword, or any
     # message sent while persona is already off, must never land in
     # the persona transcript.
     ooc = (not user_state.persona_active) or level == "hard"
     async with sessionmaker() as session:
-        await _store_user_message_once(session, update_id, user_text, ooc=ooc)
+        await _store_user_message_once(
+            session, update_id, user_text, ooc=ooc, scene_id=scene_id, kind=CHAT_KIND
+        )
 
     # Step 2: never regenerate if an assistant row already exists.
     # Unchanged, and stays before any state mutation below, so a queue
@@ -398,7 +478,9 @@ async def run(
 
     # Step 3: HARD pause word -- persona off, no LLM call, ever.
     if level == "hard":
-        await run_hard_pause(sessionmaker, bot, chat_id=chat_id, update_id=update_id)
+        await run_hard_pause(
+            sessionmaker, bot, chat_id=chat_id, update_id=update_id, scene_id=scene_id
+        )
         return
 
     # Step 4: SOFT pause word -- lower intensity, then carry on into a
@@ -422,6 +504,7 @@ async def run(
             update_id=update_id,
             text=CAP_REPLY_TEXT,
             category=CHAT_CATEGORY,
+            scene_id=scene_id,
         )
         return
 
@@ -460,7 +543,7 @@ async def run(
         return
 
     latency_ms = int((time.monotonic() - started_at) * 1000)
-    usd_cost = compute_cost(response.usage, settings)
+    usd_cost = compute_cost(response.usage, settings, model=response.model)
     logger.info(
         "turn completed",
         extra={
@@ -489,6 +572,8 @@ async def run(
             tokens_out=response.usage.output_tokens,
             local_date=local_date_for(user_state.timezone),
             category=category,
+            scene_id=scene_id,
+            kind=CHAT_KIND,
         )
 
     # Split, send, then mark sent.

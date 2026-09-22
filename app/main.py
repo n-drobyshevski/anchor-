@@ -17,6 +17,14 @@ The LLM provider (1c) is constructed once here and threaded through
 build_dispatcher() -> build_router(), so every turn shares one
 AsyncOpenAI client/connection pool, and closed on shutdown in both
 modes -- an unclosed client leaks its underlying HTTP connections.
+
+2a adds a second provider for background work (scene summaries now;
+the extractor and the welfare classifier later). It runs the same model
+as chat today, by decision, but is a separate LLMProvider because its
+max_tokens and temperature differ and because compute_cost is
+model-aware. Both share one AsyncOpenAI client, built here and closed
+here: neither provider owns it (see app/llm/openrouter.py), so shutdown
+closes the client directly rather than through either one.
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from aiohttp import web
 
 from app.config import Settings, check_runtime_settings, get_settings
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
-from app.llm.openrouter import OpenRouterProvider
+from app.llm.openrouter import OpenRouterProvider, build_client
 from app.llm.provider import LLMProvider
 from app.log import setup_logging
 from app.startup import run_startup_tasks
@@ -43,15 +51,33 @@ logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
 
 
-def build_provider(settings: Settings) -> LLMProvider:
-    return OpenRouterProvider(
+def build_providers(settings: Settings):
+    """The chat provider, the background provider, and the client they share.
+
+    Returns (provider, cheap_provider, client). The caller owns `client`
+    and must close it on shutdown; calling close() on either provider is
+    a no-op, by design (app/llm/openrouter.py).
+    """
+    client = build_client(settings.OPENROUTER_API_KEY)
+    provider = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.LLM_MODEL,
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
         web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
+        client=client,
     )
+    cheap_provider = OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_CHEAP,
+        max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
+        temperature=settings.LLM_CHEAP_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
+        client=client,
+    )
+    return provider, cheap_provider, client
 
 
 def build_dispatcher(sessionmaker, settings: Settings, provider: LLMProvider) -> Dispatcher:
@@ -78,20 +104,29 @@ async def _on_startup(app: web.Application) -> None:
         allowed_updates=["message", "callback_query"],
     )
     await register_commands(bot)
-    app["worker_tasks"] = await run_worker(sessionmaker, app["dp"], bot)
+    app["worker_tasks"] = await run_worker(
+        sessionmaker, app["dp"], bot, settings, app["cheap_provider"]
+    )
     logger.info("startup complete", extra={"event": "startup"})
 
 
 async def _on_cleanup(app: web.Application) -> None:
     await stop_worker(app["worker_tasks"])
-    await app["provider"].close()
+    await app["llm_client"].close()
     await dispose_engine(app["engine"])
     await app["bot"].session.close()
     logger.info("cleanup complete", extra={"event": "cleanup"})
 
 
 def build_webhook_app(
-    settings: Settings, bot: Bot, dp: Dispatcher, sessionmaker, engine, provider: LLMProvider
+    settings: Settings,
+    bot: Bot,
+    dp: Dispatcher,
+    sessionmaker,
+    engine,
+    provider: LLMProvider,
+    cheap_provider: LLMProvider,
+    llm_client,
 ) -> web.Application:
     app = web.Application()
     app["settings"] = settings
@@ -100,6 +135,8 @@ def build_webhook_app(
     app["sessionmaker"] = sessionmaker
     app["engine"] = engine
     app["provider"] = provider
+    app["cheap_provider"] = cheap_provider
+    app["llm_client"] = llm_client
 
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
@@ -111,19 +148,25 @@ def build_webhook_app(
 
 
 async def _run_polling_mode(
-    settings: Settings, bot: Bot, dp: Dispatcher, sessionmaker, engine, provider: LLMProvider
+    settings: Settings,
+    bot: Bot,
+    dp: Dispatcher,
+    sessionmaker,
+    engine,
+    cheap_provider: LLMProvider,
+    llm_client,
 ) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
-    worker_tasks = await run_worker(sessionmaker, dp, bot)
+    worker_tasks = await run_worker(sessionmaker, dp, bot, settings, cheap_provider)
     try:
         await run_polling(bot, sessionmaker, settings)
     finally:
         await stop_worker(worker_tasks)
-        await provider.close()
+        await llm_client.close()
         await dispose_engine(engine)
         await bot.session.close()
 
@@ -137,14 +180,20 @@ def main() -> None:
 
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-    provider = build_provider(settings)
+    provider, cheap_provider, llm_client = build_providers(settings)
     dp = build_dispatcher(sessionmaker, settings, provider)
 
     if settings.MODE == "webhook":
-        app = build_webhook_app(settings, bot, dp, sessionmaker, engine, provider)
+        app = build_webhook_app(
+            settings, bot, dp, sessionmaker, engine, provider, cheap_provider, llm_client
+        )
         web.run_app(app, host="0.0.0.0", port=settings.PORT)
     else:
-        asyncio.run(_run_polling_mode(settings, bot, dp, sessionmaker, engine, provider))
+        asyncio.run(
+            _run_polling_mode(
+                settings, bot, dp, sessionmaker, engine, cheap_provider, llm_client
+            )
+        )
 
 
 if __name__ == "__main__":
