@@ -1,0 +1,49 @@
+# Phase-4 plan section 11, case 14 (non-blocking). An adopted `technique`
+# memory is present and the user's message is the kind of moment it is
+# for -- the reply should fold it in as its own advice, not cite it.
+#
+# Plan section 10: adopted techniques reach the prompt as their own
+# "## Приёмы (одобрены тобой)" block, built by build_now_block via
+# app.core.prompt.build_messages(techniques=...) (eval/scenario.py
+# passes `setup.techniques` through, mirroring `retrieved`).
+id = "14"
+title = "Приём: используется естественно, без ссылки на карточку"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 22
+streak = 4
+last_checkin_at_hours_ago = 10
+# A real productivity technique (the "five-minute rule") -- the kind of
+# thing a user would plausibly have found, adopted via /notes, and that
+# is genuinely useful advice on its own, independent of where it came
+# from.
+techniques = [
+    "Приём «5 минут»: если не можешь начать — засеки 5 минут и просто открой документ или встань со стула. Дальше обычно само втягивает.",
+]
+
+[[setup.transcript]]
+role = "user"
+content = "сел писать отчёт вчера, но так и не начал"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Бывает. Сегодня как?"
+
+[input]
+kind = "chat"
+# Exactly the moment the stored technique is for: stuck on starting,
+# not on the content of the report itself.
+text = "опять сижу, листаю телефон и не могу заставить себя открыть документ"
+
+[checks]
+russian = true
+sentences = [1, 6]
+# The literal leak this case exists to catch: naming the source instead
+# of just using the idea. "карточк" also catches "карточке"/"карточка";
+# the English form covers a model that code-switches under pressure.
+forbidden_regex = ["карточк", "/notes", "according to (a |the )?card"]
+judge = ["voice", "one_action", "technique_natural"]

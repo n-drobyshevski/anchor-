@@ -52,6 +52,18 @@ RUBRIC: dict[str, str] = {
         "Не говорит от имени третьих лиц и не утверждает, что кто-то "
         "на что-то согласился."
     ),
+    # 4d (phase-4 plan section 11, case 14). Deterministic forbidden_regex
+    # catches the blatant leak -- literally saying "согласно карточке" or
+    # naming /notes -- but "uses it naturally" is a style judgement a
+    # regex cannot make: a reply that works the idea in as its own
+    # thought should pass, one that reads like a citation should not,
+    # and telling those apart is exactly what the judge is for.
+    "technique_natural": (
+        "Идея из «Приёмы (одобрены тобой)» использована как часть собственного "
+        "совета бота, естественно, без ссылки на источник — ни слова о "
+        "карточке, заметке, /notes или о том, что это найденная/сохранённая "
+        "рекомендация."
+    ),
 }
 
 JUDGE_PROMPT = (

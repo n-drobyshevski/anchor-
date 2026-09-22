@@ -135,6 +135,11 @@ async def build(
         pinned=setup.get("memories"),
         summaries=setup.get("summaries"),
         retrieved=setup.get("retrieved"),
+        # 4d, phase-4 plan section 10: adopted `technique` memories, set
+        # only by cases 14-16 -- every other case's `setup` has no
+        # `techniques` key, so this stays None and their prompts are
+        # byte-for-byte unchanged.
+        techniques=setup.get("techniques"),
         focus_on=state.focus_on,
         due_action=state.due_action,
         due_set_at=state.due_set_at,

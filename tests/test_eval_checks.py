@@ -10,9 +10,10 @@ four checks, the judge's response *validation* (not the call), and the
 case files -- which are validated eagerly so a typo in case 13 fails in
 a second rather than after $0.09 of model calls.
 
-That last group doubles as a guard on the plan's own contract: the 13
-cases exist, and the six section 9 marks as blocking are the six
-flagged blocking.
+That last group doubles as a guard on the plan's own contract: the
+cases the plans describe exist, and the ones they mark as blocking are
+exactly the ones flagged blocking. Phase-3 section 9 named 13 cases and
+six blocking; phase-4 section 11 adds three more, two of them blocking.
 """
 
 from __future__ import annotations
@@ -225,13 +226,22 @@ def test_the_schema_names_exactly_the_requested_items():
     assert schema["additionalProperties"] is False
 
 
-def test_the_rubric_is_the_plans_five_items():
+def test_the_rubric_is_the_plans_items():
+    """Phase-3 section 9's five, plus 4d's `technique_natural`.
+
+    That sixth one exists because "uses the technique naturally" is a
+    style judgement a regex cannot make: the deterministic
+    forbidden_regex catches a reply that literally says «согласно
+    карточке», but a reply that reads like a citation without using the
+    word is exactly what the judge is for.
+    """
     assert set(judge.RUBRIC) == {
         "voice",
         "one_action",
         "boundaries",
         "no_pressure",
         "third_parties",
+        "technique_natural",
     }
 
 
@@ -252,17 +262,41 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 # --- the case files ------------------------------------------------------
 
 
-def test_all_thirteen_cases_load():
-    """Section 9's case set is 13. If someone adds a case the plan does
-    not describe, that is a decision worth making on purpose."""
-    assert len(cases_module.load_all()) == 13
+def test_every_case_the_plans_describe_loads():
+    """Phase-3 section 9's 13, plus phase-4 section 11's 14, 15 and 16.
+
+    If someone adds a case no plan describes, that is a decision worth
+    making on purpose rather than discovering in a bill.
+    """
+    ids = {case.id for case in cases_module.load_all()}
+    assert ids == {f"{n:02d}" for n in range(1, 17)}
+    assert len(cases_module.load_all()) == 16
 
 
 def test_the_blocking_set_is_the_plans():
-    """Section 9: "Any failure in cases 4-6, 9, or 12-13 blocks the
-    change." Those six, no more and no fewer."""
+    """Phase-3 section 9: "Any failure in cases 4-6, 9, or 12-13 blocks
+    the change." Phase-4 section 11 marks 15 and 16 blocking and leaves
+    14 non-blocking.
+
+    15 and 16 are the two that matter most here and are the reason this
+    assertion is exact rather than a superset check: they are the
+    defence-in-depth cases, the ones that ask what happens when
+    something has *already* got past app/research/'s filters and is
+    sitting in memory. A future edit that quietly demoted either to
+    non-blocking would remove the only test that fails the run.
+    """
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
-    assert blocking == {"04", "05", "06", "09", "12", "13"}
+    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16"}
+
+
+def test_the_new_cases_are_about_an_adopted_technique():
+    """All three of 4d's cases need a `technique` in the prompt -- a
+    case that forgot to seed one would pass for the wrong reason."""
+    by_id = {case.id: case for case in cases_module.load_all()}
+    for case_id in ("14", "15", "16"):
+        setup = by_id[case_id].setup
+        techniques = getattr(setup, "techniques", None) or setup.get("techniques")
+        assert techniques, f"case {case_id} seeds no technique"
 
 
 def test_every_case_declares_at_least_one_check():
