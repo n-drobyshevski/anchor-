@@ -1,0 +1,264 @@
+"""/export (phase-2 plan sections 11 and 14).
+
+The export's job is to be an accurate record, so the tests care about
+two things beyond "it has rows": that the numbers survive the round trip
+exactly, and that nothing about it reaches a log.
+"""
+
+from __future__ import annotations
+
+import datetime
+import decimal
+import json
+import logging
+
+import pytest
+from aiogram import Bot, Dispatcher
+from aiogram.types import Update
+
+from app.config import Settings
+from app.core import export
+from app.db.models import (
+    Checkin,
+    Journal,
+    Memory,
+    Message,
+    Proposal,
+    Scene,
+    SpendLedger,
+    StateChange,
+    TelegramUpdate,
+    UserState,
+)
+from app.tg import data as data_ui
+from app.tg.router import build_router
+from conftest import FakeLLMProvider, FakeSession
+
+pytestmark = pytest.mark.asyncio
+
+CHAT_ID = 555
+TIMEZONE = "Europe/Paris"
+SECRET_TEXT = "пользователь живёт в Лилле"
+
+
+def _command_update(update_id: int, text: str) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id,
+            "date": 0,
+            "chat": {"id": CHAT_ID, "type": "private"},
+            "from": {"id": CHAT_ID, "is_bot": False, "first_name": "Test"},
+            "text": text,
+            "entities": [{"type": "bot_command", "offset": 0, "length": len(text)}],
+        },
+    }
+
+
+def _build_dp(sessionmaker):
+    fake = FakeSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    dp = Dispatcher()
+    dp.include_router(build_router(sessionmaker, Settings(), FakeLLMProvider(), FakeLLMProvider()))
+    return dp, bot, fake
+
+
+async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
+    """One row in each of the nine exported tables.
+
+    `extra_update_ids` are queue rows for updates a test will feed
+    afterwards -- message.update_id is a foreign key into
+    telegram_update, so a command handler storing its own reply needs
+    its row to exist first, exactly as the real webhook path guarantees.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today = datetime.date.today()
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=CHAT_ID, timezone=TIMEZONE, streak=3))
+        await session.commit()
+        session.add(TelegramUpdate(update_id=1, payload={"update_id": 1}))
+        for update_id in extra_update_ids:
+            session.add(TelegramUpdate(update_id=update_id, payload={}))
+        await session.commit()
+        scene = Scene(started_at=now, ended_at=now, summary="Говорили про отчёт.")
+        session.add(scene)
+        await session.commit()
+        await session.refresh(scene)
+        session.add_all(
+            [
+                Message(
+                    role="user", content=SECRET_TEXT, ooc=False, kind="chat",
+                    update_id=1, scene_id=scene.id,
+                    usd_cost=decimal.Decimal("0.000108"),
+                ),
+                Memory(kind="identity", text=SECRET_TEXT, source="user"),
+                Checkin(local_date=today, day_rating=4, due_result="partial", note="устал"),
+                Proposal(field="due_action", value="сдать отчёт", reason="договорились"),
+                Journal(local_date=today, text="Поговорили про отчёт."),
+                StateChange(field="intensity", old_value="3", new_value="4", source="command"),
+                SpendLedger(
+                    local_date=today, category="chat", usd_cost=decimal.Decimal("0.000108")
+                ),
+            ]
+        )
+        await session.commit()
+
+
+# --- contents ---
+
+
+async def test_export_contains_all_nine_tables_with_rows(sessionmaker):
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+
+    expected = {m.__tablename__ for m in export.EXPORTED_MODELS}
+    assert set(payload["tables"]) == expected
+    assert len(expected) == 9
+    for name, rows in payload["tables"].items():
+        assert rows, f"{name} exported empty despite being seeded"
+
+
+async def test_export_omits_the_plumbing_tables(sessionmaker):
+    """telegram_update, job and pending_memory are transport and queue;
+    their only real content is message text `messages` already carries."""
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+
+    for name in ("telegram_update", "job", "pending_memory", "persona_version"):
+        assert name not in payload["tables"]
+
+
+async def test_the_bytes_are_valid_json_and_round_trip(sessionmaker):
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+
+    parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
+    assert set(parsed["tables"]) == set(payload["tables"])
+    assert parsed["tables"]["memory"][0]["text"] == SECRET_TEXT
+
+
+async def test_money_survives_exactly_as_a_string(sessionmaker):
+    """usd_cost is Numeric(10, 6). Through a float it would quietly stop
+    being the number that was stored."""
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+    parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
+
+    value = parsed["tables"]["spend_ledger"][0]["usd_cost"]
+    assert isinstance(value, str)
+    assert decimal.Decimal(value) == decimal.Decimal("0.000108")
+
+
+async def test_datetimes_and_dates_are_iso(sessionmaker):
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+    parsed = json.loads(export.to_bytes(payload).decode("utf-8"))
+
+    created = parsed["tables"]["memory"][0]["created_at"]
+    assert "T" in created
+    datetime.datetime.fromisoformat(created)  # raises if it is not ISO-8601
+
+    local_date = parsed["tables"]["journal"][0]["local_date"]
+    assert datetime.date.fromisoformat(local_date) == datetime.date.today()
+
+
+async def test_cyrillic_is_readable_not_escaped(sessionmaker):
+    """The file is meant to be opened and read, not only re-imported."""
+    await _seed_everything(sessionmaker)
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+
+    raw = export.to_bytes(payload).decode("utf-8")
+    assert SECRET_TEXT in raw
+    assert "\\u0436" not in raw
+
+
+async def test_an_empty_database_still_exports_every_table(sessionmaker):
+    async with sessionmaker() as session:
+        payload = await export.build_export(session)
+
+    assert set(payload["tables"]) == {m.__tablename__ for m in export.EXPORTED_MODELS}
+    assert all(rows == [] for rows in payload["tables"].values())
+
+
+async def test_filename_uses_the_local_date():
+    expected = datetime.datetime.now(
+        __import__("zoneinfo").ZoneInfo(TIMEZONE)
+    ).strftime("%Y%m%d")
+    assert export.export_filename(TIMEZONE) == f"anchor-export-{expected}.json"
+
+
+# --- the command ---
+
+
+async def test_the_command_sends_a_document_with_the_right_name(sessionmaker):
+    await _seed_everything(sessionmaker, 2)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/export"), context={"bot": bot})
+    )
+
+    assert len(fake.documents) == 1
+    sent = fake.documents[0]
+    assert sent.document.filename.startswith("anchor-export-")
+    assert sent.document.filename.endswith(".json")
+    # parse_mode is explicitly None: everything this bot sends is plain text.
+    assert sent.parse_mode is None
+
+    parsed = json.loads(sent.document.data.decode("utf-8"))
+    assert parsed["tables"]["memory"][0]["text"] == SECRET_TEXT
+
+
+async def test_a_replayed_export_sends_one_document(sessionmaker):
+    await _seed_everything(sessionmaker, 2)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    for _ in range(2):
+        await dp.feed_update(
+            bot, Update.model_validate(_command_update(2, "/export"), context={"bot": bot})
+        )
+
+    assert len(fake.documents) == 1
+
+
+async def test_export_logs_no_contents(sessionmaker, caplog):
+    """Plan section 11: "Never logs contents". Sizes and counts only."""
+    await _seed_everything(sessionmaker, 2)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    with caplog.at_level(logging.DEBUG):
+        await dp.feed_update(
+            bot, Update.model_validate(_command_update(2, "/export"), context={"bot": bot})
+        )
+
+    blob = "\n".join(
+        [r.getMessage() for r in caplog.records]
+        + [str(v) for r in caplog.records for v in vars(r).values()]
+    )
+    assert SECRET_TEXT not in blob
+    assert "Лилл" not in blob
+    assert "устал" not in blob
+
+
+async def test_an_oversized_export_explains_instead_of_failing(sessionmaker):
+    """Without the guard the failure is an opaque Telegram API error."""
+    await _seed_everything(sessionmaker, 2)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    original = data_ui.DOCUMENT_LIMIT
+    data_ui.DOCUMENT_LIMIT = 10
+    try:
+        await dp.feed_update(
+            bot, Update.model_validate(_command_update(2, "/export"), context={"bot": bot})
+        )
+    finally:
+        data_ui.DOCUMENT_LIMIT = original
+
+    assert fake.documents == []
+    assert fake.sent[-1].text.startswith("Слишком много данных")

@@ -62,7 +62,9 @@ from app.core import proposal as proposal_core
 from app.core.spend import today_by_category, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.tg.send import send_keyboard
 from app.tg import checkin as checkin_ui
+from app.tg import data as data_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
 from app.tg import welfare as welfare_ui
@@ -88,6 +90,8 @@ BOT_COMMANDS = [
     BotCommand(command="checkin", description="Чек-ин за день"),
     BotCommand(command="due", description="Главное действие"),
     BotCommand(command="focus", description="Фокус вкл/выкл"),
+    BotCommand(command="export", description="Выгрузить все данные"),
+    BotCommand(command="delete", description="Удалить все данные"),
 ]
 
 DUE_CLEARED = "Главное действие снято."
@@ -371,6 +375,38 @@ def build_router(
             message, event_update.update_id, FOCUS_ON if enabled else FOCUS_OFF
         )
 
+    # --- 2f: data control (plan section 11) ---
+
+    @router.message(Command("export"))
+    async def export_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        await data_ui.run_export(
+            sessionmaker, message.bot, chat_id=message.chat.id, timezone=user_state.timezone
+        )
+        # mark_update_handled, not _reply_once: send_command_reply is
+        # text-only end to end and would re-send stored *text* on a
+        # replay, which is meaningless for a document. Same shape
+        # /checkin uses.
+        await turn.mark_update_handled(
+            sessionmaker, update_id=event_update.update_id, text="[/export]", scene_id=scene_id
+        )
+
+    @router.message(Command("delete"))
+    async def delete_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings)
+        await send_keyboard(
+            message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
+        )
+        await turn.mark_update_handled(
+            sessionmaker, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
+        )
+
     # --- 2b: memory (plan section 11) ---
 
     async def _once(update_id: int) -> bool:
@@ -514,6 +550,24 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             update_id=event_update.update_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("d:"))
+    async def delete_decision(callback: CallbackQuery) -> None:
+        """`d:yes:<epoch>` / `d:no` -- the two-step delete confirmation.
+
+        Deliberately not gated on _once: the wipe destroys the `message`
+        rows that gate reads, and a replayed press is harmless anyway
+        (see app/tg/data.py).
+        """
+        await data_ui.handle_delete_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
             data=callback.data,
         )
 

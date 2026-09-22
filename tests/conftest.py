@@ -51,6 +51,7 @@ from aiogram.methods import (
     EditMessageReplyMarkup,
     EditMessageText,
     SendChatAction,
+    SendDocument,
     SendMessage,
     TelegramMethod,
 )
@@ -237,6 +238,7 @@ class FakeSession(BaseSession):
         self.chat_actions: list[SendChatAction] = []
         self.edits: list[EditMessageText] = []
         self.answered: list[AnswerCallbackQuery] = []
+        self.documents: list[SendDocument] = []
         self._next_message_id = 1
 
     async def close(self) -> None:
@@ -270,6 +272,23 @@ class FakeSession(BaseSession):
                     "date": 0,
                     "chat": {"id": method.chat_id, "type": "private"},
                     "text": method.text,
+                },
+                context={"bot": bot},
+            )
+        if isinstance(method, SendDocument):
+            # SendDocument.__returning__ is Message, so this must hand
+            # back a TgMessage like the SendMessage branch, not True.
+            # `method.document` is the BufferedInputFile itself, so a
+            # test reads .filename and parses .data with no HTTP layer
+            # and nothing uploaded.
+            self.documents.append(method)
+            message_id = self._next_message_id
+            self._next_message_id += 1
+            return TgMessage.model_validate(
+                {
+                    "message_id": message_id,
+                    "date": 0,
+                    "chat": {"id": method.chat_id, "type": "private"},
                 },
                 context={"bot": bot},
             )

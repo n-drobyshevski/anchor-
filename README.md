@@ -1,4 +1,4 @@
-# Anchor — Milestone 2e
+# Anchor — Milestone 2f (Phase 2 complete)
 
 A private, single-user Telegram bot.
 
@@ -97,6 +97,42 @@ before the turn returns.
 «Я в порядке, продолжаем» button (plan §13). Both route through the
 same `run_resume`, which is what keeps `tests/test_turn.py`'s
 grep-the-whole-source invariant down to a single call site.
+
+Milestone 2f closes Phase 2 with control over everything the previous
+four milestones started storing:
+
+- **`/export`** sends a JSON file of §11's nine tables — state, messages,
+  memories, scenes, check-ins, proposals, journal, state_change,
+  spend_ledger. Money is exported as a string, not a float: `usd_cost` is
+  `Numeric(10, 6)`, and a float round-trip would quietly change the
+  number in a file whose point is to be accurate. Contents are never
+  logged; only byte and row counts.
+- **`/delete`** is a two-step confirm, then one `TRUNCATE` over eleven
+  tables plus a reset of the singleton state row. `persona_version`
+  survives (it's a hash of a file in this repo, not your data), and
+  `chat_id` survives so the bot still knows who it's talking to.
+
+The `[Да, удалить]` button **expires after five minutes**. §11 specifies
+a two-step confirm and no expiry; left literal, a button in scrollback
+wipes everything irreversibly when tapped by accident weeks later. The
+issue time rides in the callback data, so a stale press answers
+«Устарело» and does nothing.
+
+`pending_memory` is wiped too, though §11's list omits it: it holds text
+typed at `/remember` and never classified, and leaving that behind after
+"delete all my data" is exactly what build rule 7 forbids.
+
+**One row survives a delete, deliberately** — a single `state_change`
+recording that a wipe happened, with no content of any kind. The reset
+changes six state fields, and this would otherwise be the only state
+mutation in the codebase with no audit behind it. Running `/export`
+straight after a `/delete` therefore shows exactly one row.
+
+Two tests in `tests/test_delete.py` are what actually enforce "/delete
+must really delete": every table must be either purged or explicitly
+kept, and every `user_state` column either preserved or explicitly
+reset. Both fail the day someone adds a table or a column and forgets —
+which is the only day it matters.
 
 ### Pause words still come first
 

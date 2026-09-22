@@ -28,7 +28,7 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
 
 from app.core.split import split
 
@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 # Telegram's hard limit for a single message.
 MESSAGE_LIMIT = 4096
+
+# Telegram's documented ceiling for a bot's sendDocument (2f). A single
+# user's export is nowhere near it; the guard exists because the failure
+# mode without one is an opaque API error rather than a sentence the
+# user can act on.
+DOCUMENT_LIMIT = 50 * 1024 * 1024
 
 # editMessageText rejects an edit that would not change anything. That
 # is not an error for us: it happens the first time "‹" is pressed on
@@ -132,3 +138,24 @@ async def answer_callback(bot: Bot, callback_id: str, text: str | None = None) -
     answered or times out.
     """
     await bot.answer_callback_query(callback_id, text=text)
+
+
+async def send_document(
+    bot: Bot, chat_id: int, data: bytes, filename: str, caption: str | None = None
+) -> int:
+    """Send in-memory bytes as a file; returns the message_id.
+
+    parse_mode=None is explicit. aiogram defaults it to
+    Default("parse_mode"), and everything this bot sends is plain text
+    (send_reply above omits it for the same reason) -- a caption
+    silently entity-parsed would be the one place that convention broke.
+    """
+    if len(data) > DOCUMENT_LIMIT:
+        raise ValueError(f"document is {len(data)} bytes, limit is {DOCUMENT_LIMIT}")
+    message = await bot.send_document(
+        chat_id,
+        BufferedInputFile(data, filename=filename),
+        caption=caption,
+        parse_mode=None,
+    )
+    return message.message_id
