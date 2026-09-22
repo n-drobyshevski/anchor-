@@ -81,9 +81,14 @@ def build_providers(settings: Settings):
     return provider, cheap_provider, client
 
 
-def build_dispatcher(sessionmaker, settings: Settings, provider: LLMProvider) -> Dispatcher:
+def build_dispatcher(
+    sessionmaker,
+    settings: Settings,
+    provider: LLMProvider,
+    cheap_provider: LLMProvider | None = None,
+) -> Dispatcher:
     dp = Dispatcher()
-    dp.include_router(build_router(sessionmaker, settings, provider))
+    dp.include_router(build_router(sessionmaker, settings, provider, cheap_provider))
     return dp
 
 
@@ -182,7 +187,7 @@ def main() -> None:
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
     provider, cheap_provider, llm_client = build_providers(settings)
-    dp = build_dispatcher(sessionmaker, settings, provider)
+    dp = build_dispatcher(sessionmaker, settings, provider, cheap_provider)
 
     if settings.MODE == "webhook":
         app = build_webhook_app(

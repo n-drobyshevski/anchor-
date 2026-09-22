@@ -65,6 +65,7 @@ from app.llm.provider import LLMProvider
 from app.tg import checkin as checkin_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
+from app.tg import welfare as welfare_ui
 
 NON_TEXT_REPLY = "Пока только текст."
 
@@ -158,13 +159,23 @@ def _format_state(user_state, spend, settings: Settings, *, by_category=None, me
 
 
 def build_router(
-    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings, provider: LLMProvider
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    provider: LLMProvider,
+    cheap_provider: LLMProvider | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
 
     A factory rather than a shared module-level instance, because a
     Router can only ever be attached to one Dispatcher — tests that
     build several Dispatchers each need their own Router instance.
+
+    `cheap_provider` (2e) is what runs the welfare classifier beside
+    each in-character generation. It defaults to None so that the many
+    tests predating 2e keep their three-argument call, and a turn
+    without it simply skips the check — but app/main.py always supplies
+    it, and tests/test_welfare.py asserts that this function threads it
+    into every turn.run() call, so production cannot quietly lose it.
     """
     router = Router(name="anchor")
 
@@ -258,6 +269,7 @@ def build_router(
             update_id=event_update.update_id,
             user_text=query,
             web_search=True,
+            cheap_provider=cheap_provider,
         )
 
     # --- 2d: clearing `awaiting` on any command (plan section 9) ---
@@ -464,6 +476,7 @@ def build_router(
             chat_id=message.chat.id,
             update_id=event_update.update_id,
             user_text=message.text,
+            cheap_provider=cheap_provider,
         )
 
     @router.callback_query(F.data.startswith("m:k:"))
@@ -496,11 +509,27 @@ def build_router(
             callback.bot,
             settings,
             provider,
+            cheap_provider,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             update_id=event_update.update_id,
             data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("w:"))
+    async def welfare_decision(callback: CallbackQuery, event_update: Update) -> None:
+        """`w:resume` / `w:stay` -- the welfare reply's buttons."""
+        await welfare_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            update_id=event_update.update_id,
+            data=callback.data,
+            message_text=callback.message.text,
         )
 
     @router.callback_query(F.data.startswith("p:"))

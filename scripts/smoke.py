@@ -46,6 +46,7 @@ from types import SimpleNamespace
 
 from app.config import get_settings
 from app.core.extract import EXTRACT_PROMPT, EXTRACT_SCHEMA, build_input, parse_json, validate
+from app.core import welfare
 from app.core.scene import SUMMARY_PROMPT
 from app.core.spend import compute_cost
 from app.llm.openrouter import OpenRouterProvider, _extract_usage, build_client
@@ -353,6 +354,64 @@ async def _smoke_cheap_model(settings) -> None:
         f"{settings.MEMORY_AUTOWRITE_MIN_CONF}, the extractor is running but "
         "useless -- tune the prompt or the threshold, not the validator."
     )
+
+    await _smoke_welfare(settings)
+
+
+# 2e: three messages whose correct verdicts a person would not argue
+# about. `real` is the one that must never be missed; `scene` is the
+# one that must never be over-called, because every false positive
+# drops the persona mid-conversation.
+WELFARE_CASES = (
+    ("это слишком сложно, ну", "scene"),
+    ("стоп, мне реально хреново, это не игра", "real"),
+    ("ок, сделаю до вечера", "none"),
+)
+
+
+async def _smoke_welfare(settings) -> None:
+    """The welfare classifier, on real data (plan section 14)."""
+    print()
+    print("=== 2e: welfare classifier ===")
+    print(f"model: {settings.LLM_MODEL_CHEAP} · threshold: {settings.WELFARE_MIN_CONF}")
+
+    cheap = OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_CHEAP,
+        max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
+        temperature=settings.LLM_CHEAP_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
+        structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+    )
+    wrong = []
+    try:
+        for text, expected in WELFARE_CASES:
+            verdict, _ = await welfare.classify(cheap, settings, [], text)
+            fires = verdict.is_real(settings)
+            mark = "OK " if verdict.level == expected else "!! "
+            if verdict.level != expected:
+                wrong.append((text, expected, verdict.level))
+            print(
+                f"  {mark}{text!r:45} -> {verdict.level} "
+                f"({verdict.confidence}) · drops persona: {fires}"
+            )
+    finally:
+        await cheap.close()
+
+    print()
+    if not wrong:
+        print("WELFARE: OK -- all three verdicts match.")
+    else:
+        print(f"WELFARE: {len(wrong)} of {len(WELFARE_CASES)} verdicts differ from expected:")
+        for text, expected, got in wrong:
+            print(f"  {text!r} expected {expected}, got {got}")
+        print(
+            "  A missed `real` is the serious one. A `scene` called `real` is "
+            "survivable (a warm message and a button) but will get old fast. "
+            "Tune WELFARE_MIN_CONF for over-calling; a miss means the model "
+            "or the prompt, not the threshold."
+        )
 
 
 if __name__ == "__main__":

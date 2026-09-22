@@ -139,6 +139,18 @@ class Settings(BaseSettings):
     # whether bad output could be applied.
     LLM_STRUCTURED_OUTPUTS: bool = True
 
+    # --- 2e: the welfare check (phase-2 plan sections 2 and 10) ---
+    # Confidence at or above which a `real` verdict drops the persona.
+    # 0.6 is deliberately low: the classifier prompt already tells the
+    # model to choose `real` when torn, and the cost of a false positive
+    # (a warm out-of-character message the user waves away with a
+    # button) is far smaller than the cost of a false negative.
+    WELFARE_MIN_CONF: float = 0.6
+    # The classifier runs beside the main generation, so this is the
+    # extra latency ceiling it can add, not a total. On timeout the
+    # normal reply goes out -- the check fails open for chat.
+    WELFARE_TIMEOUT_SECONDS: float = 8.0
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _rewrite_asyncpg_scheme(cls, value: str) -> str:

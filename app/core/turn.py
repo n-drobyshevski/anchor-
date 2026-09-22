@@ -48,6 +48,18 @@ and the commit loses one increment instead; undercounting a use is
 harmless, while overcounting would corrupt the last_used_at tie-break
 that gives retrieval its callback variety.
 
+2e adds the welfare check (plan section 10). The classifier runs
+*beside* the main generation rather than before it, so it costs no extra
+latency on the overwhelming majority of turns where it says `none`.
+When it says `real`, the persona reply that came back is discarded
+unsent -- its cost is still ledgered, because it was still billed -- the
+persona is switched off, and a plain out-of-character reply goes out in
+its place.
+
+The check never runs on a neutral turn, a canned reply, a pause, or at
+the cap, because every one of those returns before step 6. It does run
+on a check-in note, which plan section 10 asks for explicitly.
+
 2d adds the check-in note branch (plan section 9), and where it sits is
 the whole design. It must run **after** pause.match -- plan section 13
 puts pause words before everything, `awaiting` states included -- and
@@ -86,14 +98,14 @@ import logging
 import time
 
 from aiogram import Bot
-from sqlalchemy import select
+from sqlalchemy import select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core import pause
 from app.core.outbound import cancel_outbound
-from app.core import checkin, memory
+from app.core import checkin, memory, welfare
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import check_cap, compute_cost, local_date_for
@@ -143,6 +155,7 @@ EXTRACT = "extract"
 CHAT_KIND = "chat"
 CANNED_KIND = "canned"
 CHECKIN_KIND = "checkin"
+WELFARE_KIND = "welfare"
 
 # Plan section 9, verbatim: the hidden flag on the turn that follows a
 # completed check-in.
@@ -360,6 +373,136 @@ async def _send_canned_reply(
             await _mark_sent(session, row.id)
 
 
+async def _ledger_only(
+    session: AsyncSession,
+    *,
+    response,
+    settings: Settings,
+    local_date: datetime.date,
+    category: str,
+) -> None:
+    """Record what a call cost without storing anything it produced.
+
+    Two 2e callers: the welfare classifier, whose output is a verdict
+    rather than a message, and a discarded persona generation. Plan
+    section 10 is explicit that a discarded reply's "cost is still
+    ledgered" -- the money left regardless of whether the words did.
+    """
+    if response is None:
+        return
+    session.add(
+        SpendLedger(
+            local_date=local_date,
+            category=category,
+            model=response.model,
+            tokens_in=response.usage.input_tokens,
+            tokens_cached=response.usage.cached_tokens,
+            tokens_out=response.usage.output_tokens,
+            usd_cost=compute_cost(response.usage, settings, model=response.model),
+        )
+    )
+    await session.commit()
+
+
+async def _welfare_context(session: AsyncSession, update_id: int) -> list[Message]:
+    """The last few in-character messages, for the classifier's input."""
+    result = await session.execute(
+        select(Message)
+        .where(Message.ooc.is_(False))
+        .where(Message.update_id.is_distinct_from(update_id))
+        .order_by(Message.id.desc())
+        .limit(welfare.CONTEXT_MESSAGES)
+    )
+    rows = list(result.scalars().all())
+    rows.reverse()
+    return rows
+
+
+async def _retag_as_welfare(session: AsyncSession, update_id: int) -> None:
+    """Move this turn's user message out of the persona's world.
+
+    Plan section 10: welfare exchanges never reach the extractor, a
+    scene summary, memory or the journal. The *reply* is written
+    kind='welfare', ooc=True from the start, but the message that
+    triggered it was stored back at step 1, before anyone knew -- as an
+    ordinary in-character line. Left that way it would sit in the
+    transcript and the next scene summary, which is exactly the content
+    that must not be there.
+    """
+    await session.execute(
+        sql_update(Message)
+        .where(Message.update_id == update_id)
+        .where(Message.role == "user")
+        .values(kind=WELFARE_KIND, ooc=True)
+    )
+    await session.commit()
+
+
+async def run_welfare_turn(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    provider: LLMProvider,
+    *,
+    chat_id: int,
+    update_id: int,
+    user_text: str,
+    scene_id: int | None,
+    discarded,
+    timezone: str,
+) -> None:
+    """Drop the persona and answer plainly (plan section 10).
+
+    Order matters. The persona goes off and the discarded generation is
+    ledgered *before* the replacement reply is generated, so that a
+    crash between the two leaves the bot paused and silent rather than
+    paused-and-about-to-send-a-persona-reply. The discarded text is
+    never stored, so no later replay can resurrect it.
+    """
+    async with sessionmaker() as session:
+        await _ledger_only(
+            session,
+            response=discarded,
+            settings=settings,
+            local_date=local_date_for(timezone),
+            category=CHAT_CATEGORY,
+        )
+        await update_state(session, "persona_active", False, "welfare")
+        await _retag_as_welfare(session, update_id)
+    await cancel_outbound()
+
+    text, usage = await welfare.generate_reply(provider, user_text)
+
+    async with sessionmaker() as session:
+        message_id = await _insert_assistant_row(
+            session,
+            update_id=update_id,
+            content=text,
+            usd_cost=compute_cost(usage.usage, settings, model=usage.model)
+            if usage is not None
+            else decimal.Decimal("0"),
+            model=usage.model if usage is not None else None,
+            tokens_in=usage.usage.input_tokens if usage is not None else None,
+            tokens_cached=usage.usage.cached_tokens if usage is not None else None,
+            tokens_out=usage.usage.output_tokens if usage is not None else None,
+            local_date=local_date_for(timezone) if usage is not None else None,
+            category=welfare.WELFARE_CATEGORY,
+            scene_id=scene_id,
+            kind=WELFARE_KIND,
+        )
+
+    if message_id is None:
+        return
+
+    # Local import: app/tg/welfare.py imports this module for run_resume.
+    from app.tg.welfare import send_welfare_reply
+
+    await send_welfare_reply(bot, chat_id, text)
+    async with sessionmaker() as session:
+        await _mark_sent(session, message_id)
+    logger.info("welfare turn delivered", extra={"update_id": update_id})
+
+
 async def already_handled(
     sessionmaker: async_sessionmaker[AsyncSession], update_id: int
 ) -> bool:
@@ -528,16 +671,27 @@ async def run_resume(
     chat_id: int,
     update_id: int,
     scene_id: int | None = None,
+    source: Source = "command",
 ) -> None:
-    """/in only. The only place in this repo that sets persona_active=True
-    (tests/test_turn.py enforces this by grepping app/ for the literal)."""
+    """The only place in this repo that sets persona_active=True.
+
+    Two callers, both explicit user actions (plan section 13, which
+    amends Phase 1's "/in only"): the /in command, and 2e's
+    «Я в порядке, продолжаем» button. They share this function rather
+    than each flipping the flag, which is what keeps
+    tests/test_turn.py's grep-the-source invariant down to a single
+    call site -- the strongest form the rule can take.
+
+    `source` is what separates them in the audit log: a typed command
+    versus a button press.
+    """
     async with sessionmaker() as session:
         already_handled = await _get_assistant_row(session, update_id)
     if already_handled is None:
         async with sessionmaker() as session:
-            # Always "command": /in is the only caller and a pause word
-            # can never resume the persona (plan section 7).
-            await update_state(session, "persona_active", True, "command")
+            # A pause word can never reach here: only /in and the
+            # welfare button call this (plan sections 7 and 13).
+            await update_state(session, "persona_active", True, source)
 
     await _send_canned_reply(
         sessionmaker,
@@ -562,6 +716,7 @@ async def run(
     web_search: bool = False,
     kind: str = CHAT_KIND,
     extra_flags: list[str] | None = None,
+    cheap_provider: LLMProvider | None = None,
 ) -> None:
     """Run one idempotent chat turn. See module and plan sections 7/8 docs.
 
@@ -714,11 +869,57 @@ async def run(
                     update_id=update_id,
                 )
         started_at = time.monotonic()
-        response = await _complete_with_retries(
-            provider, messages, update_id=update_id, web_search=web_search
+
+        # 2e: the welfare classifier runs concurrently with the main
+        # generation, not before it. On an ordinary turn it therefore
+        # adds no latency at all -- the reply was already waiting on the
+        # slower of the two calls.
+        run_welfare = (
+            cheap_provider is not None and user_state.persona_active and level != "hard"
         )
+        if run_welfare:
+            async with sessionmaker() as session:
+                welfare_context = await _welfare_context(session, update_id)
+            response, (verdict, welfare_usage) = await asyncio.gather(
+                _complete_with_retries(
+                    provider, messages, update_id=update_id, web_search=web_search
+                ),
+                welfare.classify(cheap_provider, settings, welfare_context, user_text),
+            )
+        else:
+            verdict, welfare_usage = welfare.Verdict(), None
+            response = await _complete_with_retries(
+                provider, messages, update_id=update_id, web_search=web_search
+            )
     finally:
         await stop_typing(typing_task)
+
+    # The classifier's own call is ledgered whatever it concluded: it
+    # was billed, so it is recorded.
+    if welfare_usage is not None:
+        async with sessionmaker() as session:
+            await _ledger_only(
+                session,
+                response=welfare_usage,
+                settings=settings,
+                local_date=local_date_for(user_state.timezone),
+                category=welfare.WELFARE_CATEGORY,
+            )
+
+    if verdict.is_real(settings):
+        await run_welfare_turn(
+            sessionmaker,
+            bot,
+            settings,
+            cheap_provider,
+            chat_id=chat_id,
+            update_id=update_id,
+            user_text=user_text,
+            scene_id=scene_id,
+            discarded=response,
+            timezone=user_state.timezone,
+        )
+        return
 
     if response is None:
         await send_reply(bot, chat_id, FAILURE_REPLY_TEXT)

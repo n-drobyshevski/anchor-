@@ -1,4 +1,4 @@
-# Anchor — Milestone 2d
+# Anchor — Milestone 2e
 
 A private, single-user Telegram bot.
 
@@ -67,6 +67,36 @@ Milestone 2d adds the daily ritual the rest is built around:
   overwrite what you just set.
 - **Extended `/state`** with focus, streak, last check-in, due action,
   memory count, and today's spend broken down by category.
+
+Milestone 2e adds the welfare check — the one place where the bot is
+meant to stop being Anchor:
+
+- A cheap classifier runs **beside** each in-character generation, so on
+  an ordinary turn it adds no latency: the reply was already waiting on
+  the slower of the two calls.
+- On real, out-of-scene distress the persona reply is **discarded
+  unsent** (its cost is still ledgered — the money left whether the
+  words did or not), the persona switches off, and a plain, warm
+  out-of-character message goes out with two buttons.
+- It **fails open**. A classifier that times out, errors, or returns
+  something unparseable lets the normal reply through. A check meant to
+  catch a case the persona would mishandle must not become a new way
+  for the bot to break.
+- It **fails toward `real`**. The prompt says to choose `real` when
+  torn and `WELFARE_MIN_CONF` is 0.6, because the errors aren't
+  symmetric: a false positive is a warm message dismissed with a button,
+  a false negative is the persona pushing someone who isn't okay.
+
+Both halves of a welfare exchange are excluded from the extractor,
+scene summaries, memory and the journal. The reply is written
+`kind='welfare', ooc=True`; the message that *triggered* it was stored
+as ordinary chat before anyone knew, so it is retagged the same way
+before the turn returns.
+
+`persona_active` can only be set back to true by `/in` or the
+«Я в порядке, продолжаем» button (plan §13). Both route through the
+same `run_resume`, which is what keeps `tests/test_turn.py`'s
+grep-the-whole-source invariant down to a single call site.
 
 ### Pause words still come first
 
