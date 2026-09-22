@@ -102,3 +102,71 @@ def test_mode_is_checked_before_missing_credentials():
     wrong ones."""
     with pytest.raises(SystemExit, match="MODE must be one of"):
         check_runtime_settings(_settings(MODE="polllling", TELEGRAM_BOT_TOKEN=""))
+
+
+# --- whitespace and the secret-token charset ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "padded",
+    ["abc123 ", " abc123", "abc123\n", "abc123\r\n", "\tabc123\t"],
+)
+def test_surrounding_whitespace_is_stripped_from_credentials(padded):
+    """A pasted value carries whatever the dashboard or shell attached
+    to it. `openssl rand -hex 32` ends in a newline and a Windows
+    clipboard adds CR; neither is part of the credential."""
+    settings = _settings(TELEGRAM_SECRET_TOKEN=padded, OPENROUTER_API_KEY=padded)
+    assert settings.TELEGRAM_SECRET_TOKEN == "abc123"
+    assert settings.OPENROUTER_API_KEY == "abc123"
+
+
+def test_a_whitespace_padded_secret_token_is_accepted():
+    """The exact production failure: a 64-char hex secret rejected as
+    outside Telegram's charset because a space rode along with it."""
+    check_runtime_settings(
+        _settings(
+            MODE="webhook",
+            TELEGRAM_SECRET_TOKEN="1ddda22978cf2059532d1316e5506f267f5934e49045d8f ",
+            PUBLIC_URL="https://x.up.railway.app",
+        )
+    )
+
+
+def test_database_url_scheme_rewrite_still_runs_after_stripping():
+    """The strip validator is mode="before", so it must not displace the
+    asyncpg rewrite, which compares a prefix."""
+    settings = _settings(DATABASE_URL="  postgresql://u:p@h/db\n")
+    assert settings.DATABASE_URL == "postgresql+asyncpg://u:p@h/db"
+
+
+def test_a_genuinely_malformed_secret_token_is_rejected():
+    with pytest.raises(SystemExit, match="Telegram's charset"):
+        check_runtime_settings(
+            _settings(
+                MODE="webhook",
+                TELEGRAM_SECRET_TOKEN="abc\ndef",  # inner break survives stripping
+                PUBLIC_URL="https://x.up.railway.app",
+            )
+        )
+
+
+def test_rejecting_a_malformed_secret_token_never_prints_it():
+    """A pydantic field validator rendered the offending value into the
+    error, which put a live webhook secret into the deploy logs. Nothing
+    that validates a credential may echo it."""
+    secret = "1ddda22978cf\n2059532d1316e5506f267f5934e49045d8f"
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_runtime_settings(
+            _settings(MODE="webhook", TELEGRAM_SECRET_TOKEN=secret, PUBLIC_URL="https://x.up.railway.app")
+        )
+
+    message = str(excinfo.value)
+    assert "1ddda22978cf" not in message
+    assert "2059532d1316" not in message
+
+
+def test_constructing_settings_with_a_malformed_secret_no_longer_raises():
+    """Settings() itself must stay quiet: it is built all over the suite,
+    and a raising validator is also what leaked the value."""
+    assert Settings(TELEGRAM_SECRET_TOKEN="abc\ndef").TELEGRAM_SECRET_TOKEN == "abc\ndef"

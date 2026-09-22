@@ -21,6 +21,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Telegram's own charset for the webhook secret token.
 _SECRET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
+# Values that arrive by copy-paste and must not carry stray whitespace.
+_STRIPPED_FIELDS = (
+    "MODE",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_SECRET_TOKEN",
+    "PUBLIC_URL",
+    "DATABASE_URL",
+    "OPENROUTER_API_KEY",
+    "LLM_MODEL",
+    "LLM_DATA_COLLECTION",
+    "TZ_DEFAULT",
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -62,14 +75,23 @@ class Settings(BaseSettings):
             return "postgresql+asyncpg://" + value[len("postgresql://") :]
         return value
 
-    @field_validator("TELEGRAM_SECRET_TOKEN")
+    @field_validator(*_STRIPPED_FIELDS, mode="before")
     @classmethod
-    def _validate_secret_token_charset(cls, value: str) -> str:
-        if value and not _SECRET_TOKEN_RE.match(value):
-            raise ValueError(
-                "TELEGRAM_SECRET_TOKEN must match Telegram's charset ^[A-Za-z0-9_-]{1,256}$"
-            )
-        return value
+    def _strip_surrounding_whitespace(cls, value):
+        """Trim whitespace a dashboard or a shell added to a pasted value.
+
+        `openssl rand -hex 32` ends in a newline, a dashboard field can
+        keep a trailing space, and a Windows clipboard adds CR. None of
+        those are part of the credential, but all of them travel with
+        it, and the resulting failure is opaque: an API key with a
+        trailing CR is rejected as unauthorized by the vendor, not as
+        malformed by us.
+
+        mode="before" so this runs ahead of the other validators on
+        these fields -- notably the DATABASE_URL scheme rewrite, which
+        does a prefix comparison.
+        """
+        return value.strip() if isinstance(value, str) else value
 
 
 def get_settings() -> Settings:
@@ -134,4 +156,19 @@ def check_runtime_settings(settings: Settings) -> None:
             + ", ".join(missing)
             + ". Set them in the deployment environment (or .env locally); "
             "see .env.example for the full list."
+        )
+
+    # Checked here rather than as a validator on the field, because a
+    # pydantic ValidationError renders the offending input_value into
+    # the message -- which put a live webhook secret into the platform's
+    # deploy logs, where anyone with read access to the project can see
+    # it. Nothing that validates a credential may echo it.
+    token = settings.TELEGRAM_SECRET_TOKEN
+    if token and not _SECRET_TOKEN_RE.match(token):
+        raise SystemExit(
+            "TELEGRAM_SECRET_TOKEN must match Telegram's charset "
+            "^[A-Za-z0-9_-]{1,256}$ (the value is deliberately not shown). "
+            "Surrounding whitespace is stripped automatically, so this means "
+            "the value itself contains a character outside that set -- most "
+            "often a line break from a multi-line paste."
         )
