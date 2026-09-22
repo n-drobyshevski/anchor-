@@ -120,13 +120,23 @@ def test_surrounding_whitespace_is_stripped_from_credentials(padded):
     assert settings.OPENROUTER_API_KEY == "abc123"
 
 
+# A deliberately synthetic stand-in for the value that caused the
+# production failure: 64 hex characters, the shape `openssl rand -hex 32`
+# produces, carrying the trailing space that broke the charset check. The
+# repeating pattern keeps it under every secret scanner's entropy
+# threshold -- the previous fixture was random-looking hex and gitleaks
+# reported it as a live credential, which is noise a manual scan cannot
+# afford.
+PADDED_HEX_SECRET = "deadbeef" * 8 + " "
+
+
 def test_a_whitespace_padded_secret_token_is_accepted():
     """The exact production failure: a 64-char hex secret rejected as
     outside Telegram's charset because a space rode along with it."""
     check_runtime_settings(
         _settings(
             MODE="webhook",
-            TELEGRAM_SECRET_TOKEN="1ddda22978cf2059532d1316e5506f267f5934e49045d8f ",
+            TELEGRAM_SECRET_TOKEN=PADDED_HEX_SECRET,
             PUBLIC_URL="https://x.up.railway.app",
         )
     )

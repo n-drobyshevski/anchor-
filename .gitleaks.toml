@@ -1,0 +1,35 @@
+# gitleaks configuration for Anchor.
+#
+# gitleaks is a developer tool, not a project dependency: it is run by hand
+# (`gitleaks git --redact -v --log-opts="--all"`) and never in CI. This file
+# exists so that a by-hand scan comes back clean, because a scan that always
+# reports the same known finding teaches you to ignore findings.
+
+[extend]
+useDefault = true
+
+# --- 1. The superseded secret-token fixture ---------------------------------
+#
+# Commit b843fd2 ("Strip whitespace from pasted credentials; stop echoing one
+# on failure") added a settings test whose fixture was 47 random-looking hex
+# characters. gitleaks' `generic-api-key` rule scored it at 3.76 entropy and
+# reported it as a live credential.
+#
+# It is not one. 47 characters is not a whole number of bytes, so no hex
+# encoder can produce it; the value occurs exactly once in the tree; and the
+# test it belongs to only asserts that a whitespace-padded token is accepted.
+# The fixture has since been replaced with an obviously synthetic
+# `"deadbeef" * 8` (tests/test_config.py), which also makes the test match its
+# own docstring -- it claims a 64-char hex secret and previously used 47.
+#
+# History is deliberately not rewritten, so a scan over `--all` still reaches
+# the old blob. This entry silences that one historical commit and nothing
+# else: `condition = "AND"` requires rule, path and commit to match together,
+# so any *new* finding in the same file is still reported, and this rule still
+# fires everywhere else in the history.
+[[allowlists]]
+description = "Superseded synthetic secret-token fixture in tests/test_config.py"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/test_config\.py$''']
+commits = ["b843fd251ae41623fa63719b3b8f00a262807594"]
