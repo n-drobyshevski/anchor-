@@ -6,15 +6,28 @@
 - rows from a Telegram-origin turn (both the user's and the reply) are
   mirrored
 - the cursor only moves forward and repeat polls do not republish
+- the second, state_change cursor: a mapped field publishes
+  publish_invalidate(topic), an unmapped one publishes nothing, and it
+  gets the same startup/reset semantics as the message cursor
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 
-from app.db.models import Message, TelegramUpdate
+from app.db.models import Message, StateChange, TelegramUpdate
+from app.web import tail as tail_module
 from app.web.hub import WebHub
-from app.web.tail import _max_message_id, _tail_once
+from app.web.tail import (
+    STATE_CHANGE_FIELD_TOPIC,
+    _max_message_id,
+    _max_state_change_id,
+    _tail_once,
+    _tail_state_change_once,
+    start_tail,
+    stop_tail,
+)
 
 NOW = datetime.datetime.now(datetime.timezone.utc)
 
@@ -282,3 +295,175 @@ async def test_a_stale_unsent_row_no_longer_blocks_the_cursor_forever(sessionmak
         cursor = await _tail_once(session, hub, 0)
 
     assert cursor == later_visible.id  # not held back by the stale row
+
+
+# --- the second cursor: state_change -> invalidate ------------------------
+
+
+async def _add_state_change(sessionmaker, *, field: str, source: str = "command") -> StateChange:
+    async with sessionmaker() as session:
+        row = StateChange(field=field, old_value=None, new_value=None, source=source)
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def test_a_mapped_field_publishes_invalidate_with_its_topic(sessionmaker):
+    await _add_state_change(sessionmaker, field="focus_on")
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        cursor = await _tail_state_change_once(session, hub, 0)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.event for e in events.backlog] == ["invalidate"]
+    assert events.backlog[0].data == {"topic": STATE_CHANGE_FIELD_TOPIC["focus_on"]}
+    assert cursor > 0
+
+
+async def test_every_distinct_topic_publishes_once_per_poll_deduplicated(sessionmaker):
+    """Low-severity finding: one `invalidate` per *distinct* topic among
+    the rows a single poll sees, not one per row -- several
+    STATE_CHANGE_FIELD_TOPIC fields share a topic (all of "state"'s
+    eight fields, "checkin"'s four, "memory"'s three), and a real update
+    routinely writes more than one of them in the same transaction/poll
+    window. Publishing every one of them would flood the hub's shared,
+    fixed-size ring buffer with events a client cannot tell apart from
+    each other and gains nothing from receiving twice."""
+    for field in STATE_CHANGE_FIELD_TOPIC:
+        await _add_state_change(sessionmaker, field=field)
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        await _tail_state_change_once(session, hub, 0)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    topics = [e.data["topic"] for e in events.backlog]
+    # One event per distinct topic, in first-seen order -- not one per
+    # row/field.
+    expected = list(dict.fromkeys(STATE_CHANGE_FIELD_TOPIC.values()))
+    assert topics == expected
+
+
+async def test_idle_run_is_mapped_to_the_memory_topic(sessionmaker):
+    """app/core/idle/undo.py's undo() restores or re-deletes memory
+    rows; a Memory screen open during an undo needs the same "refetch
+    me" signal a /forget or an extractor autowrite gets."""
+    assert STATE_CHANGE_FIELD_TOPIC["idle_run"] == "memory"
+    await _add_state_change(sessionmaker, field="idle_run", source="undo")
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        await _tail_state_change_once(session, hub, 0)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.data["topic"] for e in events.backlog] == ["memory"]
+
+
+async def test_an_unmapped_field_advances_the_cursor_but_publishes_nothing(sessionmaker):
+    # "data" (app/core/purge.py's /delete) is written in the real app
+    # but deliberately absent from STATE_CHANGE_FIELD_TOPIC -- a full
+    # wipe, not an incremental change any screen's "refetch me" story
+    # covers.
+    assert "data" not in STATE_CHANGE_FIELD_TOPIC
+    row = await _add_state_change(sessionmaker, field="data")
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        cursor = await _tail_state_change_once(session, hub, 0)
+
+    assert cursor == row.id
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert events.backlog == []
+
+
+async def test_state_change_cursor_advances_and_a_repeat_poll_republishes_nothing(sessionmaker):
+    row = await _add_state_change(sessionmaker, field="timezone")
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        cursor = await _tail_state_change_once(session, hub, 0)
+    assert cursor == row.id
+
+    async with sessionmaker() as session:
+        cursor_again = await _tail_state_change_once(session, hub, cursor)
+    assert cursor_again == cursor
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert len(events.backlog) == 1
+
+
+async def test_max_state_change_id_is_zero_on_an_empty_table(sessionmaker):
+    async with sessionmaker() as session:
+        assert await _max_state_change_id(session) == 0
+
+
+async def test_state_change_cursor_resets_when_delete_restarts_the_id_sequence(sessionmaker):
+    """Same reasoning as the message cursor's own reset test:
+    app/core/purge.py's /delete TRUNCATEs `state_change` (it is in
+    PURGED_TABLES, in the same statement as `message`) with RESTART
+    IDENTITY, so a stale in-memory cursor above the post-wipe max id
+    must reset to 0 rather than filtering out every future row."""
+    from sqlalchemy import text as sql_text
+
+    from app.core.purge import PURGED_TABLES
+
+    for _ in range(3):
+        row = await _add_state_change(sessionmaker, field="streak")
+    hub = WebHub()
+    async with sessionmaker() as session:
+        cursor = await _tail_state_change_once(session, hub, 0)
+    assert cursor == row.id
+
+    async with sessionmaker() as session:
+        await session.execute(sql_text(f"TRUNCATE TABLE {', '.join(PURGED_TABLES)} RESTART IDENTITY"))
+        await session.commit()
+
+    new_row = await _add_state_change(sessionmaker, field="streak")
+    assert new_row.id <= cursor
+
+    async with sessionmaker() as session:
+        cursor = await _tail_state_change_once(session, hub, cursor)
+
+    assert cursor == new_row.id
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    # Three pre-wipe rows collapse into a single "checkin" invalidate
+    # (one poll, one topic, per _tail_state_change_once's per-poll
+    # dedup), and the post-wipe row is a second poll -- two events, not
+    # four.
+    assert [e.data["topic"] for e in events.backlog] == ["checkin", "checkin"]
+
+
+# --- start_tail: both cursors seed at the current max id at boot --------
+
+
+async def test_start_tail_seeds_both_cursors_so_pre_boot_rows_are_never_replayed(
+    sessionmaker, monkeypatch
+):
+    """Low-severity finding: nothing regression-tested that start_tail()
+    actually reads `_max_message_id`/`_max_state_change_id` at boot
+    rather than starting both cursors at 0 -- if it stopped doing that,
+    every pre-boot message/state_change row would be replayed as
+    live/invalidate events on the first poll after every deploy, and no
+    test would have failed."""
+    await _add(sessionmaker, role="user", content="до старта", kind="chat", update_id=900)
+    await _add_state_change(sessionmaker, field="timezone")
+
+    monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
+    hub = WebHub()
+    task = await start_tail(sessionmaker, hub)
+    try:
+        await asyncio.sleep(0.05)  # let at least one poll run
+    finally:
+        await stop_tail(task)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert events.backlog == []

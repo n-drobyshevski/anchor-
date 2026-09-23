@@ -206,14 +206,102 @@ button, input, textarea {
   font-size: 0.9rem;
 }
 
+/* ---------- Shell + Nav ----------
+   The authenticated app frame around every screen (ui/Shell.js,
+   ui/Nav.js): a bottom tab bar under 900px, a left sidebar at/above
+   it. W1 has exactly one screen (#chat, below) and exactly one nav
+   item, but the layout already supports more -- Nav.js's item array
+   is what grows, not this CSS. */
+
+.shell {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nav {
+  order: 2;
+  flex: none;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.nav-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 4px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.nav-item[aria-current="page"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-label {
+  line-height: 1.1;
+}
+
+@media (min-width: 900px) {
+  .shell {
+    flex-direction: row;
+  }
+
+  .nav {
+    order: 0;
+    flex-direction: column;
+    align-items: stretch;
+    width: 220px;
+    border-top: none;
+    border-right: 1px solid var(--border);
+    padding: 16px 8px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    gap: 4px;
+  }
+
+  .nav-item {
+    /* The bar's `flex: 1` shares the width between tabs; in a column
+       it would stretch one item over the sidebar's full height. */
+    flex: none;
+    justify-content: flex-start;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 0.92rem;
+  }
+
+  .nav-item[aria-current="page"] {
+    background: var(--bubble-muted);
+  }
+}
+
 /* ---------- Chat shell ---------- */
 
 #chat {
-  height: 100dvh;
+  /* Fills .shell-screen (see "Shell + Nav" above) instead of its own
+     100dvh -- the shell as a whole is 100dvh; #chat only owns what is
+     left over once the nav bar/sidebar takes its share. */
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   max-width: 42rem;
   margin: 0 auto;
+  width: 100%;
   position: relative;
 }
 
@@ -458,9 +546,22 @@ button, input, textarea {
   align-items: flex-end;
   gap: 8px;
   padding: 10px 12px;
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  /* Below 900px the composer sits above the .nav tab bar (see "Shell +
+     Nav" above), which already pads itself by this same inset -- doing
+     it here too would double it, leaving an empty ~34px band between
+     the composer and the tab bar on a notched phone. Only at/above
+     900px, where .nav moves to the side and the composer really is the
+     bottom-most element, does #composer need to claim the inset
+     itself. */
+  padding-bottom: 10px;
   border-top: 1px solid var(--border);
   background: var(--bg);
+}
+
+@media (min-width: 900px) {
+  #composer {
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
 }
 
 #composer-input {

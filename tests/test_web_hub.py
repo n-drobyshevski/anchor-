@@ -3,6 +3,8 @@
 - Last-Event-ID replay returns only events after the given seq
 - the subscriber cap (3) raises TooManySubscribers
 - close_all() ends every live stream and clears the callback allowlist
+- publish_invalidate() rejects an unknown topic and otherwise publishes
+  an "invalidate" event carrying {"topic": ...}
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import datetime
 
 import pytest
 
-from app.web.hub import MAX_SUBSCRIBERS, TooManySubscribers, WebHub
+from app.web.hub import HubEvent, INVALIDATE_TOPICS, MAX_SUBSCRIBERS, TooManySubscribers, WebHub
 
 NOW = datetime.datetime(2026, 9, 23, tzinfo=datetime.timezone.utc)
 
@@ -149,3 +151,42 @@ def test_text_for_returns_the_most_recently_registered_text():
     assert hub.text_for(-1) == "как ты?"
     hub.register_message_text(-1, "как ты? Хорошо.")
     assert hub.text_for(-1) == "как ты? Хорошо."
+
+
+# --- publish_invalidate() ---------------------------------------------
+
+
+def test_publish_invalidate_rejects_a_topic_outside_the_closed_set():
+    hub = WebHub()
+    with pytest.raises(ValueError):
+        hub.publish_invalidate("not_a_real_topic")
+
+
+@pytest.mark.parametrize("topic", sorted(INVALIDATE_TOPICS))
+def test_publish_invalidate_accepts_every_topic_in_the_closed_set(topic):
+    hub = WebHub()
+    hub.publish_invalidate(topic)  # must not raise
+
+
+async def test_publish_invalidate_wire_shape_is_event_invalidate_with_topic():
+    """The exact SSE wire format the HTTP API contract promises:
+    `event: invalidate` / `data: {"topic": ...}` -- exercised here at
+    the hub level (routes.py's _format_sse is generic over any
+    HubEvent, so this is the whole contract)."""
+    hub = WebHub()
+    sub = hub.subscribe()
+    hub.publish_invalidate("state")
+
+    event = await asyncio.wait_for(sub.events().__anext__(), timeout=1)
+
+    assert event.event == "invalidate"
+    assert event.data == {"topic": "state"}
+    sub.close()
+
+
+def test_publish_invalidate_is_replayed_from_the_backlog_like_any_other_event():
+    hub = WebHub()
+    seq = hub.publish_invalidate("cards")
+    sub = hub.subscribe(last_event_id=seq - 1)
+    sub.close()
+    assert sub.backlog == [HubEvent(seq=seq, event="invalidate", data={"topic": "cards"})]

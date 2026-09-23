@@ -200,7 +200,19 @@ def build_middleware(settings: Settings):
                 _apply_headers(rejection, settings, path)
                 return rejection
 
-        response = await handler(request)
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            # A handler that raises (static_file's 404 for any /static/*
+            # miss, including every traversal probe) still produces a
+            # StreamResponse -- aiohttp.web.HTTPException is one -- that
+            # reaches the client without ever passing back through this
+            # function otherwise. Stamping it here too is what makes
+            # "every response to `/`, `/static/*` and `/api/*` carries
+            # these headers" (the module docstring's job 1) actually
+            # true instead of true only for a handler that returns.
+            _apply_headers(exc, settings, path)
+            raise
         _apply_headers(response, settings, path)
         return response
 

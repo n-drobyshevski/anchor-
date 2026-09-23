@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import pathlib
@@ -36,13 +37,24 @@ import uuid
 from aiogram import Bot
 from aiohttp import web
 from sqlalchemy import or_, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
 from app.core.clock import Clock
 from app.db.models import Message
 from app.web import auth, ingress, security
 from app.web.hub import TooManySubscribers, WebHub
+from app.web.http import (
+    _clear_pre_cookie,
+    _clear_session_cookie,
+    _cookie_settings,
+    _json,
+    _parse_positive_int,
+    _rate_limited,
+    _read_body,
+    _session_token_valid,
+    _set_pre_cookie,
+    _set_session_cookie,
+)
 from app.web.ratelimit import (
     LOCKOUT_ALERT_TEXT,
     MAX_PENDING_WEB_ROWS,
@@ -74,88 +86,120 @@ CODE_MESSAGE = "Код входа в веб-Anchor: {code} ({minutes} мин). �
 BLOCKED_SEND_REPLY = {"error": "blocked"}
 
 
-def _json(status: int, data: dict, *, retry_after: float | None = None) -> web.Response:
-    headers = {}
-    if retry_after is not None:
-        headers["Retry-After"] = str(max(1, int(retry_after + 0.999)))
-    return web.json_response(data, status=status, headers=headers)
-
-
-def _rate_limited(retry_after: float) -> web.Response:
-    seconds = max(1, int(retry_after + 0.999))
-    return _json(429, {"error": "rate_limited", "retry_after": seconds}, retry_after=retry_after)
-
-
-async def _read_body(request: web.Request) -> tuple[dict | None, web.Response | None]:
-    """Bounded JSON read, translated to the contract's error bodies.
-
-    Returns (body, None) on success, or (None, error_response).
-    """
-    try:
-        body = await security.read_json_bounded(request)
-    except security.LengthRequired:
-        return None, _json(411, {"error": "length_required"})
-    except security.PayloadTooLarge:
-        return None, _json(413, {"error": "payload_too_large"})
-    except security.BadJson:
-        return None, _json(400, {"error": "bad_request"})
-    return body, None
-
-
-def _cookie_settings(request: web.Request) -> tuple[Settings, async_sessionmaker, Clock, Bot]:
-    app = request.app
-    return app["settings"], app["sessionmaker"], app["clock"], app["bot"]
-
-
-async def _session_token_valid(request: web.Request) -> bool:
-    settings, sessionmaker, clock, _bot = _cookie_settings(request)
-    token = request.cookies.get(auth.SESSION_COOKIE)
-    async with sessionmaker() as session:
-        return await auth.validate_session(session, clock, settings, token)
-
-
-def _set_pre_cookie(response: web.Response, token: str, ttl_s: int) -> None:
-    response.set_cookie(
-        auth.PRE_COOKIE, token, max_age=ttl_s, path="/", secure=True, httponly=True, samesite="Strict"
-    )
-
-
-def _clear_pre_cookie(response: web.Response) -> None:
-    response.del_cookie(auth.PRE_COOKIE, path="/", secure=True, samesite="Strict")
-
-
-def _set_session_cookie(response: web.Response, token: str, settings: Settings) -> None:
-    response.set_cookie(
-        auth.SESSION_COOKIE,
-        token,
-        max_age=settings.WEB_SESSION_MAX_DAYS * 24 * 3600,
-        path="/",
-        secure=True,
-        httponly=True,
-        samesite="Strict",
-    )
-
-
-def _clear_session_cookie(response: web.Response) -> None:
-    response.del_cookie(auth.SESSION_COOKIE, path="/", secure=True, samesite="Strict")
-
-
 def _log(event: str, route: str, **extra) -> None:
     logger.info(event, extra={"event": event, "route": route, **extra})
 
 
-# --- static + index --------------------------------------------------------
+# --- static manifest --------------------------------------------------
+
+# The only extensions a `/static/{path:.+}` request may ever resolve to
+# (W1 plan step 2). `index.html` is deliberately not among them: it is
+# served only at `/` (the `index` handler below), never reachable at
+# `/static/index.html` -- omitting `.html` here is what enforces that,
+# with no separate check needed.
+_STATIC_CONTENT_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+
+# 1 MiB: generous for every file this app actually ships (the largest
+# vendored module is a few KB), and small enough that even a manifest
+# built from a directory an attacker could somehow write into cannot
+# turn `setup_web` into an unbounded-memory read.
+MAX_STATIC_FILE_BYTES = 1024 * 1024
 
 
-def _static_handler(filename: str, content_type: str):
-    path = STATIC_DIR / filename
+class _StaticFile:
+    """One `/static/*` response, fully precomputed at `setup_web` time.
 
-    async def handler(request: web.Request) -> web.StreamResponse:
-        if not path.is_file():
-            raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={"Content-Type": content_type})
+    `body` is the file's bytes -- read once, at startup, never touched
+    again. `etag_value` is the bare sha256 hex (what `aiohttp`'s parsed
+    `ETag.value` carries -- no quotes, no `W/` prefix, per RFC 9110);
+    `etag` is that same value quoted, exactly as the `ETag` response
+    header must be sent. Both change if and only if the content would.
+    """
 
-    return handler
+    __slots__ = ("body", "content_type", "etag", "etag_value")
+
+    def __init__(self, body: bytes, content_type: str) -> None:
+        self.body = body
+        self.content_type = content_type
+        self.etag_value = hashlib.sha256(body).hexdigest()
+        self.etag = f'"{self.etag_value}"'
+
+
+def _build_static_manifest(static_dir: pathlib.Path) -> dict[str, _StaticFile]:
+    """Walk `static_dir` once and return an exact-match `{relative
+    posix path: _StaticFile}` dict -- the whole reason `GET
+    /static/{path:.+}` (below) never touches the filesystem per
+    request: it is a dict lookup against this manifest, built once at
+    startup, or a 404.
+
+    Three things are deliberately excluded, none of them raising --
+    each is simply left out of the manifest, which 404s it exactly like
+    a path that was never real:
+    - a symlink (`path.is_symlink()`), checked *before* `is_file()`,
+      which itself follows symlinks and would otherwise happily read
+      through one to wherever it points;
+    - anything whose extension is not in `_STATIC_CONTENT_TYPES` --
+      `index.html`, `vendor/VENDOR.lock`, a stray `.map`, or anything
+      else that is not one of the three kinds this app ever serves;
+    - a file over `MAX_STATIC_FILE_BYTES`.
+
+    Called once, at `setup_web` time (this module's own docstring):
+    the frontend track's files may not exist yet when this runs in some
+    test processes, which is fine -- `static_dir.is_dir()` being False,
+    or simply finding nothing under it, both yield an empty manifest,
+    not an error.
+    """
+    manifest: dict[str, _StaticFile] = {}
+    if not static_dir.is_dir():
+        return manifest
+    for path in sorted(static_dir.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        content_type = _STATIC_CONTENT_TYPES.get(path.suffix.lower())
+        if content_type is None:
+            continue
+        try:
+            if path.stat().st_size > MAX_STATIC_FILE_BYTES:
+                continue
+            body = path.read_bytes()
+        except OSError:
+            continue
+        rel = path.relative_to(static_dir).as_posix()
+        manifest[rel] = _StaticFile(body=body, content_type=content_type)
+    return manifest
+
+
+async def static_file(request: web.Request) -> web.StreamResponse:
+    """`GET /static/{path:.+}`: an exact-match lookup against the
+    manifest `setup_web` built, or 404 -- never a filesystem read, and
+    never anything resembling `..`-traversal, a percent-encoded
+    variant, an absolute path or a directory, since none of those are
+    ever a *key* the manifest contains (aiohttp decodes the path before
+    handing it to this handler, but a decoded traversal string is still
+    just a string this dict does not have).
+    """
+    manifest: dict[str, _StaticFile] = request.app["web_static_manifest"]
+    entry = manifest.get(request.match_info["path"])
+    if entry is None:
+        raise web.HTTPNotFound()
+    # aiohttp parses If-None-Match into a list of ETag(value, is_weak)
+    # per RFC 9110 -- a weak comparison (a proxy that gzips the body and
+    # rewrites the validator to W/"<sha>"), a comma-separated list, or
+    # "*" (also from ETag.value, unquoted, same as entry.etag_value)
+    # must all still 304. Comparing the raw header string against our
+    # quoted etag (the old code's `==`) matched none of those, so a
+    # compressing proxy/CDN in front of this app defeated revalidation
+    # entirely -- every load re-downloaded every module.
+    inm = request.if_none_match
+    if inm is not None and any(tag.value in (entry.etag_value, "*") for tag in inm):
+        return web.Response(status=304, headers={"ETag": entry.etag})
+    return web.Response(
+        body=entry.body, headers={"Content-Type": entry.content_type, "ETag": entry.etag}
+    )
 
 
 async def index(request: web.Request) -> web.StreamResponse:
@@ -335,16 +379,6 @@ async def logout(request: web.Request) -> web.Response:
 
 
 # --- GET /api/history ----------------------------------------------------
-
-
-def _parse_positive_int(raw: str | None, default: int | None) -> int | None:
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 async def history(request: web.Request) -> web.Response:
@@ -617,11 +651,17 @@ def setup_web(
     app["web_rate_limiter"] = WebRateLimiter(clock)
     app["web_passphrase_lock"] = asyncio.Lock()
     app["web_passphrase_waiters"] = {"n": 0}
+    # Built once, here, not per-request: see _build_static_manifest's
+    # docstring for why this is what keeps GET /static/{path:.+} off
+    # the filesystem entirely. Built from whatever exists under
+    # STATIC_DIR at this exact moment, so it picks up the frontend
+    # track's app/**/*.js files whenever setup_web happens to run after
+    # they have landed -- and an empty vendor/app dir (a test process
+    # that never wrote them) just means an empty manifest, not an error.
+    app["web_static_manifest"] = _build_static_manifest(STATIC_DIR)
 
     app.router.add_get("/", index)
-    app.router.add_get("/static/app.js", _static_handler("app.js", "text/javascript; charset=utf-8"))
-    app.router.add_get("/static/app.css", _static_handler("app.css", "text/css; charset=utf-8"))
-    app.router.add_get("/static/icon.svg", _static_handler("icon.svg", "image/svg+xml"))
+    app.router.add_get("/static/{path:.+}", static_file)
 
     app.router.add_get("/api/me", me)
     app.router.add_post("/api/auth/passphrase", auth_passphrase)

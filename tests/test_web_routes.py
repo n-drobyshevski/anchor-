@@ -578,3 +578,214 @@ async def test_sse_replays_backlog_and_streams_a_live_event(sessionmaker, monkey
     assert toast_data["text"] == "подсказка"
 
     assert ": ka" in text  # the keepalive fired at least once in the interval
+
+
+# --- GET /static/{path:.+}: the manifest (W1 plan step 2) ---
+
+# These tests point `routes_module.STATIC_DIR` at a throwaway directory
+# they build themselves, so the manifest's mechanics (content types,
+# 304, every 404 shape) are exercised deterministically -- independent
+# of whatever the frontend track has or has not written under the real
+# app/web/static/ yet.
+
+
+def _write_static_tree(base):
+    (base / "app").mkdir()
+    (base / "vendor").mkdir()
+    (base / "app" / "main.js").write_text("console.log('hi');", encoding="utf-8")
+    (base / "app.css").write_text("body { color: red }", encoding="utf-8")
+    (base / "icon.svg").write_text("<svg></svg>", encoding="utf-8")
+    (base / "vendor" / "preact.module.js").write_text("export {};", encoding="utf-8")
+    (base / "vendor" / "VENDOR.lock").write_text("{}", encoding="utf-8")
+    (base / "index.html").write_text("<html></html>", encoding="utf-8")
+    (base / "app" / "big.js").write_bytes(b"x" * (1024 * 1024 + 1))
+    return base
+
+
+def _build_static_app(monkeypatch, sessionmaker, static_dir):
+    monkeypatch.setattr(routes_module, "STATIC_DIR", static_dir)
+    bot, _fake = make_bot()
+    app, _hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    return app
+
+
+async def test_static_serves_js_css_svg_with_correct_content_types(
+    sessionmaker, tmp_path, monkeypatch
+):
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/static/app/main.js")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/javascript; charset=utf-8"
+        assert (await resp.read()) == b"console.log('hi');"
+
+        resp = await client.get("/static/app.css")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/css; charset=utf-8"
+
+        resp = await client.get("/static/icon.svg")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/svg+xml"
+
+        resp = await client.get("/static/vendor/preact.module.js")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/javascript; charset=utf-8"
+
+
+async def test_static_304_on_matching_if_none_match(sessionmaker, tmp_path, monkeypatch):
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        first = await client.get("/static/app/main.js")
+        etag = first.headers["ETag"]
+        assert etag
+
+        second = await client.get("/static/app/main.js", headers={"If-None-Match": etag})
+        assert second.status == 304
+        assert second.headers["ETag"] == etag
+        assert (await second.read()) == b""
+
+        third = await client.get(
+            "/static/app/main.js", headers={"If-None-Match": '"stale-etag"'}
+        )
+        assert third.status == 200
+
+        # Low-severity finding: a proxy/CDN that recompresses the body
+        # weakens the validator to W/"<sha>" (still the same sha256, per
+        # RFC 9110's weak-comparison rule this uses `.value` for, not
+        # `==` on the raw header), and a client may send a
+        # comma-separated list rather than one value -- either used to
+        # miss a 304 entirely because the old check compared the raw
+        # header string to the quoted ETag by exact equality.
+        weak = await client.get(
+            "/static/app/main.js", headers={"If-None-Match": f'W/{etag}'}
+        )
+        assert weak.status == 304
+
+        listed = await client.get(
+            "/static/app/main.js", headers={"If-None-Match": f'"other-etag", {etag}'}
+        )
+        assert listed.status == 304
+
+        wildcard = await client.get("/static/app/main.js", headers={"If-None-Match": "*"})
+        assert wildcard.status == 304
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/static/does-not-exist.js",  # missing
+        "/static/vendor/VENDOR.lock",  # disallowed extension
+        "/static/app",  # a directory, no trailing slash
+        "/static/app/",  # a directory, trailing slash
+        "/static//etc/passwd",  # an absolute-looking embedded path
+        "/static/index.html",  # served only at "/", never under /static/
+        "/static/app/big.js",  # over the 1 MiB cap
+    ],
+)
+async def test_static_404_for_traversal_missing_and_disallowed_paths(
+    sessionmaker, tmp_path, monkeypatch, path
+):
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(path)
+        assert resp.status == 404
+
+
+@pytest.mark.parametrize(
+    "raw_path",
+    [
+        "/static/%2e%2e/app.css",  # percent-encoded ".." segment
+        "/static/%2e%2e%2fapp.css",  # percent-encoded ".." + slash
+        "/static/app%2f..%2fapp.css",  # fully percent-encoded traversal
+    ],
+)
+async def test_static_404_for_percent_encoded_traversal(
+    sessionmaker, tmp_path, monkeypatch, raw_path
+):
+    """Low-severity finding: these were checked manually against the
+    real handler (they do 404, since the decoded string is simply not a
+    key `_build_static_manifest` ever populated) but nothing regression-
+    tested it. A *literal* "app/../app.css" is not a meaningful case to
+    add alongside these: `yarl.URL.join` (what both a real browser's
+    fetch() and this test's own client use to build the request line)
+    normalizes a dot segment away before any request is ever sent, with
+    or without `encoded=True` -- by the time any conforming HTTP client
+    could send it, it already reads "app.css", a real file, not a
+    traversal attempt. Percent-encoding is what survives that
+    normalization and is what `yarl.URL(..., encoded=True)` lets this
+    test's request line actually carry unnormalized, exactly as
+    aiohttp's own request-line decoding would see it."""
+    from yarl import URL
+
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(URL(raw_path, encoded=True))
+        assert resp.status == 404
+
+
+async def test_static_404_carries_security_headers(sessionmaker, tmp_path, monkeypatch):
+    """Low-severity finding: a raised web.HTTPNotFound() used to reach
+    the client with no security headers at all, because the middleware
+    only stamped them onto a *returned* response, never one that
+    propagated out of `await handler(request)` as an exception -- every
+    /static/* miss, including every traversal probe above, was served
+    with no nosniff and no CSP."""
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/static/vendor/VENDOR.lock")
+        assert resp.status == 404
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["Content-Security-Policy"]
+
+
+async def test_static_skips_a_symlink(sessionmaker, tmp_path, monkeypatch):
+    _write_static_tree(tmp_path)
+    target = tmp_path / "app" / "main.js"
+    link = tmp_path / "app" / "linked.js"
+    link.symlink_to(target)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/static/app/linked.js")
+        assert resp.status == 404
+
+
+async def test_static_security_headers_present(sessionmaker, tmp_path, monkeypatch):
+    _write_static_tree(tmp_path)
+    app = _build_static_app(monkeypatch, sessionmaker, tmp_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/static/app/main.js")
+        assert resp.status == 200
+        assert resp.headers["Content-Security-Policy"]
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["Cache-Control"] == "no-cache"
+
+
+async def test_static_security_headers_present_on_the_real_shipped_files(sessionmaker):
+    """Same assertion as the isolated test above, but against whatever
+    the real app/web/static/ tree actually contains right now -- per
+    the task brief, `app/**/*.js` may not exist yet (a concurrent
+    track's job), so this picks whichever real `.js` file it finds
+    under `static/app/` or `static/vendor/` instead of hardcoding
+    `app/main.js`.
+    """
+    real_static = routes_module.STATIC_DIR
+    candidates = sorted((real_static / "app").rglob("*.js")) + sorted(
+        (real_static / "vendor").rglob("*.js")
+    )
+    if not candidates:
+        pytest.skip("no real static .js file exists yet under app/web/static/")
+    rel = candidates[0].relative_to(real_static).as_posix()
+
+    bot, _fake = make_bot()
+    app, _hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(f"/static/{rel}")
+        assert resp.status == 200
+        assert resp.headers["Content-Security-Policy"]
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["Cache-Control"] == "no-cache"

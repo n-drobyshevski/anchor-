@@ -35,6 +35,17 @@ from typing import AsyncIterator
 RING_BUFFER_SIZE = 200
 MAX_SUBSCRIBERS = 3
 
+# The closed set of topics a screen may subscribe to invalidate-on
+# (W1 plan step 2). Closed, not an open string, because an SSE
+# `invalidate` event exists to tell a *specific* screen "refetch your
+# own data" -- a typo'd or made-up topic would silently mean "no screen
+# ever refetches for this", which is exactly the kind of bug a
+# ValueError at the publish call site catches immediately instead of
+# shipping quietly. app/web/tail.py's STATE_CHANGE_FIELD_TOPIC is the
+# one producer in this track that publishes through here; no W1 screen
+# consumes it yet (tests cover the wire format only).
+INVALIDATE_TOPICS = frozenset({"state", "memory", "proposals", "checkin", "cards"})
+
 # A sentinel distinct from `None`, which is itself a meaningful value for
 # `keyboard` (an edit that *clears* the buttons). publish_edit() uses this
 # to tell "this field did not change, omit it" apart from "this field
@@ -59,7 +70,7 @@ class HubEvent:
     """One SSE frame. `seq` is both the `id:` line and the replay key."""
 
     seq: int
-    event: str  # "message" | "edit" | "typing" | "toast"
+    event: str  # "message" | "edit" | "typing" | "toast" | "invalidate"
     data: dict
 
 
@@ -198,6 +209,19 @@ class WebHub:
 
     def publish_toast(self, text: str) -> int:
         return self._publish("toast", {"text": text})
+
+    def publish_invalidate(self, topic: str) -> int:
+        """Tell every live SSE stream "refetch `topic`'s own data" --
+        not a payload of what changed, just which screen's GET should
+        re-run. `topic` must be one of `INVALIDATE_TOPICS`; anything
+        else raises ValueError rather than publishing an event no
+        screen was ever going to recognize (this module's own
+        docstring on INVALIDATE_TOPICS explains why that is a raise,
+        not a silent no-op).
+        """
+        if topic not in INVALIDATE_TOPICS:
+            raise ValueError(f"unknown invalidate topic {topic!r}")
+        return self._publish("invalidate", {"topic": topic})
 
     # --- subscribing: track 2's GET /api/events ---
 
