@@ -11,27 +11,29 @@
 // the remount's fresh loadHistory() and a live event racing it could
 // land in the wrong order, because nothing reset the gate on unmount
 // (only a login/logout does). Keeping Chat mounted avoids both --
-// State/Proposals stay mount-per-visit, since neither owns
+// State/Memory/Proposals stay mount-per-visit, since none of them owns
 // unrecoverable per-visit state the way Chat's log/composer do, and
 // each already refetches on mount via hooks.js's useAutoRefetch.
 import { html } from '../html.js';
 import { Chat } from '../screens/Chat.js';
 import { State } from '../screens/State.js';
+import { Memory } from '../screens/Memory.js';
 import { Proposals } from '../screens/Proposals.js';
 import { route } from '../store.js';
 import { Nav } from './Nav.js';
 
-// A later screen that should behave like State/Proposals (mount only
-// while active) adds its hash here and to ui/Nav.js's NAV_ITEMS --
+// A later screen that should behave like State/Memory/Proposals (mount
+// only while active) adds its hash here and to ui/Nav.js's NAV_ITEMS --
 // nowhere else, since router.js already normalizes any hash outside
 // KNOWN_ROUTES back to '#/chat'.
 const OTHER_SCREENS = {
   '#/state': State,
+  '#/memory': Memory,
   '#/proposals': Proposals,
 };
 
 export function Shell() {
-  const isChat = route.value !== '#/state' && route.value !== '#/proposals';
+  const isChat = route.value !== '#/state' && route.value !== '#/memory' && route.value !== '#/proposals';
   const OtherScreen = OTHER_SCREENS[route.value];
   return html`
     <div id="shell" class="shell">

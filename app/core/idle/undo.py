@@ -15,6 +15,14 @@ Refuses (never raises) a run that is not reversible, not `done`, already
 undone, or older than `IDLE_UNDO_DAYS`. 6a tests this against synthetic
 `idle_change` rows on `memory` and `notebook_entry`; the real writers
 (consolidate, reflect) arrive in 6b.
+
+**A merge group is one conflict unit (W3 finding).** A consolidate
+merge's `supersede` changes each compare clean against their own
+row's state even after the user edits or pins the *merged* row they
+fed into -- neither of those touches the original rows at all. Without
+`_conflicted_merge_targets`'s pre-scan, undo would restore the
+originals to active right next to the user's post-merge change,
+duplicating the fact the merge was meant to consolidate.
 """
 
 from __future__ import annotations
@@ -134,6 +142,45 @@ async def _apply_one(session: AsyncSession, change: IdleChange) -> bool:
     return False
 
 
+async def _conflicted_merge_targets(session: AsyncSession, changes: list[IdleChange]) -> set[int]:
+    """Which `insert`-op memory ids in `changes` can no longer be safely
+    un-inserted -- gone, or their current state has drifted from what
+    the run wrote (W3 finding).
+
+    A consolidate merge logs one `insert` (the merged row) plus one
+    `supersede` per original it replaced, all pointing `superseded_by`
+    at that same insert. `_apply_one` processes changes newest-first, so
+    it reaches those `supersede` rows *before* the `insert` -- and a
+    `supersede` change's own before/after never mentions the merged row
+    beyond its id, only the original's own fields, so a later edit or
+    pin of the *merged* row (which touches only the merged row's own
+    state) does not, by itself, make any `supersede` change look
+    conflicted. Left alone, undo would restore the originals to active
+    right next to the user's post-merge edit or pin -- exactly the
+    duplicate-facts case this pre-scan exists to catch, applying plan
+    section 7's "часть изменений уже перезаписана" to the whole merge
+    group rather than row by row.
+
+    Deliberately narrower than `_apply_one`'s own insert-branch check:
+    it does not also treat "another row's superseded_by still points at
+    it" as a conflict here, because at pre-scan time that is true of
+    *every* live, not-yet-undone consolidate merge (the originals still
+    point at it) -- that third check only means something once this
+    group's own `supersede` changes have actually been applied or
+    skipped, which is `_apply_one`'s own job during the real pass below,
+    not this one.
+    """
+    conflicted: set[int] = set()
+    for change in changes:
+        if change.table_name != "memory" or change.op != "insert" or change.after is None:
+            continue
+        row = await session.get(Memory, change.row_id)
+        current = _row_state(row) if row is not None else None
+        if _comparable("memory", current) != _comparable("memory", change.after):
+            conflicted.add(change.row_id)
+    return conflicted
+
+
 async def undo_run(
     session: AsyncSession, settings: Settings, run_id: int, *, clock: Clock
 ) -> UndoResult:
@@ -157,10 +204,24 @@ async def undo_run(
         select(IdleChange).where(IdleChange.run_id == run_id).order_by(IdleChange.id.desc())
     )
     changes = list(result.scalars().all())
+    conflicted_merge_targets = await _conflicted_merge_targets(session, changes)
 
     restored = 0
     conflicts = 0
     for change in changes:
+        # A supersede feeding a merged/edited row whose own insert is
+        # already known-conflicted (see _conflicted_merge_targets) is
+        # skipped here too, before `_apply_one` ever gets to it -- that
+        # function's own per-row check has no way to see this, since
+        # this row's own before/after never changed.
+        if (
+            change.table_name == "memory"
+            and change.op == "supersede"
+            and change.after is not None
+            and change.after.get("superseded_by") in conflicted_merge_targets
+        ):
+            conflicts += 1
+            continue
         if await _apply_one(session, change):
             restored += 1
         else:

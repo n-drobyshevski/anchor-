@@ -7,7 +7,7 @@
 // data-fetching library: screens still own their own `useState` for
 // the fetched value, loading and error handling: this only wires the
 // two extra triggers so each screen does not repeat the same wiring.
-import { useEffect } from '../vendor/hooks.module.js';
+import { useEffect, useRef } from '../vendor/hooks.module.js';
 import { invalidate } from './store.js';
 
 // `topic` is a single topic string, or an array of them -- State.js
@@ -27,23 +27,33 @@ export function useAutoRefetch(topic, reload) {
   // mechanism, which only tracks `.value` reads made while rendering.
   const current = invalidate.value;
 
+  // `reload` is a fresh closure every render (it captures the screen's
+  // own setState calls and, for a filterable list like Memory.js, the
+  // filter state those calls read) -- kept in a ref, updated on every
+  // render, so the effects below (which intentionally register their
+  // listener/subscribe only once, per their own comments) call
+  // *today's* reload rather than the one closed over back at mount
+  // (W3 finding: without this, a screen with filters refetched the
+  // unfiltered first page on every tab refocus, silently dropping
+  // whatever kind/pinned filter and "Показать ещё" pages were loaded).
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
   useEffect(() => {
-    reload();
-    // Intentionally once per mount only -- `reload` is a fresh closure
-    // every render (it captures the screen's own setState calls), so
-    // including it here would refetch on every render instead of only
-    // the triggers this hook exists for.
+    reloadRef.current();
+    // Intentionally once per mount only -- see reloadRef above for why
+    // this still calls the current reload despite the empty deps.
     // eslint-disable-next-line
   }, []);
 
   useEffect(() => {
-    if (current && (current.topic === '*' || topics.includes(current.topic))) reload();
+    if (current && (current.topic === '*' || topics.includes(current.topic))) reloadRef.current();
     // eslint-disable-next-line
   }, [current]);
 
   useEffect(() => {
     function onVisibilityChange() {
-      if (document.visibilityState === 'visible') reload();
+      if (document.visibilityState === 'visible') reloadRef.current();
     }
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);

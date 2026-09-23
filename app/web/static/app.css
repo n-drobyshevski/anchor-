@@ -887,3 +887,188 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   background: var(--danger);
   color: #fff;
 }
+
+/* ---------- Memory (screens/Memory.js) ---------- */
+
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* The confirm button in the forget dialog: filled red, not the accent
+   green with red text that btn-primary + btn-danger would otherwise give. */
+.btn-primary.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+
+.memory-counter {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* Shared by the header's pinned-cap counter and every char counter
+   (AddForm, the inline edit textarea) once the value crosses its
+   limit -- both are aria-live="polite" already (see Memory.js), this
+   is only the visual half of that same "over limit" signal. */
+.char-counter {
+  margin: 0;
+  align-self: flex-end;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.char-counter-over {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  color: var(--text);
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.chip:hover:not(:disabled) { border-color: var(--accent); }
+
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  width: 100%;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-card {
+  gap: 6px;
+}
+
+.kind-chip {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--bubble-muted);
+  color: var(--bubble-muted-text);
+  white-space: nowrap;
+}
+
+/* Pin toggle: a plain <button> (aria-pressed carries the state, the
+   same reasoning as .switch above) rather than a checkbox input, kept
+   dim until pinned so the row of cards is not dominated by pins. */
+.pin-toggle {
+  background: none;
+  border: none;
+  padding: 4px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.35;
+  flex: none;
+}
+
+.pin-toggle:hover:not(:disabled) { opacity: 0.7; }
+
+.pin-toggle[aria-pressed="true"] {
+  opacity: 1;
+}
+
+.pin-toggle:disabled { cursor: default; }
+
+.add-form select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.95rem;
+  width: 100%;
+}
+
+/* Native <dialog> (Memory.js's ForgetDialog): showModal() puts it in
+   the top layer, so it centers itself over everything (including the
+   nav bar) regardless of where it sits in the document -- this only
+   styles its box and ::backdrop, not its position.
+
+   Box styles (background/border/padding/width) stay on the bare
+   selector -- harmless while closed, since `display: none` hides them
+   regardless. `display: flex` does not: the UA's own `dialog:not([open])
+   { display: none }` only wins a tie by *source order*, and this rule
+   came later, so it overrode the UA rule and left the closed dialog
+   rendered as an empty box (W3 finding). Scoping the layout to
+   `[open]` is what a closed <dialog> needs to actually be `display:
+   none` again. */
+.confirm-dialog {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  max-width: 22rem;
+  width: calc(100% - 32px);
+}
+
+.confirm-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.confirm-dialog h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.confirm-dialog p {
+  margin: 0;
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}

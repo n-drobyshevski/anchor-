@@ -13,6 +13,10 @@
   expire moves the fingerprint and publishes both "proposals" and
   "state"; an unrelated poll with nothing new publishes nothing; the
   fingerprint is seeded at boot the same way the other two cursors are
+- the fourth, memory fingerprint poll (W3): a Telegram-style
+  write_memory/set_pinned/hard_delete each move the fingerprint and
+  publish both "memory" and "state"; a no-op poll publishes nothing;
+  seeded at boot like the others
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 
+from app.core import memory as memory_core
 from app.core import proposal as proposal_core
 from app.core.clock import SystemClock
 from app.db.models import Message, StateChange, TelegramUpdate
@@ -29,7 +34,9 @@ from app.web.tail import (
     STATE_CHANGE_FIELD_TOPIC,
     _max_message_id,
     _max_state_change_id,
+    _memory_fingerprint,
     _proposals_fingerprint,
+    _tail_memory_once,
     _tail_once,
     _tail_proposals_once,
     _tail_state_change_once,
@@ -585,6 +592,128 @@ async def test_start_tail_also_seeds_the_proposals_fingerprint(sessionmaker, mon
         await proposal_core.create(
             session, clock, field=proposal_core.DUE_ACTION, value="до старта", reason=None
         )
+
+    monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
+    hub = WebHub()
+    task = await start_tail(sessionmaker, hub)
+    try:
+        await asyncio.sleep(0.05)
+    finally:
+        await stop_tail(task)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert events.backlog == []
+
+
+# --- the memory fingerprint poll (W3) -------------------------------------
+
+
+async def _write(sessionmaker, **kwargs):
+    async with sessionmaker() as session:
+        return await memory_core.write_memory(session, **kwargs)
+
+
+async def test_memory_fingerprint_is_zero_on_an_empty_table(sessionmaker):
+    async with sessionmaker() as session:
+        assert await _memory_fingerprint(session) == (0, 0, 0, 0)
+
+
+async def test_a_telegram_style_write_memory_publishes_memory_and_state(sessionmaker):
+    """Plan step 2's "Live-update gap" finding: write_memory itself
+    writes no state_change row, so this fingerprint poll is the only
+    thing that notices a Telegram `/remember` or an extractor autowrite
+    at all."""
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, (0, 0, 0, 0))
+
+    await _write(sessionmaker, kind="identity", text="пользователь живёт в Лилле", source="user")
+
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, fp)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.data["topic"] for e in events.backlog] == ["memory", "state"]
+
+
+async def test_a_repeat_poll_with_no_memory_change_publishes_nothing(sessionmaker):
+    hub = WebHub()
+    await _write(sessionmaker, kind="identity", text="факт один", source="user")
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, (0, 0, 0, 0))
+
+    async with sessionmaker() as session:
+        fp_again = await _tail_memory_once(session, hub, fp)
+    assert fp_again == fp
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    # One poll's worth of events only -- the repeat poll published nothing.
+    assert [e.data["topic"] for e in events.backlog] == ["memory", "state"]
+
+
+async def test_set_pinned_moves_the_fingerprint(sessionmaker):
+    """A pin/unpin changes no `superseded_by`, so the active count in
+    the fingerprint stays put -- it is the pinned count that has to
+    move, and it must."""
+    hub = WebHub()
+    row = await _write(sessionmaker, kind="identity", text="факт", source="user")
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, (0, 0, 0, 0))
+
+    async with sessionmaker() as session:
+        await memory_core.set_pinned(session, row.id, True)
+
+    async with sessionmaker() as session:
+        fp2 = await _tail_memory_once(session, hub, fp)
+    assert fp2 != fp
+    assert fp2[2] == fp[2] + 1  # the pinned-count slot moved by exactly one
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.data["topic"] for e in events.backlog] == ["memory", "state", "memory", "state"]
+
+
+async def test_hard_delete_moves_the_fingerprint(sessionmaker):
+    hub = WebHub()
+    row = await _write(sessionmaker, kind="identity", text="факт", source="user")
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, (0, 0, 0, 0))
+
+    async with sessionmaker() as session:
+        await memory_core.hard_delete(session, row.id)
+
+    async with sessionmaker() as session:
+        fp2 = await _tail_memory_once(session, hub, fp)
+    assert fp2 != fp
+    assert fp2[1] == fp[1] - 1  # the active-count slot dropped by exactly one
+
+
+async def test_a_supersede_moves_max_id_and_superseded_count_but_not_active_count(sessionmaker):
+    hub = WebHub()
+    old = await _write(sessionmaker, kind="identity", text="живёт в Лилле", source="user")
+    async with sessionmaker() as session:
+        fp = await _tail_memory_once(session, hub, (0, 0, 0, 0))
+
+    async with sessionmaker() as session:
+        await memory_core.write_memory(
+            session, kind="identity", text="живёт в Руане", source="user", supersedes_id=old.id
+        )
+
+    async with sessionmaker() as session:
+        fp2 = await _tail_memory_once(session, hub, fp)
+    assert fp2 != fp
+    assert fp2[1] == fp[1]  # active count unchanged: one out, one in
+    assert fp2[3] == fp[3] + 1  # superseded count moved by exactly one
+
+
+async def test_start_tail_also_seeds_the_memory_fingerprint(sessionmaker, monkeypatch):
+    """Same low-severity-finding shape as the other three cursors' own
+    boot tests: a pre-boot memory write must not be replayed as a live
+    invalidate on the first poll after start."""
+    await _write(sessionmaker, kind="identity", text="до старта", source="user")
 
     monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
     hub = WebHub()

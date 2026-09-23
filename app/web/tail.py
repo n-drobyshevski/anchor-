@@ -29,7 +29,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import proposal as proposal_core
-from app.db.models import Message, StateChange
+from app.db.models import Memory, Message, StateChange
 from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
@@ -377,12 +377,71 @@ async def _tail_proposals_once(
     return current
 
 
+# --- the fourth cursor: memory -> invalidate ------------------------------
+
+# Another cheap fingerprint, not a row cursor -- same reasoning as the
+# proposal one above, for a different gap (W3 plan step 2's "Live-update
+# gap" finding): `write_memory` and `set_pinned` write no `state_change`
+# row at all, so neither a Telegram `/remember`/`/pin`, an extractor
+# autowrite, nor idle consolidate/undo (app/core/idle/undo.py, which
+# *does* write a "idle_run" state_change row mapped to "memory" above,
+# but only for that one path) reaches an open Memory screen without
+# this. `(max(id), active count, pinned count, superseded count)`
+# changes on every write this screen cares about: an add or an
+# extractor autowrite bumps max(id) and the active count; a pin/unpin
+# moves the pinned count; a correction (write_memory with
+# supersedes_id) bumps max(id) and the superseded count while leaving
+# the active count unchanged; a hard delete (`/forget`, or idle undo
+# re-deleting a consolidated row) drops the active count. The quadruple
+# catches all four without reading the whole table every two seconds.
+MemoryFingerprint = tuple[int, int, int, int]
+
+
+async def _memory_fingerprint(session: AsyncSession) -> MemoryFingerprint:
+    result = await session.execute(
+        select(
+            func.max(Memory.id),
+            func.count().filter(Memory.superseded_by.is_(None)),
+            func.count().filter(Memory.superseded_by.is_(None), Memory.pinned.is_(True)),
+            func.count().filter(Memory.superseded_by.is_not(None)),
+        )
+    )
+    max_id, active_count, pinned_count, superseded_count = result.one()
+    return (max_id or 0, active_count or 0, pinned_count or 0, superseded_count or 0)
+
+
+async def _tail_memory_once(
+    session: AsyncSession, hub: WebHub, fingerprint: MemoryFingerprint
+) -> MemoryFingerprint:
+    """One poll of `memory`'s fingerprint: publish_invalidate("memory")
+    and "state" (the State screen's own memories count) exactly once
+    when the fingerprint has moved since the last poll, then return the
+    new one.
+
+    "State" fires on *every* memory fingerprint change, including a
+    pin/unpin that leaves the active count untouched -- the identical
+    simplification `_tail_proposals_once` makes above, for the same
+    reason: telling a count-changing write apart from here would mean
+    re-deriving what changed for a query that already runs every two
+    seconds. app/web/panels/memory.py's own web-issued writes make the
+    same unconditional call for the same reason (see that module's own
+    docstring), so a web write and a Telegram one invalidate identically
+    regardless of which path this fingerprint ever notices first.
+    """
+    current = await _memory_fingerprint(session)
+    if current != fingerprint:
+        hub.publish_invalidate("memory")
+        hub.publish_invalidate("state")
+    return current
+
+
 async def _tail_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     hub: WebHub,
     cursor: int,
     state_change_cursor: int,
     proposals_fingerprint: ProposalFingerprint,
+    memory_fingerprint: MemoryFingerprint,
 ) -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -394,6 +453,9 @@ async def _tail_loop(
                 )
                 proposals_fingerprint = await _tail_proposals_once(
                     session, hub, proposals_fingerprint
+                )
+                memory_fingerprint = await _tail_memory_once(
+                    session, hub, memory_fingerprint
                 )
         except Exception as exc:  # noqa: BLE001 - a tail crash must never take the process down
             logger.warning("web tail failed", extra={"event": type(exc).__name__})
@@ -410,8 +472,11 @@ async def start_tail(
         cursor = await _max_message_id(session)
         state_change_cursor = await _max_state_change_id(session)
         proposals_fingerprint = await _proposals_fingerprint(session)
+        memory_fingerprint = await _memory_fingerprint(session)
     return asyncio.create_task(
-        _tail_loop(sessionmaker, hub, cursor, state_change_cursor, proposals_fingerprint),
+        _tail_loop(
+            sessionmaker, hub, cursor, state_change_cursor, proposals_fingerprint, memory_fingerprint
+        ),
         name="anchor-web-tail",
     )
 

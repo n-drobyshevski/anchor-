@@ -570,7 +570,7 @@ class Memory(Base):
     pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
-    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt
+    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt|consolidate
     confidence: Mapped[float | None] = mapped_column(Float)
     superseded_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

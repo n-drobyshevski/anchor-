@@ -410,6 +410,7 @@ async def test_send_rejects_delete_and_export(sessionmaker):
         {"text": "   ", "client_key": str(uuid.uuid4())},
         {"text": "x" * 4001, "client_key": str(uuid.uuid4())},
         {"text": "hi\x07there", "client_key": str(uuid.uuid4())},  # BEL, a rejected control char
+        {"text": "hi \ud800 there", "client_key": str(uuid.uuid4())},  # a lone UTF-16 surrogate
         {"text": "hi", "client_key": "not-a-uuid"},
         {"text": "hi"},  # missing client_key
         {"client_key": str(uuid.uuid4())},  # missing text
@@ -430,6 +431,17 @@ def test_send_allows_newline_and_tab():
 
     assert _valid_text("line one\nline two\tend") is True
     assert _valid_text("bad\x07byte") is False
+
+
+def test_send_rejects_a_lone_surrogate():
+    """W3 finding: a lone UTF-16 surrogate is not a control character,
+    so it passed this check before and failed asyncpg's UTF-8 encoding
+    downstream instead -- an unhandled 500 whose traceback logged the
+    text as a SQL parameter repr."""
+    from app.web.routes import _valid_text
+
+    assert _valid_text("hi \ud800 there") is False
+    assert _valid_text("\udfff") is False
 
 
 # --- POST /api/press ---

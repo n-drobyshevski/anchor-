@@ -455,3 +455,62 @@ async def test_a_conflicted_original_keeps_the_merged_row_it_points_at(sessionma
         assert (await session.get(Memory, edited_id)).superseded_by == merged_id
         other = await session.get(Memory, max(before))
         assert _row_state(other) == before[max(before)]
+
+
+async def test_undo_after_editing_the_merged_row_leaves_the_originals_superseded(sessionmaker):
+    """W3 finding: a web/tg edit of the *merged* row supersedes it with
+    a new row (D). D isn't part of this idle run at all, so nothing
+    about it stops each original's own `supersede` change from looking
+    clean in isolation -- undo restoring them to active would duplicate
+    the fact the merge consolidated, right next to D. The whole group
+    must be treated as one conflict."""
+    clock = _clock()
+    run_id, merged_id, before = await _consolidate_shaped_run(sessionmaker, clock)
+    async with sessionmaker() as session:
+        merged = await session.get(Memory, merged_id)
+        edited = Memory(kind=merged.kind, text="любит зелёный чай", source="user")
+        session.add(edited)
+        await session.flush()
+        merged.superseded_by = edited.id
+        await session.commit()
+        edited_id = edited.id
+
+    async with sessionmaker() as session:
+        result = await undo_run(session, Settings(), run_id, clock=clock)
+
+    assert result.status == "ok"
+    assert result.restored == 0
+    assert result.skipped_conflicts == 3
+    async with sessionmaker() as session:
+        for row_id in before:
+            assert (await session.get(Memory, row_id)).superseded_by == merged_id, (
+                "the originals must stay superseded, not resurrected next to the edit"
+            )
+        assert await session.get(Memory, merged_id) is not None
+        assert (await session.get(Memory, edited_id)).superseded_by is None
+
+
+async def test_undo_after_pinning_the_merged_row_leaves_the_originals_superseded(sessionmaker):
+    """Same bug, the pin-shaped trigger: pinning the merged row touches
+    only its own `pinned` column, so each original's `supersede` change
+    still looks clean on its own -- the pre-scan must catch it via the
+    merged row's own drifted state, not via anything on the originals."""
+    clock = _clock()
+    run_id, merged_id, before = await _consolidate_shaped_run(sessionmaker, clock)
+    async with sessionmaker() as session:
+        merged = await session.get(Memory, merged_id)
+        merged.pinned = True
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await undo_run(session, Settings(), run_id, clock=clock)
+
+    assert result.status == "ok"
+    assert result.restored == 0
+    assert result.skipped_conflicts == 3
+    async with sessionmaker() as session:
+        for row_id in before:
+            assert (await session.get(Memory, row_id)).superseded_by == merged_id
+        merged = await session.get(Memory, merged_id)
+        assert merged is not None
+        assert merged.pinned is True

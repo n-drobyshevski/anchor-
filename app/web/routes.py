@@ -82,6 +82,15 @@ PRESS_DATA_MAX_BYTES = 64
 # same string either way.)
 _DISALLOWED_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
 
+# A lone UTF-16 surrogate passes the control-character check above (it
+# is not a control character) and Python's own str type, then fails
+# asyncpg's UTF-8 encoding at the query boundary -- an unhandled 500
+# whose aiohttp.server traceback includes the offending text as a SQL
+# parameter repr (W3 finding, verified against POST /api/send and this
+# module's own message-write path). app/web/panels/memory.py's
+# `_valid_shape` carries the identical regex for the same reason.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
 CODE_MESSAGE = "Код входа в веб-Anchor: {code} ({minutes} мин). Если это не ты — /weblogout"
 
 BLOCKED_SEND_REPLY = {"error": "blocked"}
@@ -425,7 +434,7 @@ def _valid_text(value: object) -> bool:
     stripped = value.strip()
     if not (1 <= len(stripped) <= 4000):
         return False
-    return not _DISALLOWED_CONTROL_RE.search(value)
+    return not _DISALLOWED_CONTROL_RE.search(value) and not _SURROGATE_RE.search(value)
 
 
 def _valid_client_key(value: object) -> bool:
