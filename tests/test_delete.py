@@ -500,12 +500,100 @@ async def test_confirming_wipes_everything(sessionmaker):
 
 
 async def test_the_confirmation_names_the_real_provider(sessionmaker):
-    """Plan section 11's text says copies sit with xAI for 30 days. The
-    bot moved to OpenRouter in 1e and runs data_collection=deny, so both
-    halves stopped being true."""
+    """6e (plan section 9.3) replaces the 1e-era wording with the
+    plan's own exact final-reply text, which now also covers backups
+    rather than naming a specific model vendor."""
     assert "xAI" not in data_ui.DELETED_TEXT
-    assert "30" not in data_ui.DELETED_TEXT
-    assert "OpenRouter" in data_ui.DELETED_TEXT
+    assert data_ui.DELETED_TEXT == (
+        "Удалено, включая бэкапы. Копии у провайдеров моделей удаляются по их "
+        "правилам хранения."
+    )
+
+
+async def test_the_confirm_text_mentions_backups(sessionmaker):
+    """6e (plan section 9.3)'s exact confirm text."""
+    assert data_ui.CONFIRM_TEXT == "Удалить все данные и все резервные копии? Это необратимо."
+
+
+class _FakeS3Client:
+    """An in-memory stand-in for boto3's S3 client -- just enough of
+    list_objects_v2/delete_objects for app/ops/backup.py's purge path
+    (plan section 12: "delete: purges the backup objects in a fake
+    S3"). No network, no moto -- per the approved decision."""
+
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        self.objects = objects
+
+    def list_objects_v2(self, *, Bucket, Prefix, ContinuationToken=None):
+        matching = sorted(k for k in self.objects if k.startswith(Prefix))
+        return {"Contents": [{"Key": k} for k in matching], "IsTruncated": False}
+
+    def delete_objects(self, *, Bucket, Delete):
+        for entry in Delete["Objects"]:
+            self.objects.pop(entry["Key"], None)
+        return {}
+
+
+async def test_delete_purges_backup_objects_in_a_fake_s3(sessionmaker, monkeypatch):
+    """6e (plan section 9.3 and 12): /delete purges every object under
+    the `anchor/` prefix, using a fake in-memory S3 client."""
+    from app.ops import backup as backup_module
+
+    fake_s3 = _FakeS3Client(
+        {
+            "anchor/2026/01/01/anchor-20260101T040000Z.dump.age": b"ciphertext-1",
+            "anchor/2026/01/02/anchor-20260102T040000Z.dump.age": b"ciphertext-2",
+            "unrelated/other-app/file": b"not ours",
+        }
+    )
+    monkeypatch.setattr(backup_module, "build_s3_client", lambda settings: fake_s3)
+
+    await _seed_everything(sessionmaker, 2, 3)
+    settings = Settings(
+        BACKUP_S3_ENDPOINT="https://fake.example",
+        BACKUP_S3_BUCKET="anchor-backups",
+        BACKUP_S3_ACCESS_KEY_ID="fake-key",
+        BACKUP_S3_SECRET_ACCESS_KEY="fake-secret",
+    )
+    fake = FakeSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    dp = Dispatcher()
+    dp.include_router(build_router(sessionmaker, settings, FakeLLMProvider(), FakeLLMProvider()))
+
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    issued = int(time.time())
+    await dp.feed_update(
+        bot,
+        Update.model_validate(_callback_update(3, f"d:yes:{issued}"), context={"bot": bot}),
+    )
+
+    assert "anchor/2026/01/01/anchor-20260101T040000Z.dump.age" not in fake_s3.objects
+    assert "anchor/2026/01/02/anchor-20260102T040000Z.dump.age" not in fake_s3.objects
+    assert "unrelated/other-app/file" in fake_s3.objects
+    assert fake.edits[-1].text == data_ui.DELETED_TEXT
+
+
+async def test_delete_proceeds_when_s3_is_not_configured(sessionmaker):
+    """Plan section 9.3: "if S3 isn't configured, the wipe still
+    proceeds" -- the database side of /delete must not be blocked by a
+    missing backup configuration."""
+    await _seed_everything(sessionmaker, 2, 3)
+    dp, bot, fake = _build_dp(sessionmaker)  # default Settings(): no S3 configured
+
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    issued = int(time.time())
+    await dp.feed_update(
+        bot,
+        Update.model_validate(_callback_update(3, f"d:yes:{issued}"), context={"bot": bot}),
+    )
+
+    after = await _counts(sessionmaker)
+    assert after["memory"] == 0
+    assert fake.edits[-1].text == data_ui.DELETED_TEXT
 
 
 async def test_cancelling_deletes_nothing(sessionmaker):

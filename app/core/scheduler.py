@@ -99,6 +99,8 @@ from app.core.state import get_state
 from app.db.jobs import enqueue_job
 from app.db.models import Outbound
 from app.research.sweeps import RESEARCH_SWEEP
+from app.core import retention as retention_module
+from app.ops import backup as backup_module
 
 logger = logging.getLogger(__name__)
 
@@ -489,6 +491,65 @@ async def maybe_enqueue_review_expiry(session: AsyncSession, clock: Clock, timez
     )
     if enqueued:
         logger.info("review expiry queued", extra={"event": REVIEW_EXPIRY})
+    return enqueued
+
+
+async def maybe_enqueue_backup(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue tonight's encrypted backup, at most once per local day
+    (Phase 6 plan section 9.1; milestone 6e).
+
+    Modelled on `maybe_enqueue_research_sweep`'s dedup-keyed enqueue and
+    "not called from `heartbeat()`" split (app/worker.py's
+    `_heartbeat_loop` calls this as a sibling step), but unlike every
+    sweep above it this one *is* gated -- on `BACKUP_ENABLED` (the same
+    global-kill-switch shape as `OUTBOUND_ENABLED`/`IDLE_ENABLED`) and
+    on the local wall clock reaching `BACKUP_TIME`. It is deliberately
+    NOT gated on the idle budget, the idle window, or
+    `user_state.persona_active` -- a backup is infrastructure, not
+    courtesy, and app/ops/backup.py's own job runs with no provider and
+    no bot regardless of whether the persona would speak right now.
+
+    No grace window: any heartbeat at or after `BACKUP_TIME` local, on a
+    day nothing has queued yet, queues it -- unlike the fixed outbound
+    intents, a backup that runs at 04:07 instead of 04:00 because the
+    worker restarted has lost nothing worth clamping.
+    """
+    if not settings.BACKUP_ENABLED:
+        return False
+    local_date = clock_module.local_date(clock, timezone)
+    target = clock_module.combine_local(local_date, settings.BACKUP_TIME, timezone)
+    if clock.now_utc() < target:
+        return False
+    enqueued = await enqueue_job(
+        session, backup_module.BACKUP, {}, dedup_key=backup_module.backup_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("backup queued", extra={"event": backup_module.BACKUP})
+    return enqueued
+
+
+async def maybe_enqueue_retention_sweep(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's retention sweep, at most once per local day (Phase 6
+    plan section 9.4; milestone 6e).
+
+    Modelled exactly on `maybe_enqueue_notebook_expiry` -- same
+    dedup-keyed enqueue, same "not inside `heartbeat()`" split, same
+    "no gate beyond the dedup key" shape: housekeeping on rows that
+    already exist, unconditional on every other switch in this file.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session,
+        retention_module.RETENTION_SWEEP,
+        {},
+        dedup_key=retention_module.retention_sweep_dedup_key(local_date),
+    )
+    if enqueued:
+        logger.info("retention sweep queued", extra={"event": retention_module.RETENTION_SWEEP})
     return enqueued
 
 

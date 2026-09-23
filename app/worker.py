@@ -64,11 +64,12 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
-from sqlalchemy import update as sql_update
+from sqlalchemy import select as sql_select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -94,12 +95,15 @@ from app.core.review import REVIEW_EXPIRY
 from app.core.scheduler import (
     TICK_DECIDE,
     heartbeat,
+    maybe_enqueue_backup,
     maybe_enqueue_notebook_expiry,
     maybe_enqueue_orders_expiry,
     maybe_enqueue_research_sweep,
+    maybe_enqueue_retention_sweep,
     maybe_enqueue_review_expiry,
 )
 from app.core.tick import run_tick_decide
+from app.core.retention import RETENTION_SWEEP, run_retention_sweep
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.models import HeartbeatState
@@ -113,6 +117,7 @@ from app.db.jobs import (
 )
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
+from app.ops.backup import BACKUP, run_backup
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
@@ -272,6 +277,22 @@ async def _run_job(
         # `provider` nor `safety_provider` and reports nothing back to
         # the user (there is no command this is a reply to).
         await run_daily_sweep(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == BACKUP:
+        # 6e: the nightly encrypted backup (app/ops/backup.py). No
+        # provider and no bot, same as RESEARCH_SWEEP above -- it is a
+        # subprocess, an age-encrypt stream and an S3 upload, never a
+        # model call, and never reports back to the user (the /state
+        # "Бэкап: ..." line is how they find out, not a chat message).
+        await run_backup(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == RETENTION_SWEEP:
+        # 6e: the daily retention sweeps (app/core/retention.py) --
+        # plain SQL housekeeping like RESEARCH_SWEEP/NOTEBOOK_EXPIRY
+        # above, needing neither `provider` nor `safety_provider`.
+        await run_retention_sweep(session, settings, clock)
         return ExtractOutcome()
 
     if kind == NOTEBOOK_REFLECT:
@@ -644,6 +665,18 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_review_expiry(session, clock, state.timezone)
+            # 6e: the nightly backup, same cadence and same "not inside
+            # heartbeat()" reasoning as the sweeps above -- see
+            # app/core/scheduler.py's maybe_enqueue_backup for the extra
+            # gates (BACKUP_ENABLED, BACKUP_TIME) this one alone checks.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_backup(session, settings, clock, state.timezone)
+            # 6e: the daily retention sweeps, same cadence and same
+            # "not inside heartbeat()" reasoning as every sweep above.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_retention_sweep(session, clock, state.timezone)
             # 6a: idle planning, same cadence and same "not inside
             # heartbeat()" reasoning as the four sweeps above -- see
             # app/core/scheduler.py's module docstring. plan_idle opens
@@ -664,6 +697,78 @@ async def _heartbeat_loop(
                 await session.commit()
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
+
+
+WATCHDOG_INTERVAL_SECONDS = 60
+
+
+def watchdog_is_stale(
+    heartbeat_at: datetime.datetime | None,
+    now: datetime.datetime,
+    started_at: datetime.datetime,
+    stale_after: datetime.timedelta,
+) -> bool:
+    """Pure predicate behind the liveness watchdog (Phase 6 plan section
+    9.6; milestone 6e). Separated from `_watchdog_loop` so a test can
+    drive it with an injected clock and no database at all.
+
+    Railway's own healthcheck (`/readyz`, app/tg/webhook.py) is only
+    consulted at deploy time -- it does not restart a service that goes
+    unhealthy later in its life. This predicate is what backs the
+    in-process fallback: the process kills *itself* when the heartbeat
+    has gone stale, so Railway's restart policy (which does apply to a
+    crashed process) brings it back.
+
+    **The startup grace.** Before `started_at + stale_after` has
+    elapsed, a `heartbeat_at` of `None` -- the heartbeat loop has not
+    stamped it even once yet -- is never stale. Without this, the
+    watchdog would kill a freshly-deployed process during the first
+    `HEARTBEAT_INTERVAL_SECONDS` or so of its life, before the
+    heartbeat loop's very first tick has had a chance to run at all.
+    Once that grace has passed, a still-`None` heartbeat_at *is* stale
+    -- the heartbeat loop genuinely never ran, which is exactly the
+    failure this watchdog exists to catch.
+    """
+    if heartbeat_at is None:
+        return now - started_at > stale_after
+    return now - heartbeat_at > stale_after
+
+
+async def _watchdog_loop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    clock: Clock,
+    *,
+    exit_fn=None,
+    started_at: datetime.datetime | None = None,
+) -> None:
+    """Checks heartbeat staleness once a minute; exits the process if stale.
+
+    `exit_fn` defaults to `os._exit` (not `sys.exit`, which only raises
+    SystemExit and would be caught by this loop's own broad except, or
+    by aiohttp/asyncio machinery above it -- the point is an immediate,
+    unrecoverable process exit for Railway's restart policy to act on).
+    Overridable so a test can assert it was *called* with the right
+    code rather than actually terminating the test process.
+    """
+    exit_fn = exit_fn if exit_fn is not None else (lambda code: os._exit(code))
+    started_at = started_at if started_at is not None else clock.now_utc()
+    stale_after = datetime.timedelta(minutes=settings.LIVENESS_STALE_MIN)
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+        try:
+            async with sessionmaker() as session:
+                result = await session.execute(
+                    sql_select(HeartbeatState.heartbeat_at).where(HeartbeatState.id == 1)
+                )
+                heartbeat_at = result.scalar_one_or_none()
+        except Exception as exc:  # noqa: BLE001 - a check failure is not itself staleness
+            logger.warning("watchdog check failed", extra={"event": type(exc).__name__})
+            continue
+        if watchdog_is_stale(heartbeat_at, clock.now_utc(), started_at, stale_after):
+            logger.error("heartbeat stale, exiting", extra={"event": "heartbeat_stale"})
+            exit_fn(1)
+            return
 
 
 async def _recover_loop(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -704,7 +809,16 @@ async def run_worker(
     heartbeat_task = asyncio.create_task(
         _heartbeat_loop(sessionmaker, settings, clock), name="anchor-heartbeat-loop"
     )
-    return [claim_task, recover_task, heartbeat_task]
+    # 6e: the liveness watchdog (plan section 9.6). Started alongside
+    # the heartbeat loop, not folded into it -- a heartbeat tick that
+    # raises is caught by that loop's own broad except and retried next
+    # minute, which is the right behaviour for planning but the wrong
+    # one for a watchdog: this loop must keep checking and, when the
+    # heartbeat genuinely never recovers, actually exit the process.
+    watchdog_task = asyncio.create_task(
+        _watchdog_loop(sessionmaker, settings, clock), name="anchor-watchdog-loop"
+    )
+    return [claim_task, recover_task, heartbeat_task, watchdog_task]
 
 
 async def stop_worker(tasks: list[asyncio.Task]) -> None:

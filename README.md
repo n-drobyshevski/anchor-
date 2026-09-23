@@ -917,6 +917,20 @@ the extractor and welfare classifier depend on it.
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
 
+**6e (hardening).** The service builds from the root `Dockerfile` now
+(`railway.json` sets `"builder": "DOCKERFILE"`), not Railway's default
+buildpack — production Postgres is version 18, and `app/ops/backup.py`
+needs `pg_dump` on that same major version, which only a Dockerfile
+build can install. The start command and healthcheck path above are
+unchanged and stay configured on the Railway service itself;
+`railway.json` deliberately has no `deploy` section. Switch the
+service's builder to "Dockerfile" in Railway's settings once this
+lands. To enable nightly backups: generate an age keypair offline
+(`age-keygen -o key.txt`), set `BACKUP_AGE_RECIPIENT` to its public
+key, keep `key.txt` off this server, and set the `BACKUP_S3_*`
+variables from the Railway bucket's credentials (`docs/secrets.md`,
+`docs/restore.md`).
+
 ## Privacy
 
 No message text, prompt, completion, or raw update payload is ever

@@ -38,6 +38,16 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_JUDGE",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
+    # 6e: credentials and endpoints that arrive by copy-paste from a
+    # Railway variables panel or an offline `age-keygen`, same reasoning
+    # as OPENROUTER_API_KEY above.
+    "BACKUP_AGE_RECIPIENT",
+    "BACKUP_S3_ENDPOINT",
+    "BACKUP_S3_BUCKET",
+    "BACKUP_S3_REGION",
+    "BACKUP_S3_ACCESS_KEY_ID",
+    "BACKUP_S3_SECRET_ACCESS_KEY",
+    "BACKUP_PG_DUMP",
 )
 
 
@@ -618,6 +628,75 @@ class Settings(BaseSettings):
     def _canary_dow_in_range(cls, value: int) -> int:
         if not 1 <= value <= 7:
             raise ValueError(f"CANARY_DOW must be between 1 and 7, got {value}")
+        return value
+
+    # --- 6e: hardening (Phase 6 plan section 2; milestone 6e) -----------
+    #
+    # Encrypted nightly backups (§9.1). BACKUP_ENABLED is the same shape
+    # as OUTBOUND_ENABLED/IDLE_ENABLED: false stops the heartbeat from
+    # ever enqueueing a backup job, nothing else touched. Unlike idle,
+    # the backup job itself is never gated on budget, persona state or
+    # the idle window -- app/ops/backup.py's own docstring says why.
+    BACKUP_ENABLED: bool = True
+    BACKUP_TIME: datetime.time = datetime.time(4, 0)
+    BACKUP_KEEP_DAILY: int = 14
+    BACKUP_KEEP_WEEKLY: int = 8
+    # Public age recipient only (age1...); the matching private key never
+    # touches the server. Empty by default -- until the user generates a
+    # keypair offline and sets this, app/ops/backup.py records
+    # backup_log.status='failed', error_code='not_configured' every
+    # night rather than crashing the heartbeat.
+    BACKUP_AGE_RECIPIENT: str = ""
+    BACKUP_S3_ENDPOINT: str = ""
+    BACKUP_S3_BUCKET: str = ""
+    # "auto" is Tigris's (Railway bucket) own convention for "the
+    # endpoint decides"; a real S3-compatible provider that requires a
+    # specific region can still set this explicitly.
+    BACKUP_S3_REGION: str = "auto"
+    BACKUP_S3_ACCESS_KEY_ID: str = ""
+    BACKUP_S3_SECRET_ACCESS_KEY: str = ""
+    # PATH by default. A setting rather than a hardcoded path so the
+    # Dockerfile's postgresql-client-18 install can be found regardless
+    # of where a given base image happens to put it, without a code
+    # change -- and so a test can point it at a specific pg_dump binary
+    # (e.g. /usr/lib/postgresql/18/bin/pg_dump) without touching PATH.
+    BACKUP_PG_DUMP: str = "pg_dump"
+
+    UPDATE_PAYLOAD_RETENTION_DAYS: int = 30
+    JOB_RETENTION_DAYS: int = 30
+    # 0 means "keep forever" -- not a threshold of zero days, an off
+    # switch. app/core/retention.py's own sweep treats it that way
+    # explicitly rather than the validator forbidding it, because the
+    # plan's own default is 0.
+    MESSAGE_RETENTION_DAYS: int = 0
+
+    # How long the heartbeat may go stale before /readyz fails and the
+    # in-process watchdog (app/worker.py) kills the process so Railway's
+    # restart policy brings it back (§9.6).
+    LIVENESS_STALE_MIN: int = 5
+
+    @field_validator("BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY", "LIVENESS_STALE_MIN")
+    @classmethod
+    def _backup_int_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("UPDATE_PAYLOAD_RETENTION_DAYS", "JOB_RETENTION_DAYS")
+    @classmethod
+    def _retention_settings_at_least_one(cls, value: int, info) -> int:
+        # These two are genuinely mandatory sweeps (the plan gives them
+        # no "0 = off" meaning, unlike MESSAGE_RETENTION_DAYS below), so
+        # 0 is rejected the same way the notebook/orders caps reject it.
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("MESSAGE_RETENTION_DAYS")
+    @classmethod
+    def _message_retention_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"MESSAGE_RETENTION_DAYS must be >= 0, got {value}")
         return value
 
     @field_validator("IDLE_WINDOW")

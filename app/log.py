@@ -95,6 +95,10 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "amendment_id",
     "passed",
     "reason",
+    # 6e: backup/retention housekeeping (app/ops/backup.py,
+    # app/core/retention.py) -- a ciphertext object's size, never its
+    # key or contents.
+    "bytes",
 )
 
 

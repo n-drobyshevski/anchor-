@@ -36,6 +36,7 @@ from app.core import export, purge
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core.outbound import cancel_outbound
+from app.ops import backup
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
 
 logger = logging.getLogger(__name__)
@@ -43,18 +44,18 @@ logger = logging.getLogger(__name__)
 # How long a delete confirmation stays live, in seconds.
 CONFIRM_TTL = 300
 
-CONFIRM_TEXT = "Удалить все данные? Это необратимо."
+CONFIRM_TEXT = "Удалить все данные и все резервные копии? Это необратимо."
 CONFIRM_YES = "Да, удалить"
 CONFIRM_NO = "Отмена"
 
-# Plan section 11's text says copies sit with xAI for up to 30 days.
-# Both halves stopped being true: milestone 1e moved this bot to
-# OpenRouter, and LLM_DATA_COLLECTION=deny routes only to providers that
-# do not retain prompts at all. A privacy statement the user would act
-# on has to describe what the code actually does.
+# 6e (plan section 9.3): the wipe now also purges every backup object,
+# and the confirm/final text says so. Superseded the 1e-era wording
+# (which described only the OpenRouter side) because a privacy
+# statement the user would act on has to describe what the code
+# actually does, and 6e adds a whole other thing it does.
 DELETED_TEXT = (
-    "Удалено. Запросы к модели идут через OpenRouter с запретом на хранение "
-    "промптов — копий у провайдера не остаётся."
+    "Удалено, включая бэкапы. Копии у провайдеров моделей удаляются по их "
+    "правилам хранения."
 )
 CANCELLED_TEXT = "Отменено."
 STALE_TEXT = "Устарело."
@@ -145,6 +146,17 @@ async def handle_delete_callback(
         logger.info("stale delete confirmation ignored", extra={"event": "stale"})
         await edit_keyboard(bot, chat_id, message_id, STALE_TEXT, None)
         return
+
+    # 6e (plan section 9.3): purge every backup object under the
+    # `anchor/` prefix before the database wipe. Order does not matter
+    # for correctness -- the two are unrelated stores -- but doing it
+    # first means a crash between the two steps leaves the smaller
+    # blast radius (backups already gone, database still there) rather
+    # than the reverse. A no-op, not a failure, when S3 isn't
+    # configured: the database wipe still proceeds either way (backup.
+    # purge_all_backups' own docstring).
+    deleted_objects = await backup.purge_all_backups(settings)
+    logger.info("backup objects purged", extra={"event": "delete", "count": deleted_objects})
 
     async with sessionmaker() as session:
         # 3b (plan section 6): /delete cancels first. The wipe

@@ -10,6 +10,8 @@ it at once, and never print a value.
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -386,3 +388,81 @@ def test_canary_dow_rejects_out_of_range(value):
 @pytest.mark.parametrize("value", [1, 4, 7])
 def test_canary_dow_accepts_the_iso_weekday_range(value):
     assert Settings(_env_file=None, CANARY_DOW=value).CANARY_DOW == value
+
+
+# --- 6e: backups, retention sweeps, liveness (Phase 6 plan section 2) ---
+
+
+def test_backup_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.BACKUP_ENABLED is True
+    assert settings.BACKUP_TIME == datetime.time(4, 0)
+    assert settings.BACKUP_KEEP_DAILY == 14
+    assert settings.BACKUP_KEEP_WEEKLY == 8
+    assert settings.BACKUP_AGE_RECIPIENT == ""
+    assert settings.BACKUP_S3_ENDPOINT == ""
+    assert settings.BACKUP_S3_BUCKET == ""
+    assert settings.BACKUP_S3_REGION == "auto"
+    assert settings.BACKUP_S3_ACCESS_KEY_ID == ""
+    assert settings.BACKUP_S3_SECRET_ACCESS_KEY == ""
+    assert settings.BACKUP_PG_DUMP == "pg_dump"
+
+
+@pytest.mark.parametrize("field", ["BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY"])
+def test_backup_keep_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY"])
+def test_backup_keep_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
+def test_backup_credentials_are_stripped_of_surrounding_whitespace():
+    settings = Settings(
+        _env_file=None,
+        BACKUP_AGE_RECIPIENT=" age1abc \n",
+        BACKUP_S3_ENDPOINT=" https://example.r2.dev \n",
+        BACKUP_S3_BUCKET=" anchor \n",
+        BACKUP_S3_ACCESS_KEY_ID=" key \n",
+        BACKUP_S3_SECRET_ACCESS_KEY=" secret \n",
+        BACKUP_S3_REGION=" auto \n",
+        BACKUP_PG_DUMP=" /usr/bin/pg_dump \n",
+    )
+    assert settings.BACKUP_AGE_RECIPIENT == "age1abc"
+    assert settings.BACKUP_S3_ENDPOINT == "https://example.r2.dev"
+    assert settings.BACKUP_S3_BUCKET == "anchor"
+    assert settings.BACKUP_S3_ACCESS_KEY_ID == "key"
+    assert settings.BACKUP_S3_SECRET_ACCESS_KEY == "secret"
+    assert settings.BACKUP_S3_REGION == "auto"
+    assert settings.BACKUP_PG_DUMP == "/usr/bin/pg_dump"
+
+
+def test_retention_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.UPDATE_PAYLOAD_RETENTION_DAYS == 30
+    assert settings.JOB_RETENTION_DAYS == 30
+    assert settings.MESSAGE_RETENTION_DAYS == 0
+
+
+@pytest.mark.parametrize("field", ["UPDATE_PAYLOAD_RETENTION_DAYS", "JOB_RETENTION_DAYS"])
+def test_mandatory_retention_settings_reject_zero(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+def test_message_retention_days_accepts_zero_as_keep_forever():
+    assert Settings(_env_file=None, MESSAGE_RETENTION_DAYS=0).MESSAGE_RETENTION_DAYS == 0
+
+
+def test_message_retention_days_rejects_negative():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, MESSAGE_RETENTION_DAYS=-1)
+
+
+def test_liveness_stale_min_default_and_validation():
+    assert Settings(_env_file=None).LIVENESS_STALE_MIN == 5
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, LIVENESS_STALE_MIN=0)
+    assert Settings(_env_file=None, LIVENESS_STALE_MIN=1).LIVENESS_STALE_MIN == 1

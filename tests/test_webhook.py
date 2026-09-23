@@ -9,13 +9,17 @@
 
 from __future__ import annotations
 
+import datetime
+
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update as sql_update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import Settings
-from app.db.models import TelegramUpdate
-from app.tg.webhook import SECRET_HEADER, handle_webhook, healthz, readyz
+from app.core.clock import FrozenClock
+from app.db.models import HeartbeatState, TelegramUpdate
+from app.tg.webhook import SECRET_HEADER, handle_webhook, healthz, heartbeat_stale, readyz
 
 ALLOWED_CHAT_ID = 555
 SECRET = "test-secret-token-123"
@@ -32,10 +36,12 @@ def _settings(database_url: str) -> Settings:
     )
 
 
-def _build_app(settings: Settings, sessionmaker) -> web.Application:
+def _build_app(settings: Settings, sessionmaker, clock=None) -> web.Application:
     app = web.Application()
     app["settings"] = settings
     app["sessionmaker"] = sessionmaker
+    if clock is not None:
+        app["clock"] = clock
     app.router.add_post("/telegram/webhook", handle_webhook)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
@@ -149,11 +155,62 @@ async def test_healthz_always_200(test_database_url, sessionmaker):
         assert resp.status == 200
 
 
-async def test_readyz_200_when_db_reachable(test_database_url, sessionmaker):
-    app = _build_app(_settings(test_database_url), sessionmaker)
+async def _upsert_heartbeat_at(sessionmaker, heartbeat_at) -> None:
+    """Set heartbeat_state.id=1's stamp, inserting the row if the per-
+    test TRUNCATE (tests/conftest.py's sessionmaker fixture) removed it
+    -- the migration only ever inserts it once, when the database is
+    first created."""
+    async with sessionmaker() as session:
+        await session.execute(
+            pg_insert(HeartbeatState).values(id=1).on_conflict_do_nothing(index_elements=["id"])
+        )
+        await session.execute(
+            sql_update(HeartbeatState).where(HeartbeatState.id == 1).values(heartbeat_at=heartbeat_at)
+        )
+        await session.commit()
+
+
+async def test_readyz_200_when_db_reachable_and_heartbeat_fresh(test_database_url, sessionmaker):
+    """6e: /readyz now also checks heartbeat_state -- a fresh stamp is
+    required for 200, not just a reachable database (plan section 9.6)."""
+    now = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    await _upsert_heartbeat_at(sessionmaker, now)
+
+    clock = FrozenClock(now + datetime.timedelta(minutes=1))
+    app = _build_app(_settings(test_database_url), sessionmaker, clock=clock)
     async with TestClient(TestServer(app)) as client:
         resp = await client.get("/readyz")
         assert resp.status == 200
+
+
+async def test_readyz_503_when_heartbeat_never_ran(test_database_url, sessionmaker):
+    """The migration inserts heartbeat_state with heartbeat_at=null --
+    a fresh deploy before the heartbeat's first tick is not ready."""
+    app = _build_app(_settings(test_database_url), sessionmaker)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/readyz")
+        assert resp.status == 503
+
+
+async def test_readyz_503_when_heartbeat_stale(test_database_url, sessionmaker):
+    now = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    await _upsert_heartbeat_at(sessionmaker, now)
+
+    settings = _settings(test_database_url)
+    clock = FrozenClock(now + datetime.timedelta(minutes=settings.LIVENESS_STALE_MIN + 1))
+    app = _build_app(settings, sessionmaker, clock=clock)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/readyz")
+        assert resp.status == 503
+
+
+def test_heartbeat_stale_pure():
+    """The predicate itself, table-driven (plan section 12's "/readyz
+    fails when the heartbeat is stale")."""
+    now = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    assert heartbeat_stale(None, now, 5) is True
+    assert heartbeat_stale(now - datetime.timedelta(minutes=4), now, 5) is False
+    assert heartbeat_stale(now - datetime.timedelta(minutes=5, seconds=1), now, 5) is True
 
 
 # --- 2b: callback_query updates (the first inline keyboards) ---

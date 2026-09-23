@@ -70,6 +70,7 @@ from app.core.idle.facts import idle_jobs_today, latest_canary_status
 from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.ops.backup import latest_backup_status
 from app.tg.send import send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
@@ -89,6 +90,34 @@ NON_TEXT_REPLY = "Пока только текст."
 START_TEXT = (
     "Я — Anchor. Здесь по-русски, коротко и по делу.\n"
     "Выйти из роли можно командой /out или словом «пурпурный»."
+)
+
+# 6e: /privacy (plan section 9.5). Fixed text, 8-10 lines, reflecting
+# what the code actually does -- same "a privacy statement the user
+# would act on has to describe what the code actually does" reasoning
+# app/tg/data.py's DELETED_TEXT docstring already gives. The 14/8
+# backup figures and the 30-day clip-text figure are app/config.py's
+# BACKUP_KEEP_DAILY/BACKUP_KEEP_WEEKLY defaults and
+# app/research/sweeps.py's RETENTION_DAYS, spelled out rather than
+# read live -- the plan calls this "fixed text", and a deploy that
+# changes those settings is also the deploy that should update this
+# string, the same way DELETED_TEXT is not computed from settings
+# either.
+PRIVACY_TEXT = (
+    "Что хранится и где: сообщения, память, заметки, чек-ины, журнал, "
+    "договорённости и настройки — в базе Postgres на Railway.\n"
+    "Запросы к модели идут через OpenRouter с запретом на сбор данных "
+    "(data collection: deny); сам провайдер модели хранит данные по своим "
+    "правилам.\n"
+    "Переписка в Telegram не имеет сквозного шифрования — сообщения "
+    "проходят через серверы Telegram и этого бота.\n"
+    "Резервные копии базы зашифрованы (age) и хранятся: 14 ежедневных + 8 "
+    "еженедельных копий, остальные удаляются.\n"
+    "Текст страниц, найденных при поиске, хранится 30 дней, потом "
+    "стирается — карточки и ссылки остаются.\n"
+    "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
+    "/export — выгрузить все свои данные одним файлом.\n"
+    "/delete — удалить все данные и все резервные копии, безвозвратно."
 )
 
 BOT_COMMANDS = [
@@ -131,6 +160,8 @@ BOT_COMMANDS = [
     BotCommand(command="digest", description="Фоновая работа"),
     # 6d (Phase 6 plan section 7).
     BotCommand(command="interests", description="Темы для фонового поиска"),
+    # 6e (Phase 6 plan section 9.5).
+    BotCommand(command="privacy", description="Приватность и хранение данных"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -208,6 +239,7 @@ def _format_state(
     mood=None,
     idle=None,
     canary=None,
+    backup=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -298,6 +330,21 @@ def _format_state(
         mark = "ок" if canary_passed else "⚠️"
         canary_line = f"Канарейка: {canary_date.isoformat()} {mark}\n"
 
+    # 6e: "Бэкап: <дата время> ок" / "Бэкап: ⚠️ ошибка <дата>" (plan
+    # section 9.1) -- `backup` is `(local_date, status)` from
+    # app/ops/backup.latest_backup_status, or None if no backup has ever
+    # run. `pruned` counts as a healthy outcome here (the backup itself
+    # succeeded; pruning is what later happened to the object), so only
+    # `failed` gets the warning glyph.
+    backup_line = ""
+    if backup is not None:
+        backup_started_at, backup_status = backup
+        local_started = backup_started_at.astimezone(tz)
+        if backup_status == "failed":
+            backup_line = f"Бэкап: ⚠️ ошибка {local_started.date().isoformat()}\n"
+        else:
+            backup_line = f"Бэкап: {local_started.strftime('%Y-%m-%d %H:%M')} ок\n"
+
     return (
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
@@ -309,6 +356,7 @@ def _format_state(
         "{research}"
         "{idle}"
         "{canary}"
+        "{backup}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -328,6 +376,7 @@ def _format_state(
         research=research_line,
         idle=idle_line,
         canary=canary_line,
+        backup=backup_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -411,6 +460,8 @@ def build_router(
             idle_jobs = await idle_jobs_today(session, clock, user_state.timezone)
             # 6c.
             canary_status = await latest_canary_status(session)
+            # 6e.
+            backup_status = await latest_backup_status(session)
         await message.answer(
             _format_state(
                 user_state,
@@ -420,6 +471,7 @@ def build_router(
                 by_category=by_category,
                 idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
                 canary=canary_status,
+                backup=backup_status,
                 memories=memories,
                 outbound=outbound,
                 welfare_counts=welfare_counts,
@@ -670,6 +722,13 @@ def build_router(
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
         )
+
+    @router.message(Command("privacy"))
+    async def privacy(message: Message, event_update: Update) -> None:
+        # 6e (plan section 9.5). Fixed text, no arguments, same
+        # store-and-send-idempotently shape as /focus's usage line --
+        # see _reply_once's own docstring.
+        await _reply_once(message, event_update.update_id, PRIVACY_TEXT)
 
     # --- 2b: memory (plan section 11) ---
 
