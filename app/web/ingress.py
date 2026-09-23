@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db import queue
+from app.tg.checkin import WEB_SUBMIT_CALLBACK
 from app.web.hub import WebHub
 
 # The two commands the design blocks on the web (design section 2 and
@@ -238,5 +239,36 @@ async def press(
 
     def build(update_id: int) -> dict:
         return build_callback_update(update_id, message_id, data, settings, text=text)
+
+    return await queue.enqueue_web(session, build, None)
+
+
+async def checkin_complete(session: AsyncSession, *, settings: Settings, message_id: int) -> int:
+    """Enqueue the synthetic completion press for a check-in filled on
+    the web (W4). Returns its update_id.
+
+    `message_id` is the negative id app/web/panels/checkin.py minted
+    with `queue.reserve_web_id` and stored as the check-in row's
+    `tg_message_id` in the same request (core `checkin.submit`, which
+    also stored the note, if any). The data is WEB_SUBMIT_CALLBACK, so
+    app/tg/checkin.py's `_current()` staleness check accepts this press
+    and `finish_and_react` finishes exactly that check-in, by its id
+    (core `finish_submitted`) -- never whatever the global note step
+    happens to point at, and in queue order, so nothing queued before
+    this row can be taken for the check-in's note.
+
+    **No hub allowlist check, unlike `press`**, on purpose: that check
+    exists to refuse a *browser-supplied* (message_id, data) pair that
+    the sink never issued. Here neither value comes from the browser --
+    the data is a fixed constant and the id was minted server-side a
+    moment ago -- and no message carrying this button was ever sent
+    through the sink, so the allowlist could never contain it (and so
+    a browser can never press it through `press`). `client_key=None`:
+    every call is a fresh row; the panel's in-progress check (409,
+    under its lock) is what stops a double submit, and
+    `finish_submitted` is what makes a replay finish nothing.
+    """
+    def build(update_id: int) -> dict:
+        return build_callback_update(update_id, message_id, WEB_SUBMIT_CALLBACK, settings)
 
     return await queue.enqueue_web(session, build, None)

@@ -24,6 +24,7 @@ from sqlalchemy import select, update as sql_update
 from app.config import Settings
 from app.core import export as export_module
 from app.core import purge as purge_module
+from app.core.clock import local_date
 from app.db import queue
 from app.db.models import Job, Message, SafetyEvent, SpendLedger, TelegramUpdate, UserState
 from app.tg.router import build_router
@@ -201,7 +202,8 @@ async def test_out_and_in_commands_over_web(sessionmaker, clock):
 async def test_spend_cap_gives_canned_reply_over_web(sessionmaker, clock):
     await _seed_state(sessionmaker)
     settings = _settings(DAILY_USD_CAP=0.50)
-    today = clock.now_utc().astimezone(datetime.timezone.utc).date()
+    # The cap is checked against the user's local day, not UTC's.
+    today = local_date(clock, TIMEZONE)
     async with sessionmaker() as session:
         session.add(SpendLedger(local_date=today, category="chat", usd_cost=decimal.Decimal("0.50")))
         await session.commit()

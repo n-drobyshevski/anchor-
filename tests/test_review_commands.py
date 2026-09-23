@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import amendments, review
+from app.core.clock import SystemClock, local_date
 from app.db.models import (
     Job,
     PersonaAmendment,
@@ -130,7 +131,10 @@ async def test_review_works_even_when_the_gate_would_refuse(sessionmaker):
 async def test_review_respects_only_the_cap(sessionmaker):
     await _seed(sessionmaker, 1)
     async with sessionmaker() as session:
-        session.add(SpendLedger(local_date=__import__("datetime").date.today(), category="chat", usd_cost=1.00))
+        # The user's local date, as the cap check reads it -- not the host's
+        # (from 22:00 UTC the Paris date is already tomorrow).
+        today = local_date(SystemClock(), TIMEZONE)
+        session.add(SpendLedger(local_date=today, category="chat", usd_cost=1.00))
         await session.commit()
 
     settings = Settings(DAILY_USD_CAP=1.00)

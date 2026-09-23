@@ -17,6 +17,8 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import memory, proposal, safety_events
+from app.core.clock import SystemClock
+from app.core.clock import local_date as clock_local_date
 from app.db.models import (
     IdleRun,
     Proposal,
@@ -232,20 +234,23 @@ async def test_state_shows_every_phase_two_field(sessionmaker):
         last_checkin_at=now - datetime.timedelta(days=1),
         due_action="сдать отчёт", due_set_at=now - datetime.timedelta(days=2),
     )
+    # /state sums spend for the user's local day; seeding the UTC date put
+    # these rows on "yesterday" from 22:00 UTC (Paris is UTC+2).
+    today = clock_local_date(SystemClock(), TIMEZONE)
     async with sessionmaker() as session:
         await memory.write_memory(
             session, kind="identity", text="пользователь живёт в Лилле", source="user"
         )
         session.add(
             SpendLedger(
-                local_date=datetime.datetime.now(datetime.timezone.utc).date(),
+                local_date=today,
                 category="chat",
                 usd_cost=decimal.Decimal("0.020000"),
             )
         )
         session.add(
             SpendLedger(
-                local_date=datetime.datetime.now(datetime.timezone.utc).date(),
+                local_date=today,
                 category="extractor",
                 usd_cost=decimal.Decimal("0.010000"),
             )

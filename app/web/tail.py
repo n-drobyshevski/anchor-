@@ -29,7 +29,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import proposal as proposal_core
-from app.db.models import Memory, Message, StateChange
+from app.db.models import Checkin, CheckinOrderResult, Journal, Memory, Message, StateChange
 from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
@@ -88,10 +88,14 @@ STATE_CHANGE_FIELD_TOPIC: dict[str, str] = {
     "last_checkin_at": "checkin",
     "awaiting": "checkin",
     "awaiting_ref": "checkin",
-    # 2b/2c: memory writes and hard-deletes, and journal entries
-    # (app/tg/memory.py's /forget, app/core/extract.py's autowrite).
+    # 2b/2c: memory writes and hard-deletes (app/tg/memory.py's
+    # /forget, app/core/extract.py's autowrite).
     "memory": "memory",
-    "journal": "memory",
+    # app/core/extract.py's journal line. W4 moved it from "memory" to
+    # "checkin": the journal feed lives on the Check-in screen, not the
+    # Memory one (and `_tail_checkin_once` below watches the journal
+    # table itself too, so this is a second, faster-to-notice path).
+    "journal": "checkin",
     # app/core/idle/undo.py's undo(): restores or re-deletes whatever
     # memory rows the idle run touched (design section unrelated to
     # this track, but the effect is a memory-table change all the
@@ -435,6 +439,71 @@ async def _tail_memory_once(
     return current
 
 
+# --- the fifth cursor: checkin + journal -> invalidate --------------------
+
+# Another fingerprint, for W4's Check-in screen. The Telegram check-in
+# flow's per-step writes (`set_rating`, `set_due_result`, `set_note`,
+# `orders.record_result`) and the extractor's journal insert write no
+# state_change row of their own -- only `start`/`finish`'s awaiting/
+# streak/last_checkin_at writes do -- so without this an open Check-in
+# screen would not see a Telegram rating tap until the check-in
+# finished. Each element moves on one of those writes: a new day's row
+# (max id, count), a rating (count/sum of day_rating -- a same-day redo
+# resets then re-rates, which moves the sum or passes through a lower
+# count), a due answer, a note (count and total length), an order
+# answer (its count), and a journal line (max id, count).
+CheckinFingerprint = tuple[int, int, int, int, int, int, int, int, int, int]
+
+
+async def _checkin_fingerprint(session: AsyncSession) -> CheckinFingerprint:
+    checkin_row = (
+        await session.execute(
+            select(
+                func.max(Checkin.id),
+                func.count(),
+                func.count(Checkin.day_rating),
+                func.sum(Checkin.day_rating),
+                func.count(Checkin.due_result),
+                func.count(Checkin.note),
+                func.sum(func.length(Checkin.note)),
+            )
+        )
+    ).one()
+    order_count = (
+        await session.execute(select(func.count()).select_from(CheckinOrderResult))
+    ).scalar_one()
+    journal_row = (await session.execute(select(func.max(Journal.id), func.count()))).one()
+    max_id, count, rated, rating_sum, due_count, note_count, note_len = checkin_row
+    journal_max, journal_count = journal_row
+    return (
+        max_id or 0,
+        count or 0,
+        rated or 0,
+        int(rating_sum or 0),
+        due_count or 0,
+        note_count or 0,
+        int(note_len or 0),
+        order_count or 0,
+        journal_max or 0,
+        journal_count or 0,
+    )
+
+
+async def _tail_checkin_once(
+    session: AsyncSession, hub: WebHub, fingerprint: CheckinFingerprint
+) -> CheckinFingerprint:
+    """One poll of the check-in/journal fingerprint: publish_invalidate(
+    "checkin") exactly once when it has moved since the last poll, then
+    return the new one. Same shape as `_tail_memory_once`; a web-issued
+    submit (app/web/panels/checkin.py) also publishes its own invalidate
+    directly, so this is the Telegram/extractor/worker side's signal.
+    """
+    current = await _checkin_fingerprint(session)
+    if current != fingerprint:
+        hub.publish_invalidate("checkin")
+    return current
+
+
 async def _tail_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     hub: WebHub,
@@ -442,6 +511,7 @@ async def _tail_loop(
     state_change_cursor: int,
     proposals_fingerprint: ProposalFingerprint,
     memory_fingerprint: MemoryFingerprint,
+    checkin_fingerprint: CheckinFingerprint,
 ) -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -456,6 +526,9 @@ async def _tail_loop(
                 )
                 memory_fingerprint = await _tail_memory_once(
                     session, hub, memory_fingerprint
+                )
+                checkin_fingerprint = await _tail_checkin_once(
+                    session, hub, checkin_fingerprint
                 )
         except Exception as exc:  # noqa: BLE001 - a tail crash must never take the process down
             logger.warning("web tail failed", extra={"event": type(exc).__name__})
@@ -473,9 +546,16 @@ async def start_tail(
         state_change_cursor = await _max_state_change_id(session)
         proposals_fingerprint = await _proposals_fingerprint(session)
         memory_fingerprint = await _memory_fingerprint(session)
+        checkin_fingerprint = await _checkin_fingerprint(session)
     return asyncio.create_task(
         _tail_loop(
-            sessionmaker, hub, cursor, state_change_cursor, proposals_fingerprint, memory_fingerprint
+            sessionmaker,
+            hub,
+            cursor,
+            state_change_cursor,
+            proposals_fingerprint,
+            memory_fingerprint,
+            checkin_fingerprint,
         ),
         name="anchor-web-tail",
     )

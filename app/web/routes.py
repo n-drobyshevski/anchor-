@@ -661,6 +661,10 @@ def setup_web(
     app["web_rate_limiter"] = WebRateLimiter(clock)
     app["web_passphrase_lock"] = asyncio.Lock()
     app["web_passphrase_waiters"] = {"n": 0}
+    # W4: serializes POST /api/checkin's check-then-submit-then-enqueue
+    # (app/web/panels/checkin.py), so two concurrent submits cannot both
+    # pass its 409 in-progress check.
+    app["web_checkin_lock"] = asyncio.Lock()
     # Built once, here, not per-request: see _build_static_manifest's
     # docstring for why this is what keeps GET /static/{path:.+} off
     # the filesystem entirely. Built from whatever exists under
