@@ -38,6 +38,10 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_JUDGE",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
+    "PLANNER_MCP_URL",
+    "PLANNER_SUPABASE_URL",
+    "PLANNER_OAUTH_CLIENT_ID",
+    "PLANNER_OAUTH_REDIRECT_URI",
 )
 
 
@@ -352,6 +356,55 @@ class Settings(BaseSettings):
         "AnchorBot/1.0 (personal, single-user; contact via repo owner)"
     )
 
+    # --- planner P2: read path + OAuth link -----------------------------
+    #
+    # The master switch. False (the default) keeps every planner code
+    # path dark -- no job kind is dispatched, no command does anything
+    # but say "off", and build_now_block(planner=None) stays
+    # byte-identical to today (app/core/prompt.py). Off through this
+    # milestone's ship the same way RESEARCH_ENABLED was through 4a-4c.
+    PLANNER_ENABLED: bool = False
+    # The planner's MCP endpoint, e.g. https://planner.example.com/api/mcp.
+    PLANNER_MCP_URL: str = ""
+    # The planner's Supabase project URL. Its OAuth authorization server
+    # is `${PLANNER_SUPABASE_URL}/auth/v1` (see app/planner/auth.py,
+    # matching lib/mcp/env.ts's getSupabaseAuthIssuer() in the planner
+    # repo) -- Anchor discovers the actual authorize/token endpoints
+    # from that issuer's RFC 8414 metadata rather than guessing paths.
+    PLANNER_SUPABASE_URL: str = ""
+    # A public OAuth client id registered against the planner's Supabase
+    # project (dynamic client registration, done once, out of band --
+    # see docs/README for the exact steps). PKCE-only; no client secret.
+    PLANNER_OAUTH_CLIENT_ID: str = ""
+    # Anchor's own callback: https://<railway-host>/planner/oauth/callback.
+    # Its host must be added, in full, to the planner's
+    # MCP_ALLOWED_REDIRECT_HOSTS -- a bare "up.railway.app" there would
+    # allow any Railway app (design review, table 1).
+    PLANNER_OAUTH_REDIRECT_URI: str = ""
+    # A snapshot older than this is treated as absent by
+    # app/planner/snapshot.py's render_lines() -- the plan section
+    # "degradation" requirement is that the plan section of the now-
+    # block simply disappears rather than showing stale data.
+    PLANNER_SNAPSHOT_MAX_AGE_MIN: int = 30
+    # How often the heartbeat re-queues PLANNER_SYNC, in minutes (plus
+    # one extra run ~10 minutes before MORNING_TIME, so the morning
+    # message reflects a fresh agenda -- app/core/scheduler.py's
+    # maybe_enqueue_planner_sync).
+    PLANNER_SYNC_EVERY_MIN: int = 15
+    # P3: items Anchor creates on the planner are private by default,
+    # so they do not appear on the partner's calendar without opt-in
+    # (design review, your decision in section 0). Read now so the
+    # setting exists ahead of the write path that consumes it.
+    PLANNER_WRITE_PRIVATE: bool = True
+    # P4: writes proposed from ordinary chat, behind their own flag.
+    # False until 4d-equivalent evals exist for this feature.
+    PLANNER_INTENT: bool = False
+    # P3: a daily ceiling on planner writes, independent of DAILY_USD_CAP
+    # -- a loop that kept proposing writes would otherwise be bounded
+    # only by spend, and a stray planner_action is a calendar entry, not
+    # a few cents.
+    PLANNER_MAX_WRITES_PER_DAY: int = 20
+
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
     def _parse_packet(cls, value):
@@ -471,6 +524,14 @@ REQUIRED_ALWAYS = ("TELEGRAM_BOT_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY")
 # Only webhook mode serves HTTP: it verifies the secret on every request
 # and registers PUBLIC_URL with Telegram. Polling needs neither.
 REQUIRED_WEBHOOK = ("TELEGRAM_SECRET_TOKEN", "PUBLIC_URL")
+# Only required when PLANNER_ENABLED -- the whole feature is off by
+# default and must not block boot for a deployment that never sets it.
+REQUIRED_PLANNER = (
+    "PLANNER_MCP_URL",
+    "PLANNER_SUPABASE_URL",
+    "PLANNER_OAUTH_CLIENT_ID",
+    "PLANNER_OAUTH_REDIRECT_URI",
+)
 
 
 def missing_required(settings: Settings) -> list[str]:
@@ -484,6 +545,8 @@ def missing_required(settings: Settings) -> list[str]:
         missing.append("ALLOWED_CHAT_ID")
     if settings.MODE == "webhook":
         missing.extend(name for name in REQUIRED_WEBHOOK if not getattr(settings, name))
+    if settings.PLANNER_ENABLED:
+        missing.extend(name for name in REQUIRED_PLANNER if not getattr(settings, name))
     return missing
 
 

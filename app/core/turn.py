@@ -111,6 +111,10 @@ from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, welfare
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
+from app.planner import auth as planner_auth
+from app.planner import snapshot as planner_snapshot
+from app.planner.jobs import PLANNER_SYNC
+from app.core.scheduler import planner_sync_dedup_key
 from app.core.spend import Priced, check_cap, priced
 from app.core.state import Source, get_state, update_state
 from app.db.jobs import enqueue_job
@@ -857,6 +861,35 @@ async def run(
                 injected_memory_ids = [
                     row.id for row in pinned_rows + retrieved_rows + technique_rows
                 ]
+                # P2: a snapshot read only -- never a live call to the
+                # planner. A stale snapshot (or PLANNER_ENABLED off)
+                # means an empty `planner_lines`, which
+                # build_now_block(planner=None-or-[]) already renders as
+                # no section at all. If it is stale, a PLANNER_SYNC job
+                # is queued so the *next* turn sees a fresher one; this
+                # turn never waits on it.
+                planner_lines: list[str] = []
+                if settings.PLANNER_ENABLED and await planner_auth.is_enabled(session):
+                    snap = await planner_snapshot.get_snapshot(session)
+                    if planner_snapshot.is_stale(
+                        snap, clock, settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+                    ):
+                        now_local = clock_module.now_local(clock, user_state.timezone)
+                        await enqueue_job(
+                            session,
+                            PLANNER_SYNC,
+                            {},
+                            dedup_key=planner_sync_dedup_key(
+                                now_local.date(), now_local.hour, now_local.minute // 5
+                            ),
+                        )
+                    else:
+                        planner_lines = planner_snapshot.render_lines(
+                            snap,
+                            clock,
+                            user_state.timezone,
+                            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+                        )
                 messages = await build_messages(
                     session,
                     clock=clock,
@@ -875,6 +908,7 @@ async def run(
                     due_set_at=user_state.due_set_at,
                     streak=user_state.streak,
                     last_checkin_at=user_state.last_checkin_at,
+                    planner=planner_lines,
                 )
             else:
                 messages = await build_neutral_messages(

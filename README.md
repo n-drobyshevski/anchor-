@@ -923,3 +923,18 @@ As of 4a the same rule covers the web: logs may carry a domain, an HTTP
 status, an error code, a count and a cost, and never a URL path or
 query, page text, card text, a quote or a topic. A path can carry
 personal information as easily as a message can.
+
+**P2 (the planner link).** With `PLANNER_ENABLED=true`, Anchor reads
+your agenda from the planner and can show it in chat. By your own
+decision recorded in the design review, the partner's *shared* (non-
+private) event titles are included in that agenda (`partner="shared"`)
+-- and because that agenda can be quoted back to you by the persona,
+**the partner's shared event titles do go to OpenRouter** as part of
+the prompt, same as anything else in the now-block. `LLM_DATA_COLLECTION
+=deny` still applies to that call. Sleep data is never included. The
+partner's private events, and their id/description/location, are never
+emitted by the planner's `get_agenda` tool in the first place. `/delete`
+purges the planner link, the cached agenda and any pending planner
+action; `/export` includes the cached agenda but never the OAuth
+tokens themselves (see `app/core/export.py`'s `NOT_EXPORTED`-equivalent
+comment on `PlannerCredential`).

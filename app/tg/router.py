@@ -68,10 +68,13 @@ from app.core.quiet import parse as parse_quiet
 from app.core.spend import today_by_category, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.planner import auth as planner_auth
+from app.planner import snapshot as planner_snapshot
 from app.tg.send import send_keyboard
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
 from app.tg import memory as memory_ui
+from app.tg import planner as planner_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import welfare as welfare_ui
@@ -111,6 +114,11 @@ BOT_COMMANDS = [
     BotCommand(command="card", description="Карточка по id"),
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
+    # P2 (design review section 2.3): the read path + link flow.
+    # /task, /event, /done are P3 and are not registered yet.
+    BotCommand(command="plan", description="План на сегодня"),
+    BotCommand(command="planner", description="Статус планера, on/off"),
+    BotCommand(command="planner_link", description="Подключить планер"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -825,6 +833,84 @@ def build_router(
             return
         reply = await research_ui.run_reject(sessionmaker, clock, card_id=card_id)
         await _reply_once(message, event_update.update_id, reply)
+
+    # --- P2: planner read path + link flow ---
+
+    @router.message(Command("plan"))
+    async def plan_command(message: Message, event_update: Update) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.render_plan_text(
+            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("planner"))
+    async def planner_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+
+        raw = (command.args or "").strip().lower()
+        if raw in ("on", "off"):
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                row = await planner_auth.set_enabled(session, raw == "on")
+            if row is None:
+                await _reply_once(message, event_update.update_id, planner_ui.ON_OFF_NOT_LINKED)
+                return
+            await _reply_once(
+                message,
+                event_update.update_id,
+                planner_ui.ON_REPLY if raw == "on" else planner_ui.OFF_REPLY,
+            )
+            return
+        if raw:
+            await _reply_once(message, event_update.update_id, planner_ui.ON_OFF_USAGE)
+            return
+
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            credential = await planner_auth.get_status(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.render_status_text(
+            credential,
+            snap,
+            clock,
+            user_state.timezone,
+            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+        )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("planner_link"))
+    async def planner_link_command(message: Message, event_update: Update) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.LINK_DISABLED)
+            return
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            existing = await planner_auth.get_status(session)
+        if existing is not None and existing.status == planner_auth.ACTIVE:
+            await _reply_once(message, event_update.update_id, planner_ui.LINK_ALREADY)
+            return
+        try:
+            url = await planner_auth.link_url(settings, clock)
+        except Exception as exc:  # noqa: BLE001 - a failed discovery must still reply
+            await _reply_once(
+                message, event_update.update_id, planner_ui.LINK_FAILED.format(
+                    reason=type(exc).__name__
+                )
+            )
+            return
+        await _reply_once(message, event_update.update_id, planner_ui.LINK_INTRO.format(url=url))
 
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:

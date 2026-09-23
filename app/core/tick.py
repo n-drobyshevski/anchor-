@@ -53,6 +53,7 @@ from app.core.scheduler import pick_send_time, plan
 from app.core.spend import priced
 from app.core.state import get_state
 from app.db.models import Journal, SpendLedger
+from app.planner import snapshot as planner_snapshot
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,14 @@ async def run_tick_decide(
     # 2. Ask the safety model (H2: strict JSON, not prose).
     transcript = await recent_transcript(session, CONTEXT_MESSAGES)
     journal = await _recent_journal(session, JOURNAL_LINES)
+    # P2: a snapshot read only, same discipline as app/core/turn.py --
+    # the tick decision must never itself wait on the planner.
+    planner_lines: list[str] = []
+    if settings.PLANNER_ENABLED:
+        snap = await planner_snapshot.get_snapshot(session)
+        planner_lines = planner_snapshot.render_lines(
+            snap, clock, state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
     now_block = build_now_block(
         clock=clock,
         timezone=state.timezone,
@@ -258,6 +267,7 @@ async def run_tick_decide(
         due_set_at=state.due_set_at,
         streak=state.streak,
         last_checkin_at=state.last_checkin_at,
+        planner=planner_lines,
     )
     user_content = build_input(
         now_block=now_block,

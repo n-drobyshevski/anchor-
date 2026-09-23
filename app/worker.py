@@ -75,13 +75,20 @@ from app.core.clock import Clock, to_local, within_window
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
-from app.core.scheduler import TICK_DECIDE, heartbeat, maybe_enqueue_research_sweep
+from app.core.scheduler import (
+    TICK_DECIDE,
+    heartbeat,
+    maybe_enqueue_planner_sync,
+    maybe_enqueue_research_sweep,
+)
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
+from app.planner.client import PlannerClient
+from app.planner.jobs import PLANNER_SYNC, run_planner_sync
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
@@ -153,6 +160,7 @@ async def _run_job(
     kind: str,
     payload: dict,
     safety_provider: LLMProvider | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
@@ -235,6 +243,23 @@ async def _run_job(
         await run_daily_sweep(session, settings, clock)
         return ExtractOutcome()
 
+    if kind == PLANNER_SYNC:
+        # P2: no LLM call, no bot needed to do the work -- a bot is only
+        # used, best-effort, for the once-only "reconnect the planner"
+        # notice on a revoked grant (see app/planner/jobs.py).
+        if planner_client is None:
+            raise ValueError("planner_sync needs a PlannerClient")
+        await run_planner_sync(
+            session,
+            settings,
+            planner_client,
+            clock,
+            timezone=user_state.timezone,
+            bot=bot,
+            chat_id=user_state.chat_id,
+        )
+        return ExtractOutcome()
+
     if kind == TICK_DECIDE:
         # H2: the safety model decides whether there is a natural reason
         # to write first -- another strict-schema verdict. It plans an
@@ -261,6 +286,7 @@ async def process_one_job(
     bot: Bot | None = None,
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
 
@@ -281,7 +307,7 @@ async def process_one_job(
         async with sessionmaker() as session:
             outcome = await _run_job(
                 session, settings, provider, cheap_provider, bot, clock, kind, payload,
-                safety_provider,
+                safety_provider, planner_client,
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -410,13 +436,15 @@ async def _claim_loop(
     clock: Clock,
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> None:
     """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
         if await process_one_update(sessionmaker, dp, bot, clock):
             continue
         if await process_one_job(
-            sessionmaker, settings, cheap_provider, clock, bot, provider, safety_provider
+            sessionmaker, settings, cheap_provider, clock, bot, provider, safety_provider,
+            planner_client,
         ):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
@@ -459,6 +487,12 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_research_sweep(session, clock, state.timezone)
+            # P2: same shape and the same reason as the research sweep
+            # right above -- see app/core/scheduler.py's module docstring
+            # for why this is a sibling step and not inside heartbeat().
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_planner_sync(session, settings, clock, state.timezone)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 
@@ -484,16 +518,23 @@ async def run_worker(
     clock: Clock,
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> list[asyncio.Task]:
     """Start the claim loop, the recovery sweep and the heartbeat.
 
     `safety_provider` (H2) defaults to None, and every job that needs it
     falls back to `cheap_provider` -- which is what the tests predating
-    H2 rely on. app/main.py always supplies it.
+    H2 rely on. app/main.py always supplies it. `planner_client` (P2)
+    likewise defaults to None; it is only required when a PLANNER_SYNC
+    job is actually claimed, which cannot happen with PLANNER_ENABLED
+    off (app/core/scheduler.py's maybe_enqueue_planner_sync never
+    enqueues one), so tests that do not touch the planner pass no
+    client.
     """
     claim_task = asyncio.create_task(
         _claim_loop(
-            sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
+            sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider,
+            planner_client,
         ),
         name="anchor-claim-loop",
     )

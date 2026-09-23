@@ -93,6 +93,15 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # P2: the planner link. planner_credential holds live OAuth tokens --
+    # "delete all my data" purging them is the same call plan section
+    # 3.1 makes for a revoked grant: the credential is gone, and
+    # /planner_link must be run again to relink. planner_snapshot and
+    # planner_action are the cached agenda and (from P3) pending writes,
+    # both plainly user data.
+    "planner_credential",
+    "planner_snapshot",
+    "planner_action",
 )
 
 # user_state is reset in place, never dropped. persona_version is a

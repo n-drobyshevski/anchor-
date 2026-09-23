@@ -99,6 +99,10 @@ RETRIEVED_HEADER = "## Может быть важно"
 # -- these arrived from the open web and are in this prompt only
 # because the user read one and pressed [Принять].
 TECHNIQUES_HEADER = "## Приёмы (одобрены тобой)"
+# P2 (planner read path). Its own header, placed right after "Главное
+# действие" and before the retrieved-memories section -- see
+# build_now_block's docstring for why.
+PLAN_HEADER = "## План на сегодня (из планера)"
 
 # strftime("%A") depends on a ru_RU locale that is not installed in the
 # container, so the weekday name is a hardcoded lookup instead
@@ -163,6 +167,7 @@ def build_now_block(
     due_set_at: datetime.datetime | None = None,
     streak: int = 0,
     last_checkin_at: datetime.datetime | None = None,
+    planner: list[str] | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -178,6 +183,14 @@ def build_now_block(
     only path by which anything read from the open web reaches this
     prompt, and only after the user pressed [Принять] on it (phase-4
     plan section 10).
+
+    P2 adds `planner`, the rendered agenda lines from
+    app/planner/snapshot.py's render_lines() -- never ORM rows, never a
+    partner id, same discipline as `pinned`/`retrieved`/`techniques`
+    above. `planner=None` (the default, and every call site predating
+    P2) must produce byte-identical output to before this parameter
+    existed: `_bullets` already returns `[]` for `None`, so the section
+    is simply omitted, exactly like an empty `retrieved` list is.
     """
     now_local = clock_module.now_local(clock, timezone)
     weekday = _RU_WEEKDAYS[now_local.weekday()]
@@ -201,6 +214,7 @@ def build_now_block(
         lines.append(f"Главное действие: «{due_action}»{when}")
     else:
         lines.append("Главное действие: нет")
+    lines.extend(_bullets(PLAN_HEADER, planner or []))
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     # After the retrieved memories and before the flags: a technique is
     # less volatile than what this turn happened to match, and the flags
@@ -301,6 +315,7 @@ async def build_messages(
     due_set_at: datetime.datetime | None = None,
     streak: int = 0,
     last_checkin_at: datetime.datetime | None = None,
+    planner: list[str] | None = None,
     persona_path: Path = PERSONA_PATH,
 ) -> list[LLMMessage]:
     """Assemble the full message list for one turn, in plan section 7's order.
@@ -347,6 +362,7 @@ async def build_messages(
                 due_set_at=due_set_at,
                 streak=streak,
                 last_checkin_at=last_checkin_at,
+                planner=planner,
             ),
         )
     )
