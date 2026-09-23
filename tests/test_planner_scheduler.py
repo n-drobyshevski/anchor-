@@ -15,7 +15,8 @@ from sqlalchemy import select
 from app.config import Settings
 from app.core import scheduler
 from app.db.models import Job, PlannerCredential, PlannerSnapshot, UserState
-from app.planner.jobs import PLANNER_SYNC
+from app.planner import actions as planner_actions
+from app.planner.jobs import PLANNER_SYNC, PLANNER_WRITE
 from app.worker import _run_job
 
 pytestmark = pytest.mark.asyncio
@@ -161,4 +162,52 @@ async def test_worker_dispatch_raises_without_a_planner_client(sessionmaker, fro
         with pytest.raises(ValueError):
             await _run_job(
                 session, settings, None, fake_llm_provider, None, clock, PLANNER_SYNC, {},
+            )
+
+
+async def test_worker_dispatches_planner_write(sessionmaker, frozen_clock, fake_llm_provider):
+    """P3: the worker routes PLANNER_WRITE payload's planner_action_id
+    through to run_planner_write, exactly as it does PLANNER_SYNC above."""
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    settings = _settings()
+
+    class _FakeWriteClient:
+        def __init__(self):
+            self.calls = []
+
+        async def create_task(self, settings, session, clock, **kwargs):
+            self.calls.append(kwargs)
+            return {"id": "t1"}
+
+        async def get_agenda(self, settings, session, clock, **kwargs):
+            return {"events": [], "tasks": []}
+
+    client = _FakeWriteClient()
+    async with sessionmaker() as session:
+        await _seed_state(session)
+        action = await planner_actions.create(
+            session, clock, kind=planner_actions.CREATE_TASK,
+            payload={"title": "Купить молоко", "due_date": None},
+        )
+        await planner_actions.accept(session, clock, action.id)
+        await _run_job(
+            session, settings, None, fake_llm_provider, None, clock,
+            PLANNER_WRITE, {"planner_action_id": action.id}, None, client,
+        )
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["client_request_id"] == f"anchor:{action.id}"
+
+
+async def test_worker_dispatch_of_planner_write_raises_without_a_planner_client(
+    sessionmaker, frozen_clock, fake_llm_provider
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    settings = _settings()
+    async with sessionmaker() as session:
+        await _seed_state(session)
+        with pytest.raises(ValueError):
+            await _run_job(
+                session, settings, None, fake_llm_provider, None, clock,
+                PLANNER_WRITE, {"planner_action_id": 1},
             )

@@ -234,6 +234,68 @@ class PlannerClient:
             {"date": date, "timeZone": timezone, "days": days, "partner": partner},
         )
 
+    # --- P3: writes (app/planner/jobs.py's PLANNER_WRITE job) -------------
+    #
+    # Each of the three wraps call_tool the same way get_agenda does --
+    # ALLOWED_TOOLS is still the enforcement point, this is just the
+    # typed call site a caller does not have to hand-build.
+
+    async def create_task(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        title: str,
+        due_date: str | None,
+        client_request_id: str,
+    ) -> dict:
+        return await self.call_tool(
+            settings,
+            session,
+            clock,
+            "create_task",
+            {"title": title, "dueDate": due_date, "clientRequestId": client_request_id},
+        )
+
+    async def create_event(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        title: str,
+        start: str,
+        end: str,
+        all_day: bool,
+        is_private: bool,
+        client_request_id: str,
+    ) -> dict:
+        return await self.call_tool(
+            settings,
+            session,
+            clock,
+            "create_event",
+            {
+                "title": title,
+                "start": start,
+                "end": end,
+                "allDay": all_day,
+                "isPrivate": is_private,
+                "clientRequestId": client_request_id,
+            },
+        )
+
+    async def complete_task(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        task_id: str,
+    ) -> dict:
+        return await self.call_tool(settings, session, clock, "complete_task", {"id": task_id})
+
 
 def build_planner_client(settings: Settings, http: aiohttp.ClientSession) -> PlannerClient:
     """Constructed once in app/main.py, shared across the worker's jobs."""

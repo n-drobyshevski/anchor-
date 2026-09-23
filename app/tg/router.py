@@ -68,7 +68,9 @@ from app.core.quiet import parse as parse_quiet
 from app.core.spend import today_by_category, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
+from app.planner import parse as planner_parse
 from app.planner import snapshot as planner_snapshot
 from app.tg.send import send_keyboard
 from app.tg import checkin as checkin_ui
@@ -115,10 +117,14 @@ BOT_COMMANDS = [
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
     # P2 (design review section 2.3): the read path + link flow.
-    # /task, /event, /done are P3 and are not registered yet.
     BotCommand(command="plan", description="План на сегодня"),
     BotCommand(command="planner", description="Статус планера, on/off"),
     BotCommand(command="planner_link", description="Подключить планер"),
+    # P3: explicit writes, behind a confirm card (/task, /event) or a
+    # pick-from-list button (/done).
+    BotCommand(command="task", description="Добавить задачу в планер"),
+    BotCommand(command="event", description="Добавить событие в планер"),
+    BotCommand(command="done", description="Отметить задачу сделанной"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -912,6 +918,124 @@ def build_router(
             return
         await _reply_once(message, event_update.update_id, planner_ui.LINK_INTRO.format(url=url))
 
+    # --- P3: /task, /event (deterministic parse, then a confirm card) ---
+
+    async def _handle_write_command(
+        message: Message,
+        event_update: Update,
+        *,
+        text: str,
+        usage: str,
+        kind: str,
+        parser,
+    ) -> None:
+        """Shared shape for /task and /event: usage check, replay gate,
+        the daily write cap, parse (regex, then the safety-model
+        fallback), a planner_action row, then its confirm card.
+
+        Not a canned reply (like /remember): a card carries a keyboard,
+        so it is sent directly once mark_update_handled records the
+        text-only trace of what was typed.
+        """
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        if not text:
+            await _reply_once(message, event_update.update_id, usage)
+            return
+        if not await _once(event_update.update_id):
+            return
+
+        reply: str | None = None
+        action_id: int | None = None
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            timezone = user_state.timezone
+            count = await planner_actions.count_today(session, clock, timezone)
+            if count >= settings.PLANNER_MAX_WRITES_PER_DAY:
+                reply = planner_ui.WRITE_CAP_REACHED.format(
+                    count=count, cap=settings.PLANNER_MAX_WRITES_PER_DAY
+                )
+            else:
+                try:
+                    payload = await parser(session, timezone)
+                except planner_parse.ParseError as exc:
+                    reply = exc.message
+                else:
+                    action = await planner_actions.create(session, clock, kind=kind, payload=payload)
+                    action_id = action.id
+
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text=f"[/{kind}]"
+        )
+        if action_id is None:
+            await message.answer(reply)
+            return
+        await planner_ui.send_confirm_card(
+            sessionmaker, message.bot, chat_id=message.chat.id, action_id=action_id, timezone=timezone
+        )
+
+    @router.message(Command("task"))
+    async def task_command(message: Message, event_update: Update, command: CommandObject) -> None:
+        async def _parse(session, timezone: str) -> dict:
+            parsed = await planner_parse.parse_task(
+                session, settings, safety_provider or provider, clock,
+                text=(command.args or "").strip(), timezone=timezone,
+            )
+            return {
+                "title": parsed.title,
+                "due_date": parsed.due_date.isoformat() if parsed.due_date else None,
+            }
+
+        await _handle_write_command(
+            message, event_update,
+            text=(command.args or "").strip(), usage=planner_ui.TASK_USAGE,
+            kind=planner_actions.CREATE_TASK, parser=_parse,
+        )
+
+    @router.message(Command("event"))
+    async def event_command(message: Message, event_update: Update, command: CommandObject) -> None:
+        async def _parse(session, timezone: str) -> dict:
+            parsed = await planner_parse.parse_event(
+                session, settings, safety_provider or provider, clock,
+                text=(command.args or "").strip(), timezone=timezone,
+            )
+            return {
+                "title": parsed.title,
+                "start": parsed.start.isoformat(),
+                "end": parsed.end.isoformat(),
+                "all_day": parsed.all_day,
+            }
+
+        await _handle_write_command(
+            message, event_update,
+            text=(command.args or "").strip(), usage=planner_ui.EVENT_USAGE,
+            kind=planner_actions.CREATE_EVENT, parser=_parse,
+        )
+
+    # --- P3: /done (pick a task from a list; the tap is the confirmation) ---
+
+    @router.message(Command("done"))
+    async def done_command(message: Message, event_update: Update) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text, tasks = planner_ui.render_done_list(
+            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
+        if not tasks:
+            await _reply_once(message, event_update.update_id, text)
+            return
+        if not await _once(event_update.update_id):
+            return
+        await send_keyboard(message.bot, message.chat.id, text, planner_ui.done_keyboard(tasks))
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/done]"
+        )
+
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
         await turn.run(
@@ -1011,6 +1135,39 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("pa:"))
+    async def planner_action_decision(callback: CallbackQuery) -> None:
+        """`pa:y:<id>` / `pa:n:<id>` -- the /task and /event confirm card."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        await planner_ui.handle_confirm_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            timezone=user_state.timezone,
+        )
+
+    @router.callback_query(F.data.startswith("pl:d:"))
+    async def planner_done(callback: CallbackQuery) -> None:
+        """`pl:d:<task id>` -- a /done list button."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        await planner_ui.handle_done_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            timezone=user_state.timezone,
         )
 
     @router.callback_query(F.data.startswith("r:a:"))

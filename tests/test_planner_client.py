@@ -175,3 +175,74 @@ async def test_a_timeout_raises_planner_unavailable(sessionmaker, frozen_clock):
             await planner_client.get_agenda(
                 _settings(), session, clock, date="2026-09-23", timezone="Europe/Paris"
             )
+
+
+# --- P3: the write wrapper methods send the right tool + arguments ---------
+
+
+async def test_create_task_sends_the_right_tool_and_arguments(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    await _seed_credential(sessionmaker, clock)
+    fake = _FakeMcpServer()
+    app = web.Application()
+    app.router.add_post("/mcp", fake.handle)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("/mcp"))
+        planner_client = PlannerClient(client.session, url)
+        async with sessionmaker() as session:
+            await planner_client.create_task(
+                _settings(), session, clock,
+                title="Купить молоко", due_date="2026-09-24", client_request_id="anchor:1",
+            )
+    call = next(c for c in fake.calls if c.get("method") == "tools/call")
+    assert call["params"]["name"] == "create_task"
+    assert call["params"]["arguments"] == {
+        "title": "Купить молоко", "dueDate": "2026-09-24", "clientRequestId": "anchor:1",
+    }
+
+
+async def test_create_event_sends_the_right_tool_and_arguments(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    await _seed_credential(sessionmaker, clock)
+    fake = _FakeMcpServer()
+    app = web.Application()
+    app.router.add_post("/mcp", fake.handle)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("/mcp"))
+        planner_client = PlannerClient(client.session, url)
+        async with sessionmaker() as session:
+            await planner_client.create_event(
+                _settings(), session, clock,
+                title="Встреча", start="2026-09-24T18:00:00+02:00", end="2026-09-24T19:00:00+02:00",
+                all_day=False, is_private=True, client_request_id="anchor:2",
+            )
+    call = next(c for c in fake.calls if c.get("method") == "tools/call")
+    assert call["params"]["name"] == "create_event"
+    assert call["params"]["arguments"] == {
+        "title": "Встреча",
+        "start": "2026-09-24T18:00:00+02:00",
+        "end": "2026-09-24T19:00:00+02:00",
+        "allDay": False,
+        "isPrivate": True,
+        "clientRequestId": "anchor:2",
+    }
+
+
+async def test_complete_task_sends_the_right_tool_and_arguments(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    await _seed_credential(sessionmaker, clock)
+    fake = _FakeMcpServer()
+    app = web.Application()
+    app.router.add_post("/mcp", fake.handle)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("/mcp"))
+        planner_client = PlannerClient(client.session, url)
+        async with sessionmaker() as session:
+            await planner_client.complete_task(_settings(), session, clock, task_id="abc-123")
+    call = next(c for c in fake.calls if c.get("method") == "tools/call")
+    assert call["params"]["name"] == "complete_task"
+    assert call["params"]["arguments"] == {"id": "abc-123"}
+
+
+async def test_the_write_tools_are_all_allowlisted() -> None:
+    assert {"create_task", "create_event", "complete_task"} <= ALLOWED_TOOLS

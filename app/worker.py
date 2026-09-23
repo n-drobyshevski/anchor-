@@ -88,7 +88,7 @@ from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_st
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.planner.client import PlannerClient
-from app.planner.jobs import PLANNER_SYNC, run_planner_sync
+from app.planner.jobs import PLANNER_SYNC, PLANNER_WRITE, run_planner_sync, run_planner_write
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
@@ -254,6 +254,23 @@ async def _run_job(
             settings,
             planner_client,
             clock,
+            timezone=user_state.timezone,
+            bot=bot,
+            chat_id=user_state.chat_id,
+        )
+        return ExtractOutcome()
+
+    if kind == PLANNER_WRITE:
+        # P3: same shape as PLANNER_SYNC above -- no LLM call, bot used
+        # only for the canned confirmation / revoked-grant notice.
+        if planner_client is None:
+            raise ValueError("planner_write needs a PlannerClient")
+        await run_planner_write(
+            session,
+            settings,
+            planner_client,
+            clock,
+            planner_action_id=payload["planner_action_id"],
             timezone=user_state.timezone,
             bot=bot,
             chat_id=user_state.chat_id,
