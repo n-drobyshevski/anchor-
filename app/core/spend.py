@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.db.models import SpendLedger
+from app.db.models import IdleRun, SpendLedger
 from app.llm.provider import LLMUsage
 
 _CENTS_EXPONENT = decimal.Decimal("0.000001")  # Numeric(10, 6): quantize to 6dp
@@ -76,6 +76,13 @@ async def today_idle_usd(
     bare `idle` -- see app/core/idle/backfill.py -- so `LIKE 'idle:%'`
     is the whole match and needs no escaping: neither `_` nor `%`
     appears in any kind constant in app/core/idle/__init__.py.
+
+    6d adds one exception: idle `research` runs the unchanged Phase 4
+    /study pipeline, which ledgers under its own `research` category,
+    so those rows cannot match `idle:%`. Their cost is taken from
+    `idle_run.usd_cost` instead (app/core/idle/research.py reads it back
+    from study_job), which keeps IDLE_USD_CAP honest without touching
+    the pipeline and without counting anything twice.
     """
     local_today = clock_module.local_date(clock, timezone)
     result = await session.execute(
@@ -83,7 +90,12 @@ async def today_idle_usd(
         .where(SpendLedger.local_date == local_today)
         .where(SpendLedger.category.like("idle:%"))
     )
-    return decimal.Decimal(result.scalar_one())
+    research = await session.execute(
+        select(func.coalesce(func.sum(IdleRun.usd_cost), 0))
+        .where(IdleRun.local_date == local_today)
+        .where(IdleRun.kind == "research")
+    )
+    return decimal.Decimal(result.scalar_one()) + decimal.Decimal(research.scalar_one())
 
 
 async def check_cap(

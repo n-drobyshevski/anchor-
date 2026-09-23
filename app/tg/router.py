@@ -75,6 +75,7 @@ from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
 from app.tg import idle as idle_ui
+from app.tg import interests as interests_ui
 from app.tg import memory as memory_ui
 from app.tg import notebook as notebook_ui
 from app.tg import orders as orders_ui
@@ -128,6 +129,8 @@ BOT_COMMANDS = [
     BotCommand(command="amendments", description="Поправки к стилю"),
     # 6a (Phase 6 plan section 7).
     BotCommand(command="digest", description="Фоновая работа"),
+    # 6d (Phase 6 plan section 7).
+    BotCommand(command="interests", description="Темы для фонового поиска"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -857,6 +860,33 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/digest]"
         )
 
+    # --- 6d: /interests (plan section 7) ---
+
+    @router.message(Command("interests"))
+    async def interests_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        args = (command.args or "").strip()
+        parts = args.split(maxsplit=1)
+        if parts and parts[0].lower() == "add":
+            parsed = interests_ui.parse_add_args(parts[1] if len(parts) > 1 else "")
+            if parsed is None:
+                await _reply_once(message, event_update.update_id, interests_ui.ADD_USAGE)
+                return
+            packet, topic = parsed
+            if not await _once(event_update.update_id):
+                return
+            reply = await interests_ui.run_add(sessionmaker, settings, packet=packet, topic=topic)
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
+        if not await _once(event_update.update_id):
+            return
+        await interests_ui.run_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/interests]"
+        )
+
     # --- 4b/4c: research (plan section 9) ---
     #
     # Every one of these six checks RESEARCH_ENABLED first and replies
@@ -1195,6 +1225,18 @@ def build_router(
     async def research_page(callback: CallbackQuery) -> None:
         """`r:p:<page>` -- a /notes paging arrow."""
         await research_ui.handle_page_callback(
+            sessionmaker,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("it:x:"))
+    async def interest_remove(callback: CallbackQuery) -> None:
+        """`it:x:<id>` -- `/interests`' own [✖]."""
+        await interests_ui.handle_remove_callback(
             sessionmaker,
             callback.bot,
             callback_id=callback.id,

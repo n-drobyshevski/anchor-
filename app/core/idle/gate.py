@@ -58,6 +58,10 @@ NOT_EVENING = KIND_RULE_PREFIX + "not_evening"
 NO_INDEPENDENT_JUDGE = KIND_RULE_PREFIX + "no_independent_judge"
 NO_NEW_REPLIES = KIND_RULE_PREFIX + "no_new_replies"
 NOT_CANARY_DOW = KIND_RULE_PREFIX + "not_canary_dow"
+# 6d.
+RESEARCH_DISABLED = KIND_RULE_PREFIX + "research_disabled"
+NO_TOPICS = KIND_RULE_PREFIX + "no_topics"
+QUOTA_USED = KIND_RULE_PREFIX + "quota_used"
 
 # 6c: prebrief may only write tonight's note after this local hour (plan
 # section 6.4's "after 19:00 local") -- a fixed hour, unlike IDLE_WINDOW
@@ -139,6 +143,10 @@ class IdleConfig:
     # canary can never grade (or bless) a model against itself.
     independent_judge: bool = True
     canary_dow: int = 3
+    # 6d: `settings.RESEARCH_ENABLED` -- the same global switch
+    # app/research/jobs.enqueue_study checks first, reused here so idle
+    # research can never run while `/study` itself is turned off.
+    research_enabled: bool = False
 
 
 def config_from_settings(settings) -> IdleConfig:
@@ -158,6 +166,7 @@ def config_from_settings(settings) -> IdleConfig:
         morning_enabled=settings.OUTBOUND_ENABLED,
         independent_judge=bool(judge_model) and judge_model != settings.LLM_MODEL,
         canary_dow=settings.CANARY_DOW,
+        research_enabled=settings.RESEARCH_ENABLED,
     )
 
 
@@ -209,6 +218,13 @@ class IdleFacts:
     # appeared since the last *done* critique run -- app/core/idle/
     # critique.has_new_replies_since.
     critique_has_new_replies: bool = False
+    # 6d: shared with app/core/idle/research.py's own job the same way
+    # consolidate_clusters/reflect_has_new_summary are shared above, so
+    # the gate and the job can never disagree about whether there is an
+    # active topic to pick, or whether today's shared /study quota is
+    # already spent.
+    research_has_active_topic: bool = False
+    research_quota_used: bool = False
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -259,18 +275,30 @@ def _canary_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
     return GateResult(True, OK)
 
 
+def _research_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    """Plan section 6.5: `RESEARCH_ENABLED=false`, no active topics, or
+    today's shared `/study` quota already used -- checked in that order,
+    disabled first since it is the one setting-level switch."""
+    if not config.research_enabled:
+        return GateResult(False, RESEARCH_DISABLED)
+    if not facts.research_has_active_topic:
+        return GateResult(False, NO_TOPICS)
+    if facts.research_quota_used:
+        return GateResult(False, QUOTA_USED)
+    return GateResult(True, OK)
+
+
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
 # per-kind predicates"), each taking (facts, config) -- most only need
-# facts, but prebrief/critique/canary (6c) also need settings-derived
-# config (morning_enabled, independent_judge, canary_dow). RESEARCH
-# stays kind_rule:not_implemented until 6d.
+# facts, but prebrief/critique/canary/research also need settings-derived
+# config (morning_enabled, independent_judge, canary_dow, research_enabled).
 KIND_RULES: dict[str, Callable[[IdleFacts, IdleConfig], GateResult]] = {
     BACKFILL: lambda facts, config: _backfill_rule(facts),
     CONSOLIDATE: lambda facts, config: _consolidate_rule(facts),
     REFLECT: lambda facts, config: _reflect_rule(facts),
     PREBRIEF: _prebrief_rule,
     CRITIQUE: _critique_rule,
-    RESEARCH: _not_implemented_rule,
+    RESEARCH: _research_rule,
     CANARY: _canary_rule,
 }
 

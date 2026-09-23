@@ -14,14 +14,33 @@ from __future__ import annotations
 
 import ast
 import datetime
+import decimal
 import pathlib
 
 import pytest
 
 from app.config import Settings
 from app.core.clock import FrozenClock
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, IDLE_RUN, PREBRIEF, REFLECT
-from app.db.models import BriefNote, IdleRun, Memory, Message, PersonaAmendment, Scene, UserState
+from app.core.idle import (
+    BACKFILL,
+    CANARY,
+    CONSOLIDATE,
+    CRITIQUE,
+    IDLE_RUN,
+    PREBRIEF,
+    REFLECT,
+    RESEARCH,
+)
+from app.db.models import (
+    BriefNote,
+    IdleRun,
+    InterestTopic,
+    Memory,
+    Message,
+    PersonaAmendment,
+    Scene,
+    UserState,
+)
 from conftest import FakeLLMProvider, make_bot
 
 MODULES = sorted(pathlib.Path("app/core/idle").glob("*.py"))
@@ -39,7 +58,14 @@ FORBIDDEN_IMPORTS = {
     "app.core.amendments": "persona amendments -- not an idle-writable table",
     "app.core.review": "the weekly review -- writes WeeklyReview/ReviewProposal",
     "app.core.cards": "research card adoption",
-    "app.research.jobs": "the /study pipeline -- 6a does not run research",
+    # 6d: `app.research.jobs` is deliberately no longer banned.
+    # app/core/idle/research.py (and, for its own gate fact,
+    # app/core/idle/facts.py) calls `run_research_job`/`study_quota_used`
+    # directly -- see that module's own docstring on why the *pipeline*
+    # runs unchanged while the *queueing* is idle's own. Every other
+    # entry in this table still stands: research never adopts a card
+    # (`app.core.cards` stays banned) and never writes anything this
+    # table's other rows forbid.
 }
 
 FORBIDDEN_PREFIXES = ("app.tg",)
@@ -128,14 +154,22 @@ def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY])
+@pytest.mark.parametrize(
+    "kind", [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY, RESEARCH]
+)
 async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     """Every implemented idle kind, run through the worker's own dispatch
     with a real (fake-transport) bot in hand: zero Telegram calls of any
     kind. `Bot.__call__` is where every aiogram method goes, so patching
     it also catches a Bot the idle code might build for itself.
     Parametrized so 6c-6d extend it automatically -- 6b added
-    CONSOLIDATE and REFLECT, 6c adds PREBRIEF, CRITIQUE and CANARY."""
+    CONSOLIDATE and REFLECT, 6c adds PREBRIEF, CRITIQUE and CANARY, 6d
+    adds RESEARCH. RESEARCH is the one kind this asserts *no completion
+    message* for on top of the shared "no Telegram calls at all" --
+    plan section 6.5's own "no completion message is sent" is exactly
+    the same property this test already checks for every other kind, so
+    it needs no extra assertion, only the setup to make the run do real
+    (mocked-network) work."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -191,6 +225,8 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             merge_ids = (m1.id, m2.id)
         if kind == CANARY:
             session.add(PersonaAmendment(text="меньше вопросов", status="active", persona_sha="x"))
+        if kind == RESEARCH:
+            session.add(InterestTopic(text="бессонница", packet="forums", active=True))
         run = IdleRun(kind=kind, local_date=now.date(), status="queued")
         session.add(run)
         await session.commit()
@@ -206,6 +242,16 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         )
     elif kind == PREBRIEF:
         safety_text = '{"notes": ["Коротко: сегодня был спокойный день."]}'
+    elif kind == RESEARCH:
+        # research's "safety_provider" is the distill model
+        # (app/core/idle/research.py's own docstring: the same one
+        # app/worker.py's RESEARCH branch gives run_research_job). The
+        # quote must be a verbatim substring of the fetched clip text
+        # below (distill.validate's own anchor check).
+        safety_text = (
+            '{"cards": [{"kind": "technique", "text": "Совет со страницы.", '
+            '"quote": "Спать лучше в прохладной комнате.", "risk": "low"}]}'
+        )
     else:
         safety_text = '{"add": [], "close": [], "update": []}'
     safety_provider = FakeLLMProvider(text=safety_text)
@@ -240,9 +286,46 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
 
         monkeypatch.setattr("eval.trial.run_blocking_subset", _fake_run_blocking_subset)
 
+    if kind == RESEARCH:
+        # run_research_job's own network seams -- see app/core/idle/
+        # research.py's own docstring: the pipeline runs unchanged, so
+        # this test patches the same module-level names
+        # tests/test_research_jobs.py's fixtures stand in for, never
+        # app/core/idle/research.py itself.
+        from app.llm.provider import LLMResponse, LLMUsage
+        from app.research import search
+        from app.research.fetch import Clip
+
+        clip = Clip(
+            url="https://reddit.com/r/sleep/comment",
+            domain="reddit.com",
+            title="Совет",
+            text="Спать лучше в прохладной комнате.",
+            text_sha256="deadbeef",
+            http_status=200,
+        )
+
+        async def _fake_fetch(url, **kwargs):
+            return clip
+
+        async def _fake_find_urls(provider, **kwargs):
+            usage = LLMUsage(
+                input_tokens=100, cached_tokens=0, output_tokens=3,
+                cost_usd=decimal.Decimal("0.002"),
+            )
+            return search.SearchOutcome(
+                urls=(clip.url,),
+                responses=(LLMResponse(text="", usage=usage, model="fake-safety"),),
+            )
+
+        monkeypatch.setattr("app.research.jobs.default_fetch", _fake_fetch)
+        monkeypatch.setattr("app.research.search.find_urls", _fake_find_urls)
+
+    settings = Settings(RESEARCH_ENABLED=True) if kind == RESEARCH else Settings()
+
     async with sessionmaker() as session:
         await _run_job(
-            session, Settings(), provider, provider, bot, clock, IDLE_RUN,
+            session, settings, provider, provider, bot, clock, IDLE_RUN,
             {"run_id": run_id}, safety_provider=safety_provider, sessionmaker=sessionmaker,
         )
 
@@ -262,6 +345,9 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         elif kind == CANARY:
             run = await session.get(IdleRun, run_id)
             assert run.summary.get("cases") == {"01": True}
+        elif kind == RESEARCH:
+            run = await session.get(IdleRun, run_id)
+            assert run.summary.get("cards") == 1
     assert calls == []
     assert fake.sent == []
     assert fake.edits == []

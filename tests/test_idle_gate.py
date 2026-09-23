@@ -19,14 +19,16 @@ from app.core.idle.gate import (
     NOT_CANARY_DOW,
     NOT_ENOUGH_CLUSTERS,
     NOT_EVENING,
-    NOT_IMPLEMENTED,
     NOTHING_TO_BACKFILL,
     NOTE_EXISTS,
     NO_INDEPENDENT_JUDGE,
     NO_NEW_REPLIES,
     NO_NEW_SUMMARY,
+    NO_TOPICS,
     OK,
     PAUSED,
+    QUOTA_USED,
+    RESEARCH_DISABLED,
     RESERVE,
     USER_ACTIVE,
     WELFARE_COOLDOWN,
@@ -200,12 +202,39 @@ def test_row10_kind_rule_backfill_allows_when_candidates_exist():
     assert idle_gate(BACKFILL, facts, NOW, _config()) == (True, OK)
 
 
-def test_row10_kind_rule_unimplemented_kinds():
-    """CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE and CANARY all got real
-    kind rules by 6c (see this file's own kind-rule tests below);
-    RESEARCH is still `not_implemented` until 6d."""
-    facts = _facts()
-    assert idle_gate(RESEARCH, facts, NOW, _config()) == (False, NOT_IMPLEMENTED)
+# --- 6d kind rule: research ---------------------------------------------
+
+
+def test_row10_kind_rule_research_disabled():
+    facts = _facts(research_has_active_topic=True)
+    config = _config(research_enabled=False)
+    assert idle_gate(RESEARCH, facts, NOW, config) == (False, RESEARCH_DISABLED)
+
+
+def test_row10_kind_rule_research_no_topics():
+    facts = _facts(research_has_active_topic=False)
+    config = _config(research_enabled=True)
+    assert idle_gate(RESEARCH, facts, NOW, config) == (False, NO_TOPICS)
+
+
+def test_row10_kind_rule_research_quota_used():
+    facts = _facts(research_has_active_topic=True, research_quota_used=True)
+    config = _config(research_enabled=True)
+    assert idle_gate(RESEARCH, facts, NOW, config) == (False, QUOTA_USED)
+
+
+def test_row10_kind_rule_research_allows_when_topic_and_quota_free():
+    facts = _facts(research_has_active_topic=True, research_quota_used=False)
+    config = _config(research_enabled=True)
+    assert idle_gate(RESEARCH, facts, NOW, config) == (True, OK)
+
+
+def test_row10_kind_rule_research_disabled_by_default():
+    """`_config()`'s own default (`research_enabled=False`, mirroring
+    `settings.RESEARCH_ENABLED`'s off-by-default) -- research never
+    fires from a bare `IdleConfig()` the way the other 6b/6c kinds can."""
+    facts = _facts(research_has_active_topic=True)
+    assert idle_gate(RESEARCH, facts, NOW, _config()) == (False, RESEARCH_DISABLED)
 
 
 # --- 6c kind rules: prebrief, critique, canary ---------------------------

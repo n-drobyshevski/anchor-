@@ -44,10 +44,9 @@ from app.db.models import IdleRun, UserState
 
 logger = logging.getLogger(__name__)
 
-# Priority order, plan section 5. Only BACKFILL has a real kind rule in
-# 6a; the rest return kind_rule:not_implemented and so are never
-# actually planned yet, but they still occupy their place in the order
-# for when 6b-6e give them one.
+# Priority order, plan section 5. Every kind has a real kind rule as of
+# 6d (RESEARCH's own is app/core/idle/gate.py's `_research_rule`); the
+# order itself never changed across 6a-6d.
 PRIORITY: tuple[str, ...] = (BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, RESEARCH, CANARY)
 
 

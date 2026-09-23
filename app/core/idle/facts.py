@@ -24,8 +24,10 @@ from app.core.idle.critique import has_new_replies_since, last_done_critique_fin
 from app.core.idle.gate import IdleFacts
 from app.core.idle.prebrief import note_exists as prebrief_note_exists
 from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finished_at
+from app.core.idle.research import pick_topic as research_pick_topic
 from app.core.spend import today_idle_usd, today_usd
 from app.db.models import IdleRun, UserState
+from app.research.jobs import study_quota_used
 
 ACTIVE_STATUSES = ("queued", "running")
 
@@ -126,6 +128,11 @@ async def load_idle_facts(
     last_critique_at = await last_done_critique_finished_at(session)
     critique_has_new_replies = await has_new_replies_since(session, last_critique_at)
 
+    # 6d: shared with app/core/idle/research.py's own job -- same
+    # "gate and job can never disagree" role as the 6b/6c fields above.
+    research_topic = await research_pick_topic(session)
+    research_quota_used = await study_quota_used(session, settings, clock, timezone)
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -142,6 +149,8 @@ async def load_idle_facts(
         reflect_has_new_summary=reflect_has_new_summary,
         prebrief_note_exists_tomorrow=prebrief_note_exists_tomorrow,
         critique_has_new_replies=critique_has_new_replies,
+        research_has_active_topic=research_topic is not None,
+        research_quota_used=research_quota_used,
     )
 
 

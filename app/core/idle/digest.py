@@ -21,8 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT
-from app.db.models import IdleRun
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
+from app.db.models import IdleRun, InterestTopic
 
 WINDOW_24H = "24h"
 WINDOW_7D = "7d"
@@ -46,7 +46,31 @@ PREBRIEF_LINE = "• Утро: заметки готовы"
 CRITIQUE_LINE = "• Самопроверка: {count} ответов, ниже нормы — {below_norm}"
 CANARY_OK_LINE = "• Канарейка: ок"
 CANARY_REGRESSION_LINE = "• ⚠️ Регрессия: кейсы {cases}"
+# 6d (plan section 7), verbatim except the plural of «карточка», which
+# varies with N the same way app/tg/research.py's own DONE_TEXT does --
+# see `_card_noun` below on why that logic is duplicated rather than
+# imported (app/core/idle/ may never import app.tg, the isolation test's
+# own FORBIDDEN_PREFIXES).
+RESEARCH_LINE = "• Поиск: «{topic}» → {cards} {noun} (/notes)"
 SKIPS_LINE = "Пропуски: {items}"
+
+_CARD_FORMS = ("карточка", "карточки", "карточек")
+
+
+def _card_noun(n: int) -> str:
+    """The Russian plural form of «карточка» for `n` -- duplicated from
+    `app/tg/research.card_noun` on purpose: `app/core/idle/` may not
+    import `app.tg` at all (the isolation test's AST scan), and this is
+    the one small piece of that module's rendering the digest line also
+    needs. Keep the two in sync if the pluralization rule ever changes."""
+    if n % 100 in range(11, 15):
+        return _CARD_FORMS[2]
+    last = n % 10
+    if last == 1:
+        return _CARD_FORMS[0]
+    if last in (2, 3, 4):
+        return _CARD_FORMS[1]
+    return _CARD_FORMS[2]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -148,6 +172,41 @@ async def build_digest(
             failed = sorted(case_id for case_id, ok in cases.items() if not ok)
             lines.append(CANARY_REGRESSION_LINE.format(cases=", ".join(failed)))
 
+    # 6d: one line per *done* research run with cards, newest first --
+    # research is never reversible (KIND_DAILY_MAX caps it at 1/day
+    # anyway, but a 7d window can still show several), same "not a
+    # summed bullet" posture as the 6b memory/notes lines above, since
+    # each run names its own topic. A run with zero cards (nothing
+    # useful turned up) earns no line, the same restraint SUMMARIZED_LINE
+    # and PREBRIEF_LINE already take for a run that did nothing visible.
+    research_runs = sorted(
+        (r for r in done if r.kind == RESEARCH), key=lambda r: r.id, reverse=True
+    )
+    if research_runs:
+        topic_ids = {
+            int(r.summary.get("topic_id"))
+            for r in research_runs
+            if (r.summary or {}).get("topic_id") is not None
+        }
+        topics: dict[int, str] = {}
+        if topic_ids:
+            topic_rows = await session.execute(
+                select(InterestTopic.id, InterestTopic.text).where(InterestTopic.id.in_(topic_ids))
+            )
+            topics = dict(topic_rows.all())
+        for run in research_runs:
+            summary = run.summary or {}
+            topic_id = summary.get("topic_id")
+            cards = int(summary.get("cards", 0) or 0)
+            if topic_id is None or cards <= 0:
+                continue
+            topic_text = topics.get(int(topic_id))
+            if topic_text is None:
+                continue
+            lines.append(
+                RESEARCH_LINE.format(topic=topic_text, cards=cards, noun=_card_noun(cards))
+            )
+
     undoable = tuple(
         r.id
         for r in sorted(done, key=lambda r: r.id, reverse=True)
@@ -173,6 +232,7 @@ __all__ = [
     "CRITIQUE_LINE",
     "CANARY_OK_LINE",
     "CANARY_REGRESSION_LINE",
+    "RESEARCH_LINE",
     "Digest",
     "build_digest",
 ]

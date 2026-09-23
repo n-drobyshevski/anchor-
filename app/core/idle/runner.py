@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
 from app.core.idle.candidates import REFLECTED_SCENE_IDS
 from app.core.idle.facts import load_idle_facts
 from app.core.idle.gate import config_from_settings, idle_gate
@@ -317,6 +317,20 @@ async def run_idle(
             preempted_and_empty = result.preempted
             summary = {"cases": result.cases, "passed": result.passed}
             reversible = False
+        elif kind == RESEARCH:
+            from app.core.idle.research import run_research
+
+            result = await run_research(
+                session_factory, settings, safety_provider, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            # Only the pre-run check (module docstring) can mean nothing
+            # was queued at all; a preemption noticed only after the
+            # /study run finished still has its topic_id/cards, so it is
+            # never "preempted and empty".
+            preempted_and_empty = result.preempted and result.topic_id is None
+            summary = {"topic_id": result.topic_id, "cards": result.cards}
+            reversible = False
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
     except Exception as exc:  # noqa: BLE001 - never retried, see module docstring
@@ -329,6 +343,14 @@ async def run_idle(
         return
 
     usd_cost = await spend_since(session_factory, started_at)
+    if kind == RESEARCH:
+        # research's spend is ledgered under "research" (distill.
+        # RESEARCH_CATEGORY), unchanged, never "idle:research" -- see
+        # app/core/idle/research.py's own docstring on why -- so
+        # spend_since's `LIKE 'idle:%'` match above never sees it.
+        # Folded in explicitly here so idle_run.usd_cost still reflects
+        # what this run actually spent.
+        usd_cost += result.usd_cost
 
     if preempted_and_empty:
         await _finish(
