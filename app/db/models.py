@@ -74,11 +74,11 @@ class TelegramUpdate(Base):
     # Telegram's own update_id, provided explicitly on insert — not a
     # generated identity column.
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    # 6e: the daily retention sweep (app/core/retention.py's
-    # forget_update_payloads) blanks this to {} after
-    # UPDATE_PAYLOAD_RETENTION_DAYS. It stays NOT NULL on purpose -- see
-    # that function's docstring.
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # 6e (migration f7da7c8741fd, already applied in production): the
+    # column is nullable in the schema, but the retention sweep (app/core/
+    # retention.py's forget_update_payloads) blanks old payloads to {}
+    # rather than NULL, so nothing ever writes a NULL here.
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     locked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

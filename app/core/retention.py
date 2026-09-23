@@ -66,12 +66,9 @@ async def forget_update_payloads(session: AsyncSession, settings: Settings, cloc
     retention window. Row identity, status and attempts all survive --
     only the Telegram envelope (which can carry message text) is cleared.
 
-    The plan says "payload := null", but the column has been NOT NULL
-    since Phase 1, and relaxing it means `ALTER TABLE telegram_update`,
-    which needs an ACCESS EXCLUSIVE lock on the busiest table in the
-    schema. The first 6e deploy sat on exactly that lock until Railway's
-    healthcheck gave up. An empty JSON object removes the same content
-    with no schema change: the privacy outcome is identical.
+    Blanked to an empty object rather than NULL: the privacy outcome is
+    the same (the Telegram content is gone), and a JSON literal avoids
+    SQLAlchemy's JSON-null-vs-SQL-NULL ambiguity entirely.
 
     Pending and processing rows are never touched -- the worker still
     needs their payload to handle them.

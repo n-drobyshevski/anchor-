@@ -36,7 +36,9 @@ closes the client directly rather than through either one.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
+import sys
 
 from aiogram import Bot, Dispatcher
 from aiohttp import web
@@ -130,15 +132,19 @@ async def _on_startup(app: web.Application) -> None:
     # `alembic upgrade head && python -m app.main`); this is the
     # "then upsert user_state... then persona_version" step that
     # follows, per plan section 5's last line.
+    logger.info("startup step", extra={"event": "startup_tasks"})
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    logger.info("startup step", extra={"event": "set_webhook"})
     await bot.set_webhook(
         url=settings.PUBLIC_URL.rstrip("/") + WEBHOOK_PATH,
         secret_token=settings.TELEGRAM_SECRET_TOKEN,
         allowed_updates=["message", "callback_query"],
     )
+    logger.info("startup step", extra={"event": "register_commands"})
     await register_commands(bot)
+    logger.info("startup step", extra={"event": "run_worker"})
     app["worker_tasks"] = await run_worker(
         sessionmaker,
         app["dp"],
@@ -149,6 +155,7 @@ async def _on_startup(app: web.Application) -> None:
         app["provider"],
         app["safety_provider"],
     )
+    faulthandler.cancel_dump_traceback_later()
     logger.info("startup complete", extra={"event": "startup"})
 
 
@@ -213,6 +220,7 @@ async def _run_polling_mode(
     worker_tasks = await run_worker(
         sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
     )
+    faulthandler.cancel_dump_traceback_later()
     try:
         await run_polling(bot, sessionmaker, settings)
     finally:
@@ -222,7 +230,18 @@ async def _run_polling_mode(
         await bot.session.close()
 
 
+# If startup has not finished by then, dump every thread's stack to
+# stderr (and keep dumping) so a hang is visible in the deploy log
+# instead of a silent healthcheck timeout. Cancelled in _on_startup.
+STARTUP_TRACE_AFTER_S = 90
+
+
 def main() -> None:
+    # stderr, unbuffered, before anything that could hang: proves the
+    # process got past `alembic upgrade head &&` in the start command.
+    print("app.main: starting", file=sys.stderr, flush=True)
+    faulthandler.enable(file=sys.stderr)
+    faulthandler.dump_traceback_later(STARTUP_TRACE_AFTER_S, repeat=True, file=sys.stderr)
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
     # Before anything is constructed: Bot() and the LLM client both
