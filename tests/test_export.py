@@ -191,6 +191,20 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         )
         await session.commit()
 
+    # 6a. A fourth flush -- idle_change needs idle_run's id.
+    async with sessionmaker() as session:
+        run = models.IdleRun(kind="backfill", local_date=today, status="done", reversible=True)
+        session.add(run)
+        await session.flush()
+        session.add(
+            models.IdleChange(
+                run_id=run.id, table_name="memory", row_id=1, op="insert", after={"id": 1}
+            )
+        )
+        session.add(models.BriefNote(local_date=today, notes=["сон"]))
+        session.add(models.InterestTopic(text="сон", packet="ref"))
+        await session.commit()
+
 
 # --- contents ---
 
@@ -361,6 +375,9 @@ NOT_EXPORTED = {
     "job": "queue plumbing; payloads reference rows that are exported",
     "pending_memory": "unclassified /remember text, exported once it becomes a memory",
     "persona_version": "a hash of a file in this repo, not user data",
+    # 6a.
+    "backup_log": "ciphertext object keys and sizes, not user data (plan section 3)",
+    "heartbeat_state": "operational liveness marker, not user data",
 }
 
 

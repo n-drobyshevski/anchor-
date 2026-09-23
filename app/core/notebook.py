@@ -425,6 +425,7 @@ async def run_notebook_reflect(
     clock: Clock,
     timezone: str,
     scene_id: int,
+    spend_category: str = REFLECT_CATEGORY,
 ) -> None:
     """The `notebook_reflect` job body (plan section 6).
 
@@ -433,6 +434,13 @@ async def run_notebook_reflect(
     dedup key on the enqueue side (`nb:<scene_id>`) collapse a replayed
     job into a genuine no-op rather than a second, different set of
     notes for the same session.
+
+    6a: `spend_category` (keyword-only, default unchanged) lets
+    app/core/idle/backfill.py ledger this same call under
+    `idle:backfill` instead of `reflect`, matching
+    app/core/scene.run_summarize_scene's own addition. Every caller
+    predating 6a keeps its exact previous behaviour without being
+    touched.
     """
     scene = await session.get(Scene, scene_id)
     if scene is None or scene.ended_at is None:
@@ -492,7 +500,7 @@ async def run_notebook_reflect(
     session.add(
         SpendLedger(
             local_date=clock_module.local_date(clock, timezone),
-            category=REFLECT_CATEGORY,
+            category=spend_category,
             model=response.model,
             tokens_in=response.usage.input_tokens,
             tokens_cached=response.usage.cached_tokens,

@@ -1184,6 +1184,213 @@ class ReviewProposal(Base):
     )
 
 
+class IdleRun(Base):
+    """One idle-work attempt: planned, run, and its outcome (Phase 6 plan
+    section 3; milestone 6a).
+
+    `status` is the run's own lifecycle -- `queued` (planned by
+    app/core/idle/planner.py) -> `running` (claimed by app/core/idle/
+    runner.py) -> `done` | `failed` | `skipped`, and `done` rows with
+    `reversible=true` may additionally move to `undone` via /digest's
+    undo button (app/core/idle/undo.py). `skip_reason` doubles as the
+    failure code on a `failed` row -- there is deliberately no separate
+    error_code column, since the two never both apply to one row and the
+    plan's data model gives this table only one.
+
+    `summary` is counts, codes and cost only, never text -- app/core/
+    idle/'s whole privacy property (plan section 8's "Logs and idle_run.
+    summary contain only IDs, counts, codes, cost -- never text").
+    """
+
+    __tablename__ = "idle_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="queued", server_default=text("'queued'")
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String)
+    usd_cost: Mapped[decimal.Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=decimal.Decimal("0"), server_default=text("0")
+    )
+    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'"))
+    reversible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('backfill', 'consolidate', 'reflect', 'prebrief', 'critique', "
+            "'research', 'canary')",
+            name="ck_idle_run_kind",
+        ),
+        CheckConstraint(
+            "status in ('queued', 'running', 'done', 'failed', 'skipped', 'undone')",
+            name="ck_idle_run_status",
+        ),
+        # /digest's two live queries: "runs in the last N hours/days" and
+        # per-day per-kind counts for the planner's max-per-day checks.
+        Index("ix_idle_run_local_date_kind", "local_date", "kind"),
+    )
+
+
+class IdleChange(Base):
+    """The undo log for one idle_run's writes (Phase 6 plan section 3;
+    milestone 6a; `after` is 6a's own addition to the plan's SQL).
+
+    Reversed in app/core/idle/undo.py by replaying rows in reverse `id`
+    order: `insert` -> delete, `supersede` -> clear the pointer,
+    `close` -> reactivate, `update` -> restore `before`. `after` is the
+    row's state right after the change (including on `insert`, where
+    there is no `before`) -- undo.py compares it against the row's
+    *current* state before touching it, and skips (reports) that row on
+    a mismatch, which is what makes undo safe against something else
+    having changed the row since.
+
+    Only `memory` and `notebook_entry` in 6a: nothing else is
+    idle-reversible yet (the plan's consolidate/reflect kinds, 6b).
+    """
+
+    __tablename__ = "idle_change"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("idle_run.id", ondelete="CASCADE"), nullable=False
+    )
+    table_name: Mapped[str] = mapped_column(String, nullable=False)
+    row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    op: Mapped[str] = mapped_column(String, nullable=False)
+    before: Mapped[dict | None] = mapped_column(JSONB)
+    after: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "table_name in ('memory', 'notebook_entry')", name="ck_idle_change_table_name"
+        ),
+        CheckConstraint(
+            "op in ('insert', 'supersede', 'close', 'update')", name="ck_idle_change_op"
+        ),
+        Index("ix_idle_change_run_id", "run_id"),
+    )
+
+
+class BriefNote(Base):
+    """Tomorrow's pre-drafted morning notes (Phase 6 plan section 3;
+    milestone 6a's table, milestone 6c's writer and reader).
+
+    Keyed on the morning it is *for*, not on when it was written -- the
+    prebrief kind writes tonight for tomorrow's `local_date`, and the
+    morning outbound (6c) reads today's row and stamps `used_at`. A row
+    never used by its own date is simply stale and ignored, not deleted
+    -- the daily retention sweep (6e) is what actually clears it.
+    """
+
+    __tablename__ = "brief_note"
+
+    local_date: Mapped[datetime.date] = mapped_column(Date, primary_key=True)
+    notes: Mapped[list] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InterestTopic(Base):
+    """A user-picked research topic for idle `research` (Phase 6 plan
+    sections 3 and 6.5; milestone 6a's table, milestone 6d's writer and
+    reader -- `/interests add <packet> <тема>`).
+
+    Topics come only from the user, never chosen by the model (plan
+    section 1's "Out of scope": "Autonomous topic choice for research").
+    `active=false` is how `/interests`' [✖] retires one without losing
+    its history.
+
+    **The `text` column shadows sqlalchemy's `text()`** for the rest of
+    this class body, exactly the trap `Memory`'s own docstring warns
+    about -- `sa.text(...)` is used below rather than the bare
+    `text(...)` every other model in this file uses.
+    """
+
+    __tablename__ = "interest_topic"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    packet: Mapped[str] = mapped_column(String, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.text("true")
+    )
+    last_run_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 100', name="ck_interest_topic_text_length"),
+        CheckConstraint(
+            "packet in ('forums', 'guides', 'ref')", name="ck_interest_topic_packet"
+        ),
+    )
+
+
+class BackupLog(Base):
+    """One encrypted-backup attempt (Phase 6 plan section 9.1; milestone
+    6a's table only -- 6e writes and reads it).
+
+    No content ever: `object_key`, `bytes` and `sha256` describe the
+    ciphertext object on the bucket, never what is inside it.
+    """
+
+    __tablename__ = "backup_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    object_key: Mapped[str | None] = mapped_column(String)
+    bytes: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('ok', 'failed', 'pruned', 'purged')", name="ck_backup_log_status"
+        ),
+    )
+
+
+class HeartbeatState(Base):
+    """A single-row marker of when the heartbeat last ran (Phase 6 plan
+    section 2; milestone 6a; 6e's `/readyz` reads it).
+
+    Its own tiny table rather than a `user_state` column, by decision
+    (approved plan §7): `user_state`'s columns are audited or narrowly-
+    written traffic counters, and a liveness timestamp bumped every 60s
+    by the heartbeat loop is neither. Singleton shape copied from
+    `UserState.id` -- pinned to 1 by a default and a check constraint, so
+    there is always exactly one row and it is never ambiguous which one
+    to read or write.
+    """
+
+    __tablename__ = "heartbeat_state"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    heartbeat_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_heartbeat_state_id_singleton"),)
+
+
 class PersonaAmendment(Base):
     """A `persona_note` proposal the user adopted (phase-5 plan sections
     3 and 9; milestone 5d).

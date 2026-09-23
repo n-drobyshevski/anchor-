@@ -21,9 +21,14 @@ from sqlalchemy import func, select, update as sql_update
 from app.config import Settings
 from app.core import purge
 from app.db.models import (
+    BackupLog,
     Base,
+    BriefNote,
     Checkin,
     CheckinOrderResult,
+    IdleChange,
+    IdleRun,
+    InterestTopic,
     Job,
     Journal,
     Memory,
@@ -234,6 +239,28 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 proposal_id=proposal.id,
                 persona_sha="deadbeef",
             )
+        )
+        await session.commit()
+
+        # 6a: the idle framework's own five tables (Phase 6 plan section
+        # 3). idle_change needs idle_run's id, so it is added in the same
+        # flush right after.
+        run = IdleRun(kind="backfill", local_date=today, status="done", reversible=True)
+        session.add(run)
+        await session.flush()
+        session.add(
+            IdleChange(
+                run_id=run.id,
+                table_name="memory",
+                row_id=1,
+                op="insert",
+                after={"id": 1},
+            )
+        )
+        session.add(BriefNote(local_date=today, notes=["сон", "вода"]))
+        session.add(InterestTopic(text="сон", packet="ref"))
+        session.add(
+            BackupLog(started_at=now, finished_at=now, object_key="anchor/x", bytes=10, status="ok")
         )
         await session.commit()
 

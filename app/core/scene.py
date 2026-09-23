@@ -224,6 +224,7 @@ async def run_summarize_scene(
     scene_id: int,
     clock: Clock,
     timezone: str,
+    spend_category: str = SUMMARY_CATEGORY,
 ) -> None:
     """The `summarize_scene` job body (plan section 5).
 
@@ -250,6 +251,13 @@ async def run_summarize_scene(
     module-level one: app/core/notebook.py imports several names from
     this module, and importing it back here at module scope would be a
     cycle.
+
+    6a: `spend_category` (keyword-only, default unchanged) lets
+    app/core/idle/backfill.py ledger this same call under
+    `idle:backfill` instead of `summary`, so idle spend is visible
+    separately in /state's per-category breakdown and counted by
+    app/core/spend.today_idle_usd. Every caller predating 6a keeps its
+    exact previous behaviour without being touched.
     """
     scene = await session.get(Scene, scene_id)
     if scene is None:
@@ -296,7 +304,7 @@ async def run_summarize_scene(
     session.add(
         SpendLedger(
             local_date=clock_module.local_date(clock, timezone),
-            category=SUMMARY_CATEGORY,
+            category=spend_category,
             model=response.model,
             tokens_in=response.usage.input_tokens,
             tokens_cached=response.usage.cached_tokens,

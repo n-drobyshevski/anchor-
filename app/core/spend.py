@@ -66,6 +66,26 @@ async def today_by_category(
     return {category: decimal.Decimal(total) for category, total in result.all()}
 
 
+async def today_idle_usd(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> decimal.Decimal:
+    """Sum today's spend_ledger rows whose category starts with 'idle:'
+    (Phase 6 plan section 2; milestone 6a).
+
+    Idle jobs ledger under `idle:<kind>` (e.g. `idle:backfill`), never a
+    bare `idle` -- see app/core/idle/backfill.py -- so `LIKE 'idle:%'`
+    is the whole match and needs no escaping: neither `_` nor `%`
+    appears in any kind constant in app/core/idle/__init__.py.
+    """
+    local_today = clock_module.local_date(clock, timezone)
+    result = await session.execute(
+        select(func.coalesce(func.sum(SpendLedger.usd_cost), 0))
+        .where(SpendLedger.local_date == local_today)
+        .where(SpendLedger.category.like("idle:%"))
+    )
+    return decimal.Decimal(result.scalar_one())
+
+
 async def check_cap(
     session: AsyncSession, settings: Settings, clock: Clock, timezone: str
 ) -> bool:

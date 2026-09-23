@@ -1,0 +1,105 @@
+"""Async loaders that build `IdleFacts` from the database (approved plan
+§5: "facts.py -- async loaders that build IdleFacts from the DB").
+
+Kept separate from gate.py so the gate itself stays a pure function with
+no session anywhere in its call graph -- the same split
+app/core/outbound.py's `load_gate_inputs` keeps from
+app/core/outbound_gate.py's `gate()`.
+"""
+
+from __future__ import annotations
+
+import decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings
+from app.core import clock as clock_module
+from app.core.clock import Clock, to_local
+from app.core.idle.candidates import reflect_candidates, summary_candidates
+from app.core.idle.gate import IdleFacts
+from app.core.spend import today_idle_usd, today_usd
+from app.db.models import IdleRun, UserState
+
+ACTIVE_STATUSES = ("queued", "running")
+
+# Mirrors app/core/idle/backfill.py's BACKFILL_UNITS_PER_RUN: the count
+# only needs to distinguish "nothing" from "something", so it is capped
+# at the same number a single run would ever pick up.
+_BACKFILL_CANDIDATE_LIMIT = 3
+
+
+async def _active_run_ids(session: AsyncSession) -> frozenset[int]:
+    result = await session.execute(
+        select(IdleRun.id).where(IdleRun.status.in_(ACTIVE_STATUSES))
+    )
+    return frozenset(row[0] for row in result.all())
+
+
+async def _jobs_today(session: AsyncSession, local_date) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(IdleRun)
+        .where(IdleRun.local_date == local_date)
+        .where(IdleRun.status != "skipped")
+    )
+    return result.scalar_one()
+
+
+# Statuses that mean "this kind ran today" for the per-kind daily limit.
+FINISHED_STATUSES = ("done", "failed", "undone")
+
+
+async def _kind_runs_today(session: AsyncSession, local_date) -> dict[str, int]:
+    result = await session.execute(
+        select(IdleRun.kind, func.count())
+        .where(IdleRun.local_date == local_date)
+        .where(IdleRun.status.in_(FINISHED_STATUSES))
+        .group_by(IdleRun.kind)
+    )
+    return {kind: count for kind, count in result.all()}
+
+
+async def idle_jobs_today(session: AsyncSession, clock: Clock, timezone: str) -> int:
+    """How many idle jobs (not planner-only skip rows) ran today -- the
+    same count `load_idle_facts` puts in `IdleFacts.jobs_today`, exposed
+    on its own for /state's "Фон: $x / $cap, задач N" line."""
+    local_date = clock_module.local_date(clock, timezone)
+    return await _jobs_today(session, local_date)
+
+
+async def load_idle_facts(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> IdleFacts:
+    """Build the `IdleFacts` snapshot the gate needs, one query per field."""
+    state = (
+        await session.execute(select(UserState).where(UserState.id == 1))
+    ).scalar_one()
+    local_date = clock_module.local_date(clock, timezone)
+    local_now = to_local(clock.now_utc(), timezone)
+
+    active_run_ids = await _active_run_ids(session)
+    jobs_today = await _jobs_today(session, local_date)
+    idle_spend_today = await today_idle_usd(session, clock, timezone)
+    spend_today = await today_usd(session, clock, timezone)
+
+    pending_summaries = await summary_candidates(session, _BACKFILL_CANDIDATE_LIMIT)
+    pending_reflections = await reflect_candidates(session, clock, _BACKFILL_CANDIDATE_LIMIT)
+
+    return IdleFacts(
+        persona_active=state.persona_active,
+        local_now=local_now,
+        welfare_at=state.welfare_at,
+        last_user_msg_at=state.last_user_msg_at,
+        active_run_ids=active_run_ids,
+        jobs_today=jobs_today,
+        idle_spend_today=idle_spend_today,
+        spend_today=spend_today,
+        daily_usd_cap=decimal.Decimal(str(settings.DAILY_USD_CAP)),
+        backfill_candidates=len(pending_summaries) + len(pending_reflections),
+        kind_runs_today=await _kind_runs_today(session, local_date),
+    )
+
+
+__all__ = ["idle_jobs_today", "load_idle_facts"]

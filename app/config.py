@@ -562,6 +562,85 @@ class Settings(BaseSettings):
                 raise ValueError(f"TICK_HOURS entries must be 0-23, got {hour}")
         return tuple(sorted(set(hours)))
 
+    # --- 6a: idle framework (Phase 6 plan section 2; milestone 6a) ---
+    # The global kill switch, same shape as OUTBOUND_ENABLED: false stops
+    # planning at the first gate row (`disabled`), with nothing else
+    # touched. Idle stays under its own switch rather than OUTBOUND_
+    # ENABLED's because idle never sends a message at all -- the two
+    # features do not overlap.
+    IDLE_ENABLED: bool = True
+    # How long the user must have been silent before idle work may run.
+    IDLE_AFTER_H: int = 3
+    # Idle's own daily spend ceiling, separate from and inside
+    # DAILY_USD_CAP -- see IDLE_RESERVE_USD below for how the two relate.
+    IDLE_USD_CAP: float = 0.25
+    # Always kept free for live chat: idle runs only if
+    # spent_today + IDLE_JOB_USD_CAP <= DAILY_USD_CAP - IDLE_RESERVE_USD.
+    # Idle can never consume the reserve, by construction of that check
+    # (app/core/idle/gate.py's row 9), not by a promise here.
+    IDLE_RESERVE_USD: float = 0.50
+    # Per-job ceiling. A job that would cross it raises JobCapHit and
+    # stops, keeping whatever it already committed.
+    IDLE_JOB_USD_CAP: float = 0.05
+    IDLE_MAX_JOBS_PER_DAY: int = 8
+    # Local hours idle may run, "HH:MM-HH:MM", wrapping past midnight
+    # exactly like QUIET_START/QUIET_END (app/core/clock.py's
+    # within_window). The default admits the whole day.
+    IDLE_WINDOW: str = "00:00-23:59"
+    # How long a reversible, done idle_run stays undoable through /digest.
+    IDLE_UNDO_DAYS: int = 7
+    # How many recent persona replies the `critique` kind (6c) scores per
+    # run. Read only from 6c on; 6a defines it because .env.example and
+    # Settings should be complete across milestones, matching this
+    # file's own convention (see the module docstring).
+    CRITIQUE_SAMPLE: int = 5
+    # ISO weekday (1=Monday..7=Sunday) the weekly regression canary (6c)
+    # runs on, matching StandingOrder.weekday's and REVIEW_DOW's own
+    # convention rather than Python's Monday=0.
+    CANARY_DOW: int = 3
+
+    @field_validator("IDLE_AFTER_H", "IDLE_MAX_JOBS_PER_DAY", "IDLE_UNDO_DAYS", "CRITIQUE_SAMPLE")
+    @classmethod
+    def _idle_int_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("IDLE_USD_CAP", "IDLE_RESERVE_USD", "IDLE_JOB_USD_CAP")
+    @classmethod
+    def _idle_usd_settings_positive(cls, value: float, info) -> float:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be >= 0, got {value}")
+        return value
+
+    @field_validator("CANARY_DOW")
+    @classmethod
+    def _canary_dow_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 7:
+            raise ValueError(f"CANARY_DOW must be between 1 and 7, got {value}")
+        return value
+
+    @field_validator("IDLE_WINDOW")
+    @classmethod
+    def _idle_window_format(cls, value: str) -> str:
+        """`HH:MM-HH:MM`, both halves real wall-clock times.
+
+        Validated here (fail loudly at boot) and parsed again by
+        app/core/idle/gate.py's `parse_window` (the pure function the
+        gate actually calls) -- the same "settings shape is checked at
+        boot, business logic re-derives it" split TICK_HOURS and the
+        PACKET_* fields already use in this file.
+        """
+        import re as _re
+
+        match = _re.match(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$", value)
+        if not match:
+            raise ValueError(f"IDLE_WINDOW must be HH:MM-HH:MM, got {value!r}")
+        sh, sm, eh, em = (int(part) for part in match.groups())
+        if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+            raise ValueError(f"IDLE_WINDOW has an out-of-range time component: {value!r}")
+        return value
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _rewrite_asyncpg_scheme(cls, value: str) -> str:

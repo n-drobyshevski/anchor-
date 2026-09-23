@@ -118,12 +118,30 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # 6a: the idle framework's own tables (Phase 6 plan section 3).
+    # idle_change is listed child-first, though its FK is ON DELETE
+    # CASCADE -- same "TRUNCATE the whole list in one statement"
+    # reasoning as study_card/study_clip/study_job above. All five are
+    # user data by the same reasoning purge.py already applies
+    # elsewhere: idle_run/idle_change are a record of background work
+    # done on this user's behalf and its undo trail; brief_note and
+    # interest_topic are content the user will see or chose themselves;
+    # backup_log names only ciphertext object keys and sizes, but a
+    # backup taken *of* this user's data is still about them.
+    "idle_change",
+    "idle_run",
+    "brief_note",
+    "interest_topic",
+    "backup_log",
 )
 
 # user_state is reset in place, never dropped. persona_version is a
 # hash of a file in this repo, not user data, and startup rebuilds it
-# anyway (plan section 11: "Keep persona_version").
-KEPT_TABLES = ("user_state", "persona_version")
+# anyway (plan section 11: "Keep persona_version"). heartbeat_state
+# (6a) is the same kind of operational marker -- when the heartbeat
+# loop last ran, not anything about the user -- and the heartbeat loop
+# keeps stamping it right through a /delete.
+KEPT_TABLES = ("user_state", "persona_version", "heartbeat_state")
 
 # Columns that survive a wipe. Everything else on user_state must appear
 # in reset_values() below.

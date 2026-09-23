@@ -30,8 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import (
+    BriefNote,
     Checkin,
     CheckinOrderResult,
+    IdleChange,
+    IdleRun,
+    InterestTopic,
     Journal,
     NotebookEntry,
     Outbound,
@@ -107,6 +111,16 @@ EXPORTED_MODELS = (
     WeeklyReview,
     ReviewProposal,
     PersonaAmendment,
+    # 6a: the idle framework (Phase 6 plan section 3, "/export covers
+    # idle_run (metadata), idle_change, brief_note, and interest_topic").
+    # backup_log is deliberately not here -- it names ciphertext object
+    # keys, not user data, and the plan says so outright ("It doesn't
+    # need backup_log"); tests/test_export.py's NOT_EXPORTED carries the
+    # reason.
+    IdleRun,
+    IdleChange,
+    BriefNote,
+    InterestTopic,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

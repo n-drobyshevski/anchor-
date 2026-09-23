@@ -68,6 +68,7 @@ import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -75,6 +76,9 @@ from app.core.clock import Clock, to_local, within_window
 from app.core import amendments as amendments_module
 from app.core.amendments import AMENDMENT_TRIAL
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
+from app.core.idle import IDLE_RUN
+from app.core.idle.planner import plan_idle
+from app.core.idle.runner import run_idle
 from app.core.notebook import (
     NOTEBOOK_EXPIRY,
     NOTEBOOK_REFLECT,
@@ -98,6 +102,7 @@ from app.core.scheduler import (
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
+from app.db.models import HeartbeatState
 from app.db.jobs import (
     claim_job,
     complete_job,
@@ -181,6 +186,7 @@ async def _run_job(
     payload: dict,
     safety_provider: LLMProvider | None = None,
     job_id: int | None = None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
@@ -327,6 +333,30 @@ async def _run_job(
             outcome.amendment_trial_id = result.amendment_id
         return outcome
 
+    if kind == IDLE_RUN:
+        # 6a: the idle framework's own job kind. Unlike every other
+        # branch above, this one needs `sessionmaker` rather than the
+        # single `session` process_one_job already opened -- run_idle
+        # claims, re-checks the gate and finishes the run in separate
+        # transactions of its own (its own module docstring says why:
+        # a preemption check must see rows another session commits
+        # between steps). `provider` runs backfill's summary calls
+        # (prose, same as SUMMARIZE_SCENE above); `safety_provider` runs
+        # its reflect calls (strict JSON, same as NOTEBOOK_REFLECT
+        # above). Never sends anything and never touches `bot` -- see
+        # app/core/idle/'s own isolation test.
+        if sessionmaker is None:
+            raise ValueError("idle_run needs sessionmaker")
+        await run_idle(
+            sessionmaker,
+            settings,
+            provider or cheap_provider,
+            safety_provider or cheap_provider,
+            clock,
+            run_id=payload["run_id"],
+        )
+        return ExtractOutcome()
+
     if kind == TICK_DECIDE:
         # H2: the safety model decides whether there is a natural reason
         # to write first -- another strict-schema verdict. It plans an
@@ -373,7 +403,7 @@ async def process_one_job(
         async with sessionmaker() as session:
             outcome = await _run_job(
                 session, settings, provider, cheap_provider, bot, clock, kind, payload,
-                safety_provider, job_id,
+                safety_provider, job_id, sessionmaker,
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -613,6 +643,24 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_review_expiry(session, clock, state.timezone)
+            # 6a: idle planning, same cadence and same "not inside
+            # heartbeat()" reasoning as the four sweeps above -- see
+            # app/core/scheduler.py's module docstring. plan_idle opens
+            # its own session (app/core/idle/planner.py) rather than
+            # reusing one from here, matching every other sibling step.
+            async with sessionmaker() as session:
+                await plan_idle(session, settings, clock)
+            # 6a: the heartbeat's own liveness stamp (6e's /readyz reads
+            # this). A bare targeted UPDATE, not through app/core/state.py
+            # -- heartbeat_state is not user_state, and this loop is not
+            # under app/core/idle/'s isolation rules anyway.
+            async with sessionmaker() as session:
+                await session.execute(
+                    sql_update(HeartbeatState)
+                    .where(HeartbeatState.id == 1)
+                    .values(heartbeat_at=clock.now_utc())
+                )
+                await session.commit()
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

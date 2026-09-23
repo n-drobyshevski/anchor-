@@ -66,13 +66,15 @@ from app.core.outbound import cancel_outbound, load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
-from app.core.spend import today_by_category, today_usd
+from app.core.idle.facts import idle_jobs_today
+from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
 from app.tg.send import send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
+from app.tg import idle as idle_ui
 from app.tg import memory as memory_ui
 from app.tg import notebook as notebook_ui
 from app.tg import orders as orders_ui
@@ -124,6 +126,8 @@ BOT_COMMANDS = [
     # 5d (phase-5 plan sections 8 and 9).
     BotCommand(command="review", description="Итоги недели"),
     BotCommand(command="amendments", description="Поправки к стилю"),
+    # 6a (Phase 6 plan section 7).
+    BotCommand(command="digest", description="Фоновая работа"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -199,6 +203,7 @@ def _format_state(
     welfare_counts=None,
     research_counts=None,
     mood=None,
+    idle=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -269,6 +274,15 @@ def _format_state(
     if by_category:
         breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
 
+    # 6a: "Фон: $x / $cap, задач N" (approved plan §5). `idle` is
+    # (spend_today, usd_cap, jobs_today) or None -- optional the same
+    # way `outbound`/`welfare_counts`/`research_counts` are, so tests
+    # predating 6a that call _format_state directly keep working.
+    idle_line = ""
+    if idle is not None:
+        idle_spend, idle_cap, idle_jobs = idle
+        idle_line = f"Фон: {idle_spend:.2f} / {idle_cap:.2f}, задач {idle_jobs}\n"
+
     return (
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
@@ -278,6 +292,7 @@ def _format_state(
         "{outbound}"
         "{welfare}"
         "{research}"
+        "{idle}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -295,6 +310,7 @@ def _format_state(
         ),
         welfare=welfare_line,
         research=research_line,
+        idle=idle_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -373,6 +389,9 @@ def build_router(
                 session, user_state, clock, exclude_update_id=None
             )
             current_mood = mood_core.mood(user_state, mood_facts, clock.now_utc())
+            # 6a.
+            idle_spend = await today_idle_usd(session, clock, user_state.timezone)
+            idle_jobs = await idle_jobs_today(session, clock, user_state.timezone)
         await message.answer(
             _format_state(
                 user_state,
@@ -380,6 +399,7 @@ def build_router(
                 settings,
                 clock,
                 by_category=by_category,
+                idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
                 memories=memories,
                 outbound=outbound,
                 welfare_counts=welfare_counts,
@@ -801,6 +821,25 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/amendments]"
         )
 
+    # --- 6a: /digest (plan section 7) ---
+
+    @router.message(Command("digest"))
+    async def digest_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not await _once(event_update.update_id):
+            return
+        window = idle_ui.parse_digest_args(command.args)
+        if window is None:
+            await _reply_once(message, event_update.update_id, idle_ui.DIGEST_USAGE)
+            return
+        await idle_ui.run_digest(
+            sessionmaker, message.bot, settings, clock, chat_id=message.chat.id, window=window
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/digest]"
+        )
+
     # --- 4b/4c: research (plan section 9) ---
     #
     # Every one of these six checks RESEARCH_ENABLED first and replies
@@ -1141,6 +1180,20 @@ def build_router(
         await research_ui.handle_page_callback(
             sessionmaker,
             callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("idle:u:"))
+    async def idle_undo(callback: CallbackQuery) -> None:
+        """`idle:u:<run_id>` -- /digest's own [Отменить] button."""
+        await idle_ui.handle_undo_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
