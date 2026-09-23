@@ -31,7 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
-from app.db.models import TelegramUpdate
+from app.db.models import TelegramUpdate, WebUpdate
 
 MAX_ATTEMPTS = 3
 STUCK_AFTER = datetime.timedelta(minutes=5)
@@ -208,45 +208,61 @@ async def enqueue_web(
     negative id for), so a shared insert helper would need a parameter
     that is always meaningful here and never there.
 
+    **Two tables, one transaction, no foreign key between them** (see
+    `app/db/models.py`'s `TelegramUpdate`/`WebUpdate` docstrings for
+    why: an FK into `telegram_update` would take a lock this rework
+    exists to avoid). The idempotency arbiter is now `WebUpdate.
+    client_key`, checked *first* so a conflicting retry never leaves a
+    wasted `telegram_update` row behind: on a `client_key` replay the
+    `web_update` insert's ON CONFLICT DO NOTHING fires, RETURNING yields
+    nothing, and the matching `telegram_update` insert is skipped
+    entirely -- a fallback SELECT reads back the update_id the *first*
+    call used. That id is what POST /api/send hands back on every
+    retry: same client_key in, same update_id out, every time.
+
     A fresh update_id is reserved from web_update_seq first, then handed
     to `build_payload` so the synthetic Update's own message_id/update_id
     fields (app/web/ingress.py) can embed it -- the payload cannot be
-    built before the id exists. On a `client_key` replay the insert's
-    ON CONFLICT DO NOTHING fires and RETURNING yields nothing, so a
-    fallback SELECT reads back the update_id the *first* insert used.
-    That id is what POST /api/send hands back on every retry: same
-    client_key in, same update_id out, every time. The reserved id from
-    a conflicting insert is simply never used -- a gap in a sequence
-    costs nothing, and Postgres sequences are not gapless by design.
+    built before the id exists. It is always negative (Telegram's own
+    ids are always non-negative); asserted here in code rather than by a
+    database CHECK, since the sign-of-update_id invariant is no longer
+    enforced by the schema at all (see `TelegramUpdate`'s docstring).
+    A reserved id that loses the client_key race is simply never used --
+    a gap in a sequence costs nothing, and Postgres sequences are not
+    gapless by design.
     """
     update_id = await _next_web_update_id(session)
-    payload = build_payload(update_id)
-    stmt = (
-        pg_insert(TelegramUpdate)
-        .values(
-            update_id=update_id,
-            payload=payload,
-            status="pending",
-            attempts=0,
-            source="web",
-            client_key=client_key,
-        )
-        .on_conflict_do_nothing(
-            index_elements=[TelegramUpdate.client_key],
-            index_where=TelegramUpdate.client_key.isnot(None),
-        )
-        .returning(TelegramUpdate.update_id)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-    await session.commit()
-    if row is not None:
-        return row[0]
+    assert update_id < 0, f"web update_id must be negative, got {update_id}"
 
-    existing = await session.execute(
-        select(TelegramUpdate.update_id).where(TelegramUpdate.client_key == client_key)
+    web_stmt = (
+        pg_insert(WebUpdate)
+        .values(update_id=update_id, client_key=client_key)
+        .on_conflict_do_nothing(
+            index_elements=[WebUpdate.client_key],
+            index_where=WebUpdate.client_key.isnot(None),
+        )
+        .returning(WebUpdate.update_id)
     )
-    return existing.scalar_one()
+    web_result = await session.execute(web_stmt)
+    web_row = web_result.first()
+    if web_row is None:
+        # client_key already claimed by an earlier call -- the reserved
+        # id above goes unused, and no telegram_update row is inserted
+        # for it.
+        existing = await session.execute(
+            select(WebUpdate.update_id).where(WebUpdate.client_key == client_key)
+        )
+        await session.commit()
+        return existing.scalar_one()
+
+    payload = build_payload(update_id)
+    await session.execute(
+        pg_insert(TelegramUpdate).values(
+            update_id=update_id, payload=payload, status="pending", attempts=0
+        )
+    )
+    await session.commit()
+    return update_id
 
 
 async def claim(session: AsyncSession) -> TelegramUpdate | None:

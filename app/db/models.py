@@ -71,20 +71,22 @@ class Base(DeclarativeBase):
 class TelegramUpdate(Base):
     """The inbound queue (plan section 2 / 6.3), plus the web-chat transport.
 
-    `source` and `client_key` are the web-chat plan's addition (track 1
-    of that plan). `source` says which Bot app/worker.py must feed the
-    row to -- the real one for 'telegram', WebSinkSession's for 'web' --
-    and `ck_telegram_update_source_sign` below ties it to the sign of
-    `update_id` at the database level: Telegram's own ids are always
-    non-negative, web ids always come from `web_update_seq` and are
-    always negative (app/db/queue.py's enqueue_web), so the two id
-    spaces can never collide and a bug that mislabels a row is a
-    constraint violation, not a silent misroute.
-
-    `client_key` is POST /api/send's idempotency key: nullable because
-    only web rows carry one, with a partial unique index (see the
-    migration) rather than a plain one, so NULL telegram rows are never
-    compared against each other for uniqueness.
+    Origin is derived from the *sign* of `update_id`, not a stored
+    column: Telegram's own ids are always non-negative, and every
+    web-origin row gets a negative id from `web_update_seq`
+    (app/db/queue.py's `enqueue_web`), so `update_id < 0` is exactly
+    "this came from the browser" with no column that could ever drift
+    out of sync with it. This replaces an earlier design (web-chat plan
+    track 1) that added `source`/`client_key` columns and two CHECK
+    constraints directly on this table via an ALTER; that ALTER takes an
+    ACCESS EXCLUSIVE lock and hung a Railway deploy exactly the way
+    migration f7da7c8741fd did (see that migration's docstring and
+    commits 2cd24c2/068e7e3), so the web-chat plan's own schema was
+    reworked the same way: no ALTER on this hot table. The idempotency
+    key for a web-origin row lives on `WebUpdate.client_key` instead, in
+    a table this one has no foreign key into (an FK would itself take a
+    SHARE ROW EXCLUSIVE lock here) -- see `app/db/queue.py`'s
+    `enqueue_web` for how the two rows are written together.
     """
 
     __tablename__ = "telegram_update"
@@ -105,19 +107,51 @@ class TelegramUpdate(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    source: Mapped[str] = mapped_column(
-        String, nullable=False, default="telegram", server_default=text("'telegram'")
-    )
-    client_key: Mapped[str | None] = mapped_column(String)
 
     __table_args__ = (
         Index("ix_telegram_update_status_update_id", "status", "update_id"),
-        CheckConstraint("source in ('telegram', 'web')", name="ck_telegram_update_source"),
-        CheckConstraint(
-            "(source = 'web') = (update_id < 0)", name="ck_telegram_update_source_sign"
-        ),
+    )
+
+
+class WebUpdate(Base):
+    """The web-chat transport's own idempotency marker (web-chat plan
+    track 2, reworked to avoid an ALTER on `telegram_update` -- see that
+    model's docstring for why).
+
+    One row per web-origin update, `update_id`-keyed to the matching
+    `telegram_update` row but with **no foreign key** to it: an FK
+    constraint takes a SHARE ROW EXCLUSIVE lock on the referenced table
+    at creation time, which is exactly the kind of lock this rework
+    exists to avoid taking on `telegram_update`. The two rows are
+    written together, in one transaction, by `app/db/queue.py`'s
+    `enqueue_web` -- application code keeps them in sync since the
+    database no longer does.
+
+    `client_key` is POST /api/send's idempotency key, nullable because a
+    retried request may not always carry one, with a partial unique
+    index (see the migration) rather than a plain one, so NULL rows are
+    never compared against each other for uniqueness. `enqueue_web`
+    conflicts on this index (`ON CONFLICT (client_key) WHERE client_key
+    IS NOT NULL DO NOTHING`), then re-selects on a conflict, so a
+    retried POST with the same key returns the same `update_id`.
+
+    Holds no conversation content -- see app/core/purge.py's
+    PURGED_TABLES (it is purged like `web_session`) and
+    tests/test_export.py's NOT_EXPORTED (it is not exported, for the
+    same reason).
+    """
+
+    __tablename__ = "web_update"
+
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    client_key: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
         Index(
-            "uq_telegram_update_client_key",
+            "uq_web_update_client_key",
             "client_key",
             unique=True,
             postgresql_where=text("client_key IS NOT NULL"),

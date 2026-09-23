@@ -6,12 +6,13 @@ Updates:
 
     POST /api/send --> app/web/ingress.py builds a synthetic Update with
     a negative update_id --> app/db/queue.py's enqueue_web stores it in
-    telegram_update, source='web' --> app/worker.py's single claim loop
-    claims it exactly like a Telegram row, but feeds it to a `web_bot`
-    whose session is app/web/sink.py's WebSinkSession instead of a real
-    HTTP client --> every send that turn makes becomes a WebHub event
-    (app/web/hub.py) instead of a Telegram API call --> track 2's
-    GET /api/events streams those events out over SSE.
+    telegram_update (the negative id itself marks it web-origin -- see
+    app/db/models.py's TelegramUpdate/WebUpdate) --> app/worker.py's
+    single claim loop claims it exactly like a Telegram row, but feeds
+    it to a `web_bot` whose session is app/web/sink.py's WebSinkSession
+    instead of a real HTTP client --> every send that turn makes becomes
+    a WebHub event (app/web/hub.py) instead of a Telegram API call -->
+    track 2's GET /api/events streams those events out over SSE.
 
 app/web/tail.py is the other half of delivery: it mirrors Telegram-
 origin and proactive `message` rows into the same hub, so the web view

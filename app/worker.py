@@ -131,14 +131,14 @@ RECOVER_INTERVAL_SECONDS = 60
 
 
 class WebDisabled(Exception):
-    """Raised by process_one_update for a source='web' row when no
-    `web_bot` was supplied (web-chat plan track 1). Caught by the same
-    broad except every other row failure goes through, so it fails the
-    row through the ordinary retry/MAX_ATTEMPTS path rather than a
-    special one -- a worker that is ever started without WEB_UI_ENABLED
-    while a stray web row exists (a redeploy mid-rollout, a config
-    change) should retry and eventually fail it visibly, not crash the
-    claim loop over one row.
+    """Raised by process_one_update for a web-origin row (update_id < 0)
+    when no `web_bot` was supplied (web-chat plan track 1). Caught by
+    the same broad except every other row failure goes through, so it
+    fails the row through the ordinary retry/MAX_ATTEMPTS path rather
+    than a special one -- a worker that is ever started without
+    WEB_UI_ENABLED while a stray web row exists (a redeploy mid-rollout,
+    a config change) should retry and eventually fail it visibly, not
+    crash the claim loop over one row.
     """
 # Plan section 6: "A heartbeat task runs in the worker process every
 # 60 s." Fine-grained enough for a 3-hour grace window, coarse enough
@@ -161,21 +161,24 @@ async def process_one_update(
     Web-chat plan track 1: `web_bot` defaults to `None` so every existing
     caller and test keeps working unchanged (the module docstring's
     "Phase 1 signatures unchanged" discipline, extended to this
-    signature too). A row's `source` column (app/db/models.py) picks
-    which `Bot` it is fed to -- the real one for 'telegram', `web_bot`'s
-    WebSinkSession for 'web' -- which is the only functional change the
-    whole synthetic-update design makes to this function: everything
-    upstream (claim, record_inbound) and downstream (feed_update,
-    complete/fail) is identical regardless of source, because
-    `dp.feed_update` reads `message.bot`/`callback.bot` for every send it
-    makes and neither app/core/* nor app/tg/router.py otherwise cares
-    which Bot subclass they were handed.
+    signature too). A row's origin -- the *sign* of its `update_id`
+    (app/db/models.py's `TelegramUpdate` docstring: negative means web,
+    minted by `web_update_seq`; Telegram's own ids are always
+    non-negative) -- picks which `Bot` it is fed to: the real one for a
+    Telegram row, `web_bot`'s WebSinkSession for a web one. That is the
+    only functional change the whole synthetic-update design makes to
+    this function: everything upstream (claim, record_inbound) and
+    downstream (feed_update, complete/fail) is identical regardless of
+    origin, because `dp.feed_update` reads `message.bot`/`callback.bot`
+    for every send it makes and neither app/core/* nor app/tg/router.py
+    otherwise cares which Bot subclass they were handed.
 
-    A `source='web'` row claimed while `web_bot` is `None` (the web UI
-    disabled or not wired into this worker) fails immediately, before
-    `feed_update` ever runs -- there is no Bot to feed it to, and
-    pretending the real one will do would silently leak a synthetic,
-    negative-id update into Telegram-facing code that has never seen one.
+    A web-origin row (update_id < 0) claimed while `web_bot` is `None`
+    (the web UI disabled or not wired into this worker) fails
+    immediately, before `feed_update` ever runs -- there is no Bot to
+    feed it to, and pretending the real one will do would silently leak
+    a synthetic, negative-id update into Telegram-facing code that has
+    never seen one.
     """
     async with sessionmaker() as session:
         row = await claim(session)
@@ -188,7 +191,7 @@ async def process_one_update(
 
     started_at = time.monotonic()
     try:
-        if row.source == "web":
+        if row.update_id < 0:
             if web_bot is None:
                 raise WebDisabled("web UI is not enabled on this worker")
             bot_for_row = web_bot

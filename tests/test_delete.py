@@ -52,6 +52,7 @@ from app.db.models import (
     TelegramUpdate,
     UserState,
     WebSession,
+    WebUpdate,
     WeeklyReview,
 )
 from app.tg import data as data_ui
@@ -175,6 +176,12 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     token_hash=b"\x00" * 32,
                     expires_at=now + datetime.timedelta(days=1),
                 ),
+                # Web-chat plan track 2: the idempotency marker for a
+                # browser-originated update, no content of its own but
+                # purged for the same reason (app/core/purge.py's
+                # PURGED_TABLES). update_id is negative by the
+                # sign-derived-origin convention (app/db/queue.py).
+                WebUpdate(update_id=-1, client_key="test-client-key"),
             ]
         )
         await session.commit()

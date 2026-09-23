@@ -118,9 +118,10 @@ async def edit_keyboard(
     propagates.
 
     Web-chat plan track 1: a negative `message_id` only ever comes from
-    app/web/sink.py's WebSinkSession, which mints them so this guard and
-    `ck_telegram_update_source_sign` can both tell a web-issued id apart
-    from a real Telegram one purely by sign. Calling the *real* Bot with
+    app/web/sink.py's WebSinkSession, which mints them so this guard --
+    and the same sign convention app/db/models.py's TelegramUpdate uses
+    for `update_id` -- can both tell a web-issued id apart from a real
+    Telegram one purely by sign. Calling the *real* Bot with
     one is the cross-transport bug the design's adversarial review named
     concretely: a check-in note or proposal issued through the web sink
     (app/tg/checkin.py's `retire`, app/tg/proposals.py) but later retired

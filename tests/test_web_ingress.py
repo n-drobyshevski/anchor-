@@ -1,7 +1,8 @@
 """app/web/ingress.py tests (web-chat plan track 1).
 
 - the synthetic message Update payload validates as an aiogram Update
-- ids are negative and increasing; the DB's source/sign CHECK holds
+- ids are negative and increasing (origin is the sign of update_id --
+  app/db/models.py's TelegramUpdate/WebUpdate)
 - a repeated client_key stores only one row (idempotent retry)
 - /delete, /export, /delete@x, /EXPORT (case) and `d:` callbacks are
   all rejected before anything is queued
@@ -15,7 +16,7 @@ from aiogram.types import Update
 from sqlalchemy import select
 
 from app.config import Settings
-from app.db.models import TelegramUpdate
+from app.db.models import TelegramUpdate, WebUpdate
 from app.web.hub import WebHub
 from app.web.ingress import (
     BlockedCommand,
@@ -140,10 +141,12 @@ async def test_send_text_enqueues_a_negative_increasing_web_row(sessionmaker):
     async with sessionmaker() as session:
         row1 = await session.get(TelegramUpdate, id1)
         row2 = await session.get(TelegramUpdate, id2)
-    assert row1.source == "web"
-    assert row1.client_key == "a"
-    assert row2.source == "web"
-    assert row2.client_key == "b"
+        web1 = await session.get(WebUpdate, id1)
+        web2 = await session.get(WebUpdate, id2)
+    assert row1 is not None
+    assert web1.client_key == "a"
+    assert row2 is not None
+    assert web2.client_key == "b"
 
 
 async def test_send_text_retry_with_same_client_key_is_idempotent(sessionmaker):
@@ -155,22 +158,13 @@ async def test_send_text_retry_with_same_client_key_is_idempotent(sessionmaker):
     assert first == second
     async with sessionmaker() as session:
         rows = (
-            await session.execute(select(TelegramUpdate).where(TelegramUpdate.client_key == "dup"))
+            await session.execute(select(WebUpdate).where(WebUpdate.client_key == "dup"))
         ).scalars().all()
     assert len(rows) == 1
-
-
-async def test_source_sign_check_rejects_a_web_row_with_a_positive_id(sessionmaker):
-    """The migration's CHECK ((source = 'web') = (update_id < 0)) is the
-    backstop under this whole design -- prove it actually fires."""
-    from sqlalchemy.exc import IntegrityError
-
+    # No wasted telegram_update row for the losing side of the race.
     async with sessionmaker() as session:
-        session.add(
-            TelegramUpdate(update_id=999, payload={}, source="web", status="pending", attempts=0)
-        )
-        with pytest.raises(IntegrityError):
-            await session.commit()
+        tg_rows = (await session.execute(select(TelegramUpdate))).scalars().all()
+    assert len(tg_rows) == 1
 
 
 # --- press: allowlist + blocked callback prefix ---
@@ -204,8 +198,9 @@ async def test_press_accepts_allowlisted_data_and_enqueues(sessionmaker):
 
     async with sessionmaker() as session:
         row = await session.get(TelegramUpdate, update_id)
-    assert row.source == "web"
-    assert row.client_key is None
+        web_row = await session.get(WebUpdate, update_id)
+    assert row.update_id < 0
+    assert web_row.client_key is None
     assert row.payload["callback_query"]["data"] == "w:resume"
     assert row.payload["callback_query"]["message"]["message_id"] == -1
 

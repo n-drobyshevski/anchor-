@@ -27,13 +27,7 @@ async def _add(sessionmaker, *, update_id: int | None = None, **kwargs) -> Messa
         if update_id is not None:
             existing = await session.get(TelegramUpdate, update_id)
             if existing is None:
-                session.add(
-                    TelegramUpdate(
-                        update_id=update_id,
-                        payload={},
-                        source="web" if update_id < 0 else "telegram",
-                    )
-                )
+                session.add(TelegramUpdate(update_id=update_id, payload={}))
                 await session.commit()
         message = Message(ooc=False, update_id=update_id, **kwargs)
         session.add(message)

@@ -127,6 +127,13 @@ PURGED_TABLES = (
     # test is what forces this: `web_session` has to be listed here or
     # in KEPT_TABLES, or that test fails.
     "web_session",
+    # Web-chat plan track 2 (app/db/models.py's WebUpdate, added when the
+    # migration was reworked to avoid an ALTER on telegram_update). It
+    # holds no content -- only the client_key idempotency marker for a
+    # browser-originated update -- but it is still a record tied to this
+    # user's browser sessions, and tests/test_delete.py's coverage test
+    # forces every table to be listed here or in KEPT_TABLES.
+    "web_update",
     # 6a: the idle framework's own tables (Phase 6 plan section 3).
     # idle_change is listed child-first, though its FK is ON DELETE
     # CASCADE -- same "TRUNCATE the whole list in one statement"

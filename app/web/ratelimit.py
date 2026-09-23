@@ -179,7 +179,7 @@ async def pending_web_count(session: AsyncSession) -> int:
     result = await session.execute(
         select(func.count())
         .select_from(TelegramUpdate)
-        .where(TelegramUpdate.source == "web")
+        .where(TelegramUpdate.update_id < 0)
         .where(TelegramUpdate.status.in_(("pending", "processing")))
     )
     return result.scalar_one()

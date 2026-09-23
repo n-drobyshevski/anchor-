@@ -383,6 +383,12 @@ NOT_EXPORTED = {
     # (app/web/auth.py, track 2). purge.py still wipes it: "delete all
     # my data" and "give me all my data" are not the same promise.
     "web_session": "a session credential's hash, not conversation content",
+    # Web-chat plan track 2 (app/db/models.py's WebUpdate, added when the
+    # migration was reworked to avoid an ALTER on telegram_update). No
+    # content: only the client_key idempotency marker for a browser-
+    # originated update. purge.py still wipes it, same reasoning as
+    # web_session above.
+    "web_update": "an idempotency marker for a browser update, not conversation content",
     # 6a.
     "backup_log": "ciphertext object keys and sizes, not user data (plan section 3)",
     "heartbeat_state": "operational liveness marker, not user data",

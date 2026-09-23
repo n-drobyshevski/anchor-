@@ -109,11 +109,11 @@ async def test_pending_web_count_only_counts_live_web_rows(sessionmaker):
         await session.execute(
             insert(TelegramUpdate),
             [
-                {"update_id": -1, "payload": {}, "status": "pending", "source": "web"},
-                {"update_id": -2, "payload": {}, "status": "processing", "source": "web"},
-                {"update_id": -3, "payload": {}, "status": "done", "source": "web"},
-                {"update_id": -4, "payload": {}, "status": "failed", "source": "web"},
-                {"update_id": 1, "payload": {}, "status": "pending", "source": "telegram"},
+                {"update_id": -1, "payload": {}, "status": "pending"},
+                {"update_id": -2, "payload": {}, "status": "processing"},
+                {"update_id": -3, "payload": {}, "status": "done"},
+                {"update_id": -4, "payload": {}, "status": "failed"},
+                {"update_id": 1, "payload": {}, "status": "pending"},
             ],
         )
         await session.commit()

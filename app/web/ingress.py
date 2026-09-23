@@ -8,7 +8,7 @@ taken from the request -- and hand it to app/db/queue.py's `enqueue_web`,
 which mints the row's negative `update_id` from `web_update_seq` and
 stores it. From there app/worker.py's single claim loop treats it exactly
 like a Telegram row (see that module's docstring for the one line that
-changed: picking `web_bot` by `row.source`).
+changed: picking `web_bot` by the sign of `row.update_id`).
 
 **Two independent blocks**, per the design's adversarial review (finding
 1 and its fix): a text message that would route to `/delete` or

@@ -125,7 +125,7 @@ class WebSinkSession(BaseSession):
         self._hub = hub
         # Always negative, decrementing, and seeded from the wall clock
         # (ms since epoch) rather than a bare -1: app/tg/send.py's
-        # edit_keyboard guard and ck_telegram_update_source_sign both
+        # edit_keyboard guard and app/db/models.py's TelegramUpdate both
         # key off the *sign* of an id to tell a web-issued one apart
         # from a real Telegram id, but the browser also keys its own
         # dedupe/edit map (`rendered`, app.js) by this exact id, and
