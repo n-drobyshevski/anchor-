@@ -18,7 +18,9 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock, to_local
 from app.core.idle.candidates import reflect_candidates, summary_candidates
+from app.core.idle.consolidate import find_clusters
 from app.core.idle.gate import IdleFacts
+from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finished_at
 from app.core.spend import today_idle_usd, today_usd
 from app.db.models import IdleRun, UserState
 
@@ -87,6 +89,14 @@ async def load_idle_facts(
     pending_summaries = await summary_candidates(session, _BACKFILL_CANDIDATE_LIMIT)
     pending_reflections = await reflect_candidates(session, clock, _BACKFILL_CANDIDATE_LIMIT)
 
+    # 6b: shared with the jobs themselves (app/core/idle/consolidate.py,
+    # app/core/idle/reflect.py) so the gate and the job can never
+    # disagree about whether there is anything to do -- same role
+    # candidates.py plays for backfill above.
+    consolidate_clusters = len(await find_clusters(session))
+    last_reflect_at = await last_done_reflect_finished_at(session)
+    reflect_has_new_summary = await has_new_summary_since(session, last_reflect_at)
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -99,6 +109,8 @@ async def load_idle_facts(
         daily_usd_cap=decimal.Decimal(str(settings.DAILY_USD_CAP)),
         backfill_candidates=len(pending_summaries) + len(pending_reflections),
         kind_runs_today=await _kind_runs_today(session, local_date),
+        consolidate_clusters=consolidate_clusters,
+        reflect_has_new_summary=reflect_has_new_summary,
     )
 
 

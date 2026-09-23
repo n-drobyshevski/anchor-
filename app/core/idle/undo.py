@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.clock import Clock
-from app.core.export import encode as _encode
+from app.core.idle.rowstate import row_state as _row_state
 from app.db.models import IdleChange, IdleRun, Memory, NotebookEntry, StateChange
 
 logger = logging.getLogger(__name__)
@@ -68,14 +68,6 @@ def _comparable(table: str, state: dict | None) -> dict | None:
         return None
     volatile = _VOLATILE_COLUMNS.get(table, frozenset())
     return {key: value for key, value in state.items() if key not in volatile}
-
-
-def _row_state(row) -> dict:
-    """The same JSON-safe encoding idle_change's before/after columns
-    were written with -- app/core/export.py's own `encode`, reused
-    rather than re-derived, so a value that round-trips through
-    /export round-trips through undo identically."""
-    return {column.name: _encode(getattr(row, column.name)) for column in row.__table__.columns}
 
 
 def _decode(model, key: str, value):

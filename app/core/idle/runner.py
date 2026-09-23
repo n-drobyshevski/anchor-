@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core.idle import BACKFILL
+from app.core.idle import BACKFILL, CONSOLIDATE, REFLECT
 from app.core.idle.candidates import REFLECTED_SCENE_IDS
 from app.core.idle.facts import load_idle_facts
 from app.core.idle.gate import config_from_settings, idle_gate
@@ -129,6 +129,7 @@ async def _finish(
     skip_reason: str | None = None,
     summary: dict | None = None,
     usd_cost: decimal.Decimal | None = None,
+    reversible: bool | None = None,
 ) -> None:
     async with session_factory() as session:
         run = await session.get(IdleRun, run_id)
@@ -142,6 +143,8 @@ async def _finish(
             run.summary = summary
         if usd_cost is not None:
             run.usd_cost = usd_cost
+        if reversible is not None:
+            run.reversible = reversible
         await session.commit()
 
 
@@ -224,6 +227,54 @@ async def run_idle(
                 started_at=started_at,
                 timezone=timezone,
             )
+            # backfill is not single-transaction (each unit commits on
+            # its own -- see its module docstring), so a preempted run
+            # can legitimately have done some whole units already; only
+            # "preempted and did nothing at all" counts as a pure skip.
+            preempted_and_empty = (
+                result.preempted and result.summarized == 0 and result.reflected == 0
+            )
+            summary = {
+                "summarized": result.summarized,
+                "reflected": result.reflected,
+                REFLECTED_SCENE_IDS: list(result.reflected_scene_ids),
+            }
+            if result.job_cap:
+                summary["job_cap"] = True
+            reversible = False
+        elif kind == CONSOLIDATE:
+            from app.core.idle.consolidate import run_consolidate
+
+            result = await run_consolidate(
+                session_factory, settings, safety_provider, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            # consolidate is single-transaction (§4/§8: "apply happens
+            # in one transaction only after the model call and after
+            # the preemption check") -- preempted always means nothing
+            # was written.
+            preempted_and_empty = result.preempted
+            summary = {
+                "merged": result.merged,
+                "contradicted": result.contradicted,
+                "dropped": result.dropped,
+            }
+            reversible = True
+        elif kind == REFLECT:
+            from app.core.idle.reflect import run_reflect
+
+            result = await run_reflect(
+                session_factory, settings, safety_provider, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            preempted_and_empty = result.preempted
+            summary = {
+                "added": result.added,
+                "closed": result.closed,
+                "updated": result.updated,
+                "dropped": result.dropped,
+            }
+            reversible = True
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
     except Exception as exc:  # noqa: BLE001 - never retried, see module docstring
@@ -237,22 +288,18 @@ async def run_idle(
 
     usd_cost = await spend_since(session_factory, started_at)
 
-    if result.preempted and result.summarized == 0 and result.reflected == 0:
+    if preempted_and_empty:
         await _finish(
             session_factory, clock, run_id, status="skipped", skip_reason="preempted", usd_cost=usd_cost,
         )
         return
 
-    summary = {
-        "summarized": result.summarized,
-        "reflected": result.reflected,
-        REFLECTED_SCENE_IDS: list(result.reflected_scene_ids),
-    }
-    if result.preempted:
+    if getattr(result, "preempted", False):
         summary["preempted"] = True
-    if result.job_cap:
-        summary["job_cap"] = True
-    await _finish(session_factory, clock, run_id, status="done", summary=summary, usd_cost=usd_cost)
+    await _finish(
+        session_factory, clock, run_id, status="done", summary=summary, usd_cost=usd_cost,
+        reversible=reversible,
+    )
     logger.info("idle run done", extra={"run_id": run_id, "event": kind, **summary})
 
 

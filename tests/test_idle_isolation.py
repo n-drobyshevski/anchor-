@@ -20,8 +20,8 @@ import pytest
 
 from app.config import Settings
 from app.core.clock import FrozenClock
-from app.core.idle import BACKFILL, IDLE_RUN
-from app.db.models import IdleRun, Message, Scene, UserState
+from app.core.idle import BACKFILL, CONSOLIDATE, IDLE_RUN, REFLECT
+from app.db.models import IdleRun, Memory, Message, Scene, UserState
 from conftest import FakeLLMProvider, make_bot
 
 MODULES = sorted(pathlib.Path("app/core/idle").glob("*.py"))
@@ -128,13 +128,14 @@ def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", [BACKFILL])
+@pytest.mark.parametrize("kind", [BACKFILL, CONSOLIDATE, REFLECT])
 async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     """Every implemented idle kind, run through the worker's own dispatch
     with a real (fake-transport) bot in hand: zero Telegram calls of any
     kind. `Bot.__call__` is where every aiogram method goes, so patching
     it also catches a Bot the idle code might build for itself.
-    Parametrized so 6b-6d extend it automatically."""
+    Parametrized so 6c-6d extend it automatically -- 6b adds
+    CONSOLIDATE and REFLECT."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -150,11 +151,17 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
 
     clock = FrozenClock(datetime.datetime(2026, 9, 23, 12, 0, tzinfo=datetime.timezone.utc))
     now = clock.now_utc()
+    merge_ids: tuple[int, int] | None = None
     async with sessionmaker() as session:
         session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris"))
         scene = Scene(
             started_at=now - datetime.timedelta(hours=5),
             ended_at=now - datetime.timedelta(hours=4),
+            # BACKFILL needs an un-summarized scene to pick up; CONSOLIDATE
+            # and REFLECT need something already summarized -- CONSOLIDATE
+            # doesn't read scenes at all, REFLECT's kind rule needs a
+            # fresh summary to fire on.
+            summary=None if kind == BACKFILL else "Коротко поговорили.",
         )
         session.add(scene)
         await session.commit()
@@ -167,6 +174,18 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
                 Message(role="user", content="как дела", ooc=False, kind="chat", scene_id=scene_id),
             ]
         )
+        if kind == CONSOLIDATE:
+            # Two clusters, so the gate's `kind_rule:not_enough_clusters`
+            # (>= 2 required) passes.
+            m1 = Memory(kind="identity", text="живёт в Лилле", source="extractor")
+            m2 = Memory(kind="identity", text="живёт в Лилле, во Франции", source="extractor")
+            m3 = Memory(kind="preference", text="работает программистом", source="extractor")
+            m4 = Memory(kind="preference", text="работает программистом в стартапе", source="extractor")
+            session.add_all([m1, m2, m3, m4])
+            await session.commit()
+            await session.refresh(m1)
+            await session.refresh(m2)
+            merge_ids = (m1.id, m2.id)
         run = IdleRun(kind=kind, local_date=now.date(), status="queued")
         session.add(run)
         await session.commit()
@@ -175,7 +194,14 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
 
     bot, fake = make_bot()
     provider = FakeLLMProvider(text="Коротко: поговорили.")
-    safety_provider = FakeLLMProvider(text='{"add": [], "close": [], "update": []}')
+    if kind == CONSOLIDATE:
+        safety_text = (
+            '{"merges": [{"ids": [%d, %d], "text": "живёт в Лилле", "kind": "identity"}], '
+            '"contradictions": []}' % merge_ids
+        )
+    else:
+        safety_text = '{"add": [], "close": [], "update": []}'
+    safety_provider = FakeLLMProvider(text=safety_text)
 
     async with sessionmaker() as session:
         await _run_job(
@@ -186,7 +212,10 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     # Not vacuous: the run really did its work.
     async with sessionmaker() as session:
         assert (await session.get(IdleRun, run_id)).status == "done"
-        assert (await session.get(Scene, scene_id)).summary == "Коротко: поговорили."
+        if kind == BACKFILL:
+            assert (await session.get(Scene, scene_id)).summary == "Коротко: поговорили."
+        elif kind == CONSOLIDATE:
+            assert (await session.get(Memory, merge_ids[0])).superseded_by is not None
     assert calls == []
     assert fake.sent == []
     assert fake.edits == []

@@ -11,7 +11,7 @@ import pytest
 from app.core.clock import FrozenClock
 from app.core.idle.digest import NOTHING_TEXT, WINDOW_24H, WINDOW_7D, build_digest
 from app.db.models import IdleRun
-from app.tg.idle import parse_digest_args, undo_keyboard
+from app.tg.idle import parse_digest_args, undo_callback_data, undo_keyboard
 
 
 def _clock() -> FrozenClock:
@@ -215,3 +215,112 @@ async def test_digest_text_carries_no_user_content(sessionmaker):
     async with sessionmaker() as session:
         digest = await build_digest(session, clock, undo_days=7)
     assert secret not in digest.text
+
+
+# --- 6b: Память / Заметки lines, one per run, newest first --------------
+
+
+@pytest.mark.asyncio
+async def test_memory_line_shows_merges_and_contradictions(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="consolidate", local_date=clock.now_utc().date(), status="done",
+                reversible=True, summary={"merged": 3, "contradicted": 1, "dropped": 0},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Память: 3 объединения, 1 противоречие" in digest.text
+
+
+@pytest.mark.asyncio
+async def test_notes_line_shows_added_and_closed(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="reflect", local_date=clock.now_utc().date(), status="done",
+                reversible=True, summary={"added": 2, "closed": 1, "updated": 0, "dropped": 0},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Заметки: +2, закрыто 1" in digest.text
+
+
+@pytest.mark.asyncio
+async def test_memory_reflect_lines_omitted_when_nothing_happened(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                IdleRun(
+                    kind="consolidate", local_date=clock.now_utc().date(), status="done",
+                    reversible=True, summary={"merged": 0, "contradicted": 0, "dropped": 2},
+                ),
+                IdleRun(
+                    kind="reflect", local_date=clock.now_utc().date(), status="done",
+                    reversible=True, summary={"added": 0, "closed": 0, "updated": 0, "dropped": 1},
+                ),
+            ]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "Память" not in digest.text
+    assert "Заметки" not in digest.text
+
+
+@pytest.mark.asyncio
+async def test_each_reversible_run_gets_its_own_line_and_button_newest_first(sessionmaker):
+    """Coordinator's resolution (plan section 7): one line per run, newest
+    first, each with its own [Отменить]."""
+    clock = _clock()
+    async with sessionmaker() as session:
+        run1 = IdleRun(
+            kind="consolidate", local_date=clock.now_utc().date(), status="done",
+            reversible=True, summary={"merged": 1, "contradicted": 0, "dropped": 0},
+        )
+        run2 = IdleRun(
+            kind="consolidate", local_date=clock.now_utc().date(), status="done",
+            reversible=True, summary={"merged": 2, "contradicted": 1, "dropped": 0},
+        )
+        session.add_all([run1, run2])
+        await session.commit()
+        await session.refresh(run1)
+        await session.refresh(run2)
+        id1, id2 = run1.id, run2.id
+
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+
+    lines = [line for line in digest.text.splitlines() if line.startswith("• Память")]
+    assert lines == [
+        "• Память: 2 объединения, 1 противоречие",
+        "• Память: 1 объединения, 0 противоречие",
+    ]
+    # newest (id2) first among the undoable run ids too.
+    assert digest.undoable_run_ids[:2] == (id2, id1)
+
+
+@pytest.mark.asyncio
+async def test_undoable_run_ids_include_done_reversible_consolidate_and_reflect(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="reflect", local_date=clock.now_utc().date(), status="done",
+                reversible=True, summary={"added": 1, "closed": 0, "updated": 0, "dropped": 0},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert len(digest.undoable_run_ids) == 1
+    markup = undo_keyboard(digest.undoable_run_ids)
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].callback_data == undo_callback_data(digest.undoable_run_ids[0])

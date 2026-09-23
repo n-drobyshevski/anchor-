@@ -10,10 +10,10 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core.clock import FrozenClock
-from app.core.idle import BACKFILL
+from app.core.idle import BACKFILL, CONSOLIDATE, REFLECT
 from app.core.idle.gate import NOTHING_TO_BACKFILL, USER_ACTIVE
 from app.core.idle.planner import PRIORITY, plan_idle
-from app.db.models import IdleRun, Job, Message, Scene, UserState
+from app.db.models import IdleRun, Job, Memory, Message, Scene, UserState
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,6 +76,79 @@ async def test_priority_order_matches_the_plan():
     assert PRIORITY == (
         "backfill", "consolidate", "prebrief", "reflect", "critique", "research", "canary",
     )
+
+
+async def _seed_consolidate_candidate(sessionmaker) -> None:
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                Memory(kind="identity", text="живёт в Лилле", source="extractor"),
+                Memory(kind="identity", text="живёт в Лилле, во Франции", source="extractor"),
+                Memory(kind="preference", text="работает программистом", source="extractor"),
+                Memory(kind="preference", text="работает программистом в стартапе", source="extractor"),
+            ]
+        )
+        await session.commit()
+
+
+async def _seed_reflect_candidate(sessionmaker, clock) -> None:
+    now = clock.now_utc()
+    async with sessionmaker() as session:
+        scene = Scene(
+            started_at=now - datetime.timedelta(hours=2),
+            ended_at=now - datetime.timedelta(hours=1),
+            summary="Коротко.",
+        )
+        session.add(scene)
+        await session.commit()
+
+
+async def test_priority_picks_consolidate_before_reflect_when_both_eligible(sessionmaker):
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _seed_consolidate_candidate(sessionmaker)
+    await _seed_reflect_candidate(sessionmaker, clock)
+
+    async with sessionmaker() as session:
+        run_id = await plan_idle(session, Settings(), clock)
+
+    assert run_id is not None
+    async with sessionmaker() as session:
+        run = await session.get(IdleRun, run_id)
+        assert run.kind == CONSOLIDATE
+
+
+async def test_priority_falls_through_to_reflect_when_consolidate_ineligible(sessionmaker):
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _seed_reflect_candidate(sessionmaker, clock)
+
+    async with sessionmaker() as session:
+        run_id = await plan_idle(session, Settings(), clock)
+
+    assert run_id is not None
+    async with sessionmaker() as session:
+        run = await session.get(IdleRun, run_id)
+        assert run.kind == REFLECT
+
+
+async def test_consolidate_and_reflect_each_stop_at_their_daily_limit(sessionmaker):
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _seed_consolidate_candidate(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(kind=CONSOLIDATE, local_date=clock.now_utc().date(), status="done")
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        run_id = await plan_idle(session, Settings(), clock)
+
+    # consolidate already ran today (KIND_DAILY_MAX=1) -- falls through
+    # past it to whatever the next eligible kind is (nothing else is
+    # eligible here, so nothing is planned).
+    assert run_id is None
 
 
 async def test_one_idle_job_at_a_time(sessionmaker):

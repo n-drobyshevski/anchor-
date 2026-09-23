@@ -48,6 +48,9 @@ KIND_RULE_PREFIX = "kind_rule:"
 NOT_IMPLEMENTED = KIND_RULE_PREFIX + "not_implemented"
 NOTHING_TO_BACKFILL = KIND_RULE_PREFIX + "nothing_to_backfill"
 DAILY_LIMIT = KIND_RULE_PREFIX + "daily_limit"
+# 6b.
+NOT_ENOUGH_CLUSTERS = KIND_RULE_PREFIX + "not_enough_clusters"
+NO_NEW_SUMMARY = KIND_RULE_PREFIX + "no_new_summary"
 
 # Per-kind daily limits, plan section 6. Checked at row 10 before the
 # kind's own rule, against runs that finished today (done, failed or
@@ -154,6 +157,16 @@ class IdleFacts:
     # Finished (done/failed/undone) runs per kind today, for the
     # KIND_DAILY_MAX check at row 10.
     kind_runs_today: Mapping[str, int] = dataclasses.field(default_factory=dict)
+    # 6b: how many consolidate clusters exist right now (app/core/idle/
+    # consolidate.find_clusters, shared with the job itself so the gate
+    # and the job can never disagree).
+    consolidate_clusters: int = 0
+    # 6b: whether a scene summary has appeared since the last *done*
+    # reflect run (app/core/idle/reflect.has_new_summary_since). A
+    # skipped or failed run never advances this watermark, so a
+    # transient failure cannot suppress reflect forever once new
+    # material exists.
+    reflect_has_new_summary: bool = False
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -162,17 +175,29 @@ def _backfill_rule(facts: IdleFacts) -> GateResult:
     return GateResult(True, OK)
 
 
+def _consolidate_rule(facts: IdleFacts) -> GateResult:
+    if facts.consolidate_clusters < 2:
+        return GateResult(False, NOT_ENOUGH_CLUSTERS)
+    return GateResult(True, OK)
+
+
+def _reflect_rule(facts: IdleFacts) -> GateResult:
+    if not facts.reflect_has_new_summary:
+        return GateResult(False, NO_NEW_SUMMARY)
+    return GateResult(True, OK)
+
+
 def _not_implemented_rule(facts: IdleFacts) -> GateResult:
     return GateResult(False, NOT_IMPLEMENTED)
 
 
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
-# per-kind predicates"). Every kind but backfill returns
-# kind_rule:not_implemented until its own milestone lands.
+# per-kind predicates"). Kinds past 6b return kind_rule:not_implemented
+# until their own milestone lands.
 KIND_RULES: dict[str, Callable[[IdleFacts], GateResult]] = {
     BACKFILL: _backfill_rule,
-    CONSOLIDATE: _not_implemented_rule,
-    REFLECT: _not_implemented_rule,
+    CONSOLIDATE: _consolidate_rule,
+    REFLECT: _reflect_rule,
     PREBRIEF: _not_implemented_rule,
     CRITIQUE: _not_implemented_rule,
     RESEARCH: _not_implemented_rule,
@@ -237,8 +262,10 @@ __all__ = [
     "KIND_DAILY_MAX",
     "KIND_RULES",
     "MAX_JOBS",
+    "NOT_ENOUGH_CLUSTERS",
     "NOT_IMPLEMENTED",
     "NOTHING_TO_BACKFILL",
+    "NO_NEW_SUMMARY",
     "OK",
     "PAUSED",
     "RESERVE",

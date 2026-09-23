@@ -15,8 +15,10 @@ from app.core.idle.gate import (
     IDLE_CAP,
     KIND_DAILY_MAX,
     MAX_JOBS,
+    NOT_ENOUGH_CLUSTERS,
     NOT_IMPLEMENTED,
     NOTHING_TO_BACKFILL,
+    NO_NEW_SUMMARY,
     OK,
     PAUSED,
     RESERVE,
@@ -28,7 +30,7 @@ from app.core.idle.gate import (
     idle_gate,
     parse_window,
 )
-from app.core.idle import BACKFILL, CONSOLIDATE
+from app.core.idle import BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT
 
 TZ = datetime.timezone.utc
 NOW = datetime.datetime(2026, 9, 23, 12, 0, tzinfo=TZ)
@@ -190,8 +192,35 @@ def test_row10_kind_rule_backfill_allows_when_candidates_exist():
 
 
 def test_row10_kind_rule_unimplemented_kinds():
+    """CONSOLIDATE and REFLECT got real kind rules in 6b (see
+    test_idle_gate.py's own consolidate/reflect kind-rule tests below);
+    PREBRIEF is still `not_implemented` until 6c."""
     facts = _facts()
-    assert idle_gate(CONSOLIDATE, facts, NOW, _config()) == (False, NOT_IMPLEMENTED)
+    assert idle_gate(PREBRIEF, facts, NOW, _config()) == (False, NOT_IMPLEMENTED)
+
+
+# --- 6b kind rules: consolidate, reflect --------------------------------
+
+
+def test_row10_kind_rule_consolidate_fewer_than_two_clusters():
+    for clusters in (0, 1):
+        facts = _facts(consolidate_clusters=clusters)
+        assert idle_gate(CONSOLIDATE, facts, NOW, _config()) == (False, NOT_ENOUGH_CLUSTERS)
+
+
+def test_row10_kind_rule_consolidate_allows_two_or_more_clusters():
+    facts = _facts(consolidate_clusters=2)
+    assert idle_gate(CONSOLIDATE, facts, NOW, _config()) == (True, OK)
+
+
+def test_row10_kind_rule_reflect_no_new_summary():
+    facts = _facts(reflect_has_new_summary=False)
+    assert idle_gate(REFLECT, facts, NOW, _config()) == (False, NO_NEW_SUMMARY)
+
+
+def test_row10_kind_rule_reflect_allows_when_new_summary_exists():
+    facts = _facts(reflect_has_new_summary=True)
+    assert idle_gate(REFLECT, facts, NOW, _config()) == (True, OK)
 
 
 # --- first-failure-wins ordering ---------------------------------------

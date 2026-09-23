@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core.idle import BACKFILL
+from app.core.idle import BACKFILL, CONSOLIDATE, REFLECT
 from app.db.models import IdleRun
 
 WINDOW_24H = "24h"
@@ -33,6 +33,14 @@ _PERIOD_LABEL = {WINDOW_24H: "24 ч", WINDOW_7D: "7 дн."}
 HEADER = "Фоновая работа за {period} — ${cost:.2f}"
 NOTHING_TEXT = "Фоновой работы не было."
 SUMMARIZED_LINE = "• Сводки: догнала {n}"
+# 6b (plan section 7): consolidate/reflect are single-transaction,
+# reversible kinds, and the coordinator's resolution is one line **per
+# run**, newest first, each with its own [Отменить] -- unlike
+# SUMMARIZED_LINE's aggregate, a button must name exactly one run id,
+# so these can never be folded into one summed bullet the way backfill
+# is.
+MEMORY_LINE = "• Память: {merged} объединения, {contradictions} противоречие"
+NOTES_LINE = "• Заметки: +{added}, закрыто {closed}"
 SKIPS_LINE = "Пропуски: {items}"
 
 
@@ -84,7 +92,31 @@ async def build_digest(
     if summarized:
         lines.append(SUMMARIZED_LINE.format(n=summarized))
 
-    undoable = tuple(r.id for r in done if _is_undoable(r, now=now, undo_days=undo_days))
+    # 6b: one line per consolidate/reflect run, newest first -- each
+    # such run is reversible and its own [Отменить] button must name
+    # exactly this run's id, so they cannot be folded into one summed
+    # bullet the way backfill's SUMMARIZED_LINE is.
+    memory_reflect_runs = sorted(
+        (r for r in done if r.kind in (CONSOLIDATE, REFLECT)), key=lambda r: r.id, reverse=True
+    )
+    for run in memory_reflect_runs:
+        summary = run.summary or {}
+        if run.kind == CONSOLIDATE:
+            merged = int(summary.get("merged", 0) or 0)
+            contradictions = int(summary.get("contradicted", 0) or 0)
+            if merged or contradictions:
+                lines.append(MEMORY_LINE.format(merged=merged, contradictions=contradictions))
+        else:
+            added = int(summary.get("added", 0) or 0)
+            closed = int(summary.get("closed", 0) or 0)
+            if added or closed:
+                lines.append(NOTES_LINE.format(added=added, closed=closed))
+
+    undoable = tuple(
+        r.id
+        for r in sorted(done, key=lambda r: r.id, reverse=True)
+        if _is_undoable(r, now=now, undo_days=undo_days)
+    )
 
     skip_counts: dict[str, int] = {}
     for run in skipped:

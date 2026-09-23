@@ -50,7 +50,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import logging
-from typing import Literal
+from typing import Awaitable, Callable, Literal
 
 from sqlalchemy import func, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,6 +60,7 @@ from app.core import clock as clock_module
 from app.core import orders as orders_module
 from app.core import safety_events
 from app.core.clock import Clock
+from app.core.export import encode as _encode
 from app.core.extract import parse_json
 from app.core.scene import (
     MIN_MESSAGES_FOR_SUMMARY,
@@ -165,6 +166,35 @@ class Plan:
     add: list[dict] = dataclasses.field(default_factory=list)
     close: list[dict] = dataclasses.field(default_factory=list)
     update: list[dict] = dataclasses.field(default_factory=list)
+
+
+# 6b: the optional change-recorder hook `apply_plan` calls after every
+# mutation (`table_name, row_id, op, before, after`), matching
+# `idle_change`'s own columns exactly. `app/core/idle/reflect.py` passes
+# `RunContext.record_change`; `run_notebook_reflect`'s own per-scene call
+# passes None, so its behaviour -- and its tests -- are untouched.
+ChangeRecorder = Callable[[str, int, str, dict | None, dict | None], Awaitable[None]]
+
+
+@dataclasses.dataclass(frozen=True)
+class ApplyResult:
+    """Counts from one `apply_plan` call -- no text, matching
+    `run_notebook_reflect`'s own logging."""
+
+    added: int
+    closed: int
+    updated: int
+    dropped: int
+
+
+def _row_state(entry: NotebookEntry) -> dict:
+    """The same JSON-safe encoding `idle_change.before`/`after` use
+    (app/core/export.py's own `encode`, reused rather than re-derived --
+    see that module's docstring). Kept local to this module rather than
+    imported from app/core/idle/rowstate.py: app/core/idle/ depends on
+    app/core/notebook.py, never the other way around, and this is two
+    lines, not worth a cross-layer import to save."""
+    return {column.name: _encode(getattr(entry, column.name)) for column in entry.__table__.columns}
 
 
 def _clean_text(value, limit: int = TEXT_MAX) -> str | None:
@@ -375,13 +405,20 @@ async def _count_active(session: AsyncSession, kind: str) -> int:
     return result.scalar_one()
 
 
-async def _close_oldest_anchor(session: AsyncSession, kind: str, *, clock: Clock) -> None:
+async def _close_oldest_anchor(
+    session: AsyncSession, kind: str, *, clock: Clock, on_change: ChangeRecorder | None = None
+) -> None:
     """Make room under a per-kind cap by closing Anchor's own oldest entry.
 
     Never a user or review entry -- this only ever selects
     `source='anchor'` rows, which is what makes 5b's caps apply to
     Anchor's own output without ever touching something the user or the
     review wrote.
+
+    6b: a cap-driven close is itself a `close` op the idle reflect job
+    must log to `idle_change` (plan section 6.3: "including cap-driven
+    closes"), so `on_change` is threaded through here from `apply_plan`
+    exactly like every other mutation point below.
     """
     result = await session.execute(
         select(NotebookEntry)
@@ -392,8 +429,11 @@ async def _close_oldest_anchor(session: AsyncSession, kind: str, *, clock: Clock
         .limit(1)
     )
     oldest = result.scalars().first()
-    if oldest is not None:
-        _close(oldest, by="anchor", clock=clock)
+    if oldest is None:
+        return
+    before = _row_state(oldest)
+    if _close(oldest, by="anchor", clock=clock) and on_change is not None:
+        await on_change("notebook_entry", oldest.id, "close", before, _row_state(oldest))
 
 
 def _close(entry: NotebookEntry, *, by: str, clock: Clock) -> bool:
@@ -415,6 +455,76 @@ def _close(entry: NotebookEntry, *, by: str, clock: Clock) -> bool:
     entry.closed_by = by
     entry.closed_at = clock.now_utc()
     return True
+
+
+async def apply_plan(
+    session: AsyncSession,
+    settings: Settings,
+    plan: Plan,
+    *,
+    clock: Clock,
+    scene_id: int | None,
+    on_change: ChangeRecorder | None = None,
+) -> ApplyResult:
+    """Apply a validated `Plan` (plan section 6.3): close, then update,
+    then add. Shared by `run_notebook_reflect` (per scene, `on_change=
+    None`, `scene_id` set) and `app/core/idle/reflect.py`'s deeper
+    7-day version (`scene_id=None` -- an idle reflect entry is not tied
+    to one scene -- `on_change=RunContext.record_change`).
+
+    Identical mutation logic to what `run_notebook_reflect` inlined
+    before 6b; the only addition is the optional `on_change` call right
+    after each mutation, with the row's state before and after (6a's
+    `idle_change` shape). No commit here -- callers commit, exactly as
+    before.
+    """
+    dropped = 0
+    added = closed = updated = 0
+
+    for item in plan.close:
+        entry = await session.get(NotebookEntry, item["id"])
+        if entry is None:
+            dropped += 1
+            continue
+        before = _row_state(entry)
+        if _close(entry, by="anchor", clock=clock):
+            closed += 1
+            if on_change is not None:
+                await on_change("notebook_entry", entry.id, "close", before, _row_state(entry))
+        else:
+            dropped += 1
+
+    for item in plan.update:
+        entry = await session.get(NotebookEntry, item["id"])
+        if entry is None or not entry.active or entry.source != "anchor":
+            dropped += 1
+            continue
+        if await _near_duplicate(session, item["text"], ignore_id=entry.id):
+            dropped += 1
+            continue
+        before = _row_state(entry)
+        entry.text = item["text"]
+        entry.updated_at = clock.now_utc()
+        updated += 1
+        if on_change is not None:
+            await on_change("notebook_entry", entry.id, "update", before, _row_state(entry))
+
+    caps = {OBSERVATION: settings.NOTEBOOK_MAX_OBSERVATIONS, OPEN_THREAD: settings.NOTEBOOK_MAX_THREADS}
+    for item in plan.add:
+        if await _near_duplicate(session, item["text"]):
+            dropped += 1
+            continue
+        kind = item["kind"]
+        if await _count_active(session, kind) >= caps[kind]:
+            await _close_oldest_anchor(session, kind, clock=clock, on_change=on_change)
+        entry = NotebookEntry(kind=kind, text=item["text"], source="anchor", scene_id=scene_id)
+        session.add(entry)
+        await session.flush()
+        added += 1
+        if on_change is not None:
+            await on_change("notebook_entry", entry.id, "insert", None, _row_state(entry))
+
+    return ApplyResult(added=added, closed=closed, updated=updated, dropped=dropped)
 
 
 async def run_notebook_reflect(
@@ -539,44 +649,10 @@ async def run_notebook_reflect(
         + (len(raw_close) - len(plan.close))
         + (len(raw_update) - len(plan.update))
     )
-    added = closed = updated = 0
 
-    for item in plan.close:
-        entry = await session.get(NotebookEntry, item["id"])
-        if entry is not None and _close(entry, by="anchor", clock=clock):
-            closed += 1
-        else:
-            dropped += 1
-
-    for item in plan.update:
-        entry = await session.get(NotebookEntry, item["id"])
-        if entry is None or not entry.active or entry.source != "anchor":
-            dropped += 1
-            continue
-        if await _near_duplicate(session, item["text"], ignore_id=entry.id):
-            dropped += 1
-            continue
-        entry.text = item["text"]
-        entry.updated_at = clock.now_utc()
-        updated += 1
-
-    caps = {OBSERVATION: settings.NOTEBOOK_MAX_OBSERVATIONS, OPEN_THREAD: settings.NOTEBOOK_MAX_THREADS}
-    for item in plan.add:
-        if await _near_duplicate(session, item["text"]):
-            dropped += 1
-            continue
-        kind = item["kind"]
-        if await _count_active(session, kind) >= caps[kind]:
-            await _close_oldest_anchor(session, kind, clock=clock)
-        session.add(
-            NotebookEntry(
-                kind=kind,
-                text=item["text"],
-                source="anchor",
-                scene_id=scene_id,
-            )
-        )
-        added += 1
+    result = await apply_plan(session, settings, plan, clock=clock, scene_id=scene_id, on_change=None)
+    added, closed, updated = result.added, result.closed, result.updated
+    dropped += result.dropped
 
     await session.commit()
     logger.info(
@@ -719,6 +795,8 @@ async def close_entry(session: AsyncSession, entry_id: int, *, by: str, clock: C
 
 __all__ = [
     "ADD_MAX",
+    "ApplyResult",
+    "ChangeRecorder",
     "CLOSE_MAX",
     "CLOSE_REASONS",
     "INTENTION",
@@ -741,6 +819,7 @@ __all__ = [
     "UPDATE_MAX",
     "active_entries",
     "add_user_intention",
+    "apply_plan",
     "build_input",
     "close_entry",
     "replace_review_intentions",
