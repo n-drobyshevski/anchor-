@@ -16,7 +16,7 @@ import time
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update as sql_update
 
 from app.config import Settings
 from app.core import purge
@@ -119,6 +119,12 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         session.add(scene)
         await session.commit()
         await session.refresh(scene)
+        # 5e: dirty callback_scene too, same targeted-update pattern
+        # app/core/callbacks.py's own mark_delivered() uses.
+        await session.execute(
+            sql_update(UserState).where(UserState.id == 1).values(callback_scene=scene.id)
+        )
+        await session.commit()
         session.add_all(
             [
                 Message(role="user", content="текст", ooc=False, kind="chat",
@@ -301,6 +307,7 @@ async def test_user_state_is_reset_but_keeps_chat_id(sessionmaker, clock):
     assert state.due_action is None and state.due_set_at is None
     assert state.streak == 0 and state.last_checkin_at is None
     assert state.awaiting is None and state.awaiting_ref is None
+    assert state.callback_scene is None
 
 
 async def test_ids_restart_so_the_first_new_row_is_one(sessionmaker, clock):

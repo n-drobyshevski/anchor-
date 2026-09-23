@@ -40,6 +40,7 @@ import random
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core import callbacks as callbacks_module
 from app.core import mood as mood_module
 from app.core import notebook as notebook_module
 from app.core import orders as orders_module
@@ -72,6 +73,14 @@ class PersonaContext:
     orders: tuple[str, ...] = ()
     orders_yesterday: str | None = None
     notebook: dict[str, list[str]] | None = None
+    # 5e: the callback text for "## Можно вспомнить" and the memory id
+    # it came from -- None/None when this turn did not check (not a
+    # chat persona turn) or checked and found nothing to offer. The id
+    # is threaded back out so app/core/turn.py can dedupe it out of
+    # "## Может быть важно" and, after delivery, pass it to
+    # app/core/callbacks.py's mark_delivered().
+    callback: str | None = None
+    callback_memory_id: int | None = None
 
 
 async def gather(
@@ -83,8 +92,10 @@ async def gather(
     scene_id: int | None,
     exclude_update_id: int | None,
     rng: random.Random,
+    user_text: str = "",
+    enable_callback: bool = False,
 ) -> PersonaContext:
-    """Compute one turn's mood, voice anchors and nickname.
+    """Compute one turn's mood, voice anchors, nickname -- and, from 5e, callback.
 
     `exclude_update_id` is threaded straight into `mood.load_mood_facts`
     -- see that module's docstring for why the current turn's own user
@@ -99,6 +110,15 @@ async def gather(
     `rng` is injected rather than read from the module-level `random`,
     so a caller (and its tests) controls the nickname coin flip
     directly instead of monkeypatching a global.
+
+    5e: `enable_callback` defaults to False, so every existing caller
+    (both of app/core/outbound_send.py's, whose `scene_id` is `None` in
+    practice anyway) keeps getting no callback at all without having to
+    say so. app/core/turn.py's chat branch is the only caller that ever
+    passes `enable_callback=True`, and only for an ordinary chat turn --
+    never a check-in's synthetic line, never neutral mode (which never
+    calls `gather()` at all), never a welfare turn (same). When it is
+    False, `user_text` is never even read.
     """
     facts = await mood_module.load_mood_facts(
         session, state, clock, exclude_update_id=exclude_update_id
@@ -158,6 +178,24 @@ async def gather(
     )
     amendments = tuple(row[0] for row in amendment_rows.all())
 
+    # 5e: the callback (plan section 11a). select_callback() itself
+    # already returns None whenever scene_id is None or this scene
+    # already had its one callback -- enable_callback only decides
+    # whether this turn asks at all.
+    callback: str | None = None
+    callback_memory_id: int | None = None
+    if enable_callback:
+        picked = await callbacks_module.select_callback(
+            session,
+            settings,
+            clock,
+            user_text=user_text,
+            scene_id=scene_id,
+            callback_scene=state.callback_scene,
+        )
+        if picked is not None:
+            callback_memory_id, callback = picked
+
     return PersonaContext(
         mood=computed_mood,
         voice_lines=anchors,
@@ -167,4 +205,6 @@ async def gather(
         orders=order_lines,
         orders_yesterday=orders_yesterday,
         amendments=amendments,
+        callback=callback,
+        callback_memory_id=callback_memory_id,
     )

@@ -291,6 +291,27 @@ class Settings(BaseSettings):
             raise ValueError(f"AMENDMENTS_MAX_ACTIVE must be >= 1, got {value}")
         return value
 
+    # --- 5e: callbacks (phase-5 plan section 11a) ---
+    # A candidate `event` memory must be at least this old before it is
+    # eligible for "## Можно вспомнить" -- a callback to something the
+    # user said an hour ago would read as the bot parroting the last
+    # message back, not as it remembering. And it must not have been
+    # used (delivered as a callback) in the last CALLBACK_UNUSED_DAYS,
+    # so the same memory does not get recycled every few days. Both
+    # >= 1 for the same reason as the notebook/orders/amendments caps
+    # above: 0 would mean "any memory, however fresh, however recently
+    # used", which is a different feature (no cooldown at all) wearing
+    # a threshold's clothes.
+    CALLBACK_MIN_AGE_DAYS: int = 7
+    CALLBACK_UNUSED_DAYS: int = 14
+
+    @field_validator("CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS")
+    @classmethod
+    def _callback_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6

@@ -257,6 +257,10 @@ async def test_full_order_with_every_section_populated(sessionmaker, tmp_path, c
             summaries=["вчера говорили про отчёт"],
             mood="ровный",
             nickname_directive="Обращение в этом ответе: напарник",
+            retrieved=["живёт в Лилле"],
+            techniques=["пятиминутка"],
+            callback="ходил на скалодром две недели назад",
+            flags=["Пользователь сказал «жёлтый»"],
         )
 
     contents = [m.content for m in messages]
@@ -289,6 +293,11 @@ async def test_full_order_with_every_section_populated(sessionmaker, tmp_path, c
     assert now_block.index("Настроение:") < now_block.index("Главное действие:")
     assert now_block.index("Главное действие:") < now_block.index("Последний чек-ин:")
     assert now_block.index("Последний чек-ин:") < now_block.index("Обращение в этом ответе")
+    # 5e: "## Можно вспомнить" sits after the techniques header and
+    # before the flags -- plan section 10's own ordering ("## Приёмы"
+    # then "## Можно вспомнить" then flags).
+    assert now_block.index(prompt.TECHNIQUES_HEADER) < now_block.index(prompt.CALLBACK_HEADER)
+    assert now_block.index(prompt.CALLBACK_HEADER) < now_block.index("Пользователь сказал «жёлтый»")
 
 
 async def test_notebook_omits_empty_kinds_but_keeps_populated_ones(sessionmaker, tmp_path, clock):

@@ -167,6 +167,11 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         # a wipe returns the bot to a state where no nickname has been
         # used yet, exactly as a fresh deploy would see it.
         "nickname_last": None,
+        # 5e: the callback tracker resets too -- `scene` is purged along
+        # with everything else, so a stale callback_scene would point at
+        # a row that no longer exists, and the first persona turn after
+        # a wipe should get to offer a callback again regardless.
+        "callback_scene": None,
         "updated_at": clock.now_utc(),
     }
 

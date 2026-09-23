@@ -43,6 +43,8 @@ MODULES = [
     # 5d.
     pathlib.Path("app/core/review.py"),
     pathlib.Path("app/core/amendments.py"),
+    # 5e.
+    pathlib.Path("app/core/callbacks.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -75,6 +77,10 @@ ALLOWED_USER_STATE_COLUMNS: dict[str, set[str]] = {
     # "Writes to `awaiting` from `orders.py`") -- never `streak`,
     # `intensity`, `focus_on`, `due_action` or `persona_active`.
     "orders.py": {"awaiting", "awaiting_ref"},
+    # 5e: the only column app/core/callbacks.py's mark_delivered() may
+    # touch on UserState -- never `intensity`, `focus_on`, `due_action`,
+    # `streak` or `persona_active`.
+    "callbacks.py": {"callback_scene"},
 }
 
 
@@ -234,6 +240,91 @@ def test_orders_module_actually_has_a_user_state_update_for_this_test_to_see():
     assert set(names) == {"awaiting", "awaiting_ref"}
 
 
+def test_callbacks_module_actually_has_a_user_state_update_for_this_test_to_see():
+    """Same self-test shape as voice.py's/orders.py's, for
+    app/core/callbacks.py's own targeted write of `callback_scene`
+    (`mark_delivered`)."""
+    names = _update_user_state_keyword_names(pathlib.Path("app/core/callbacks.py"))
+    assert set(names) == {"callback_scene"}
+
+
+# --- 5e: the analogous walk for `update(Memory).values(...)` ---------------
+#
+# The same shape as ALLOWED_USER_STATE_COLUMNS above, aimed at the other
+# table callbacks.py is allowed to touch: mark_delivered() bumps
+# `Memory.last_used_at` after a callback is delivered, exactly like
+# app/core/memory.py's own `mark_used` -- but this module must never
+# reach any *other* Memory column (`pinned`, `superseded_by`, `text`,
+# `confidence`, ...), which OWN_TABLE_WRITES above cannot express since
+# it only sees table names, not columns.
+ALLOWED_MEMORY_COLUMNS: dict[str, set[str]] = {
+    "callbacks.py": {"last_used_at"},
+}
+
+
+def _update_memory_keyword_names(path: pathlib.Path) -> list[str]:
+    """Every keyword name passed to `.values(...)` on an
+    `update(Memory)` call in `path` -- same structural match as
+    `_update_user_state_keyword_names` above, aimed at `Memory` instead
+    of `UserState`."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "values":
+            continue
+        receiver = node.func.value
+        receiver_src = ast.unparse(receiver)
+        if "Memory" not in receiver_src:
+            continue
+        if "update(" not in receiver_src and "sql_update(" not in receiver_src:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg is not None:
+                names.append(keyword.arg)
+    return names
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_any_memory_update_only_touches_allowed_columns(path):
+    allowed = ALLOWED_MEMORY_COLUMNS.get(path.name, set())
+    names = _update_memory_keyword_names(path)
+    unknown = sorted(set(names) - allowed)
+    assert not unknown, (
+        f"{path}: update(Memory).values(...) writes column(s) {unknown}, "
+        f"outside the allow-list {sorted(allowed)}"
+    )
+
+
+def test_the_memory_column_detector_would_catch_a_synthetic_violation(tmp_path):
+    """Guards the guard, using a synthetic module -- this must fail on a
+    Memory column that is not whitelisted, regardless of what
+    callbacks.py happens to write today."""
+    sample = tmp_path / "offender.py"
+    sample.write_text(
+        "from sqlalchemy import update as sql_update\n"
+        "from app.db.models import Memory\n"
+        "def f(session):\n"
+        "    return session.execute(\n"
+        "        sql_update(Memory).where(Memory.id == 1)\n"
+        "        .values(last_used_at=None, pinned=True)\n"
+        "    )\n"
+    )
+    names = _update_memory_keyword_names(sample)
+    assert set(names) == {"last_used_at", "pinned"}
+    unknown = set(names) - ALLOWED_MEMORY_COLUMNS["callbacks.py"]
+    assert unknown == {"pinned"}
+
+
+def test_callbacks_module_actually_has_a_memory_update_for_this_test_to_see():
+    """If mark_delivered ever stopped using update(Memory).values(...)
+    (e.g. moved behind app/core/memory.py's own mark_used), this test --
+    not a silent pass above -- is what should notice."""
+    names = _update_memory_keyword_names(pathlib.Path("app/core/callbacks.py"))
+    assert names, "no update(Memory).values(...) found in callbacks.py"
+
+
 # --- 5b: each module writes only its own table(s) --------------------------
 #
 # A narrower, per-module version of the same argument: not just "no
@@ -261,6 +352,11 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     # message itself) app/core/outbound_send.py / app/tg/review.py.
     "review.py": {"WeeklyReview", "ReviewProposal", "SpendLedger"},
     "amendments.py": {"PersonaAmendment", "SpendLedger"},
+    # 5e: callbacks.py writes only the UserState.callback_scene column
+    # (covered by ALLOWED_USER_STATE_COLUMNS above) and Memory.last_used_at
+    # (covered by ALLOWED_MEMORY_COLUMNS below) -- never a new Memory
+    # row, never any other table.
+    "callbacks.py": {"UserState", "Memory"},
 }
 
 # Names a write call might be imported under -- this repo's own

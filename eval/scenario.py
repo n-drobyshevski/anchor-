@@ -40,6 +40,7 @@ from app.core.prompt import build_messages, build_neutral_messages
 from app.db.models import (
     Base,
     Checkin,
+    Memory,
     Message,
     NotebookEntry,
     PersonaAmendment,
@@ -48,7 +49,7 @@ from app.db.models import (
     UserState,
 )
 from app.llm.provider import LLMMessage
-from eval.cases import CHECKIN, NEUTRAL, OUTBOUND, Case
+from eval.cases import CHAT, CHECKIN, NEUTRAL, OUTBOUND, Case
 
 # Flags a case may ask for by name, resolved to the production
 # constants so an eval can never drift from what the bot sends.
@@ -189,6 +190,39 @@ async def seed(
     if amendment_texts:
         await session.commit()
 
+    # 5e: `memories = [{kind, text, days_ago, last_used_days_ago?}, ...]`
+    # -- real `memory` rows, unlike the plain-string `memories` key
+    # above (which overrides "## Что ты знаешь (закреплено)" directly
+    # and is left untouched: cases 01 and 06 already depend on that
+    # shape). A dict entry here is for app/core/callbacks.py's
+    # `select_callback` to actually find through its real DB query --
+    # the one seed key in this file `build()` never reads back out
+    # itself, since the callback text reaches the prompt through
+    # `persona_context.gather()`, not through a `setup` override.
+    # `days_ago` backdates `created_at` past CALLBACK_MIN_AGE_DAYS (case
+    # 25 uses 20); `last_used_days_ago` omitted means never used, which
+    # is what leaves a memory eligible without also passing
+    # CALLBACK_UNUSED_DAYS explicitly.
+    for entry in setup.get("memories", []):
+        if not isinstance(entry, dict):
+            continue
+        last_used_days_ago = entry.get("last_used_days_ago")
+        session.add(
+            Memory(
+                kind=entry["kind"],
+                text=entry["text"],
+                source=entry.get("source", "user"),
+                created_at=clock.now_utc() - datetime.timedelta(days=entry["days_ago"]),
+                last_used_at=(
+                    clock.now_utc() - datetime.timedelta(days=last_used_days_ago)
+                    if last_used_days_ago is not None
+                    else None
+                ),
+            )
+        )
+    if any(isinstance(entry, dict) for entry in setup.get("memories", [])):
+        await session.commit()
+
     await session.refresh(state)
     return state
 
@@ -224,7 +258,14 @@ async def build(
     if kind == CHECKIN and turn.CHECKIN_FLAG not in flags:
         flags.append(turn.CHECKIN_FLAG)
 
-    persona_ctx = await _persona_context(session, case, state, settings, clock)
+    persona_ctx = await _persona_context(session, case, state, settings, clock, kind=kind)
+
+    # 5e: only the plain-string entries of `memories` still override
+    # "## Что ты знаешь (закреплено)" -- a dict entry was already
+    # written as a real `memory` row by seed() above, for
+    # select_callback() to find, and has no business also appearing as
+    # a pin.
+    pinned_override = [entry for entry in setup.get("memories", []) if isinstance(entry, str)]
 
     return await build_messages(
         session,
@@ -235,7 +276,7 @@ async def build(
         update_id=None,
         transcript_turns=settings.TRANSCRIPT_TURNS,
         flags=flags or None,
-        pinned=setup.get("memories"),
+        pinned=pinned_override or None,
         summaries=setup.get("summaries"),
         retrieved=setup.get("retrieved"),
         # 4d, phase-4 plan section 10: adopted `technique` memories, set
@@ -255,13 +296,20 @@ async def build(
         orders=list(persona_ctx.orders),
         orders_yesterday=persona_ctx.orders_yesterday,
         amendments=list(persona_ctx.amendments),
+        callback=persona_ctx.callback,
     )
 
 
 async def _persona_context(
-    session: AsyncSession, case: Case, state: UserState, settings: Settings, clock: Clock
+    session: AsyncSession,
+    case: Case,
+    state: UserState,
+    settings: Settings,
+    clock: Clock,
+    *,
+    kind: str,
 ):
-    """Mood, voice anchors and the nickname directive for a chat/check-in case.
+    """Mood, voice anchors, the nickname directive and (5e) the callback.
 
     Goes through the real `persona_context.gather()` -- the same
     function app/core/turn.py calls -- so mood is computed from
@@ -275,6 +323,12 @@ async def _persona_context(
     way but from an `rng` seeded by the case id -- deterministic across
     runs of the same case, without needing a `nickname` key on every
     other case just to pin its prompt down.
+
+    `kind` decides `enable_callback` the same way app/core/turn.py's own
+    `kind == CHAT_KIND` guard does: only a chat case ever asks -- never
+    a check-in (turn.py never asks on a check-in's synthetic line
+    either), and `user_text` is the case's own input text, exactly what
+    a real chat turn would hand `select_callback`.
     """
     setup = case.setup
     scene_row = await session.execute(select(Scene.id).order_by(Scene.id.desc()).limit(1))
@@ -289,6 +343,8 @@ async def _persona_context(
         scene_id=scene_id,
         exclude_update_id=None,
         rng=rng,
+        user_text=case.input["text"],
+        enable_callback=(kind == CHAT),
     )
 
     nickname = setup.get("nickname")

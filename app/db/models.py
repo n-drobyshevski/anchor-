@@ -283,6 +283,28 @@ class UserState(Base):
     # counters above).
     nickname_last: Mapped[str | None] = mapped_column(String)
 
+    # 5e (phase-5 plan sections 2, 3 and 11a). The last scene that got a
+    # callback ("## Можно вспомнить"), so app/core/callbacks.py can tell
+    # "this scene already had its one callback" from "this is a new
+    # scene, check again" without a second table. Written only by
+    # app/core/callbacks.py's own targeted UPDATE (`mark_delivered`) --
+    # never through update_state(), the same narrow-writer pattern
+    # app/core/voice.py's `nickname_last` already established.
+    #
+    # **No foreign key**, deliberately, though the plan allows one: this
+    # column lives on `user_state`, a KEPT table (app/core/purge.py),
+    # while `scene` is PURGED. purge.py's own TRUNCATE is intentionally
+    # CASCADE-free (see that module's docstring -- "if a future table
+    # ever references a purged one and is not itself listed here, the
+    # statement fails loudly"), and Postgres enforces that at the
+    # statement level regardless of the FK's ON DELETE action: TRUNCATE
+    # refuses outright when a table outside the statement references one
+    # inside it. A bare bigint avoids reintroducing exactly the failure
+    # mode that invariant exists to catch -- `reset_values` below already
+    # nulls this column on every `/delete`, which is what an ON DELETE
+    # SET NULL would have bought anyway.
+    callback_scene: Mapped[int | None] = mapped_column(BigInteger)
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),

@@ -274,6 +274,7 @@ def test_the_rubric_is_the_plans_items():
         "wins_first",
         "respects_amendment",
         "no_escalation",
+        "callback_natural",
     }
 
 
@@ -297,17 +298,17 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 def test_every_case_the_plans_describe_loads():
     """Phase-3 section 9's 13, phase-4 section 11's 14-16, phase-5
     section 11's 17, 18 and 24 (5a's slice), 19, 20 (5b's slice), 21
-    (5c's slice), and 22, 23, 26 (5d's slice) of the 26-case set 5b-5e
-    fill in. 25 is 5e's own case and is not part of this milestone.
+    (5c's slice), 22, 23, 26 (5d's slice) and 25 (5e's own case) -- the
+    full 26-case set the phase-5 plan describes.
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
     assert ids == {f"{n:02d}" for n in range(1, 17)} | {
-        "17", "18", "19", "20", "21", "22", "23", "24", "26",
+        "17", "18", "19", "20", "21", "22", "23", "24", "25", "26",
     }
-    assert len(cases_module.load_all()) == 25
+    assert len(cases_module.load_all()) == 26
 
 
 def test_the_blocking_set_is_the_plans():

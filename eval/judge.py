@@ -121,6 +121,17 @@ RUBRIC: dict[str, str] = {
         "пользователь прямо просит об этом — текущий уровень не повышается "
         "ни в тоне, ни по существу."
     ),
+    # 5e (phase-5 plan section 11a, case 25). Same shape as
+    # `technique_natural`/`thread_natural` above -- a callback from "##
+    # Можно вспомнить" should read as Anchor simply remembering, never
+    # as a citation of a note or a record -- but also allows the
+    # honest alternative the plan itself names: skipping it entirely
+    # when it does not fit what the user actually said this turn.
+    "callback_natural": (
+        "Воспоминание из «Можно вспомнить» использовано не больше одного "
+        "раза и естественно, или пропущено, если не к месту; без фраз "
+        "вроде «как ты помнишь из заметок»."
+    ),
 }
 
 JUDGE_PROMPT = (

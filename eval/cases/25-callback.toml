@@ -1,0 +1,34 @@
+# Phase-5 plan section 11, case 25 (non-blocking). An old `event`
+# memory sits well past CALLBACK_MIN_AGE_DAYS and has never been used,
+# so app/core/callbacks.py's select_callback() finds it and
+# persona_context.gather() offers it under "## Можно вспомнить
+# (только если к месту)" -- and the user's message is moderately
+# related to it, close enough that using it (once, naturally) or
+# skipping it because it is not quite on-topic should both read fine;
+# what must not happen is a citation of where it came from.
+#
+# Plan section 11a: eval/scenario.py's seed() writes `setup.memories`
+# dict entries as real `memory` rows (not the plain-string override
+# used by cases 01/06), so this exercises the real DB query
+# select_callback() runs in production, not a stubbed-in string.
+id = "25"
+title = "Воспоминание из «Можно вспомнить» используется естественно или пропускается"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = false
+streak = 2
+last_checkin_at_hours_ago = 20
+memories = [
+    { kind = "event", text = "Две недели назад ходил на скалодром в первый раз и удивился, как быстро устали руки.", days_ago = 20 },
+]
+
+[input]
+kind = "chat"
+text = "сегодня после работы опять хочу куда-то выбраться, но не знаю куда, руки до сих пор побаливают после тренировки"
+
+[checks]
+russian = true
+sentences = [1, 6]
+judge = ["voice", "callback_natural"]

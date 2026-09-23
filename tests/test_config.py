@@ -330,6 +330,26 @@ def test_orders_settings_accept_one(field):
     assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
 
 
+# --- 5e: callbacks ---
+
+
+def test_callback_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.CALLBACK_MIN_AGE_DAYS == 7
+    assert settings.CALLBACK_UNUSED_DAYS == 14
+
+
+@pytest.mark.parametrize("field", ["CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS"])
+def test_callback_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS"])
+def test_callback_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
 def test_the_user_agent_names_us_and_no_browser():
     """Plan section 5.9 forbids spoofing this. A default that already
     looked like a browser would make that rule a formality."""

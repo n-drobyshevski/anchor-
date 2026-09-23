@@ -90,6 +90,21 @@ persona reply is actually delivered -- never on a welfare turn (which
 returns from run_welfare_turn long before this point) and never in
 neutral mode (turn_persona_context stays None there).
 
+5e (phase-5 plan sections 11a, 12 and 14) adds the callback the same
+way: `gather()` is passed `enable_callback=(kind == CHAT_KIND)`, so a
+check-in's synthetic turn never asks (its `kind` is CHECKIN_KIND by the
+time it reaches step 6), and app/core/callbacks.py's `mark_delivered()`
+runs right alongside `remember_nickname()` -- only after the reply is on
+its way out, guarded by the same `kind == CHAT_KIND` check, which is
+also what stops a check-in turn (persona-active, so
+`turn_persona_context` is not None there either) from marking a scene's
+callback slot used on a turn that never asked for one. Any callback
+memory the selection picked is dropped from `retrieved_rows` before
+`injected_memory_ids` is built, so it is never double-injected under
+both "## Может быть важно" and "## Можно вспомнить", and its
+`last_used_at` is bumped exactly once, by `mark_delivered`, not by
+`memory.mark_used()`.
+
 Milestone 1f once threaded an opt-in `web_search` flag from run() down
 to the single provider call, behind a now-removed /search command.
 Milestone 4a (2026-09) removed it: it reached the tree without a plan
@@ -116,6 +131,7 @@ from app.config import Settings
 from app.core import pause
 from app.core import clock as clock_module
 from app.core import boundaries, safety_events, welfare_terms
+from app.core import callbacks
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, orders, welfare
@@ -905,13 +921,16 @@ async def run(
                 technique_rows = await memory.retrieve_techniques(
                     session, user_text, settings.RESEARCH_TECHNIQUES_IN_PROMPT
                 )
-                injected_memory_ids = [
-                    row.id for row in pinned_rows + retrieved_rows + technique_rows
-                ]
                 # 5a: mood, this scene's voice anchors and the nickname
                 # directive -- gathered once per turn, not once per
                 # model call (see turn_persona_context's own comment
-                # above).
+                # above). 5e: `enable_callback` is only ever True on an
+                # ordinary chat turn -- never a check-in's synthetic
+                # line (kind is CHECKIN_KIND by the time this runs, see
+                # Step 0c above), never neutral mode or a welfare turn
+                # (neither reaches this branch at all), and never an
+                # outbound send (app/core/outbound_send.py's own
+                # gather() calls leave this flag at its False default).
                 turn_persona_context = await persona_context_module.gather(
                     session,
                     settings,
@@ -920,7 +939,21 @@ async def run(
                     scene_id=scene_id,
                     exclude_update_id=update_id,
                     rng=NICKNAME_RNG,
+                    user_text=user_text,
+                    enable_callback=(kind == CHAT_KIND),
                 )
+                # 5e: dedupe -- a callback memory must never also appear
+                # under "## Может быть важно" for the same turn (both
+                # pools can draw from the same `event` kind).
+                if turn_persona_context.callback_memory_id is not None:
+                    retrieved_rows = [
+                        row
+                        for row in retrieved_rows
+                        if row.id != turn_persona_context.callback_memory_id
+                    ]
+                injected_memory_ids = [
+                    row.id for row in pinned_rows + retrieved_rows + technique_rows
+                ]
                 messages = await build_messages(
                     session,
                     clock=clock,
@@ -946,6 +979,7 @@ async def run(
                     orders=list(turn_persona_context.orders),
                     orders_yesterday=turn_persona_context.orders_yesterday,
                     amendments=list(turn_persona_context.amendments),
+                    callback=turn_persona_context.callback,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1084,6 +1118,7 @@ async def run(
                 orders=list(turn_persona_context.orders),
                 orders_yesterday=turn_persona_context.orders_yesterday,
                 amendments=list(turn_persona_context.amendments),
+                callback=turn_persona_context.callback,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id
@@ -1171,6 +1206,22 @@ async def run(
             and turn_persona_context.nickname is not None
         ):
             await remember_nickname(session, turn_persona_context.nickname)
+        # 5e: same "only after delivery" timing as remember_nickname
+        # right above -- and the same guard, `kind == CHAT_KIND`, that
+        # gathered the callback in the first place (never a check-in's
+        # synthetic turn, never neutral mode or welfare, both of which
+        # already leave turn_persona_context None).
+        if (
+            category == CHAT_CATEGORY
+            and turn_persona_context is not None
+            and kind == CHAT_KIND
+        ):
+            await callbacks.mark_delivered(
+                session,
+                scene_id=scene_id,
+                memory_id=turn_persona_context.callback_memory_id,
+                clock=clock,
+            )
         await _mark_sent(session, clock, row.id)
 
     # Step 8 (2c): hand the delivered exchange to the extractor.
