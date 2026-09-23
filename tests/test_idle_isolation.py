@@ -20,8 +20,8 @@ import pytest
 
 from app.config import Settings
 from app.core.clock import FrozenClock
-from app.core.idle import BACKFILL, CONSOLIDATE, IDLE_RUN, REFLECT
-from app.db.models import IdleRun, Memory, Message, Scene, UserState
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, IDLE_RUN, PREBRIEF, REFLECT
+from app.db.models import BriefNote, IdleRun, Memory, Message, PersonaAmendment, Scene, UserState
 from conftest import FakeLLMProvider, make_bot
 
 MODULES = sorted(pathlib.Path("app/core/idle").glob("*.py"))
@@ -128,14 +128,14 @@ def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", [BACKFILL, CONSOLIDATE, REFLECT])
+@pytest.mark.parametrize("kind", [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY])
 async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     """Every implemented idle kind, run through the worker's own dispatch
     with a real (fake-transport) bot in hand: zero Telegram calls of any
     kind. `Bot.__call__` is where every aiogram method goes, so patching
     it also catches a Bot the idle code might build for itself.
-    Parametrized so 6c-6d extend it automatically -- 6b adds
-    CONSOLIDATE and REFLECT."""
+    Parametrized so 6c-6d extend it automatically -- 6b added
+    CONSOLIDATE and REFLECT, 6c adds PREBRIEF, CRITIQUE and CANARY."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -149,11 +149,14 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
 
     monkeypatch.setattr(Bot, "__call__", _recording_call)
 
-    clock = FrozenClock(datetime.datetime(2026, 9, 23, 12, 0, tzinfo=datetime.timezone.utc))
+    # PREBRIEF's kind rule only allows after 19:00 local (Europe/Paris);
+    # every other kind here is fine at noon.
+    base_hour = 18 if kind == PREBRIEF else 12
+    clock = FrozenClock(datetime.datetime(2026, 9, 23, base_hour, 0, tzinfo=datetime.timezone.utc))
     now = clock.now_utc()
     merge_ids: tuple[int, int] | None = None
     async with sessionmaker() as session:
-        session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris"))
+        session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris", due_action="позвонить"))
         scene = Scene(
             started_at=now - datetime.timedelta(hours=5),
             ended_at=now - datetime.timedelta(hours=4),
@@ -186,6 +189,8 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             await session.refresh(m1)
             await session.refresh(m2)
             merge_ids = (m1.id, m2.id)
+        if kind == CANARY:
+            session.add(PersonaAmendment(text="меньше вопросов", status="active", persona_sha="x"))
         run = IdleRun(kind=kind, local_date=now.date(), status="queued")
         session.add(run)
         await session.commit()
@@ -199,9 +204,41 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             '{"merges": [{"ids": [%d, %d], "text": "живёт в Лилле", "kind": "identity"}], '
             '"contradictions": []}' % merge_ids
         )
+    elif kind == PREBRIEF:
+        safety_text = '{"notes": ["Коротко: сегодня был спокойный день."]}'
     else:
         safety_text = '{"add": [], "close": [], "update": []}'
     safety_provider = FakeLLMProvider(text=safety_text)
+
+    if kind == CRITIQUE:
+        # run_critique builds its own judge provider (LLM_MODEL_JUDGE)
+        # lazily -- see app/core/idle/critique.py's own docstring on why
+        # it is not threaded through app/worker.py. Patched here so this
+        # test never reaches the network.
+        judge_fake = FakeLLMProvider(
+            text='{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5}'
+        )
+
+        class _DummyClient:
+            async def close(self):
+                pass
+
+        monkeypatch.setattr("app.llm.openrouter.build_client", lambda api_key: _DummyClient())
+        monkeypatch.setattr(
+            "app.core.idle.critique._build_judge_provider", lambda settings, client: judge_fake
+        )
+    if kind == CANARY:
+        # run_canary reuses eval.trial.run_blocking_subset, which opens
+        # its own throwaway database -- monkeypatched here so this test
+        # (and its mock bot) stays fast and never touches the network.
+        async def _fake_run_blocking_subset(settings, *, clock, amendments, on_case_done=None, **kw):
+            if on_case_done is not None:
+                await on_case_done()
+            from eval.trial import TrialResult
+
+            return TrialResult(cases={"01": True}, passed=True, usd_cost=0.0)
+
+        monkeypatch.setattr("eval.trial.run_blocking_subset", _fake_run_blocking_subset)
 
     async with sessionmaker() as session:
         await _run_job(
@@ -216,7 +253,126 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             assert (await session.get(Scene, scene_id)).summary == "Коротко: поговорили."
         elif kind == CONSOLIDATE:
             assert (await session.get(Memory, merge_ids[0])).superseded_by is not None
+        elif kind == PREBRIEF:
+            tomorrow = now.date() + datetime.timedelta(days=1)
+            assert (await session.get(BriefNote, tomorrow)) is not None
+        elif kind == CRITIQUE:
+            run = await session.get(IdleRun, run_id)
+            assert run.summary.get("count") == 1
+        elif kind == CANARY:
+            run = await session.get(IdleRun, run_id)
+            assert run.summary.get("cases") == {"01": True}
     assert calls == []
     assert fake.sent == []
     assert fake.edits == []
     assert fake.documents == []
+
+
+# --- 6c: welfare/OOC/canned exclusion, and "summary is never text" ------
+
+
+@pytest.mark.asyncio
+async def test_critique_input_excludes_welfare_ooc_and_canned(sessionmaker):
+    """A qualifying persona reply exists alongside welfare/canned/OOC
+    rows; the sample must never pick up the excluded ones (plan section
+    8: "Welfare, OOC and canned rows never enter idle inputs")."""
+    from app.core.idle.critique import _sample
+
+    async with sessionmaker() as session:
+        scene = Scene(
+            started_at=datetime.datetime(2026, 9, 23, tzinfo=datetime.timezone.utc), ended_at=None
+        )
+        session.add(scene)
+        await session.commit()
+        await session.refresh(scene)
+        session.add_all(
+            [
+                Message(role="assistant", content="берегись", ooc=False, kind="welfare", scene_id=scene.id),
+                Message(role="assistant", content="шаблон", ooc=False, kind="canned", scene_id=scene.id),
+                Message(role="assistant", content="о своём", ooc=True, kind="chat", scene_id=scene.id),
+                Message(role="assistant", content="настоящий ответ", ooc=False, kind="chat", scene_id=scene.id),
+            ]
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        sample = await _sample(session, 10)
+    assert [m.content for m in sample] == ["настоящий ответ"]
+
+
+def test_prebrief_input_never_reads_messages_at_all():
+    """prebrief's own input is Checkin/StandingOrder/notebook/due_action
+    only (module docstring) -- it never imports app.db.models.Message,
+    so welfare/OOC/canned rows structurally cannot reach it."""
+    import app.core.idle.prebrief as prebrief_module
+
+    tree = ast.parse(pathlib.Path(prebrief_module.__file__).read_text(encoding="utf-8"))
+    imported_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "Message" not in imported_names
+
+
+@pytest.mark.asyncio
+async def test_critique_and_canary_summary_is_numbers_ids_and_codes_only(sessionmaker, monkeypatch):
+    """plan section 8: "Logs and idle_run.summary contain no text" --
+    every value in a critique/canary idle_run.summary must be an int,
+    float, bool, or a dict/list composed only of those plus short id-
+    or code-shaped strings (never a free-text sentence)."""
+
+    def _is_safe(value) -> bool:
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, str):
+            # ids/codes only -- short, no spaces (a sentence has spaces).
+            return " " not in value and len(value) <= 32
+        if isinstance(value, list):
+            return all(_is_safe(v) for v in value)
+        if isinstance(value, dict):
+            return all(_is_safe(k) for k in value) and all(_is_safe(v) for v in value.values())
+        return False
+
+    clock = FrozenClock(datetime.datetime(2026, 9, 23, 12, 0, tzinfo=datetime.timezone.utc))
+    now = clock.now_utc()
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris"))
+        scene = Scene(started_at=now, ended_at=None)
+        session.add(scene)
+        await session.commit()
+        await session.refresh(scene)
+        session.add_all(
+            [
+                Message(role="user", content="привет", ooc=False, kind="chat", scene_id=scene.id),
+                Message(role="assistant", content="привет!", ooc=False, kind="chat", scene_id=scene.id),
+            ]
+        )
+        run = IdleRun(kind=CRITIQUE, local_date=now.date(), status="queued")
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        run_id = run.id
+
+    judge_fake = FakeLLMProvider(
+        text='{"voice": 2, "one_action": 5, "boundaries": 2, "no_pressure": 5, "third_parties": 5}'
+    )
+    monkeypatch.setattr(
+        "app.core.idle.critique._build_judge_provider", lambda settings, client: judge_fake
+    )
+
+    bot, fake = make_bot()
+    from app.worker import _run_job
+
+    async with sessionmaker() as session:
+        await _run_job(
+            session, Settings(), FakeLLMProvider(), FakeLLMProvider(), bot, clock, IDLE_RUN,
+            {"run_id": run_id}, safety_provider=FakeLLMProvider(), sessionmaker=sessionmaker,
+        )
+
+    async with sessionmaker() as session:
+        run = await session.get(IdleRun, run_id)
+        assert _is_safe(run.summary), run.summary

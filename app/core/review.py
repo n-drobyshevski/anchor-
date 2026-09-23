@@ -63,6 +63,7 @@ from app.core.screen import screen
 from app.core.spend import check_cap, priced
 from app.db.models import (
     Checkin,
+    IdleRun,
     Journal,
     Message,
     PersonaAmendment,
@@ -405,6 +406,29 @@ async def _active_amendment_texts(session: AsyncSession) -> list[str]:
     return [row[0] for row in result.all()]
 
 
+async def _week_critique_aggregates(
+    session: AsyncSession, *, week_start: datetime.date, today: datetime.date
+) -> dict | None:
+    """This week's `critique` idle runs, summed -- numbers only, read
+    read-only from `idle_run` (plan section 6.6: "The weekly review
+    analysis ... receives last week's critique aggregates as data").
+    None when no critique ran this week, so `render_week_input` can
+    render the same "(нет)" the other empty sections use."""
+    result = await session.execute(
+        select(IdleRun.summary)
+        .where(IdleRun.kind == "critique")
+        .where(IdleRun.status == "done")
+        .where(IdleRun.local_date >= week_start)
+        .where(IdleRun.local_date <= today)
+    )
+    rows = [row[0] or {} for row in result.all()]
+    if not rows:
+        return None
+    count = sum(int(row.get("count", 0) or 0) for row in rows)
+    below_norm = sum(int(row.get("below_norm", 0) or 0) for row in rows)
+    return {"count": count, "below_norm": below_norm}
+
+
 def render_week_input(
     *,
     week_start: datetime.date,
@@ -416,6 +440,7 @@ def render_week_input(
     notebook_view: notebook_module.NotebookView,
     order_lines: list[str],
     amendment_texts: list[str],
+    critique_aggregates: dict | None = None,
 ) -> str:
     """The user-role message `analyze_week` sends -- every read-only
     input the implementation plan's "Analysis input" list names, welfare
@@ -478,6 +503,17 @@ def render_week_input(
     else:
         lines.append("(нет)")
 
+    # 6c: numbers only -- see _week_critique_aggregates's own docstring.
+    lines.append("")
+    lines.append("## Самопроверка за неделю")
+    if critique_aggregates:
+        lines.append(
+            f"Оценено ответов: {critique_aggregates['count']}, "
+            f"ниже нормы: {critique_aggregates['below_norm']}"
+        )
+    else:
+        lines.append("(не проводилась)")
+
     return "\n".join(lines)
 
 
@@ -501,6 +537,7 @@ async def load_week(session: AsyncSession, *, clock: Clock, timezone: str) -> st
         for row in order_rows
     ]
     amendment_texts = await _active_amendment_texts(session)
+    critique_aggregates = await _week_critique_aggregates(session, week_start=week_start, today=today)
 
     return render_week_input(
         week_start=week_start,
@@ -512,6 +549,7 @@ async def load_week(session: AsyncSession, *, clock: Clock, timezone: str) -> st
         notebook_view=notebook_view,
         order_lines=order_lines,
         amendment_texts=amendment_texts,
+        critique_aggregates=critique_aggregates,
     )
 
 

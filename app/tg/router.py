@@ -66,7 +66,7 @@ from app.core.outbound import cancel_outbound, load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
-from app.core.idle.facts import idle_jobs_today
+from app.core.idle.facts import idle_jobs_today, latest_canary_status
 from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
@@ -204,6 +204,7 @@ def _format_state(
     research_counts=None,
     mood=None,
     idle=None,
+    canary=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -283,6 +284,17 @@ def _format_state(
         idle_spend, idle_cap, idle_jobs = idle
         idle_line = f"Фон: {idle_spend:.2f} / {idle_cap:.2f}, задач {idle_jobs}\n"
 
+    # 6c: "Канарейка: <дата> ок/⚠️" alongside the idle line -- `canary`
+    # is `(local_date, passed)` from app/core/idle/facts.latest_canary_status,
+    # or None if no canary has ever completed (nothing shown, same
+    # "optional the same way idle/outbound/... is" posture idle_line
+    # follows above).
+    canary_line = ""
+    if canary is not None:
+        canary_date, canary_passed = canary
+        mark = "ок" if canary_passed else "⚠️"
+        canary_line = f"Канарейка: {canary_date.isoformat()} {mark}\n"
+
     return (
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
@@ -293,6 +305,7 @@ def _format_state(
         "{welfare}"
         "{research}"
         "{idle}"
+        "{canary}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -311,6 +324,7 @@ def _format_state(
         welfare=welfare_line,
         research=research_line,
         idle=idle_line,
+        canary=canary_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -392,6 +406,8 @@ def build_router(
             # 6a.
             idle_spend = await today_idle_usd(session, clock, user_state.timezone)
             idle_jobs = await idle_jobs_today(session, clock, user_state.timezone)
+            # 6c.
+            canary_status = await latest_canary_status(session)
         await message.answer(
             _format_state(
                 user_state,
@@ -400,6 +416,7 @@ def build_router(
                 clock,
                 by_category=by_category,
                 idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
+                canary=canary_status,
                 memories=memories,
                 outbound=outbound,
                 welfare_counts=welfare_counts,

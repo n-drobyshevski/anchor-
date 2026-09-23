@@ -9,6 +9,7 @@ app/core/outbound_gate.py's `gate()`.
 
 from __future__ import annotations
 
+import datetime
 import decimal
 
 from sqlalchemy import func, select
@@ -19,7 +20,9 @@ from app.core import clock as clock_module
 from app.core.clock import Clock, to_local
 from app.core.idle.candidates import reflect_candidates, summary_candidates
 from app.core.idle.consolidate import find_clusters
+from app.core.idle.critique import has_new_replies_since, last_done_critique_finished_at
 from app.core.idle.gate import IdleFacts
+from app.core.idle.prebrief import note_exists as prebrief_note_exists
 from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finished_at
 from app.core.spend import today_idle_usd, today_usd
 from app.db.models import IdleRun, UserState
@@ -63,6 +66,24 @@ async def _kind_runs_today(session: AsyncSession, local_date) -> dict[str, int]:
     return {kind: count for kind, count in result.all()}
 
 
+async def latest_canary_status(session: AsyncSession) -> tuple[object, bool] | None:
+    """`(local_date, passed)` of the most recent *done* canary run, or
+    None if none has ever completed -- /state's own canary line
+    (app/tg/router.py)."""
+    result = await session.execute(
+        select(IdleRun.local_date, IdleRun.summary)
+        .where(IdleRun.kind == "canary")
+        .where(IdleRun.status == "done")
+        .order_by(IdleRun.id.desc())
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        return None
+    local_date, summary = row
+    return local_date, bool((summary or {}).get("passed", True))
+
+
 async def idle_jobs_today(session: AsyncSession, clock: Clock, timezone: str) -> int:
     """How many idle jobs (not planner-only skip rows) ran today -- the
     same count `load_idle_facts` puts in `IdleFacts.jobs_today`, exposed
@@ -97,6 +118,14 @@ async def load_idle_facts(
     last_reflect_at = await last_done_reflect_finished_at(session)
     reflect_has_new_summary = await has_new_summary_since(session, last_reflect_at)
 
+    # 6c: shared with app/core/idle/prebrief.py and app/core/idle/
+    # critique.py's own jobs, same "gate and job can never disagree"
+    # role as consolidate/reflect's own facts above.
+    tomorrow = local_date + datetime.timedelta(days=1)
+    prebrief_note_exists_tomorrow = await prebrief_note_exists(session, tomorrow)
+    last_critique_at = await last_done_critique_finished_at(session)
+    critique_has_new_replies = await has_new_replies_since(session, last_critique_at)
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -111,7 +140,9 @@ async def load_idle_facts(
         kind_runs_today=await _kind_runs_today(session, local_date),
         consolidate_clusters=consolidate_clusters,
         reflect_has_new_summary=reflect_has_new_summary,
+        prebrief_note_exists_tomorrow=prebrief_note_exists_tomorrow,
+        critique_has_new_replies=critique_has_new_replies,
     )
 
 
-__all__ = ["idle_jobs_today", "load_idle_facts"]
+__all__ = ["idle_jobs_today", "latest_canary_status", "load_idle_facts"]

@@ -15,9 +15,15 @@ from app.core.idle.gate import (
     IDLE_CAP,
     KIND_DAILY_MAX,
     MAX_JOBS,
+    MORNING_DISABLED,
+    NOT_CANARY_DOW,
     NOT_ENOUGH_CLUSTERS,
+    NOT_EVENING,
     NOT_IMPLEMENTED,
     NOTHING_TO_BACKFILL,
+    NOTE_EXISTS,
+    NO_INDEPENDENT_JUDGE,
+    NO_NEW_REPLIES,
     NO_NEW_SUMMARY,
     OK,
     PAUSED,
@@ -30,10 +36,13 @@ from app.core.idle.gate import (
     idle_gate,
     parse_window,
 )
-from app.core.idle import BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
 
 TZ = datetime.timezone.utc
 NOW = datetime.datetime(2026, 9, 23, 12, 0, tzinfo=TZ)
+# 2026-09-23 is a Wednesday (isoweekday 3), matching CANARY_DOW's
+# default -- used by the canary kind-rule tests below.
+EVENING = datetime.datetime(2026, 9, 23, 20, 0, tzinfo=TZ)
 
 
 def _config(**overrides) -> IdleConfig:
@@ -192,11 +201,69 @@ def test_row10_kind_rule_backfill_allows_when_candidates_exist():
 
 
 def test_row10_kind_rule_unimplemented_kinds():
-    """CONSOLIDATE and REFLECT got real kind rules in 6b (see
-    test_idle_gate.py's own consolidate/reflect kind-rule tests below);
-    PREBRIEF is still `not_implemented` until 6c."""
+    """CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE and CANARY all got real
+    kind rules by 6c (see this file's own kind-rule tests below);
+    RESEARCH is still `not_implemented` until 6d."""
     facts = _facts()
-    assert idle_gate(PREBRIEF, facts, NOW, _config()) == (False, NOT_IMPLEMENTED)
+    assert idle_gate(RESEARCH, facts, NOW, _config()) == (False, NOT_IMPLEMENTED)
+
+
+# --- 6c kind rules: prebrief, critique, canary ---------------------------
+
+
+def test_row10_kind_rule_prebrief_before_1900_local():
+    facts = _facts(local_now=NOW)  # 12:00 local
+    assert idle_gate(PREBRIEF, facts, NOW, _config()) == (False, NOT_EVENING)
+
+
+def test_row10_kind_rule_prebrief_allows_after_1900_local():
+    facts = _facts(local_now=EVENING)
+    assert idle_gate(PREBRIEF, facts, EVENING, _config()) == (True, OK)
+
+
+def test_row10_kind_rule_prebrief_morning_disabled():
+    facts = _facts(local_now=EVENING)
+    config = _config(morning_enabled=False)
+    assert idle_gate(PREBRIEF, facts, EVENING, config) == (False, MORNING_DISABLED)
+
+
+def test_row10_kind_rule_prebrief_note_already_exists():
+    facts = _facts(local_now=EVENING, prebrief_note_exists_tomorrow=True)
+    assert idle_gate(PREBRIEF, facts, EVENING, _config()) == (False, NOTE_EXISTS)
+
+
+def test_row10_kind_rule_critique_no_independent_judge():
+    facts = _facts(critique_has_new_replies=True)
+    config = _config(independent_judge=False)
+    assert idle_gate(CRITIQUE, facts, NOW, config) == (False, NO_INDEPENDENT_JUDGE)
+
+
+def test_row10_kind_rule_critique_no_new_replies():
+    facts = _facts(critique_has_new_replies=False)
+    assert idle_gate(CRITIQUE, facts, NOW, _config()) == (False, NO_NEW_REPLIES)
+
+
+def test_row10_kind_rule_critique_allows_when_new_replies_and_independent_judge():
+    facts = _facts(critique_has_new_replies=True)
+    assert idle_gate(CRITIQUE, facts, NOW, _config()) == (True, OK)
+
+
+def test_row10_kind_rule_canary_wrong_weekday():
+    facts = _facts()
+    config = _config(canary_dow=5)  # NOW is a Wednesday (3)
+    assert idle_gate(CANARY, facts, NOW, config) == (False, NOT_CANARY_DOW)
+
+
+def test_row10_kind_rule_canary_no_independent_judge():
+    facts = _facts()
+    config = _config(canary_dow=3, independent_judge=False)
+    assert idle_gate(CANARY, facts, NOW, config) == (False, NO_INDEPENDENT_JUDGE)
+
+
+def test_row10_kind_rule_canary_allows_on_its_dow_with_independent_judge():
+    facts = _facts()
+    config = _config(canary_dow=3)
+    assert idle_gate(CANARY, facts, NOW, config) == (True, OK)
 
 
 # --- 6b kind rules: consolidate, reflect --------------------------------

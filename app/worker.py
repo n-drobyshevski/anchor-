@@ -354,6 +354,7 @@ async def _run_job(
             safety_provider or cheap_provider,
             clock,
             run_id=payload["run_id"],
+            job_id=job_id,
         )
         return ExtractOutcome()
 

@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CONSOLIDATE, REFLECT
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT
 from app.db.models import IdleRun
 
 WINDOW_24H = "24h"
@@ -41,6 +41,11 @@ SUMMARIZED_LINE = "• Сводки: догнала {n}"
 # is.
 MEMORY_LINE = "• Память: {merged} объединения, {contradictions} противоречие"
 NOTES_LINE = "• Заметки: +{added}, закрыто {closed}"
+# 6c (plan section 7), verbatim.
+PREBRIEF_LINE = "• Утро: заметки готовы"
+CRITIQUE_LINE = "• Самопроверка: {count} ответов, ниже нормы — {below_norm}"
+CANARY_OK_LINE = "• Канарейка: ок"
+CANARY_REGRESSION_LINE = "• ⚠️ Регрессия: кейсы {cases}"
 SKIPS_LINE = "Пропуски: {items}"
 
 
@@ -112,6 +117,37 @@ async def build_digest(
             if added or closed:
                 lines.append(NOTES_LINE.format(added=added, closed=closed))
 
+    # 6c: prebrief/critique/canary are not per-run buttons (none of the
+    # three is reversible -- app/core/idle/runner.py always sets
+    # reversible=False for them), so each gets one summarizing line
+    # rather than one line per run, the same posture SUMMARIZED_LINE
+    # takes for backfill above.
+    prebrief_runs = [r for r in done if r.kind == PREBRIEF]
+    if any(int((r.summary or {}).get("notes", 0) or 0) > 0 for r in prebrief_runs):
+        lines.append(PREBRIEF_LINE)
+
+    critique_runs = sorted(
+        (r for r in done if r.kind == CRITIQUE), key=lambda r: r.id, reverse=True
+    )
+    if critique_runs:
+        summary = critique_runs[0].summary or {}
+        lines.append(
+            CRITIQUE_LINE.format(
+                count=int(summary.get("count", 0) or 0),
+                below_norm=int(summary.get("below_norm", 0) or 0),
+            )
+        )
+
+    canary_runs = sorted((r for r in done if r.kind == CANARY), key=lambda r: r.id, reverse=True)
+    if canary_runs:
+        summary = canary_runs[0].summary or {}
+        if summary.get("passed", True):
+            lines.append(CANARY_OK_LINE)
+        else:
+            cases = summary.get("cases") or {}
+            failed = sorted(case_id for case_id, ok in cases.items() if not ok)
+            lines.append(CANARY_REGRESSION_LINE.format(cases=", ".join(failed)))
+
     undoable = tuple(
         r.id
         for r in sorted(done, key=lambda r: r.id, reverse=True)
@@ -129,4 +165,14 @@ async def build_digest(
     return Digest(text="\n".join(lines), undoable_run_ids=undoable)
 
 
-__all__ = ["WINDOW_24H", "WINDOW_7D", "WINDOWS", "Digest", "build_digest"]
+__all__ = [
+    "WINDOW_24H",
+    "WINDOW_7D",
+    "WINDOWS",
+    "PREBRIEF_LINE",
+    "CRITIQUE_LINE",
+    "CANARY_OK_LINE",
+    "CANARY_REGRESSION_LINE",
+    "Digest",
+    "build_digest",
+]

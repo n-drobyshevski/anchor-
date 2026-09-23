@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CONSOLIDATE, REFLECT
+from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT
 from app.core.idle.candidates import REFLECTED_SCENE_IDS
 from app.core.idle.facts import load_idle_facts
 from app.core.idle.gate import config_from_settings, idle_gate
@@ -175,8 +175,15 @@ async def run_idle(
     clock: Clock,
     *,
     run_id: int,
+    job_id: int | None = None,
 ) -> None:
-    """Claim `run_id`, re-check the gate, run its kind, record the outcome."""
+    """Claim `run_id`, re-check the gate, run its kind, record the outcome.
+
+    `job_id` (6c) is threaded through to the `canary` kind only, for its
+    own job-lease refresh across a ~13-case blocking trial -- see
+    app/core/idle/canary.py's own docstring, and app/worker.py's
+    `AMENDMENT_TRIAL` branch for the pattern this copies.
+    """
     async with session_factory() as session:
         run = await session.get(IdleRun, run_id)
         if run is None:
@@ -275,6 +282,41 @@ async def run_idle(
                 "dropped": result.dropped,
             }
             reversible = True
+        elif kind == PREBRIEF:
+            from app.core.idle.prebrief import run_prebrief
+
+            result = await run_prebrief(
+                session_factory, settings, safety_provider, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            preempted_and_empty = result.preempted
+            summary = {"notes": len(result.notes)}
+            reversible = False
+        elif kind == CRITIQUE:
+            from app.core.idle.critique import run_critique
+
+            result = await run_critique(
+                session_factory, settings, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            preempted_and_empty = result.preempted
+            summary = {
+                "count": result.count,
+                "below_norm": result.below_norm,
+                "mean": result.mean,
+                "low_ids": list(result.low_ids),
+            }
+            reversible = False
+        elif kind == CANARY:
+            from app.core.idle.canary import run_canary
+
+            result = await run_canary(
+                session_factory, settings, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone, job_id=job_id,
+            )
+            preempted_and_empty = result.preempted
+            summary = {"cases": result.cases, "passed": result.passed}
+            reversible = False
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
     except Exception as exc:  # noqa: BLE001 - never retried, see module docstring

@@ -117,7 +117,13 @@ COMMON_FLAG = (
 )
 
 
-def hidden_flag(kind: str, tick_note: str | None = None, *, note: str | None = None) -> str:
+def hidden_flag(
+    kind: str,
+    tick_note: str | None = None,
+    *,
+    note: str | None = None,
+    morning_notes: list[str] | None = None,
+) -> str:
     """The instruction that stands in for the user's message.
 
     It is passed as the trailing *user* turn rather than as a `[флаги]`
@@ -133,6 +139,15 @@ def hidden_flag(kind: str, tick_note: str | None = None, *, note: str | None = N
     past `outbound.tick_note`'s 120-character column limit, so it is
     never stored on the row at all (see app/core/outbound_send.py's
     WEEKLY_REVIEW branch).
+
+    6c: `morning_notes` is today's `brief_note.notes` (plan section
+    6.4), appended as its own line -- «Заметки к утру: …» -- only for
+    `kind == MORNING` and only when there is a note to append. It never
+    changes whether the morning message is sent (the outbound gate
+    alone decides that, untouched by this function); an absent or empty
+    list leaves `hidden_flag(MORNING)` byte-for-byte what it always was,
+    which is what keeps `run_send_outbound`'s pre-6c callers and tests
+    unaffected when no prebrief note exists.
     """
     template = KIND_FLAGS[kind]
     if kind == TICK:
@@ -141,11 +156,22 @@ def hidden_flag(kind: str, tick_note: str | None = None, *, note: str | None = N
         body = template.format(note=note or "")
     else:
         body = template
+    if kind == MORNING and morning_notes:
+        body = f"{body}\nЗаметки к утру: {' '.join(morning_notes)}"
     return f"{body}\n{COMMON_FLAG}"
 
 
 async def build_outbound_messages(
-    session, settings, state, *, clock, kind, tick_note=None, review_note=None, persona_context=None
+    session,
+    settings,
+    state,
+    *,
+    clock,
+    kind,
+    tick_note=None,
+    review_note=None,
+    persona_context=None,
+    morning_notes=None,
 ):
     """The exact message list a proactive send is generated from.
 
@@ -190,7 +216,7 @@ async def build_outbound_messages(
     # try a technique the user has not seen used in a while.
     techniques = await retrieve_techniques(
         session,
-        hidden_flag(kind, tick_note, note=review_note),
+        hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
         settings.RESEARCH_TECHNIQUES_IN_PROMPT,
     )
 
@@ -211,7 +237,7 @@ async def build_outbound_messages(
         clock=clock,
         timezone=state.timezone,
         intensity=state.intensity,
-        user_text=hidden_flag(kind, tick_note, note=review_note),
+        user_text=hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
         update_id=None,
         transcript_turns=settings.TRANSCRIPT_TURNS,
         techniques=[row.text for row in techniques],
@@ -308,6 +334,7 @@ async def run_send_outbound(
     from app.core.turn import NICKNAME_RNG, _complete_with_retries
     from app.core.voice import remember_nickname
     from app.tg.outbound import send_outbound_message
+    from app.db.models import BriefNote
 
     # 1. Still live?
     row = await session.get(Outbound, outbound_id)
@@ -409,6 +436,25 @@ async def run_send_outbound(
         exclude_update_id=None,
         rng=NICKNAME_RNG,
     )
+
+    # 6c: the morning outbound reads today's unused brief_note (plan
+    # section 6.4). "Today" and "unused" together, not just "the row for
+    # today": `used_at` set only after a successful delivery below means
+    # a resend (step 2's crash path, above) never re-reads this -- the
+    # stored message already carries whatever note text it was
+    # generated with. A note whose date has passed (yesterday's,
+    # written but never delivered) is never read here at all -- it
+    # simply expires unused, per the plan's own "notes expire unused
+    # after their date" -- retention (6e) is what eventually clears it.
+    morning_notes: list[str] | None = None
+    brief_note_row: BriefNote | None = None
+    if row.kind == MORNING:
+        today = clock_module.local_date(clock, state.timezone)
+        candidate = await session.get(BriefNote, today)
+        if candidate is not None and candidate.used_at is None:
+            brief_note_row = candidate
+            morning_notes = list(candidate.notes)
+
     messages = await build_outbound_messages(
         session,
         settings,
@@ -418,6 +464,7 @@ async def run_send_outbound(
         tick_note=row.tick_note,
         review_note=review_note,
         persona_context=persona_ctx,
+        morning_notes=morning_notes,
     )
     response = await _complete_with_retries(
         provider, messages, update_id=outbound_id
@@ -480,6 +527,8 @@ async def run_send_outbound(
     # skipped, cancelled or failed row, all of which returned earlier.
     if persona_ctx.nickname is not None:
         await remember_nickname(session, persona_ctx.nickname)
+    if brief_note_row is not None:
+        brief_note_row.used_at = clock.now_utc()
     await _finish(session, row, message, clock)
     logger.info(
         "outbound sent",

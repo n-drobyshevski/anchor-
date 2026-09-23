@@ -357,3 +357,32 @@ def test_the_user_agent_names_us_and_no_browser():
     assert agent.startswith("AnchorBot/")
     for browser in ("Mozilla", "Chrome", "Safari", "AppleWebKit", "Gecko"):
         assert browser not in agent
+
+
+# --- 6c: critique sample size and canary weekday ---
+
+
+def test_critique_sample_and_canary_dow_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.CRITIQUE_SAMPLE == 5
+    assert settings.CANARY_DOW == 3
+
+
+def test_critique_sample_rejects_below_one():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, CRITIQUE_SAMPLE=0)
+
+
+def test_critique_sample_accepts_one():
+    assert Settings(_env_file=None, CRITIQUE_SAMPLE=1).CRITIQUE_SAMPLE == 1
+
+
+@pytest.mark.parametrize("value", [0, 8, -1])
+def test_canary_dow_rejects_out_of_range(value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, CANARY_DOW=value)
+
+
+@pytest.mark.parametrize("value", [1, 4, 7])
+def test_canary_dow_accepts_the_iso_weekday_range(value):
+    assert Settings(_env_file=None, CANARY_DOW=value).CANARY_DOW == value

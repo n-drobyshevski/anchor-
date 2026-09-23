@@ -143,7 +143,7 @@ async def test_consolidate_and_reflect_each_stop_at_their_daily_limit(sessionmak
         await session.commit()
 
     async with sessionmaker() as session:
-        run_id = await plan_idle(session, Settings(), clock)
+        run_id = await plan_idle(session, Settings(CANARY_DOW=7, LLM_MODEL_JUDGE=""), clock)
 
     # consolidate already ran today (KIND_DAILY_MAX=1) -- falls through
     # past it to whatever the next eligible kind is (nothing else is
@@ -206,7 +206,7 @@ async def test_no_candidates_records_a_skip_row_with_the_kind_rule_reason(sessio
     # No backfill candidates seeded at all.
 
     async with sessionmaker() as session:
-        result = await plan_idle(session, Settings(), clock)
+        result = await plan_idle(session, Settings(CANARY_DOW=7, LLM_MODEL_JUDGE=""), clock)
     assert result is None
 
     async with sessionmaker() as session:
@@ -237,7 +237,7 @@ async def test_skip_reason_change_writes_a_second_row(sessionmaker):
     await _seed_state(sessionmaker)
 
     async with sessionmaker() as session:
-        await plan_idle(session, Settings(), clock)  # nothing_to_backfill
+        await plan_idle(session, Settings(CANARY_DOW=7, LLM_MODEL_JUDGE=""), clock)  # nothing_to_backfill
 
     # Now the user is active -- a different, higher-priority reason.
     async with sessionmaker() as session:
@@ -246,7 +246,7 @@ async def test_skip_reason_change_writes_a_second_row(sessionmaker):
         await session.commit()
 
     async with sessionmaker() as session:
-        await plan_idle(session, Settings(), clock)
+        await plan_idle(session, Settings(CANARY_DOW=7, LLM_MODEL_JUDGE=""), clock)
 
     async with sessionmaker() as session:
         runs = (
@@ -372,7 +372,7 @@ async def test_backfill_stops_at_its_daily_limit(sessionmaker):
         await session.commit()
 
     async with sessionmaker() as session:
-        assert await plan_idle(session, Settings(), clock) is None
+        assert await plan_idle(session, Settings(CANARY_DOW=7, LLM_MODEL_JUDGE=""), clock) is None
 
 
 async def test_a_running_idle_job_is_not_recorded_as_a_skip(sessionmaker):

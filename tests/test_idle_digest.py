@@ -324,3 +324,122 @@ async def test_undoable_run_ids_include_done_reversible_consolidate_and_reflect(
     markup = undo_keyboard(digest.undoable_run_ids)
     assert markup is not None
     assert markup.inline_keyboard[0][0].callback_data == undo_callback_data(digest.undoable_run_ids[0])
+
+
+# --- 6c: prebrief, critique, canary lines ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prebrief_line_shows_when_notes_were_drafted(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(kind="prebrief", local_date=clock.now_utc().date(), status="done", summary={"notes": 2})
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Утро: заметки готовы" in digest.text.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_prebrief_line_absent_when_no_notes_were_drafted(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(kind="prebrief", local_date=clock.now_utc().date(), status="done", summary={"notes": 0})
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Утро: заметки готовы" not in digest.text
+
+
+@pytest.mark.asyncio
+async def test_critique_line_shows_the_latest_runs_counts(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="critique", local_date=clock.now_utc().date(), status="done",
+                summary={"count": 5, "below_norm": 1},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Самопроверка: 5 ответов, ниже нормы — 1" in digest.text.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_canary_line_ok_when_the_latest_run_passed(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="canary", local_date=clock.now_utc().date(), status="done",
+                summary={"cases": {"01": True}, "passed": True},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• Канарейка: ок" in digest.text.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_canary_line_shows_regression_case_ids(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="canary", local_date=clock.now_utc().date(), status="done",
+                summary={"cases": {"01": True, "04": False, "12": False}, "passed": False},
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert "• ⚠️ Регрессия: кейсы 04, 12" in digest.text.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_canary_line_uses_only_the_latest_run_in_window(sessionmaker):
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                IdleRun(
+                    kind="canary", local_date=clock.now_utc().date(), status="done",
+                    summary={"cases": {"01": False}, "passed": False},
+                ),
+                IdleRun(
+                    kind="canary", local_date=clock.now_utc().date(), status="done",
+                    summary={"cases": {"01": True}, "passed": True},
+                ),
+            ]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    lines = [line for line in digest.text.splitlines() if "Канарейка" in line or "Регрессия" in line]
+    assert lines == ["• Канарейка: ок"]
+
+
+@pytest.mark.asyncio
+async def test_prebrief_critique_canary_are_never_individually_undoable(sessionmaker):
+    """None of the three is reversible -- app/core/idle/runner.py always
+    sets reversible=False for them."""
+    clock = _clock()
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                IdleRun(kind="prebrief", local_date=clock.now_utc().date(), status="done", summary={"notes": 1}),
+                IdleRun(kind="critique", local_date=clock.now_utc().date(), status="done", summary={"count": 1, "below_norm": 0}),
+                IdleRun(kind="canary", local_date=clock.now_utc().date(), status="done", summary={"cases": {"01": True}, "passed": True}),
+            ]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        digest = await build_digest(session, clock, undo_days=7)
+    assert digest.undoable_run_ids == ()

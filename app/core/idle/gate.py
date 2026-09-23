@@ -51,6 +51,20 @@ DAILY_LIMIT = KIND_RULE_PREFIX + "daily_limit"
 # 6b.
 NOT_ENOUGH_CLUSTERS = KIND_RULE_PREFIX + "not_enough_clusters"
 NO_NEW_SUMMARY = KIND_RULE_PREFIX + "no_new_summary"
+# 6c.
+MORNING_DISABLED = KIND_RULE_PREFIX + "morning_disabled"
+NOTE_EXISTS = KIND_RULE_PREFIX + "note_exists"
+NOT_EVENING = KIND_RULE_PREFIX + "not_evening"
+NO_INDEPENDENT_JUDGE = KIND_RULE_PREFIX + "no_independent_judge"
+NO_NEW_REPLIES = KIND_RULE_PREFIX + "no_new_replies"
+NOT_CANARY_DOW = KIND_RULE_PREFIX + "not_canary_dow"
+
+# 6c: prebrief may only write tonight's note after this local hour (plan
+# section 6.4's "after 19:00 local") -- a fixed hour, unlike IDLE_WINDOW
+# (row 5), which is a configurable, general idle-hours setting. This is
+# specific to the prebrief kind alone, so it lives in the kind rule, not
+# the shared window check.
+PREBRIEF_AFTER_HOUR = 19
 
 # Per-kind daily limits, plan section 6. Checked at row 10 before the
 # kind's own rule, against runs that finished today (done, failed or
@@ -110,11 +124,27 @@ class IdleConfig:
     window_start: datetime.time
     window_end: datetime.time
     undo_days: int
+    # 6c: the morning intent, precisely, is `settings.OUTBOUND_ENABLED`
+    # -- the same global switch app/core/outbound_gate.py's own gate
+    # checks first (row 1 of its own table) before it ever gets to
+    # deciding a *particular* kind. There is no morning-only flag; the
+    # morning send is part of the routine itself (outbound_gate.py's
+    # own comment on MORNING: "No extra rule"), so "morning intent
+    # disabled" reduces to the one switch that turns every proactive
+    # send off.
+    morning_enabled: bool = True
+    # 6c: true iff `LLM_MODEL_JUDGE` is set and differs from `LLM_MODEL`
+    # -- the same independence check app/core/amendments.py's run_trial
+    # makes before its own throwaway trial, reused here so critique and
+    # canary can never grade (or bless) a model against itself.
+    independent_judge: bool = True
+    canary_dow: int = 3
 
 
 def config_from_settings(settings) -> IdleConfig:
     """Build an `IdleConfig` from `app.config.Settings`."""
     start, end = parse_window(settings.IDLE_WINDOW)
+    judge_model = settings.LLM_MODEL_JUDGE
     return IdleConfig(
         enabled=settings.IDLE_ENABLED,
         after_h=settings.IDLE_AFTER_H,
@@ -125,6 +155,9 @@ def config_from_settings(settings) -> IdleConfig:
         window_start=start,
         window_end=end,
         undo_days=settings.IDLE_UNDO_DAYS,
+        morning_enabled=settings.OUTBOUND_ENABLED,
+        independent_judge=bool(judge_model) and judge_model != settings.LLM_MODEL,
+        canary_dow=settings.CANARY_DOW,
     )
 
 
@@ -167,6 +200,15 @@ class IdleFacts:
     # transient failure cannot suppress reflect forever once new
     # material exists.
     reflect_has_new_summary: bool = False
+    # 6c: whether tomorrow's local date already has a brief_note row --
+    # app/core/idle/prebrief.py shares this with the gate the same way
+    # find_clusters/has_new_summary_since do above, so the gate and the
+    # job can never disagree.
+    prebrief_note_exists_tomorrow: bool = False
+    # 6c: whether a new persona reply (chat or outbound, ooc=False) has
+    # appeared since the last *done* critique run -- app/core/idle/
+    # critique.has_new_replies_since.
+    critique_has_new_replies: bool = False
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -187,21 +229,49 @@ def _reflect_rule(facts: IdleFacts) -> GateResult:
     return GateResult(True, OK)
 
 
-def _not_implemented_rule(facts: IdleFacts) -> GateResult:
+def _not_implemented_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
     return GateResult(False, NOT_IMPLEMENTED)
 
 
+def _prebrief_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    if not config.morning_enabled:
+        return GateResult(False, MORNING_DISABLED)
+    if facts.local_now.time() < datetime.time(PREBRIEF_AFTER_HOUR, 0):
+        return GateResult(False, NOT_EVENING)
+    if facts.prebrief_note_exists_tomorrow:
+        return GateResult(False, NOTE_EXISTS)
+    return GateResult(True, OK)
+
+
+def _critique_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    if not config.independent_judge:
+        return GateResult(False, NO_INDEPENDENT_JUDGE)
+    if not facts.critique_has_new_replies:
+        return GateResult(False, NO_NEW_REPLIES)
+    return GateResult(True, OK)
+
+
+def _canary_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    if facts.local_now.isoweekday() != config.canary_dow:
+        return GateResult(False, NOT_CANARY_DOW)
+    if not config.independent_judge:
+        return GateResult(False, NO_INDEPENDENT_JUDGE)
+    return GateResult(True, OK)
+
+
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
-# per-kind predicates"). Kinds past 6b return kind_rule:not_implemented
-# until their own milestone lands.
-KIND_RULES: dict[str, Callable[[IdleFacts], GateResult]] = {
-    BACKFILL: _backfill_rule,
-    CONSOLIDATE: _consolidate_rule,
-    REFLECT: _reflect_rule,
-    PREBRIEF: _not_implemented_rule,
-    CRITIQUE: _not_implemented_rule,
+# per-kind predicates"), each taking (facts, config) -- most only need
+# facts, but prebrief/critique/canary (6c) also need settings-derived
+# config (morning_enabled, independent_judge, canary_dow). RESEARCH
+# stays kind_rule:not_implemented until 6d.
+KIND_RULES: dict[str, Callable[[IdleFacts, IdleConfig], GateResult]] = {
+    BACKFILL: lambda facts, config: _backfill_rule(facts),
+    CONSOLIDATE: lambda facts, config: _consolidate_rule(facts),
+    REFLECT: lambda facts, config: _reflect_rule(facts),
+    PREBRIEF: _prebrief_rule,
+    CRITIQUE: _critique_rule,
     RESEARCH: _not_implemented_rule,
-    CANARY: _not_implemented_rule,
+    CANARY: _canary_rule,
 }
 
 
@@ -250,7 +320,7 @@ def idle_gate(
     if facts.kind_runs_today.get(kind, 0) >= KIND_DAILY_MAX[kind]:
         return GateResult(False, DAILY_LIMIT)
 
-    return KIND_RULES[kind](facts)
+    return KIND_RULES[kind](facts, config)
 
 
 __all__ = [
@@ -266,6 +336,13 @@ __all__ = [
     "NOT_IMPLEMENTED",
     "NOTHING_TO_BACKFILL",
     "NO_NEW_SUMMARY",
+    "MORNING_DISABLED",
+    "NOTE_EXISTS",
+    "NOT_EVENING",
+    "NO_INDEPENDENT_JUDGE",
+    "NO_NEW_REPLIES",
+    "NOT_CANARY_DOW",
+    "PREBRIEF_AFTER_HOUR",
     "OK",
     "PAUSED",
     "RESERVE",

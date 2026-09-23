@@ -855,3 +855,138 @@ async def test_a_weekly_review_still_respects_the_authoritative_gate(sessionmake
     assert row.skip_reason == "kind_rule:review_exists"
     assert safety_provider.calls == 0
     assert persona_provider.calls == 0
+
+
+# --- 6c: the morning outbound reads today's unused brief_note --------------
+
+
+async def test_morning_reads_todays_unused_brief_note(sessionmaker):
+    """plan section 6.4: "used only by the Phase 3 morning outbound,
+    which injects the notes as a hidden flag"."""
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(BriefNote(local_date=DAY, notes=["Вчера был тяжёлый день."]))
+        await session.commit()
+
+    provider = FakeLLMProvider()
+    bot, _ = _bot()
+    await _run(sessionmaker, provider, bot, at(9, 0), outbound_id)
+
+    (messages,) = provider.received_messages
+    assert "Заметки к утру: Вчера был тяжёлый день." in messages[-1].content
+
+
+async def test_morning_sets_used_at_only_after_successful_delivery(sessionmaker):
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(BriefNote(local_date=DAY, notes=["заметка"]))
+        await session.commit()
+
+    provider = FakeLLMProvider()
+    bot, fake = _bot()
+    await _run(sessionmaker, provider, bot, at(9, 0), outbound_id)
+
+    assert len(fake.sent) == 1
+    async with sessionmaker() as session:
+        note = await session.get(BriefNote, DAY)
+        assert note.used_at is not None
+
+
+async def test_morning_never_uses_a_brief_note_for_a_different_date(sessionmaker):
+    """Notes expire unused after their date -- a note for yesterday (or
+    tomorrow) is never read for today's send."""
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(BriefNote(local_date=DAY - datetime.timedelta(days=1), notes=["старая заметка"]))
+        await session.commit()
+
+    provider = FakeLLMProvider()
+    bot, _ = _bot()
+    await _run(sessionmaker, provider, bot, at(9, 0), outbound_id)
+
+    (messages,) = provider.received_messages
+    assert "старая заметка" not in messages[-1].content
+    async with sessionmaker() as session:
+        stale = await session.get(BriefNote, DAY - datetime.timedelta(days=1))
+        assert stale.used_at is None
+
+
+async def test_morning_never_uses_an_already_used_brief_note(sessionmaker):
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(
+            BriefNote(
+                local_date=DAY, notes=["уже показанная заметка"],
+                used_at=combine_local(DAY, datetime.time(6, 0), TIMEZONE),
+            )
+        )
+        await session.commit()
+
+    provider = FakeLLMProvider()
+    bot, _ = _bot()
+    await _run(sessionmaker, provider, bot, at(9, 0), outbound_id)
+
+    (messages,) = provider.received_messages
+    assert "уже показанная заметка" not in messages[-1].content
+
+
+async def test_evening_nag_never_reads_a_brief_note(sessionmaker):
+    """morning_notes is only ever attached to kind == MORNING -- see
+    hidden_flag's own docstring."""
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker, last_checkin_at=None)
+    outbound_id = await _plan_row(sessionmaker, kind=EVENING_NAG)
+    async with sessionmaker() as session:
+        session.add(BriefNote(local_date=DAY, notes=["заметка"]))
+        await session.commit()
+
+    provider = FakeLLMProvider()
+    bot, _ = _bot()
+    await _run(sessionmaker, provider, bot, at(20, 0), outbound_id)
+
+    (messages,) = provider.received_messages
+    assert "Заметки к утру" not in messages[-1].content
+
+
+async def test_morning_gate_verdict_is_unaffected_by_a_brief_note(sessionmaker):
+    """The gate's decision to send (or skip) the morning message is
+    untouched by a brief_note's presence -- plan section 6.4: "It never
+    changes whether a morning message is sent."""
+    from app.core.outbound import load_gate_inputs
+    from app.core.outbound_gate import config_from_settings, gate
+    from app.core.state import get_state
+    from app.db.models import BriefNote
+
+    await _seed(sessionmaker)
+    cfg = settings()
+
+    async def _verdict():
+        async with sessionmaker() as session:
+            state = await get_state(session)
+            gate_state, counts, facts = await load_gate_inputs(
+                session, at(9, 0), cfg, state, kind=MORNING
+            )
+            return gate(MORNING, gate_state, at(9, 0).now_utc(), counts, facts, config_from_settings(cfg))
+
+    without_note = await _verdict()
+
+    async with sessionmaker() as session:
+        session.add(BriefNote(local_date=DAY, notes=["заметка"]))
+        await session.commit()
+
+    with_note = await _verdict()
+
+    assert without_note == with_note

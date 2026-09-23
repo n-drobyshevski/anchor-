@@ -251,6 +251,47 @@ async def test_load_week_excludes_a_scene_with_a_welfare_message(sessionmaker, f
     assert "Сессия с кризисом." not in text
 
 
+# --- 6c: critique aggregates reach the review input (numbers only) --------
+
+
+async def test_load_week_includes_this_weeks_critique_aggregates(sessionmaker, frozen_clock):
+    from app.db.models import IdleRun, UserState
+
+    clock = frozen_clock(2026, 9, 24, 12, 0, tz=PARIS)  # Thursday
+    week_start = review.week_start_for(clock.now_utc().date())
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1, timezone=PARIS))
+        session.add(
+            IdleRun(
+                kind="critique", local_date=week_start, status="done",
+                summary={"count": 5, "below_norm": 1, "mean": {"voice": 4.5}, "low_ids": [42]},
+            )
+        )
+        await session.commit()
+
+        text = await review.load_week(session, clock=clock, timezone=PARIS)
+
+    assert "Оценено ответов: 5" in text
+    assert "ниже нормы: 1" in text
+    # Never the reply ids or per-item scores -- only the two summed
+    # counts render_week_input's own critique section names.
+    assert "42" not in text
+
+
+async def test_load_week_without_any_critique_this_week(sessionmaker, frozen_clock):
+    from app.db.models import UserState
+
+    clock = frozen_clock(2026, 9, 24, 12, 0, tz=PARIS)
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1, timezone=PARIS))
+        await session.commit()
+
+        text = await review.load_week(session, clock=clock, timezone=PARIS)
+
+    assert "Самопроверка за неделю" in text
+    assert "(не проводилась)" in text
+
+
 # --- store_review: insert, upsert (regenerate), and message_id -------------
 
 
