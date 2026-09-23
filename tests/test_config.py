@@ -310,6 +310,26 @@ def test_notebook_settings_accept_one(field):
     assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
 
 
+# --- 5c: standing orders ---
+
+
+def test_orders_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.ORDERS_MAX_ACTIVE == 5
+    assert settings.ORDERS_IN_CHECKIN_MAX == 3
+
+
+@pytest.mark.parametrize("field", ["ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX"])
+def test_orders_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX"])
+def test_orders_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
 def test_the_user_agent_names_us_and_no_browser():
     """Plan section 5.9 forbids spoofing this. A default that already
     looked like a browser would make that rule a formality."""

@@ -31,6 +31,7 @@ from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import (
     Checkin,
+    CheckinOrderResult,
     Journal,
     NotebookEntry,
     Outbound,
@@ -40,6 +41,7 @@ from app.db.models import (
     SafetyEvent,
     Scene,
     SpendLedger,
+    StandingOrder,
     StateChange,
     StudyCard,
     StudyClip,
@@ -88,6 +90,12 @@ EXPORTED_MODELS = (
     # `/mind add` intentions live here, and so does whatever Anchor
     # wrote about them.
     NotebookEntry,
+    # 5c: negotiated standing orders (phase-5 plan section 3) and their
+    # check-in results. User data by the same reasoning again -- these
+    # are commitments the user negotiated or authored themselves, plus
+    # their own daily answers about them.
+    StandingOrder,
+    CheckinOrderResult,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

@@ -23,6 +23,7 @@ from app.core import purge
 from app.db.models import (
     Base,
     Checkin,
+    CheckinOrderResult,
     Job,
     Journal,
     Memory,
@@ -35,6 +36,7 @@ from app.db.models import (
     SafetyEvent,
     Scene,
     SpendLedger,
+    StandingOrder,
     StateChange,
     StudyCard,
     StudyClip,
@@ -183,6 +185,20 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 risk_rules="low",
                 risk_final="low",
             )
+        )
+        await session.commit()
+
+        # 5c: a standing order and its check-in result (phase-5 plan
+        # section 3) -- checkin_order_result needs both ids, so it is
+        # added last, same reasoning as study_clip/study_card above.
+        checkin_row = (await session.execute(select(Checkin))).scalars().one()
+        order = StandingOrder(
+            text="пить воду по утрам", cadence="daily", status="active", source="user"
+        )
+        session.add(order)
+        await session.flush()
+        session.add(
+            CheckinOrderResult(checkin_id=checkin_row.id, order_id=order.id, result="no")
         )
         await session.commit()
 

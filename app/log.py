@@ -84,6 +84,9 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "added",
     "closed",
     "updated",
+    # 5c: standing order ids only, never order text (app/core/orders.py,
+    # app/tg/orders.py).
+    "order_id",
 )
 
 

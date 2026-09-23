@@ -245,6 +245,24 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name} must be >= 1, got {value}")
         return value
 
+    # --- 5c: standing orders (implementation plan §"Files") ---
+    # ORDERS_MAX_ACTIVE caps how many active orders can exist at once
+    # (checked on accept() and on /order); ORDERS_IN_CHECKIN_MAX caps how
+    # many are asked about in a single check-in. Both >= 1 for the same
+    # reason as the notebook caps above: 0 would be "the feature is off"
+    # wearing a cap's clothes. The 7-day proposal expiry is a plain
+    # constant (PROPOSAL_TTL_DAYS in app/core/orders.py), not a setting,
+    # because the plan's config list does not name it.
+    ORDERS_MAX_ACTIVE: int = 5
+    ORDERS_IN_CHECKIN_MAX: int = 3
+
+    @field_validator("ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX")
+    @classmethod
+    def _orders_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6

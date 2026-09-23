@@ -118,7 +118,7 @@ from app.core import clock as clock_module
 from app.core import boundaries, safety_events, welfare_terms
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
-from app.core import checkin, memory, welfare
+from app.core import checkin, memory, orders, welfare
 from app.core import persona_context as persona_context_module
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
@@ -777,9 +777,13 @@ async def run(
             if pending is not None:
                 await checkin.set_note(session, pending.id, user_text)
                 row, streak = await checkin.finish(session, clock, user_state.timezone)
+                # 5c: the day's order answers, if any, feed the same
+                # synthetic line the Пропустить path builds
+                # (app/tg/checkin.py's finish_and_react).
+                order_results = await orders.results_for_checkin(session, row.id)
                 # From here on this turn is the check-in's turn: the
                 # raw note never becomes a message of its own.
-                user_text = checkin.synthetic_line(row)
+                user_text = checkin.synthetic_line(row, order_results)
                 kind = CHECKIN_KIND
                 flags = [*(flags or []), CHECKIN_FLAG]
                 user_state = await get_state(session)
@@ -789,6 +793,28 @@ async def run(
                     from app.tg.checkin import retire
 
                     await retire(bot, chat_id, pending.tg_message_id, streak)
+    elif level is None and user_state.awaiting == orders.AWAITING_SO_COUNTER:
+        # 5c: the plain text that follows «Изменить» (app/core/orders.py's
+        # `start_counter`). Not a persona turn at all -- like a command,
+        # it never reaches step 1 below, so the counter text itself never
+        # becomes a transcript message. Guarded on already_handled(), the
+        # same replay gate app/tg/router.py's keyboard-carrying commands
+        # use via `_once` -- a replay is simply skipped, not re-sent,
+        # matching that precedent exactly.
+        if not await already_handled(sessionmaker, update_id):
+            async with sessionmaker() as session:
+                counter_outcome = await orders.submit_counter(
+                    session, user_state.awaiting_ref, user_text, clock=clock
+                )
+            from app.tg.orders import send_counter_outcome
+
+            await send_counter_outcome(
+                sessionmaker, bot, chat_id=chat_id, outcome=counter_outcome
+            )
+            await mark_update_handled(
+                sessionmaker, clock=clock, update_id=update_id, text="[so:counter]", scene_id=scene_id
+            )
+        return
 
     # Step 1: store the user message idempotently. A safeword, or any
     # message sent while persona is already off, must never land in
@@ -917,6 +943,8 @@ async def run(
                     mood=turn_persona_context.mood,
                     nickname_directive=turn_persona_context.nickname_directive,
                     notebook=turn_persona_context.notebook,
+                    orders=list(turn_persona_context.orders),
+                    orders_yesterday=turn_persona_context.orders_yesterday,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1052,6 +1080,8 @@ async def run(
                 mood=turn_persona_context.mood,
                 nickname_directive=turn_persona_context.nickname_directive,
                 notebook=turn_persona_context.notebook,
+                orders=list(turn_persona_context.orders),
+                orders_yesterday=turn_persona_context.orders_yesterday,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id

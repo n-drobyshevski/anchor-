@@ -15,6 +15,13 @@ detects something before trusting it to detect nothing.
 5a's three. Milestones 5b-5d extend this list with notebook.py,
 orders.py, review.py and amendments.py as each ships; nothing about the
 detector below needs to change for that, only the list.
+
+5c adds `orders.py` and widens `ALLOWED_USER_STATE_COLUMNS` from a flat
+set into a per-module map -- `{module_name: {allowed columns}}` -- since
+`voice.py`'s `nickname_last` and `orders.py`'s `awaiting`/`awaiting_ref`
+are two different modules' two different narrow writers, and the old
+flat set would have let either module write the other's column without
+either the AST scanner or a human reader noticing.
 """
 
 from __future__ import annotations
@@ -31,6 +38,8 @@ MODULES = [
     # 5b.
     pathlib.Path("app/core/notebook.py"),
     pathlib.Path("app/core/screen.py"),
+    # 5c.
+    pathlib.Path("app/core/orders.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -51,12 +60,19 @@ FORBIDDEN_IMPORTS = {
 # knowing it exists, transport-wise or otherwise.
 FORBIDDEN_PREFIXES = ("app.tg",)
 
-# The one column these modules may write, via a targeted
-# `update(UserState).values(...)` rather than through app.core.state
-# (see app/core/voice.py's remember_nickname docstring for why that
-# split exists). 5b-5d extend this as their own gatherers get their own
-# narrow writers (e.g. `callback_scene`).
-ALLOWED_USER_STATE_COLUMNS = {"nickname_last"}
+# Per-module allow-list for a targeted `update(UserState).values(...)`
+# rather than through app.core.state (see app/core/voice.py's
+# remember_nickname docstring for why that split exists). A module with
+# no entry here may write no UserState column at all. 5b-5d extend this
+# as their own gatherers get their own narrow writers (e.g.
+# `callback_scene`).
+ALLOWED_USER_STATE_COLUMNS: dict[str, set[str]] = {
+    "voice.py": {"nickname_last"},
+    # 5c: the only two columns app/core/orders.py may touch (plan's
+    # "Writes to `awaiting` from `orders.py`") -- never `streak`,
+    # `intensity`, `focus_on`, `due_action` or `persona_active`.
+    "orders.py": {"awaiting", "awaiting_ref"},
+}
 
 
 def _code_without_docstrings(path: pathlib.Path) -> str:
@@ -171,11 +187,12 @@ def _update_user_state_keyword_names(path: pathlib.Path) -> list[str]:
 
 @pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
 def test_any_user_state_update_only_touches_allowed_columns(path):
+    allowed = ALLOWED_USER_STATE_COLUMNS.get(path.name, set())
     names = _update_user_state_keyword_names(path)
-    unknown = sorted(set(names) - ALLOWED_USER_STATE_COLUMNS)
+    unknown = sorted(set(names) - allowed)
     assert not unknown, (
         f"{path}: update(UserState).values(...) writes column(s) {unknown}, "
-        f"outside the allow-list {sorted(ALLOWED_USER_STATE_COLUMNS)}"
+        f"outside the allow-list {sorted(allowed)}"
     )
 
 
@@ -195,7 +212,7 @@ def test_the_column_detector_would_catch_a_synthetic_violation(tmp_path):
     )
     names = _update_user_state_keyword_names(sample)
     assert set(names) == {"intensity", "nickname_last"}
-    unknown = set(names) - ALLOWED_USER_STATE_COLUMNS
+    unknown = set(names) - ALLOWED_USER_STATE_COLUMNS["voice.py"]
     assert unknown == {"intensity"}
 
 
@@ -205,6 +222,13 @@ def test_voice_module_actually_has_a_user_state_update_for_this_test_to_see():
     pass above -- is what should notice."""
     names = _update_user_state_keyword_names(pathlib.Path("app/core/voice.py"))
     assert names, "no update(UserState).values(...) found in voice.py"
+
+
+def test_orders_module_actually_has_a_user_state_update_for_this_test_to_see():
+    """Same self-test as voice.py's, for app/core/orders.py's own
+    targeted write of `awaiting`/`awaiting_ref` (`_set_awaiting`)."""
+    names = _update_user_state_keyword_names(pathlib.Path("app/core/orders.py"))
+    assert set(names) == {"awaiting", "awaiting_ref"}
 
 
 # --- 5b: each module writes only its own table(s) --------------------------
@@ -222,6 +246,10 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     "persona_context.py": set(),
     "notebook.py": {"NotebookEntry", "SpendLedger"},
     "screen.py": set(),
+    # 5c: StandingOrder and CheckinOrderResult are orders.py's own
+    # tables; UserState is the same narrow awaiting/awaiting_ref write
+    # ALLOWED_USER_STATE_COLUMNS["orders.py"] covers above.
+    "orders.py": {"StandingOrder", "CheckinOrderResult", "UserState"},
 }
 
 # Names a write call might be imported under -- this repo's own
@@ -306,3 +334,9 @@ def test_notebook_module_actually_writes_notebook_entry_for_this_test_to_see():
     this test -- not a silent pass above -- is what should notice."""
     targets = _write_targets(pathlib.Path("app/core/notebook.py"))
     assert "NotebookEntry" in targets
+
+
+def test_orders_module_actually_writes_standing_order_for_this_test_to_see():
+    """Same self-test shape as notebook.py's, for app/core/orders.py."""
+    targets = _write_targets(pathlib.Path("app/core/orders.py"))
+    assert {"StandingOrder", "CheckinOrderResult"} <= targets

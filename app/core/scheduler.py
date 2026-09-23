@@ -91,6 +91,7 @@ from app.core.outbound_gate import (
     gate,
 )
 from app.core.notebook import NOTEBOOK_EXPIRY
+from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
@@ -417,6 +418,30 @@ async def maybe_enqueue_notebook_expiry(
     )
     if enqueued:
         logger.info("notebook expiry queued", extra={"event": NOTEBOOK_EXPIRY})
+    return enqueued
+
+
+def orders_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `notebook_expiry_dedup_key`."""
+    return f"orders_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_orders_expiry(session: AsyncSession, clock: Clock, timezone: str) -> bool:
+    """Queue today's standing-order expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_notebook_expiry` right above --
+    same dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a fourth sibling
+    step), for the same reason: several tests call `heartbeat()`
+    directly and assert an exact `job` table state afterwards, and this
+    must not perturb that.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, ORDERS_EXPIRY, {}, dedup_key=orders_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("orders expiry queued", extra={"event": ORDERS_EXPIRY})
     return enqueued
 
 

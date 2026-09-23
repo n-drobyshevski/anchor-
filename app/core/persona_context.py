@@ -34,6 +34,7 @@ dataclass's shape.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import random
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core import mood as mood_module
 from app.core import notebook as notebook_module
+from app.core import orders as orders_module
 from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core import clock as clock_module
@@ -52,12 +54,13 @@ from app.db.models import UserState
 class PersonaContext:
     """Everything `gather()` computes for one persona turn.
 
-    `amendments` and `orders` are 5c/5d placeholders still: empty tuples
-    here until those milestones' own gatherers populate them. `notebook`
-    is 5b's: `gather()` below fills it from `app.core.notebook.
-    active_entries()`. All three exist on this dataclass already so
-    `build_messages` (app/core/prompt.py) always has a stable shape to
-    be fed from.
+    `amendments` is still a 5d placeholder: an empty tuple here until
+    that milestone's own gatherer populates it. `notebook` is 5b's, and
+    `orders`/`orders_yesterday` are 5c's: `gather()` below fills all
+    three from `app.core.notebook.active_entries()` and
+    `app.core.orders.active_orders()`/`yesterday_tally()`. All four
+    exist on this dataclass already so `build_messages`
+    (app/core/prompt.py) always has a stable shape to be fed from.
     """
 
     mood: str | None
@@ -66,6 +69,7 @@ class PersonaContext:
     nickname_directive: str | None
     amendments: tuple[str, ...] = ()
     orders: tuple[str, ...] = ()
+    orders_yesterday: str | None = None
     notebook: dict[str, list[str]] | None = None
 
 
@@ -130,10 +134,25 @@ async def gather(
         "threads": [text for _, text, _ in view.threads],
     }
 
+    # 5c: active standing orders (plan section 7's "## Договорённости")
+    # and yesterday's tally for the "now" block. Texts and cadence
+    # labels only, same "no ids in the persona prompt" rule the
+    # notebook already follows -- app/core/orders.py's own ids exist for
+    # the `so:*` callbacks, never for the chat model.
+    order_rows = await orders_module.active_orders(session)
+    order_lines = tuple(
+        f"«{row.text}» ({orders_module.cadence_label(row.cadence, row.weekday)})"
+        for row in order_rows
+    )
+    yesterday = clock_module.local_date(clock, state.timezone) - datetime.timedelta(days=1)
+    orders_yesterday = await orders_module.yesterday_tally(session, yesterday)
+
     return PersonaContext(
         mood=computed_mood,
         voice_lines=anchors,
         nickname=nickname,
         nickname_directive=nickname_directive,
         notebook=notebook,
+        orders=order_lines,
+        orders_yesterday=orders_yesterday,
     )

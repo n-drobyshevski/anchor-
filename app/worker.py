@@ -79,12 +79,15 @@ from app.core.notebook import (
     run_notebook_expiry,
     run_notebook_reflect,
 )
+from app.core import orders as orders_module
+from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
 from app.core.scheduler import (
     TICK_DECIDE,
     heartbeat,
     maybe_enqueue_notebook_expiry,
+    maybe_enqueue_orders_expiry,
     maybe_enqueue_research_sweep,
 )
 from app.core.tick import run_tick_decide
@@ -96,6 +99,7 @@ from app.llm.provider import LLMProvider
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
+from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
 
 logger = logging.getLogger(__name__)
@@ -268,6 +272,13 @@ async def _run_job(
         await run_notebook_expiry(session, settings, clock=clock)
         return ExtractOutcome()
 
+    if kind == ORDERS_EXPIRY:
+        # 5c: moves stale proposed/awaiting_counter/countered rows to
+        # expired (plan section 7's "Expiry") -- plain SQL housekeeping
+        # like NOTEBOOK_EXPIRY above, needing neither provider nor a bot.
+        await orders_module.expire_stale(session, clock=clock)
+        return ExtractOutcome()
+
     if kind == TICK_DECIDE:
         # H2: the safety model decides whether there is a natural reason
         # to write first -- another strict-schema verdict. It plans an
@@ -349,6 +360,12 @@ async def process_one_job(
         # expires it); a double-charged extraction is not.
         if outcome.created and bot is not None:
             await _send_proposals(sessionmaker, bot, outcome)
+        # 5c: a standing-order proposal from this turn's extraction,
+        # sent through app/tg/orders.py -- never through
+        # app/tg/proposals.py, because it is not a Proposal row (see
+        # ExtractOutcome.order_proposed's own docstring).
+        if outcome.order_proposed is not None and bot is not None:
+            await _send_order_proposal(sessionmaker, bot, outcome.order_proposed)
 
     return True
 
@@ -434,6 +451,21 @@ async def _send_proposals(
             )
 
 
+async def _send_order_proposal(
+    sessionmaker: async_sessionmaker[AsyncSession], bot: Bot, order_id: int
+) -> None:
+    """The extractor's own standing-order proposal card (5c)."""
+    async with sessionmaker() as session:
+        user_state = await get_state(session)
+    try:
+        await send_order_proposal(sessionmaker, bot, chat_id=user_state.chat_id, order_id=order_id)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning(
+            "order proposal send failed",
+            extra={"order_id": order_id, "event": type(exc).__name__},
+        )
+
+
 async def _claim_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     dp: Dispatcher,
@@ -499,6 +531,11 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_notebook_expiry(session, clock, state.timezone)
+            # 5c: standing orders' own daily sweep, same cadence and same
+            # "not inside heartbeat()" reasoning as the two sweeps above.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_orders_expiry(session, clock, state.timezone)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

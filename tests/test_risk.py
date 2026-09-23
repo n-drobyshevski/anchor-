@@ -38,6 +38,16 @@ HITS: tuple[tuple[str, str], ...] = (
     ("extreme_restriction", "Держите меньше 800 ккал в день."),
     ("extreme_restriction", "Try fasting for two days."),
     ("extreme_restriction", "Sleep deprivation sharpens focus."),
+    # 5c: meal-skipping shapes (implementation plan's Decisions,
+    # "Risk rule") -- standing orders are screened regardless of
+    # author, so the same rule that hides a full fast has to hide
+    # "don't eat until evening" too.
+    ("extreme_restriction", "Не есть до вечера."),
+    ("extreme_restriction", "Не есть до обеда, потом можно всё."),
+    ("extreme_restriction", "Без еды до полудня."),
+    ("extreme_restriction", "Пропускать завтрак каждый день."),
+    ("extreme_restriction", "Не завтракать вовсе."),
+    ("extreme_restriction", "Не ужинать совсем."),
     ("illegal", "Наркотики помогают сосредоточиться."),
     ("illegal", "Проще украсть, чем покупать."),
     ("illegal", "You can hack into the system to check."),
@@ -72,6 +82,14 @@ CLEAN: tuple[tuple[str, str], ...] = (
     ("extreme_restriction", "Не спать днём дольше двадцати минут."),
     ("extreme_restriction", "Спите восемь часов, ложась до полуночи."),
     ("extreme_restriction", "Работайте 25 минут, потом 5 минут отдыха."),
+    # 5c: the meal-skipping widening must not catch these -- neither has
+    # the "не есть до <часть дня>" / "пропускать <приём пищи>" /
+    # "не завтракать|обедать|ужинать" shape the new patterns require.
+    ("extreme_restriction", "Не есть сладкое после шести."),
+    ("extreme_restriction", "Не есть за три часа до сна для лучшего сна."),
+    # A cut-off time is ordinary advice, not a skipped meal.
+    ("extreme_restriction", "Не ужинать после девяти вечера."),
+    ("extreme_restriction", "Не обедать позже трёх."),
     ("illegal", "Уберите телефон в другую комнату на вечер."),
     ("third_party", "Контролировать своё время помогает список дел."),
     ("third_party", "Заставить себя начать проще, чем закончить."),

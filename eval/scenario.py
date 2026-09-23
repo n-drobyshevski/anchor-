@@ -37,7 +37,7 @@ from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core.outbound_send import build_outbound_messages, hidden_flag
 from app.core.prompt import build_messages, build_neutral_messages
-from app.db.models import Base, Checkin, Message, NotebookEntry, Scene, UserState
+from app.db.models import Base, Checkin, Message, NotebookEntry, Scene, StandingOrder, UserState
 from app.llm.provider import LLMMessage
 from eval.cases import CHECKIN, NEUTRAL, OUTBOUND, Case
 
@@ -138,6 +138,23 @@ async def seed(session: AsyncSession, case: Case, clock: Clock) -> UserState:
     if setup.get("notebook"):
         await session.commit()
 
+    # 5c: `orders = [{text, cadence, weekday?}, ...]`, inserted directly
+    # as active StandingOrder rows -- same "bypass the writer" reasoning
+    # as the notebook seed key above, since a case seeds the *world*
+    # (what is already agreed), not a negotiation in progress.
+    for entry in setup.get("orders", []):
+        session.add(
+            StandingOrder(
+                text=entry["text"],
+                cadence=entry.get("cadence", "daily"),
+                weekday=entry.get("weekday"),
+                status="active",
+                source="user",
+            )
+        )
+    if setup.get("orders"):
+        await session.commit()
+
     await session.refresh(state)
     return state
 
@@ -196,6 +213,8 @@ async def build(
         mood=persona_ctx.mood,
         nickname_directive=persona_ctx.nickname_directive,
         notebook=persona_ctx.notebook,
+        orders=list(persona_ctx.orders),
+        orders_yesterday=persona_ctx.orders_yesterday,
     )
 
 

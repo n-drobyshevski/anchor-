@@ -74,6 +74,7 @@ from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
 from app.tg import memory as memory_ui
 from app.tg import notebook as notebook_ui
+from app.tg import orders as orders_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import welfare as welfare_ui
@@ -115,6 +116,9 @@ BOT_COMMANDS = [
     BotCommand(command="reject", description="Отклонить карточку"),
     # 5b (phase-5 plan section 6).
     BotCommand(command="mind", description="Заметки Anchor"),
+    # 5c (phase-5 plan section 7).
+    BotCommand(command="order", description="Новая договорённость"),
+    BotCommand(command="orders", description="Список договорённостей"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -742,6 +746,28 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/mind]"
         )
 
+    # --- 5c: standing orders (plan section 7) ---
+
+    @router.message(Command("order"))
+    async def order_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not await _once(event_update.update_id):
+            return
+        reply = await orders_ui.run_order_command(
+            sessionmaker, settings, clock, text=command.args or ""
+        )
+        await _reply_once(message, event_update.update_id, reply)
+
+    @router.message(Command("orders"))
+    async def orders_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await orders_ui.run_orders_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/orders]"
+        )
+
     # --- 4b/4c: research (plan section 9) ---
     #
     # Every one of these six checks RESEARCH_ENABLED first and replies
@@ -973,6 +999,38 @@ def build_router(
             update_id=event_update.update_id,
             data=callback.data,
             message_text=callback.message.text,
+        )
+
+    @router.callback_query(F.data.startswith("so:x:"))
+    async def order_retire(callback: CallbackQuery) -> None:
+        """`so:x:<id>` -- `/orders`' own [Снять]. Registered ahead of the
+        generic `so:` handler below, which would otherwise swallow it
+        (aiogram routes callback_query first-match-wins, same reason
+        the memory/research paging callbacks above are ordered)."""
+        await orders_ui.handle_retire_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("so:"))
+    async def order_decision(callback: CallbackQuery) -> None:
+        """`so:a:<id>` / `so:c:<id>` / `so:r:<id>` -- accept, start a
+        counter, or decline/cancel. Shared by the proposal card and the
+        counter card (app/tg/orders.py's own docstring says why)."""
+        await orders_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
         )
 
     @router.callback_query(F.data.startswith("p:"))

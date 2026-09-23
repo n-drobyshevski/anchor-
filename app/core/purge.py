@@ -69,7 +69,14 @@ PURGED_TABLES = (
     # regardless of which FK action a column carries.
     "notebook_entry",
     "scene",
+    # 5c: standing orders and their check-in results (phase-5 plan
+    # section 3). checkin_order_result is listed ahead of checkin and
+    # standing_order, child-first -- same "TRUNCATE the whole list in
+    # one statement" reasoning as study_card/study_clip/study_job below,
+    # even though both its FKs are ON DELETE CASCADE.
+    "checkin_order_result",
     "checkin",
+    "standing_order",
     "proposal",
     "journal",
     "state_change",

@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import orders as orders_module
 from app.core import safety_events
 from app.core.clock import Clock
 from app.core.extract import parse_json
@@ -286,7 +287,12 @@ def _flatten(view: NotebookView) -> list[tuple[int, str, str]]:
 
 
 def build_input(
-    *, dialogue: str, summary: str | None, view: NotebookView, due_action: str | None
+    *,
+    dialogue: str,
+    summary: str | None,
+    view: NotebookView,
+    due_action: str | None,
+    orders: list[str] | None = None,
 ) -> str:
     """The user-role message `run_notebook_reflect` sends.
 
@@ -296,6 +302,11 @@ def build_input(
     id in front of a model. Non-Anchor entries are marked `(user)` /
     `(review)` so the model can tell what it is not allowed to touch,
     but the marking is a hint, not the boundary -- `validate()` is.
+
+    5c: `orders` (plain text, no ids -- there is nothing here for the
+    model to reference by id) lists the active standing orders after
+    the due action, matching plan section 6's input list, "the due
+    action and active standing orders".
     """
     lines = ["## Сессия", dialogue]
     if summary:
@@ -313,6 +324,8 @@ def build_input(
         lines.append("(пока пусто)")
     lines.append("")
     lines.append(f"Главное действие: {due_action or 'нет'}")
+    if orders:
+        lines.append("Договорённости: " + "; ".join(orders))
     return "\n".join(lines)
 
 
@@ -447,6 +460,15 @@ async def run_notebook_reflect(
     }
     state = (await session.execute(select(UserState).where(UserState.id == 1))).scalar_one_or_none()
     due_action = state.due_action if state is not None else None
+    # 5c: active standing orders join the due action in the reflect
+    # input (plan section 6). Texts only, oldest first -- the same
+    # "no ids beyond the notebook's own" rule build_input's docstring
+    # already states.
+    order_rows = await orders_module.active_orders(session)
+    order_lines = [
+        f"«{row.text}» ({orders_module.cadence_label(row.cadence, row.weekday)})"
+        for row in order_rows
+    ]
 
     response = await provider.complete(
         [
@@ -458,6 +480,7 @@ async def run_notebook_reflect(
                     summary=scene.summary,
                     view=view,
                     due_action=due_action,
+                    orders=order_lines,
                 ),
             ),
         ],

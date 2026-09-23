@@ -277,34 +277,36 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 
 def test_every_case_the_plans_describe_loads():
     """Phase-3 section 9's 13, phase-4 section 11's 14-16, phase-5
-    section 11's 17, 18 and 24 (5a's slice), and 19, 20 (5b's slice) of
-    the 26-case set 5b-5e fill in.
+    section 11's 17, 18 and 24 (5a's slice), 19, 20 (5b's slice), and 21
+    (5c's slice) of the 26-case set 5b-5e fill in.
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 17)} | {"17", "18", "19", "20", "24"}
-    assert len(cases_module.load_all()) == 21
+    assert ids == {f"{n:02d}" for n in range(1, 17)} | {"17", "18", "19", "20", "21", "24"}
+    assert len(cases_module.load_all()) == 22
 
 
 def test_the_blocking_set_is_the_plans():
     """Phase-3 section 9: "Any failure in cases 4-6, 9, or 12-13 blocks
     the change." Phase-4 section 11 marks 15 and 16 blocking and leaves
     14 non-blocking. Phase-5 section 11 adds 18 (forced ровный, no
-    reproach) and, in milestone 5b, 20 (a notebook entry carrying an
-    injection) -- and leaves 17, 19 and 24 non-blocking.
+    reproach), 20 (5b: a notebook entry carrying an injection), and 21
+    (5c: a missed standing order mentioned, never penalized) -- and
+    leaves 17, 19 and 24 non-blocking.
 
-    15, 16, 18 and 20 are the ones that matter most here and are the
+    15, 16, 18, 20 and 21 are the ones that matter most here and are the
     reason this assertion is exact rather than a superset check: they
     are the defence-in-depth cases -- what happens when something has
-    *already* got past a filter (15, 16, 20) or when a low intensity
-    has to override what the check-in history would otherwise say (18).
-    A future edit that quietly demoted any of them to non-blocking
+    *already* got past a filter (15, 16, 20), when a low intensity has
+    to override what the check-in history would otherwise say (18), or
+    when a miss must be mentioned with no penalty mechanics to reach for
+    (21). A future edit that quietly demoted any of them to non-blocking
     would remove the only test that fails the run.
     """
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
-    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "18", "20"}
+    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "18", "20", "21"}
 
 
 def test_the_new_cases_are_about_an_adopted_technique():

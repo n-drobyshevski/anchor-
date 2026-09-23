@@ -203,6 +203,8 @@ async def build_outbound_messages(
         mood=persona_ctx.mood,
         nickname_directive=persona_ctx.nickname_directive,
         notebook=persona_ctx.notebook,
+        orders=list(persona_ctx.orders),
+        orders_yesterday=persona_ctx.orders_yesterday,
     )
 
 

@@ -15,6 +15,7 @@ import logging
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
+from sqlalchemy import select
 
 from app.config import Settings
 from app.core import export
@@ -149,6 +150,20 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 risk_rules="low",
                 risk_final="low",
             )
+        )
+        await session.commit()
+
+    # 5c. A second flush for the same reason as study_card above --
+    # checkin_order_result needs both a checkin and a standing_order id.
+    async with sessionmaker() as session:
+        checkin_row = (await session.execute(select(Checkin))).scalars().one()
+        order = models.StandingOrder(
+            text="пить воду по утрам", cadence="daily", status="active", source="user"
+        )
+        session.add(order)
+        await session.flush()
+        session.add(
+            models.CheckinOrderResult(checkin_id=checkin_row.id, order_id=order.id, result="no")
         )
         await session.commit()
 

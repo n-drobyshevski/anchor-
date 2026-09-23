@@ -560,8 +560,20 @@ class Proposal(Base):
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
+        # 5c widens this with 'standing_order' -- the extractor's own
+        # proposal item (app/core/extract.py) can carry that field, even
+        # though a proposal row with it is never actually inserted:
+        # _apply() routes a standing_order proposal to app/core/
+        # orders.propose() instead, which writes its own `standing_order`
+        # row with the negotiation statuses that field needs (§"Where
+        # proposals live"). The widening keeps proposal.FIELDS -- the
+        # enum this constraint mirrors -- and the schema in step, so a
+        # future caller cannot construct a Proposal this constraint
+        # would then reject for a reason unrelated to the one enforced
+        # in code.
         CheckConstraint(
-            "field in ('due_action', 'focus_on', 'rule')", name="ck_proposal_field"
+            "field in ('due_action', 'focus_on', 'rule', 'standing_order')",
+            name="ck_proposal_field",
         ),
         CheckConstraint(
             "status in ('pending', 'accepted', 'rejected', 'expired')",
@@ -951,4 +963,112 @@ class NotebookEntry(Base):
         # kind (`/mind`'s grouping, the reflection job's per-kind cap,
         # the prompt's three lines).
         Index("ix_notebook_entry_active_kind", "active", "kind"),
+    )
+
+
+class StandingOrder(Base):
+    """A negotiated recurring commitment (phase-5 plan sections 3 and 7;
+    milestone 5c).
+
+    The row **is** the negotiation's state machine, the same shape
+    `Checkin` and `Proposal` already use for theirs:
+    `proposed` -> (`awaiting_counter` -> `countered`) -> `active` |
+    `declined`, or `expired` off the two waiting states after
+    `PROPOSAL_TTL_DAYS` (app/core/orders.py). `retired` is the terminal
+    state for an order the user had accepted and later removed with
+    `/orders`' [Снять].
+
+    `counter_of` is what makes "one round only" checkable in the
+    database, not just in code: a row with `counter_of` set is itself a
+    counter and can never be countered again (`ck_standing_order_not_
+    self_counter` only rules out the degenerate self-reference; the "a
+    counter can't be countered" rule is enforced in app/core/orders.py,
+    because it depends on the *original* row's own `counter_of` being
+    null, which a single-row CHECK cannot see).
+
+    `weekday` is required exactly when `cadence='weekly'` and forbidden
+    otherwise -- `ck_standing_order_weekly_needs_weekday` -- because a
+    `weekly` order with no weekday would have nothing for
+    `app/core/orders.py`'s `due_today()` to compare against, and a
+    `daily`/`weekdays`/`once` order with one would silently carry a
+    number nothing ever reads.
+
+    `tg_message_id` mirrors `Checkin.tg_message_id` and `Proposal.
+    tg_message_id`: the proposal card's message, so its buttons can be
+    edited away once the row is decided.
+    """
+
+    __tablename__ = "standing_order"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    cadence: Mapped[str] = mapped_column(String, nullable=False)
+    weekday: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    counter_of: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("standing_order.id")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 200', name="ck_standing_order_text_length"),
+        CheckConstraint(
+            "cadence in ('daily', 'weekdays', 'weekly', 'once')",
+            name="ck_standing_order_cadence",
+        ),
+        CheckConstraint(
+            "status in ('proposed', 'awaiting_counter', 'countered', 'active', "
+            "'declined', 'retired', 'expired')",
+            name="ck_standing_order_status",
+        ),
+        CheckConstraint(
+            "source in ('anchor', 'user', 'review')", name="ck_standing_order_source"
+        ),
+        CheckConstraint(
+            "(cadence = 'weekly') = (weekday is not null)",
+            name="ck_standing_order_weekly_needs_weekday",
+        ),
+        CheckConstraint(
+            "weekday is null or weekday between 1 and 7", name="ck_standing_order_weekday_range"
+        ),
+        CheckConstraint("counter_of is null or counter_of <> id", name="ck_standing_order_not_self_counter"),
+        Index("ix_standing_order_status", "status"),
+    )
+
+
+class CheckinOrderResult(Base):
+    """One order's answer within one day's check-in (phase-5 plan
+    sections 3 and 7; milestone 5c).
+
+    `(checkin_id, order_id)` is the primary key, not a surrogate id:
+    exactly one answer per order per check-in, and `app/core/orders.py`'s
+    `record_result` upserts against it -- a replayed `c:o:<id>:<d|n>`
+    callback overwrites its own answer rather than adding a second row,
+    the same idempotency shape `Checkin`'s own upsert gives the day's
+    three fields.
+
+    Both foreign keys cascade: purging a check-in or an order (this
+    table is truncated ahead of both in app/core/purge.py, so the
+    cascade never actually fires there) must not leave an orphaned
+    result behind.
+    """
+
+    __tablename__ = "checkin_order_result"
+
+    checkin_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("checkin.id", ondelete="CASCADE"), primary_key=True
+    )
+    order_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("standing_order.id", ondelete="CASCADE"), primary_key=True
+    )
+    result: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("result in ('done', 'no')", name="ck_checkin_order_result_result"),
     )

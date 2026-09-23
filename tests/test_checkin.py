@@ -17,8 +17,17 @@ from aiogram.types import Update
 from sqlalchemy import select
 
 from app.config import Settings
-from app.core import checkin
-from app.db.models import Checkin, Job, Message, StateChange, TelegramUpdate, UserState
+from app.core import checkin, orders
+from app.db.models import (
+    Checkin,
+    CheckinOrderResult,
+    Job,
+    Message,
+    StandingOrder,
+    StateChange,
+    TelegramUpdate,
+    UserState,
+)
 from app.tg import checkin as checkin_ui
 from app.tg.router import build_router
 from conftest import FakeLLMProvider, FakeSession
@@ -439,3 +448,110 @@ async def test_an_over_long_note_is_trimmed_to_the_column_limit(sessionmaker, cl
         row = await checkin.start(session, clock, TIMEZONE)
         saved = await checkin.set_note(session, row.id, "я" * 600)
     assert len(saved.note) == checkin.NOTE_MAX
+
+
+# --- 5c: standing orders in the check-in (plan section 7) ------------------
+
+
+async def _add_order(sessionmaker, text: str, cadence: str = "daily", weekday: int | None = None) -> int:
+    async with sessionmaker() as session:
+        session.add(StandingOrder(text=text, cadence=cadence, weekday=weekday, status=orders.ACTIVE, source="user"))
+        await session.commit()
+        row = (await session.execute(select(StandingOrder).where(StandingOrder.text == text))).scalars().one()
+        return row.id
+
+
+async def test_order_step_appears_after_the_due_step(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3, due_action="сдать отчёт")
+    order_id = await _add_order(sessionmaker, "пить воду")
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:4"))
+    await _feed(dp, bot, _callback_update(3, "c:d:done"))
+
+    assert fake.edits[-1].text == "«пить воду» — сегодня выполнено?"
+    labels = [b.text for r in fake.edits[-1].reply_markup.inline_keyboard for b in r]
+    assert labels == ["Да", "Нет"]
+
+
+async def test_order_step_appears_after_rating_with_no_due_action(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    await _add_order(sessionmaker, "читать")
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+
+    assert "читать" in fake.edits[-1].text
+    assert fake.edits[-1].reply_markup is not None
+
+
+async def test_no_orders_goes_straight_to_the_note_step(sessionmaker):
+    """No regression on 2d's own shape (tested above): with no active
+    orders, the flow is exactly what it was before 5c."""
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+
+    assert fake.edits[-1].text == checkin_ui.NOTE_TEXT
+
+
+async def test_at_most_three_orders_are_asked(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3, 4, 5)
+    ids = [await _add_order(sessionmaker, f"дело {i}") for i in range(4)]
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+    for update_id, order_id in zip((3, 4, 5), ids[:3]):
+        assert "дело" in fake.edits[-1].text
+        await _feed(dp, bot, _callback_update(update_id, f"c:o:{order_id}:d"))
+
+    # The fourth active order is never asked (the cap), and the flow
+    # moves on to the note step.
+    assert fake.edits[-1].text == checkin_ui.NOTE_TEXT
+    async with sessionmaker() as session:
+        results = (await session.execute(select(CheckinOrderResult))).scalars().all()
+    assert len(results) == 3
+
+
+async def test_only_orders_due_today_are_asked(sessionmaker, clock):
+    await _seed(sessionmaker, 1, 2)
+    from app.core.clock import local_date as clock_local_date
+
+    today = clock_local_date(clock, TIMEZONE)
+    not_today_weekday = (today.isoweekday() % 7) + 1  # any other ISO weekday
+    await _add_order(sessionmaker, "дело недели", cadence="weekly", weekday=not_today_weekday)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+
+    assert fake.edits[-1].text == checkin_ui.NOTE_TEXT
+
+
+async def test_order_results_are_stored_and_the_synthetic_line_lists_them(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    order_id = await _add_order(sessionmaker, "пить воду")
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+    await _feed(dp, bot, _callback_update(3, f"c:o:{order_id}:n"))
+    await _feed(dp, bot, _callback_update(4, "c:n:skip"))
+
+    async with sessionmaker() as session:
+        result = await session.get(CheckinOrderResult, (1, order_id))
+    assert result is not None
+    assert result.result == "no"
+
+    # Пропустить runs an in-character turn whose user-role content is
+    # the synthetic line -- app/core/checkin.py's `synthetic_line` is
+    # what this asserts the exact clause from.
+    async with sessionmaker() as session:
+        stored = (await session.execute(select(Message))).scalars().all()
+    user_rows = [row for row in stored if row.role == "user"]
+    assert any("договорённости: «пить воду» — нет" in row.content for row in user_rows)
