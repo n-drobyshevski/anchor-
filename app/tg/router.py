@@ -59,21 +59,30 @@ from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import memory as memory_core
+from app.core import mood as mood_core
 from app.core import safety_events
 from app.core import proposal as proposal_core
 from app.core.outbound import cancel_outbound, load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
-from app.core.spend import today_by_category, today_usd
+from app.core.idle.facts import idle_jobs_today, latest_canary_status
+from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state, update_state
 from app.llm.provider import LLMProvider
+from app.ops.backup import latest_backup_status
 from app.tg.send import send_keyboard
+from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
+from app.tg import idle as idle_ui
+from app.tg import interests as interests_ui
 from app.tg import memory as memory_ui
+from app.tg import notebook as notebook_ui
+from app.tg import orders as orders_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
+from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
 from app.web import auth as web_auth
 from app.web.hub import WebHub
@@ -85,6 +94,34 @@ NON_TEXT_REPLY = "Пока только текст."
 START_TEXT = (
     "Я — Anchor. Здесь по-русски, коротко и по делу.\n"
     "Выйти из роли можно командой /out или словом «пурпурный»."
+)
+
+# 6e: /privacy (plan section 9.5). Fixed text, 8-10 lines, reflecting
+# what the code actually does -- same "a privacy statement the user
+# would act on has to describe what the code actually does" reasoning
+# app/tg/data.py's DELETED_TEXT docstring already gives. The 14/8
+# backup figures and the 30-day clip-text figure are app/config.py's
+# BACKUP_KEEP_DAILY/BACKUP_KEEP_WEEKLY defaults and
+# app/research/sweeps.py's RETENTION_DAYS, spelled out rather than
+# read live -- the plan calls this "fixed text", and a deploy that
+# changes those settings is also the deploy that should update this
+# string, the same way DELETED_TEXT is not computed from settings
+# either.
+PRIVACY_TEXT = (
+    "Что хранится и где: сообщения, память, заметки, чек-ины, журнал, "
+    "договорённости и настройки — в базе Postgres на Railway.\n"
+    "Запросы к модели идут через OpenRouter с запретом на сбор данных "
+    "(data collection: deny); сам провайдер модели хранит данные по своим "
+    "правилам.\n"
+    "Переписка в Telegram не имеет сквозного шифрования — сообщения "
+    "проходят через серверы Telegram и этого бота.\n"
+    "Резервные копии базы зашифрованы (age) и хранятся: 14 ежедневных + 8 "
+    "еженедельных копий, остальные удаляются.\n"
+    "Текст страниц, найденных при поиске, хранится 30 дней, потом "
+    "стирается — карточки и ссылки остаются.\n"
+    "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
+    "/export — выгрузить все свои данные одним файлом.\n"
+    "/delete — удалить все данные и все резервные копии, безвозвратно."
 )
 
 BOT_COMMANDS = [
@@ -115,6 +152,20 @@ BOT_COMMANDS = [
     BotCommand(command="card", description="Карточка по id"),
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
+    # 5b (phase-5 plan section 6).
+    BotCommand(command="mind", description="Заметки Anchor"),
+    # 5c (phase-5 plan section 7).
+    BotCommand(command="order", description="Новая договорённость"),
+    BotCommand(command="orders", description="Список договорённостей"),
+    # 5d (phase-5 plan sections 8 and 9).
+    BotCommand(command="review", description="Итоги недели"),
+    BotCommand(command="amendments", description="Поправки к стилю"),
+    # 6a (Phase 6 plan section 7).
+    BotCommand(command="digest", description="Фоновая работа"),
+    # 6d (Phase 6 plan section 7).
+    BotCommand(command="interests", description="Темы для фонового поиска"),
+    # 6e (Phase 6 plan section 9.5).
+    BotCommand(command="privacy", description="Приватность и хранение данных"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -220,12 +271,22 @@ def _format_state(
     outbound=None,
     welfare_counts=None,
     research_counts=None,
+    mood=None,
+    idle=None,
+    canary=None,
+    backup=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
     Spend is broken down by ledger category so a day where the
     background jobs cost more than the conversation is visible at a
     glance rather than hidden inside one total.
+
+    5a: `mood`, computed by the caller through the same
+    load_mood_facts()+mood() pair the persona prompt uses, so /state
+    can never show a mood the prompt itself would not have shown this
+    turn. Plain -- no gloss here; the gloss is an instruction to the
+    model, not information for the user.
     """
     tz = ZoneInfo(user_state.timezone)
     now = clock_module.now_local(clock, user_state.timezone)
@@ -284,14 +345,53 @@ def _format_state(
     if by_category:
         breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
 
+    # 6a: "Фон: $x / $cap, задач N" (approved plan §5). `idle` is
+    # (spend_today, usd_cap, jobs_today) or None -- optional the same
+    # way `outbound`/`welfare_counts`/`research_counts` are, so tests
+    # predating 6a that call _format_state directly keep working.
+    idle_line = ""
+    if idle is not None:
+        idle_spend, idle_cap, idle_jobs = idle
+        idle_line = f"Фон: {idle_spend:.2f} / {idle_cap:.2f}, задач {idle_jobs}\n"
+
+    # 6c: "Канарейка: <дата> ок/⚠️" alongside the idle line -- `canary`
+    # is `(local_date, passed)` from app/core/idle/facts.latest_canary_status,
+    # or None if no canary has ever completed (nothing shown, same
+    # "optional the same way idle/outbound/... is" posture idle_line
+    # follows above).
+    canary_line = ""
+    if canary is not None:
+        canary_date, canary_passed = canary
+        mark = "ок" if canary_passed else "⚠️"
+        canary_line = f"Канарейка: {canary_date.isoformat()} {mark}\n"
+
+    # 6e: "Бэкап: <дата время> ок" / "Бэкап: ⚠️ ошибка <дата>" (plan
+    # section 9.1) -- `backup` is `(local_date, status)` from
+    # app/ops/backup.latest_backup_status, or None if no backup has ever
+    # run. `pruned` counts as a healthy outcome here (the backup itself
+    # succeeded; pruning is what later happened to the object), so only
+    # `failed` gets the warning glyph.
+    backup_line = ""
+    if backup is not None:
+        backup_started_at, backup_status = backup
+        local_started = backup_started_at.astimezone(tz)
+        if backup_status == "failed":
+            backup_line = f"Бэкап: ⚠️ ошибка {local_started.date().isoformat()}\n"
+        else:
+            backup_line = f"Бэкап: {local_started.strftime('%Y-%m-%d %H:%M')} ок\n"
+
     return (
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
         "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
+        "Настроение: {mood}\n"
         "Главное действие: {due}\n"
         "{outbound}"
         "{welfare}"
         "{research}"
+        "{idle}"
+        "{canary}"
+        "{backup}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -302,12 +402,16 @@ def _format_state(
         focus="вкл" if user_state.focus_on else "выкл",
         streak=user_state.streak,
         last_checkin=last_checkin,
+        mood=mood,
         due=due,
         outbound="".join(
             line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
         ),
         welfare=welfare_line,
         research=research_line,
+        idle=idle_line,
+        canary=canary_line,
+        backup=backup_line,
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -394,6 +498,22 @@ def build_router(
                     session, clock, user_state.timezone, kind=safety_events.SEARCH
                 ),
             )
+            # 5a: the same pair the persona prompt uses (app/core/
+            # persona_context.py's gather()), so /state can never claim
+            # a mood the prompt itself would not have shown this turn.
+            # `exclude_update_id=None`: /state is not itself a chat
+            # turn, so there is no "this turn's own message" to exclude.
+            mood_facts = await mood_core.load_mood_facts(
+                session, user_state, clock, exclude_update_id=None
+            )
+            current_mood = mood_core.mood(user_state, mood_facts, clock.now_utc())
+            # 6a.
+            idle_spend = await today_idle_usd(session, clock, user_state.timezone)
+            idle_jobs = await idle_jobs_today(session, clock, user_state.timezone)
+            # 6c.
+            canary_status = await latest_canary_status(session)
+            # 6e.
+            backup_status = await latest_backup_status(session)
         await message.answer(
             _format_state(
                 user_state,
@@ -401,10 +521,14 @@ def build_router(
                 settings,
                 clock,
                 by_category=by_category,
+                idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
+                canary=canary_status,
+                backup=backup_status,
                 memories=memories,
                 outbound=outbound,
                 welfare_counts=welfare_counts,
                 research_counts=research_counts,
+                mood=current_mood,
             )
         )
 
@@ -657,6 +781,17 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
         )
 
+    @router.message(Command("privacy"))
+    async def privacy(message: Message, event_update: Update) -> None:
+        # 6e (plan section 9.5). Fixed text, no arguments, same
+        # store-and-send-idempotently shape as /focus's usage line --
+        # see _reply_once's own docstring. No is_web_sink guard: unlike
+        # /export and /delete this sends neither a document nor a data
+        # mutation, only a canned informational reply, so there is
+        # nothing here a web-origin update could do that a Telegram one
+        # could not.
+        await _reply_once(message, event_update.update_id, PRIVACY_TEXT)
+
     if hub is not None:
 
         @router.message(Command("weblogout"))
@@ -779,6 +914,126 @@ def build_router(
             sessionmaker, settings, memory_id=memory_id, pinned=pinned
         )
         await _reply_once(message, event_update.update_id, reply)
+
+    # --- 5b: the notebook (plan section 6) ---
+
+    @router.message(Command("mind"))
+    async def mind(message: Message, event_update: Update, command: CommandObject) -> None:
+        args = (command.args or "").strip()
+        parts = args.split(maxsplit=1)
+        if parts and parts[0] == "add":
+            text = parts[1].strip() if len(parts) > 1 else ""
+            if not text:
+                await _reply_once(message, event_update.update_id, notebook_ui.MIND_ADD_USAGE)
+                return
+            if not await _once(event_update.update_id):
+                return
+            reply = await notebook_ui.run_mind_add(sessionmaker, settings, clock, text=text)
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
+        if not await _once(event_update.update_id):
+            return
+        await notebook_ui.run_mind(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/mind]"
+        )
+
+    # --- 5c: standing orders (plan section 7) ---
+
+    @router.message(Command("order"))
+    async def order_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not await _once(event_update.update_id):
+            return
+        reply = await orders_ui.run_order_command(
+            sessionmaker, settings, clock, text=command.args or ""
+        )
+        await _reply_once(message, event_update.update_id, reply)
+
+    @router.message(Command("orders"))
+    async def orders_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await orders_ui.run_orders_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/orders]"
+        )
+
+    # --- 5d: weekly review and persona amendments (plan sections 8, 9) ---
+
+    @router.message(Command("review"))
+    async def review_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await review_ui.run_review_command(
+            sessionmaker,
+            settings,
+            provider,
+            safety_provider,
+            message.bot,
+            clock,
+            chat_id=message.chat.id,
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/review]"
+        )
+
+    @router.message(Command("amendments"))
+    async def amendments_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await amendments_ui.run_amendments_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/amendments]"
+        )
+
+    # --- 6a: /digest (plan section 7) ---
+
+    @router.message(Command("digest"))
+    async def digest_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not await _once(event_update.update_id):
+            return
+        window = idle_ui.parse_digest_args(command.args)
+        if window is None:
+            await _reply_once(message, event_update.update_id, idle_ui.DIGEST_USAGE)
+            return
+        await idle_ui.run_digest(
+            sessionmaker, message.bot, settings, clock, chat_id=message.chat.id, window=window
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/digest]"
+        )
+
+    # --- 6d: /interests (plan section 7) ---
+
+    @router.message(Command("interests"))
+    async def interests_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        args = (command.args or "").strip()
+        parts = args.split(maxsplit=1)
+        if parts and parts[0].lower() == "add":
+            parsed = interests_ui.parse_add_args(parts[1] if len(parts) > 1 else "")
+            if parsed is None:
+                await _reply_once(message, event_update.update_id, interests_ui.ADD_USAGE)
+                return
+            packet, topic = parsed
+            if not await _once(event_update.update_id):
+                return
+            reply = await interests_ui.run_add(sessionmaker, settings, packet=packet, topic=topic)
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
+        if not await _once(event_update.update_id):
+            return
+        await interests_ui.run_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/interests]"
+        )
 
     # --- 4b/4c: research (plan section 9) ---
     #
@@ -947,6 +1202,20 @@ def build_router(
             data=callback.data,
         )
 
+    @router.callback_query(F.data.startswith("nb:x:"))
+    async def notebook_close(callback: CallbackQuery) -> None:
+        """`nb:x:<id>` -- a `/mind` entry's [✖] button. Closes any entry,
+        including Anchor's own -- see app/tg/notebook.py's docstring."""
+        await notebook_ui.handle_close_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
     @router.callback_query(F.data.startswith("c:"))
     async def checkin_callback(callback: CallbackQuery, event_update: Update) -> None:
         """`c:r:<n>` / `c:d:<result>` / `c:n:skip` -- the check-in flow."""
@@ -1011,6 +1280,68 @@ def build_router(
             message_text=callback.message.text,
         )
 
+    @router.callback_query(F.data.startswith("so:x:"))
+    async def order_retire(callback: CallbackQuery) -> None:
+        """`so:x:<id>` -- `/orders`' own [Снять]. Registered ahead of the
+        generic `so:` handler below, which would otherwise swallow it
+        (aiogram routes callback_query first-match-wins, same reason
+        the memory/research paging callbacks above are ordered)."""
+        await orders_ui.handle_retire_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("so:"))
+    async def order_decision(callback: CallbackQuery) -> None:
+        """`so:a:<id>` / `so:c:<id>` / `so:r:<id>` -- accept, start a
+        counter, or decline/cancel. Shared by the proposal card and the
+        counter card (app/tg/orders.py's own docstring says why)."""
+        await orders_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("am:x:"))
+    async def amendment_revoke(callback: CallbackQuery) -> None:
+        """`am:x:<id>` -- `/amendments`' own [Отозвать]. Registered ahead
+        of the generic `am:` handler below, which would otherwise
+        swallow it (same first-match-wins reasoning as `so:x:` above)."""
+        await amendments_ui.handle_revoke_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("am:"))
+    async def amendment_decision(callback: CallbackQuery) -> None:
+        """`am:a:<id>` / `am:r:<id>` -- adopt or decline a `persona_note`
+        review proposal card."""
+        await review_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
     @router.callback_query(F.data.startswith("p:"))
     async def proposal_decision(callback: CallbackQuery) -> None:
         """`p:a:<id>` / `p:r:<id>` -- the extractor's confirmation buttons."""
@@ -1056,6 +1387,32 @@ def build_router(
         await research_ui.handle_page_callback(
             sessionmaker,
             callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("it:x:"))
+    async def interest_remove(callback: CallbackQuery) -> None:
+        """`it:x:<id>` -- `/interests`' own [✖]."""
+        await interests_ui.handle_remove_callback(
+            sessionmaker,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("idle:u:"))
+    async def idle_undo(callback: CallbackQuery) -> None:
+        """`idle:u:<run_id>` -- /digest's own [Отменить] button."""
+        await idle_ui.handle_undo_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

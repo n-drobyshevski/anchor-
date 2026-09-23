@@ -8,6 +8,16 @@ starting again resets the day.
 
 This module knows nothing about Telegram; app/tg/checkin.py owns the
 keyboards and the Russian strings.
+
+5c (phase-5 plan section 7) adds one step per active standing order due
+today, between the due-action step and the note step: this module
+imports app/core/orders.py -- never the reverse, which is what lets
+`orders.due_today`/`next_due_order`/`record_result`/`yesterday_tally`
+read a `local_date` and a `checkin_id` without app/core/orders.py ever
+knowing what a check-in *is*. `synthetic_line`'s own `order_results`
+parameter is the only place that dependency shows: it appends the day's
+order answers to the stored check-in message, via
+`orders.yesterday_line` for the actual formatting.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock as clock_module
+from app.core import orders
 from app.core.clock import Clock
 from app.core.state import STATE_ID, get_state, update_state
 from app.db.models import Checkin, UserState
@@ -157,18 +168,28 @@ async def finish(
     return row, streak
 
 
-def synthetic_line(row: Checkin) -> str:
+def synthetic_line(
+    row: Checkin, order_results: list[tuple[str, str]] | None = None
+) -> str:
     """Plan section 9's stored message: `[чек-ин] день 4/5 · действие: частично · «заметка»`.
 
     This, not the user's raw note, is what lands in `message` -- so the
     transcript and the scene summary see the whole check-in as one
     coherent turn rather than a bare sentence with no context.
+
+    5c: `order_results` is `[(order_text, 'done'|'no'), ...]`, in the
+    order the orders were asked. When given and non-empty, one more
+    clause is appended -- « · договорённости: «x» — да; «y» — нет» --
+    via `orders.yesterday_line` for the formatting.
     """
     parts = [f"день {row.day_rating}/5" if row.day_rating else "день не оценён"]
     if row.due_result and row.due_result != NONE:
         parts.append(f"действие: {_DUE_LABELS[row.due_result]}")
     if row.note:
         parts.append(f"«{row.note}»")
+    tail = orders.yesterday_line(order_results or [])
+    if tail:
+        parts.append(f"договорённости: {tail}")
     return "[чек-ин] " + " · ".join(parts)
 
 

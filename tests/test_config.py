@@ -10,6 +10,8 @@ it at once, and never print a value.
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -241,6 +243,115 @@ def test_the_guides_packet_is_capped_at_five_domains():
     assert len(Settings(_env_file=None, PACKET_GUIDES="a.com,b.com,c.com,d.com,e.com").PACKET_GUIDES) == 5
 
 
+# --- 5a: voice, mood and nicknames ---
+
+
+def test_voice_and_nickname_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.NICKNAMES_FILE == "persona/nicknames.txt"
+    assert settings.NICKNAME_RATE == 0.5
+    assert settings.VOICE_FILE == "persona/voice.md"
+    assert settings.VOICE_PER_SCENE == 4
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0, 0.5])
+def test_nickname_rate_accepts_the_closed_unit_interval(value):
+    assert Settings(_env_file=None, NICKNAME_RATE=value).NICKNAME_RATE == value
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01, -1, 2])
+def test_nickname_rate_rejects_outside_zero_to_one(value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, NICKNAME_RATE=value)
+
+
+def test_voice_per_scene_rejects_negative():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, VOICE_PER_SCENE=-1)
+
+
+def test_voice_per_scene_accepts_zero():
+    assert Settings(_env_file=None, VOICE_PER_SCENE=0).VOICE_PER_SCENE == 0
+
+
+# --- 5b: the notebook ---
+
+
+def test_notebook_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.NOTEBOOK_MAX_INTENTIONS == 4
+    assert settings.NOTEBOOK_MAX_OBSERVATIONS == 4
+    assert settings.NOTEBOOK_MAX_THREADS == 6
+    assert settings.NOTEBOOK_THREAD_TTL_DAYS == 21
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    ],
+)
+def test_notebook_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    ],
+)
+def test_notebook_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
+# --- 5c: standing orders ---
+
+
+def test_orders_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.ORDERS_MAX_ACTIVE == 5
+    assert settings.ORDERS_IN_CHECKIN_MAX == 3
+
+
+@pytest.mark.parametrize("field", ["ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX"])
+def test_orders_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX"])
+def test_orders_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
+# --- 5e: callbacks ---
+
+
+def test_callback_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.CALLBACK_MIN_AGE_DAYS == 7
+    assert settings.CALLBACK_UNUSED_DAYS == 14
+
+
+@pytest.mark.parametrize("field", ["CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS"])
+def test_callback_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS"])
+def test_callback_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
 def test_the_user_agent_names_us_and_no_browser():
     """Plan section 5.9 forbids spoofing this. A default that already
     looked like a browser would make that rule a formality."""
@@ -248,3 +359,110 @@ def test_the_user_agent_names_us_and_no_browser():
     assert agent.startswith("AnchorBot/")
     for browser in ("Mozilla", "Chrome", "Safari", "AppleWebKit", "Gecko"):
         assert browser not in agent
+
+
+# --- 6c: critique sample size and canary weekday ---
+
+
+def test_critique_sample_and_canary_dow_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.CRITIQUE_SAMPLE == 5
+    assert settings.CANARY_DOW == 3
+
+
+def test_critique_sample_rejects_below_one():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, CRITIQUE_SAMPLE=0)
+
+
+def test_critique_sample_accepts_one():
+    assert Settings(_env_file=None, CRITIQUE_SAMPLE=1).CRITIQUE_SAMPLE == 1
+
+
+@pytest.mark.parametrize("value", [0, 8, -1])
+def test_canary_dow_rejects_out_of_range(value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, CANARY_DOW=value)
+
+
+@pytest.mark.parametrize("value", [1, 4, 7])
+def test_canary_dow_accepts_the_iso_weekday_range(value):
+    assert Settings(_env_file=None, CANARY_DOW=value).CANARY_DOW == value
+
+
+# --- 6e: backups, retention sweeps, liveness (Phase 6 plan section 2) ---
+
+
+def test_backup_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.BACKUP_ENABLED is True
+    assert settings.BACKUP_TIME == datetime.time(4, 0)
+    assert settings.BACKUP_KEEP_DAILY == 14
+    assert settings.BACKUP_KEEP_WEEKLY == 8
+    assert settings.BACKUP_AGE_RECIPIENT == ""
+    assert settings.BACKUP_S3_ENDPOINT == ""
+    assert settings.BACKUP_S3_BUCKET == ""
+    assert settings.BACKUP_S3_REGION == "auto"
+    assert settings.BACKUP_S3_ACCESS_KEY_ID == ""
+    assert settings.BACKUP_S3_SECRET_ACCESS_KEY == ""
+    assert settings.BACKUP_PG_DUMP == "pg_dump"
+
+
+@pytest.mark.parametrize("field", ["BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY"])
+def test_backup_keep_settings_reject_below_one(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+@pytest.mark.parametrize("field", ["BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY"])
+def test_backup_keep_settings_accept_one(field):
+    assert getattr(Settings(_env_file=None, **{field: 1}), field) == 1
+
+
+def test_backup_credentials_are_stripped_of_surrounding_whitespace():
+    settings = Settings(
+        _env_file=None,
+        BACKUP_AGE_RECIPIENT=" age1abc \n",
+        BACKUP_S3_ENDPOINT=" https://example.r2.dev \n",
+        BACKUP_S3_BUCKET=" anchor \n",
+        BACKUP_S3_ACCESS_KEY_ID=" key \n",
+        BACKUP_S3_SECRET_ACCESS_KEY=" secret \n",
+        BACKUP_S3_REGION=" auto \n",
+        BACKUP_PG_DUMP=" /usr/bin/pg_dump \n",
+    )
+    assert settings.BACKUP_AGE_RECIPIENT == "age1abc"
+    assert settings.BACKUP_S3_ENDPOINT == "https://example.r2.dev"
+    assert settings.BACKUP_S3_BUCKET == "anchor"
+    assert settings.BACKUP_S3_ACCESS_KEY_ID == "key"
+    assert settings.BACKUP_S3_SECRET_ACCESS_KEY == "secret"
+    assert settings.BACKUP_S3_REGION == "auto"
+    assert settings.BACKUP_PG_DUMP == "/usr/bin/pg_dump"
+
+
+def test_retention_defaults_match_the_plan():
+    settings = Settings(_env_file=None)
+    assert settings.UPDATE_PAYLOAD_RETENTION_DAYS == 30
+    assert settings.JOB_RETENTION_DAYS == 30
+    assert settings.MESSAGE_RETENTION_DAYS == 0
+
+
+@pytest.mark.parametrize("field", ["UPDATE_PAYLOAD_RETENTION_DAYS", "JOB_RETENTION_DAYS"])
+def test_mandatory_retention_settings_reject_zero(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+def test_message_retention_days_accepts_zero_as_keep_forever():
+    assert Settings(_env_file=None, MESSAGE_RETENTION_DAYS=0).MESSAGE_RETENTION_DAYS == 0
+
+
+def test_message_retention_days_rejects_negative():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, MESSAGE_RETENTION_DAYS=-1)
+
+
+def test_liveness_stale_min_default_and_validation():
+    assert Settings(_env_file=None).LIVENESS_STALE_MIN == 5
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, LIVENESS_STALE_MIN=0)
+    assert Settings(_env_file=None, LIVENESS_STALE_MIN=1).LIVENESS_STALE_MIN == 1

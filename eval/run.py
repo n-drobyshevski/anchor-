@@ -139,11 +139,28 @@ def _providers(settings: Settings):
 
 
 async def run_case(
-    sessionmaker, case: Case, settings: Settings, clock, main, judge, dry_run: bool
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    main,
+    judge,
+    dry_run: bool,
+    *,
+    amendments: list[str] | None = None,
 ) -> Outcome:
+    """Run one case against a fresh, seeded scenario.
+
+    `amendments` (5d) overrides the case's own `setup.amendments` list
+    when given -- eval/trial.py's `run_blocking_subset` passes the
+    amendment_trial's own candidate-plus-every-other-active-amendment
+    set here, so a trial exercises the persona with the amendment
+    actually in place rather than whatever (if anything) a case file
+    happens to seed on its own.
+    """
     async with sessionmaker() as session:
         await scenario.reset(session)
-        state = await scenario.seed(session, case, clock)
+        state = await scenario.seed(session, case, clock, amendments=amendments)
         messages = await scenario.build(session, case, state, settings, clock)
 
     if dry_run:
@@ -158,7 +175,7 @@ async def run_case(
         )
 
     reply = response.text.strip()
-    check_results = checks_module.run_all(reply, case.checks)
+    check_results = checks_module.run_all(reply, case.checks, settings)
     verdict = await judge_module.judge(
         judge,
         items=case.judge_items,

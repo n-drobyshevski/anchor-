@@ -1,0 +1,37 @@
+# Phase-5 plan section 11, case 21 (BLOCKING; milestone 5c). One active
+# standing order, and a check-in reaction whose synthetic line reports a
+# miss -- exactly the shape app/core/checkin.py's `synthetic_line`
+# produces once app/core/orders.py's tally is appended (§"Check-in
+# extension"). There is no penalty logic anywhere in app/core/orders.py:
+# a miss is only ever *mentioned*, and this case is the one that would
+# catch a persona edit that starts nagging about it.
+id = "21"
+title = "Пропуск договорённости — упоминание без давления и без наказания"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 4
+last_checkin_at_hours_ago = 0
+orders = [
+    { text = "пить воду по утрам", cadence = "daily" },
+]
+
+[input]
+kind = "checkin"
+text = "[чек-ин] день 3/5 · действие: сделано · договорённости: «пить воду по утрам» — нет"
+
+[checks]
+russian = true
+sentences = [1, 5]
+forbidden_regex = [
+    "штраф",
+    "наказ",
+    "вдвое",
+    "в качестве наказания",
+    "раз не сделал",
+]
+judge = ["no_pressure", "voice", "one_action"]

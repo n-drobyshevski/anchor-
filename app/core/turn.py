@@ -81,6 +81,30 @@ those returns before this point. That is why the enqueue is a single
 line at the very bottom of run() rather than a condition somewhere in
 the middle: the control flow already encodes the rule.
 
+5a (phase-5 plan section 5) gathers mood, this scene's voice anchors
+and the nickname directive once per turn via app/core/persona_context.py
+and threads the same `PersonaContext` into both build_messages() calls
+below (the original attempt and the boundary retry), so a retry never
+re-rolls any of the three. `remember_nickname()` runs only after the
+persona reply is actually delivered -- never on a welfare turn (which
+returns from run_welfare_turn long before this point) and never in
+neutral mode (turn_persona_context stays None there).
+
+5e (phase-5 plan sections 11a, 12 and 14) adds the callback the same
+way: `gather()` is passed `enable_callback=(kind == CHAT_KIND)`, so a
+check-in's synthetic turn never asks (its `kind` is CHECKIN_KIND by the
+time it reaches step 6), and app/core/callbacks.py's `mark_delivered()`
+runs right alongside `remember_nickname()` -- only after the reply is on
+its way out, guarded by the same `kind == CHAT_KIND` check, which is
+also what stops a check-in turn (persona-active, so
+`turn_persona_context` is not None there either) from marking a scene's
+callback slot used on a turn that never asked for one. Any callback
+memory the selection picked is dropped from `retrieved_rows` before
+`injected_memory_ids` is built, so it is never double-injected under
+both "## Может быть важно" and "## Можно вспомнить", and its
+`last_used_at` is bumped exactly once, by `mark_delivered`, not by
+`memory.mark_used()`.
+
 Milestone 1f once threaded an opt-in `web_search` flag from run() down
 to the single provider call, behind a now-removed /search command.
 Milestone 4a (2026-09) removed it: it reached the tree without a plan
@@ -95,6 +119,7 @@ import asyncio
 import datetime
 import decimal
 import logging
+import random
 import time
 
 from aiogram import Bot
@@ -106,17 +131,28 @@ from app.config import Settings
 from app.core import pause
 from app.core import clock as clock_module
 from app.core import boundaries, safety_events, welfare_terms
+from app.core import callbacks
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
-from app.core import checkin, memory, welfare
+from app.core import checkin, memory, orders, welfare
+from app.core import persona_context as persona_context_module
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.core.spend import Priced, check_cap, priced
 from app.core.state import Source, get_state, update_state
+from app.core.voice import remember_nickname
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
 from app.llm.provider import LLMError, LLMProvider, LLMRetryableError
 from app.tg.send import send_reply, start_typing, stop_typing
+
+# 5a: the nickname coin flip's source of randomness. Module-level so a
+# test can monkeypatch it to a seeded `random.Random(n)` for a
+# deterministic outcome, the same injection style app/core/voice.py's
+# own `voice_anchors()` uses for its *deterministic* draw (seeded by
+# scene_id) -- this one is a genuine coin flip and has nothing to seed
+# it by, so the object itself is the injection point instead.
+NICKNAME_RNG = random.Random()
 
 logger = logging.getLogger(__name__)
 
@@ -757,9 +793,13 @@ async def run(
             if pending is not None:
                 await checkin.set_note(session, pending.id, user_text)
                 row, streak = await checkin.finish(session, clock, user_state.timezone)
+                # 5c: the day's order answers, if any, feed the same
+                # synthetic line the Пропустить path builds
+                # (app/tg/checkin.py's finish_and_react).
+                order_results = await orders.results_for_checkin(session, row.id)
                 # From here on this turn is the check-in's turn: the
                 # raw note never becomes a message of its own.
-                user_text = checkin.synthetic_line(row)
+                user_text = checkin.synthetic_line(row, order_results)
                 kind = CHECKIN_KIND
                 flags = [*(flags or []), CHECKIN_FLAG]
                 user_state = await get_state(session)
@@ -769,6 +809,28 @@ async def run(
                     from app.tg.checkin import retire
 
                     await retire(bot, chat_id, pending.tg_message_id, streak)
+    elif level is None and user_state.awaiting == orders.AWAITING_SO_COUNTER:
+        # 5c: the plain text that follows «Изменить» (app/core/orders.py's
+        # `start_counter`). Not a persona turn at all -- like a command,
+        # it never reaches step 1 below, so the counter text itself never
+        # becomes a transcript message. Guarded on already_handled(), the
+        # same replay gate app/tg/router.py's keyboard-carrying commands
+        # use via `_once` -- a replay is simply skipped, not re-sent,
+        # matching that precedent exactly.
+        if not await already_handled(sessionmaker, update_id):
+            async with sessionmaker() as session:
+                counter_outcome = await orders.submit_counter(
+                    session, user_state.awaiting_ref, user_text, clock=clock
+                )
+            from app.tg.orders import send_counter_outcome
+
+            await send_counter_outcome(
+                sessionmaker, bot, chat_id=chat_id, outcome=counter_outcome
+            )
+            await mark_update_handled(
+                sessionmaker, clock=clock, update_id=update_id, text="[so:counter]", scene_id=scene_id
+            )
+        return
 
     # Step 1: store the user message idempotently. A safeword, or any
     # message sent while persona is already off, must never land in
@@ -834,6 +896,11 @@ async def run(
     category = CHAT_CATEGORY if user_state.persona_active else OOC_CATEGORY
     typing_task = start_typing(bot, chat_id)
     injected_memory_ids: list[int] = []
+    # 5a: set only on the persona branch below, and reused verbatim by
+    # the boundary retry further down -- a retry must not re-roll the
+    # mood, the voice anchors or the nickname; see app/core/
+    # persona_context.py's docstring.
+    turn_persona_context: persona_context_module.PersonaContext | None = None
     try:
         async with sessionmaker() as session:
             if user_state.persona_active:
@@ -854,6 +921,36 @@ async def run(
                 technique_rows = await memory.retrieve_techniques(
                     session, user_text, settings.RESEARCH_TECHNIQUES_IN_PROMPT
                 )
+                # 5a: mood, this scene's voice anchors and the nickname
+                # directive -- gathered once per turn, not once per
+                # model call (see turn_persona_context's own comment
+                # above). 5e: `enable_callback` is only ever True on an
+                # ordinary chat turn -- never a check-in's synthetic
+                # line (kind is CHECKIN_KIND by the time this runs, see
+                # Step 0c above), never neutral mode or a welfare turn
+                # (neither reaches this branch at all), and never an
+                # outbound send (app/core/outbound_send.py's own
+                # gather() calls leave this flag at its False default).
+                turn_persona_context = await persona_context_module.gather(
+                    session,
+                    settings,
+                    user_state,
+                    clock,
+                    scene_id=scene_id,
+                    exclude_update_id=update_id,
+                    rng=NICKNAME_RNG,
+                    user_text=user_text,
+                    enable_callback=(kind == CHAT_KIND),
+                )
+                # 5e: dedupe -- a callback memory must never also appear
+                # under "## Может быть важно" for the same turn (both
+                # pools can draw from the same `event` kind).
+                if turn_persona_context.callback_memory_id is not None:
+                    retrieved_rows = [
+                        row
+                        for row in retrieved_rows
+                        if row.id != turn_persona_context.callback_memory_id
+                    ]
                 injected_memory_ids = [
                     row.id for row in pinned_rows + retrieved_rows + technique_rows
                 ]
@@ -875,6 +972,14 @@ async def run(
                     due_set_at=user_state.due_set_at,
                     streak=user_state.streak,
                     last_checkin_at=user_state.last_checkin_at,
+                    voice_lines=turn_persona_context.voice_lines,
+                    mood=turn_persona_context.mood,
+                    nickname_directive=turn_persona_context.nickname_directive,
+                    notebook=turn_persona_context.notebook,
+                    orders=list(turn_persona_context.orders),
+                    orders_yesterday=turn_persona_context.orders_yesterday,
+                    amendments=list(turn_persona_context.amendments),
+                    callback=turn_persona_context.callback,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1004,6 +1109,16 @@ async def run(
                 due_set_at=user_state.due_set_at,
                 streak=user_state.streak,
                 last_checkin_at=user_state.last_checkin_at,
+                # 5a: the same context the first attempt used -- no
+                # re-roll of mood/voice/nickname on a retry.
+                voice_lines=turn_persona_context.voice_lines,
+                mood=turn_persona_context.mood,
+                nickname_directive=turn_persona_context.nickname_directive,
+                notebook=turn_persona_context.notebook,
+                orders=list(turn_persona_context.orders),
+                orders_yesterday=turn_persona_context.orders_yesterday,
+                amendments=list(turn_persona_context.amendments),
+                callback=turn_persona_context.callback,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id
@@ -1081,6 +1196,32 @@ async def run(
     async with sessionmaker() as session:
         row = await _get_assistant_row(session, update_id)
         await memory.mark_used(session, clock, injected_memory_ids)
+        # 5a: only now, with the persona reply actually on its way to
+        # the user -- never on a welfare turn (run_welfare_turn returns
+        # long before this point) and never on neutral mode (category
+        # is OOC_CATEGORY there, and turn_persona_context stays None).
+        if (
+            category == CHAT_CATEGORY
+            and turn_persona_context is not None
+            and turn_persona_context.nickname is not None
+        ):
+            await remember_nickname(session, turn_persona_context.nickname)
+        # 5e: same "only after delivery" timing as remember_nickname
+        # right above -- and the same guard, `kind == CHAT_KIND`, that
+        # gathered the callback in the first place (never a check-in's
+        # synthetic turn, never neutral mode or welfare, both of which
+        # already leave turn_persona_context None).
+        if (
+            category == CHAT_CATEGORY
+            and turn_persona_context is not None
+            and kind == CHAT_KIND
+        ):
+            await callbacks.mark_delivered(
+                session,
+                scene_id=scene_id,
+                memory_id=turn_persona_context.callback_memory_id,
+                clock=clock,
+            )
         await _mark_sent(session, clock, row.id)
 
     # Step 8 (2c): hand the delivered exchange to the extractor.

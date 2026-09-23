@@ -30,20 +30,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import (
+    BriefNote,
     Checkin,
+    CheckinOrderResult,
+    IdleChange,
+    IdleRun,
+    InterestTopic,
     Journal,
+    NotebookEntry,
     Outbound,
     Memory,
     Message,
+    PersonaAmendment,
     Proposal,
+    ReviewProposal,
     SafetyEvent,
     Scene,
     SpendLedger,
+    StandingOrder,
     StateChange,
     StudyCard,
     StudyClip,
     StudyJob,
     UserState,
+    WeeklyReview,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +92,35 @@ EXPORTED_MODELS = (
     StudyJob,
     StudyClip,
     StudyCard,
+    # 5b: Anchor's own working notes (phase-5 plan section 3). User data
+    # by the same reasoning as everything above it -- the user's own
+    # `/mind add` intentions live here, and so does whatever Anchor
+    # wrote about them.
+    NotebookEntry,
+    # 5c: negotiated standing orders (phase-5 plan section 3) and their
+    # check-in results. User data by the same reasoning again -- these
+    # are commitments the user negotiated or authored themselves, plus
+    # their own daily answers about them.
+    StandingOrder,
+    CheckinOrderResult,
+    # 5d: the weekly review and persona amendments (phase-5 plan
+    # sections 3, 8 and 9). weekly_review.analysis is the validated
+    # summary of the user's own week; review_proposal is what it
+    # suggested and how the user answered; persona_amendment is what the
+    # user adopted and its (pass/fail only, no model text) eval_report.
+    WeeklyReview,
+    ReviewProposal,
+    PersonaAmendment,
+    # 6a: the idle framework (Phase 6 plan section 3, "/export covers
+    # idle_run (metadata), idle_change, brief_note, and interest_topic").
+    # backup_log is deliberately not here -- it names ciphertext object
+    # keys, not user data, and the plan says so outright ("It doesn't
+    # need backup_log"); tests/test_export.py's NOT_EXPORTED carries the
+    # reason.
+    IdleRun,
+    IdleChange,
+    BriefNote,
+    InterestTopic,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

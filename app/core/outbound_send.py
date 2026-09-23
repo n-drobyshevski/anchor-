@@ -53,6 +53,7 @@ from app.core.outbound_gate import (
     MORNING,
     SILENCE,
     TICK,
+    WEEKLY_REVIEW,
     config_from_settings,
     gate,
 )
@@ -101,6 +102,12 @@ KIND_FLAGS: dict[str, str] = {
         "Ты пишешь первым. Повод: «{note}». Коротко, 1–3 предложения, "
         "одно действие или вопрос."
     ),
+    # 5d (phase-5 plan section 8), verbatim.
+    WEEKLY_REVIEW: (
+        "Итоги недели. Коротко (3–6 предложений): одно-два достижения, одна "
+        "вещь на следующую неделю. Без упрёков, без повышения интенсивности. "
+        "Данные: {note}"
+    ),
 }
 
 # Added to every kind.
@@ -110,7 +117,13 @@ COMMON_FLAG = (
 )
 
 
-def hidden_flag(kind: str, tick_note: str | None = None) -> str:
+def hidden_flag(
+    kind: str,
+    tick_note: str | None = None,
+    *,
+    note: str | None = None,
+    morning_notes: list[str] | None = None,
+) -> str:
     """The instruction that stands in for the user's message.
 
     It is passed as the trailing *user* turn rather than as a `[флаги]`
@@ -118,13 +131,48 @@ def hidden_flag(kind: str, tick_note: str | None = None) -> str:
     message here, and the chat template this bot runs against expects a
     conversation that ends with one. The flag is never stored -- only
     Anchor's reply is -- so it cannot leak into a later transcript.
+
+    5d: `note` is the weekly review's own `{note}` substitution (the
+    week's wins/misses/patterns, rendered by app/core/review.py's
+    `render_note`) -- a separate keyword from `tick_note` because the
+    two never travel together and a review's note routinely runs well
+    past `outbound.tick_note`'s 120-character column limit, so it is
+    never stored on the row at all (see app/core/outbound_send.py's
+    WEEKLY_REVIEW branch).
+
+    6c: `morning_notes` is today's `brief_note.notes` (plan section
+    6.4), appended as its own line -- «Заметки к утру: …» -- only for
+    `kind == MORNING` and only when there is a note to append. It never
+    changes whether the morning message is sent (the outbound gate
+    alone decides that, untouched by this function); an absent or empty
+    list leaves `hidden_flag(MORNING)` byte-for-byte what it always was,
+    which is what keeps `run_send_outbound`'s pre-6c callers and tests
+    unaffected when no prebrief note exists.
     """
     template = KIND_FLAGS[kind]
-    body = template.format(note=tick_note or "") if kind == TICK else template
+    if kind == TICK:
+        body = template.format(note=tick_note or "")
+    elif kind == WEEKLY_REVIEW:
+        body = template.format(note=note or "")
+    else:
+        body = template
+    if kind == MORNING and morning_notes:
+        body = f"{body}\nЗаметки к утру: {' '.join(morning_notes)}"
     return f"{body}\n{COMMON_FLAG}"
 
 
-async def build_outbound_messages(session, settings, state, *, clock, kind, tick_note=None):
+async def build_outbound_messages(
+    session,
+    settings,
+    state,
+    *,
+    clock,
+    kind,
+    tick_note=None,
+    review_note=None,
+    persona_context=None,
+    morning_notes=None,
+):
     """The exact message list a proactive send is generated from.
 
     Factored out of run_send_outbound in 3e so `eval/` can build the
@@ -132,10 +180,30 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
     that the harness "builds the real prompt through the production
     `prompt.py`" -- an eval that assembled its own approximation would
     pass happily while the thing that ships regressed.
+
+    5a: an outbound message is a persona reply, so it gets the same
+    mood/voice/nickname treatment a chat turn does, via app/core/
+    persona_context.py. There is no update_id to exclude for the mood
+    facts' "last user message" query (an outbound send has no current
+    user message at all), and the voice seed falls back to the local
+    calendar date, since no caller threads a scene id through here.
+
+    `persona_context` lets run_send_outbound gather once and hand the
+    *same* PersonaContext to both this function and the nickname write
+    that follows a real delivery -- gathering twice would draw the
+    nickname coin flip twice and could remember a different nickname
+    than the one the sent prompt actually carried. Left `None` (the
+    default), this function gathers its own, read-only context, which
+    is what eval/scenario.py relies on: it calls this function directly
+    with no delivery afterwards, so nothing here may have a side
+    effect. The one write, remember_nickname(), lives in
+    run_send_outbound's own step 7, after a real send.
     """
     from app.core.memory import retrieve_techniques
+    from app.core import persona_context as persona_context_module
     from app.core.prompt import build_messages
     from app.core.scene import recent_summaries
+    from app.core.turn import NICKNAME_RNG
 
     # 4d: adopted techniques are for in-character generation, which a
     # proactive message is (phase-4 plan section 10: "chat turns and
@@ -147,15 +215,29 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
     # the right behaviour: an unprompted message is exactly the place to
     # try a technique the user has not seen used in a while.
     techniques = await retrieve_techniques(
-        session, hidden_flag(kind, tick_note), settings.RESEARCH_TECHNIQUES_IN_PROMPT
+        session,
+        hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
+        settings.RESEARCH_TECHNIQUES_IN_PROMPT,
     )
+
+    persona_ctx = persona_context
+    if persona_ctx is None:
+        persona_ctx = await persona_context_module.gather(
+            session,
+            settings,
+            state,
+            clock,
+            scene_id=None,
+            exclude_update_id=None,
+            rng=NICKNAME_RNG,
+        )
 
     return await build_messages(
         session,
         clock=clock,
         timezone=state.timezone,
         intensity=state.intensity,
-        user_text=hidden_flag(kind, tick_note),
+        user_text=hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
         update_id=None,
         transcript_turns=settings.TRANSCRIPT_TURNS,
         techniques=[row.text for row in techniques],
@@ -165,6 +247,13 @@ async def build_outbound_messages(session, settings, state, *, clock, kind, tick
         due_set_at=state.due_set_at,
         streak=state.streak,
         last_checkin_at=state.last_checkin_at,
+        voice_lines=persona_ctx.voice_lines,
+        mood=persona_ctx.mood,
+        nickname_directive=persona_ctx.nickname_directive,
+        notebook=persona_ctx.notebook,
+        orders=list(persona_ctx.orders),
+        orders_yesterday=persona_ctx.orders_yesterday,
+        amendments=list(persona_ctx.amendments),
     )
 
 
@@ -204,8 +293,19 @@ async def run_send_outbound(
     *,
     clock: Clock,
     outbound_id: int,
+    safety_provider: LLMProvider | None = None,
 ) -> None:
-    """The `send_outbound` job body. Steps are plan section 7's, in order."""
+    """The `send_outbound` job body. Steps are plan section 7's, in order.
+
+    5d: `safety_provider`, threaded from app/worker.py's `_run_job`
+    (the same H2 provider every other safety-model job already takes),
+    is what a `WEEKLY_REVIEW` row's analysis step runs on. It is
+    optional and defaults to None so every pre-5d call site -- and every
+    test of a non-review kind -- keeps its exact previous signature; a
+    `WEEKLY_REVIEW` row with no safety provider is skipped with reason
+    `review_unavailable`, the same as an analysis that failed to parse
+    or was refused by the cap (see the `WEEKLY_REVIEW` branch below).
+    """
     # Local imports.
     #
     # `app.tg.outbound` has to stay local: app/core/ does not import
@@ -226,11 +326,15 @@ async def run_send_outbound(
         SKIPPED,
         load_gate_inputs,
     )
+    from app.core import persona_context as persona_context_module
+    from app.core import review as review_module
     from app.core.spend import priced
     from app.core.state import get_state
     from app.core.scene import ensure_open_scene
-    from app.core.turn import _complete_with_retries
+    from app.core.turn import NICKNAME_RNG, _complete_with_retries
+    from app.core.voice import remember_nickname
     from app.tg.outbound import send_outbound_message
+    from app.db.models import BriefNote
 
     # 1. Still live?
     row = await session.get(Outbound, outbound_id)
@@ -282,6 +386,35 @@ async def run_send_outbound(
         )
         return
 
+    # 5d: the weekly review's own step 1 (implementation plan's "Send
+    # path"), between the authoritative gate and everything else --
+    # there is no scene or generation to do at all if the analysis
+    # itself is unavailable. `check_cap` inside `analyze_week` covers
+    # the daily wallet; a missing `safety_provider` (misconfiguration --
+    # app/main.py always supplies one) is refused the same way, since
+    # neither has a fallback message.
+    review_analysis = None
+    review_note: str | None = None
+    if row.kind == WEEKLY_REVIEW:
+        if safety_provider is None:
+            row.status = SKIPPED
+            row.skip_reason = review_module.REVIEW_UNAVAILABLE
+            await session.commit()
+            logger.info(
+                "weekly review skipped, no safety provider", extra={"outbound_id": outbound_id}
+            )
+            return
+        review_analysis = await review_module.analyze_week(
+            session, settings, safety_provider, clock=clock, timezone=state.timezone
+        )
+        if review_analysis is None:
+            row.status = SKIPPED
+            row.skip_reason = review_module.REVIEW_UNAVAILABLE
+            await session.commit()
+            logger.info("weekly review unavailable", extra={"outbound_id": outbound_id})
+            return
+        review_note = review_module.render_note(review_analysis)
+
     # 4. Scene. An outbound counts as activity for scene timing, but it
     #    is not the user speaking -- last_user_msg_at is untouched.
     scene_id = await ensure_open_scene(
@@ -289,6 +422,39 @@ async def run_send_outbound(
     )
 
     # 5. Generate. Main model, section 7's prompt plus the hidden flag.
+    # 5a: gathered once, here, and handed into build_outbound_messages
+    # so the nickname write below (step 7) remembers exactly the
+    # nickname the sent prompt's directive carried -- gathering a
+    # second time would draw the coin flip again and could disagree
+    # with what was actually said.
+    persona_ctx = await persona_context_module.gather(
+        session,
+        settings,
+        state,
+        clock,
+        scene_id=None,
+        exclude_update_id=None,
+        rng=NICKNAME_RNG,
+    )
+
+    # 6c: the morning outbound reads today's unused brief_note (plan
+    # section 6.4). "Today" and "unused" together, not just "the row for
+    # today": `used_at` set only after a successful delivery below means
+    # a resend (step 2's crash path, above) never re-reads this -- the
+    # stored message already carries whatever note text it was
+    # generated with. A note whose date has passed (yesterday's,
+    # written but never delivered) is never read here at all -- it
+    # simply expires unused, per the plan's own "notes expire unused
+    # after their date" -- retention (6e) is what eventually clears it.
+    morning_notes: list[str] | None = None
+    brief_note_row: BriefNote | None = None
+    if row.kind == MORNING:
+        today = clock_module.local_date(clock, state.timezone)
+        candidate = await session.get(BriefNote, today)
+        if candidate is not None and candidate.used_at is None:
+            brief_note_row = candidate
+            morning_notes = list(candidate.notes)
+
     messages = await build_outbound_messages(
         session,
         settings,
@@ -296,6 +462,9 @@ async def run_send_outbound(
         clock=clock,
         kind=row.kind,
         tick_note=row.tick_note,
+        review_note=review_note,
+        persona_context=persona_ctx,
+        morning_notes=morning_notes,
     )
     response = await _complete_with_retries(
         provider, messages, update_id=outbound_id
@@ -326,9 +495,15 @@ async def run_send_outbound(
         logger.warning("outbound generated nothing", extra={"outbound_id": outbound_id})
         return
 
-    # 6. Store the message and the ledger row together.
+    # 6. Store the message and the ledger row together. 5d: ledgered as
+    #    review_msg rather than outbound for a weekly review (plan
+    #    section 12's invariant list), so /state can show what the
+    #    review's own message cost separately from a reply or a nag.
     cost = priced(response.usage, settings, model=response.model)
     usd_cost = cost.usd
+    category = (
+        review_module.REVIEW_MSG_CATEGORY if row.kind == WEEKLY_REVIEW else OUTBOUND_CATEGORY
+    )
     message = await _insert_outbound_message(
         session,
         outbound_id=outbound_id,
@@ -339,6 +514,7 @@ async def run_send_outbound(
         usage=response.usage,
         usd_cost=usd_cost,
         cost_source=cost.source,
+        category=category,
     )
     if message is None:
         # A concurrent run inserted it. Let that run deliver it.
@@ -347,6 +523,12 @@ async def run_send_outbound(
 
     # 7. Send, then mark delivered and move the counters.
     await send_outbound_message(bot, state.chat_id, text, kind=row.kind)
+    # 5a: only after the send above actually happened -- never on a
+    # skipped, cancelled or failed row, all of which returned earlier.
+    if persona_ctx.nickname is not None:
+        await remember_nickname(session, persona_ctx.nickname)
+    if brief_note_row is not None:
+        brief_note_row.used_at = clock.now_utc()
     await _finish(session, row, message, clock)
     logger.info(
         "outbound sent",
@@ -358,6 +540,41 @@ async def run_send_outbound(
             "usd_cost": str(usd_cost),
         },
     )
+
+    # 5d: implementation plan's "Send path" steps 4-5 -- the weekly_review
+    # row (now with its message_id), this week's rotated review
+    # intentions, and the review's own proposal rows (each sent as its
+    # own card via app/tg/review.py, imported locally the same way this
+    # function already imports app.tg.outbound). Deliberately wrapped:
+    # the persona message is already sent and marked delivered by this
+    # point, so a failure here (a proposal card that could not be sent,
+    # say) must not fail the job and roll the *send* back -- step 2's
+    # "already generated" branch above would just re-mark it sent on a
+    # retry, never re-running this block. The trade-off is a review
+    # whose bookkeeping or cards did not finish is logged, not retried;
+    # that is the same trade-off _send_proposals/_send_order_proposal
+    # make in app/worker.py for exactly this reason.
+    if row.kind == WEEKLY_REVIEW and review_analysis is not None:
+        try:
+            week_start = review_module.week_start_for(
+                clock_module.local_date(clock, state.timezone)
+            )
+            review_row = await review_module.store_review(
+                session, week_start=week_start, analysis=review_analysis, clock=clock
+            )
+            await review_module.set_message_id(session, review_row.id, message.id)
+            await review_module.apply_intentions(session, settings, review_analysis, clock=clock)
+            proposals = await review_module.create_proposals(
+                session, review_id=review_row.id, analysis=review_analysis
+            )
+            from app.tg.review import send_review_proposal_cards
+
+            await send_review_proposal_cards(bot, state.chat_id, proposals)
+        except Exception as exc:  # noqa: BLE001 - a failed follow-up must not fail the send
+            logger.warning(
+                "weekly review follow-up failed",
+                extra={"outbound_id": outbound_id, "event": type(exc).__name__},
+            )
 
 
 async def _insert_outbound_message(
@@ -371,6 +588,7 @@ async def _insert_outbound_message(
     usage,
     usd_cost,
     cost_source: str | None = None,
+    category: str = OUTBOUND_CATEGORY,
 ) -> Message | None:
     """Insert the assistant row and its ledger row in one transaction.
 
@@ -413,7 +631,7 @@ async def _insert_outbound_message(
     session.add(
         SpendLedger(
             local_date=local_date,
-            category=OUTBOUND_CATEGORY,
+            category=category,
             model=model,
             tokens_in=usage.input_tokens,
             tokens_cached=usage.cached_tokens,

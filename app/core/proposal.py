@@ -38,6 +38,7 @@ __all__ = [
     "DUE_ACTION",
     "FOCUS_ON",
     "RULE",
+    "STANDING_ORDER",
     "FIELDS",
     "accept",
     "create",
@@ -57,8 +58,14 @@ EXPIRED = "expired"
 DUE_ACTION = "due_action"
 FOCUS_ON = "focus_on"
 RULE = "rule"
+# 5c: widened alongside ck_proposal_field, for schema parity only -- no
+# Proposal row is ever actually inserted with this field. See app/core/
+# extract.py's _apply, which routes a standing_order item to
+# app/core/orders.propose() instead, and that module's own docstring on
+# why the negotiation needs its own row shape rather than this table's.
+STANDING_ORDER = "standing_order"
 
-FIELDS = (DUE_ACTION, FOCUS_ON, RULE)
+FIELDS = (DUE_ACTION, FOCUS_ON, RULE, STANDING_ORDER)
 
 # Values that parse as "focus on". Anything else is off, which is the
 # safe direction: focus is a pressure-increasing mode, so an ambiguous

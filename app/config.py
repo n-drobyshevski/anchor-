@@ -51,6 +51,16 @@ _STRIPPED_FIELDS = (
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
     "WEB_PASSPHRASE_HASH",
+    # 6e: credentials and endpoints that arrive by copy-paste from a
+    # Railway variables panel or an offline `age-keygen`, same reasoning
+    # as OPENROUTER_API_KEY above.
+    "BACKUP_AGE_RECIPIENT",
+    "BACKUP_S3_ENDPOINT",
+    "BACKUP_S3_BUCKET",
+    "BACKUP_S3_REGION",
+    "BACKUP_S3_ACCESS_KEY_ID",
+    "BACKUP_S3_SECRET_ACCESS_KEY",
+    "BACKUP_PG_DUMP",
 )
 
 
@@ -193,6 +203,137 @@ class Settings(BaseSettings):
     # anyway, so setting it back to "" does not silently restore the old
     # behaviour -- it stops the run with exit code 3.
     LLM_MODEL_JUDGE: str = "openai/gpt-4.1-nano"
+
+    # --- 5a: voice, mood and nicknames (phase-5 plan section 2) ---
+    # Paths are resolved against the repo root (app/core/prompt.py's
+    # REPO_ROOT), not the process's cwd, so a deploy that starts the
+    # bot from a different working directory still finds them.
+    #
+    # An empty NICKNAMES_FILE means nicknames are never used -- the
+    # plan states this explicitly, and app/core/voice.py's loader
+    # treats a file with no lines exactly like a file with none that
+    # pass the comment/blank filter, so no separate flag is needed.
+    NICKNAMES_FILE: str = "persona/nicknames.txt"
+    # Share of persona replies that carry a nickname. 0 means never,
+    # 1 means every reply that has one to give -- both ends are valid
+    # configurations, not errors, so the validator only rejects outside
+    # [0, 1].
+    NICKNAME_RATE: float = 0.5
+    VOICE_FILE: str = "persona/voice.md"
+    # How many lines of voice.md app/core/voice.py samples per scene.
+    # Capped at the file's own length there, so this number is a
+    # ceiling, not a promise.
+    VOICE_PER_SCENE: int = 4
+
+    @field_validator("NICKNAME_RATE")
+    @classmethod
+    def _rate_in_unit_interval(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"NICKNAME_RATE must be between 0 and 1, got {value}")
+        return value
+
+    @field_validator("VOICE_PER_SCENE")
+    @classmethod
+    def _voice_per_scene_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"VOICE_PER_SCENE must be >= 0, got {value}")
+        return value
+
+    # --- 5b: the notebook (implementation plan §"Files") ---
+    # Per-kind caps on *active* entries. All four validated >= 1: a cap
+    # of 0 would mean "this kind can never hold an entry", which is a
+    # different feature (turning a kind off) wearing a cap's clothes,
+    # and app/core/notebook.py's per-kind cap assumes there is always
+    # room for at least one entry once the oldest anchor-sourced one is
+    # closed.
+    NOTEBOOK_MAX_INTENTIONS: int = 4
+    NOTEBOOK_MAX_OBSERVATIONS: int = 4
+    NOTEBOOK_MAX_THREADS: int = 6
+    # How long an open_thread may sit unresolved before the daily sweep
+    # (app/core/notebook.py's run_notebook_expiry) closes it with
+    # closed_by='expiry'. Intentions and observations have no TTL --
+    # only a thread is "something to ask about later", which is exactly
+    # the shape that goes stale.
+    NOTEBOOK_THREAD_TTL_DAYS: int = 21
+
+    @field_validator(
+        "NOTEBOOK_MAX_INTENTIONS",
+        "NOTEBOOK_MAX_OBSERVATIONS",
+        "NOTEBOOK_MAX_THREADS",
+        "NOTEBOOK_THREAD_TTL_DAYS",
+    )
+    @classmethod
+    def _notebook_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    # --- 5c: standing orders (implementation plan §"Files") ---
+    # ORDERS_MAX_ACTIVE caps how many active orders can exist at once
+    # (checked on accept() and on /order); ORDERS_IN_CHECKIN_MAX caps how
+    # many are asked about in a single check-in. Both >= 1 for the same
+    # reason as the notebook caps above: 0 would be "the feature is off"
+    # wearing a cap's clothes. The 7-day proposal expiry is a plain
+    # constant (PROPOSAL_TTL_DAYS in app/core/orders.py), not a setting,
+    # because the plan's config list does not name it.
+    ORDERS_MAX_ACTIVE: int = 5
+    ORDERS_IN_CHECKIN_MAX: int = 3
+
+    @field_validator("ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX")
+    @classmethod
+    def _orders_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    # --- 5d: weekly review and persona amendments (implementation plan
+    # §"Config") ---
+    # ISO weekday (1=Monday .. 7=Sunday) the review is planned on, local
+    # to user_state.timezone -- matches StandingOrder.weekday's own
+    # convention rather than Python's Monday=0.
+    REVIEW_DOW: int = 7
+    REVIEW_TIME: datetime.time = datetime.time(19, 0)
+    # The cap on `active` plus `trial` amendments together (plan's
+    # "Adopt": "The cap counts active plus trial rows against
+    # AMENDMENTS_MAX_ACTIVE"). >= 1 for the same reason as the notebook
+    # and orders caps above: 0 would be "the feature is off" wearing a
+    # cap's clothes.
+    AMENDMENTS_MAX_ACTIVE: int = 10
+
+    @field_validator("REVIEW_DOW")
+    @classmethod
+    def _review_dow_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 7:
+            raise ValueError(f"REVIEW_DOW must be between 1 and 7, got {value}")
+        return value
+
+    @field_validator("AMENDMENTS_MAX_ACTIVE")
+    @classmethod
+    def _amendments_max_active_at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"AMENDMENTS_MAX_ACTIVE must be >= 1, got {value}")
+        return value
+
+    # --- 5e: callbacks (phase-5 plan section 11a) ---
+    # A candidate `event` memory must be at least this old before it is
+    # eligible for "## Можно вспомнить" -- a callback to something the
+    # user said an hour ago would read as the bot parroting the last
+    # message back, not as it remembering. And it must not have been
+    # used (delivered as a callback) in the last CALLBACK_UNUSED_DAYS,
+    # so the same memory does not get recycled every few days. Both
+    # >= 1 for the same reason as the notebook/orders/amendments caps
+    # above: 0 would mean "any memory, however fresh, however recently
+    # used", which is a different feature (no cooldown at all) wearing
+    # a threshold's clothes.
+    CALLBACK_MIN_AGE_DAYS: int = 7
+    CALLBACK_UNUSED_DAYS: int = 14
+
+    @field_validator("CALLBACK_MIN_AGE_DAYS", "CALLBACK_UNUSED_DAYS")
+    @classmethod
+    def _callback_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
 
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
@@ -466,6 +607,154 @@ class Settings(BaseSettings):
             if not 0 <= hour <= 23:
                 raise ValueError(f"TICK_HOURS entries must be 0-23, got {hour}")
         return tuple(sorted(set(hours)))
+
+    # --- 6a: idle framework (Phase 6 plan section 2; milestone 6a) ---
+    # The global kill switch, same shape as OUTBOUND_ENABLED: false stops
+    # planning at the first gate row (`disabled`), with nothing else
+    # touched. Idle stays under its own switch rather than OUTBOUND_
+    # ENABLED's because idle never sends a message at all -- the two
+    # features do not overlap.
+    IDLE_ENABLED: bool = True
+    # How long the user must have been silent before idle work may run.
+    IDLE_AFTER_H: int = 3
+    # Idle's own daily spend ceiling, separate from and inside
+    # DAILY_USD_CAP -- see IDLE_RESERVE_USD below for how the two relate.
+    IDLE_USD_CAP: float = 0.25
+    # Always kept free for live chat: idle runs only if
+    # spent_today + IDLE_JOB_USD_CAP <= DAILY_USD_CAP - IDLE_RESERVE_USD.
+    # Idle can never consume the reserve, by construction of that check
+    # (app/core/idle/gate.py's row 9), not by a promise here.
+    IDLE_RESERVE_USD: float = 0.50
+    # Per-job ceiling. A job that would cross it raises JobCapHit and
+    # stops, keeping whatever it already committed.
+    IDLE_JOB_USD_CAP: float = 0.05
+    IDLE_MAX_JOBS_PER_DAY: int = 8
+    # Local hours idle may run, "HH:MM-HH:MM", wrapping past midnight
+    # exactly like QUIET_START/QUIET_END (app/core/clock.py's
+    # within_window). The default admits the whole day.
+    IDLE_WINDOW: str = "00:00-23:59"
+    # How long a reversible, done idle_run stays undoable through /digest.
+    IDLE_UNDO_DAYS: int = 7
+    # How many recent persona replies the `critique` kind (6c) scores per
+    # run. Read only from 6c on; 6a defines it because .env.example and
+    # Settings should be complete across milestones, matching this
+    # file's own convention (see the module docstring).
+    CRITIQUE_SAMPLE: int = 5
+    # ISO weekday (1=Monday..7=Sunday) the weekly regression canary (6c)
+    # runs on, matching StandingOrder.weekday's and REVIEW_DOW's own
+    # convention rather than Python's Monday=0.
+    CANARY_DOW: int = 3
+
+    @field_validator("IDLE_AFTER_H", "IDLE_MAX_JOBS_PER_DAY", "IDLE_UNDO_DAYS", "CRITIQUE_SAMPLE")
+    @classmethod
+    def _idle_int_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("IDLE_USD_CAP", "IDLE_RESERVE_USD", "IDLE_JOB_USD_CAP")
+    @classmethod
+    def _idle_usd_settings_positive(cls, value: float, info) -> float:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be >= 0, got {value}")
+        return value
+
+    @field_validator("CANARY_DOW")
+    @classmethod
+    def _canary_dow_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 7:
+            raise ValueError(f"CANARY_DOW must be between 1 and 7, got {value}")
+        return value
+
+    # --- 6e: hardening (Phase 6 plan section 2; milestone 6e) -----------
+    #
+    # Encrypted nightly backups (§9.1). BACKUP_ENABLED is the same shape
+    # as OUTBOUND_ENABLED/IDLE_ENABLED: false stops the heartbeat from
+    # ever enqueueing a backup job, nothing else touched. Unlike idle,
+    # the backup job itself is never gated on budget, persona state or
+    # the idle window -- app/ops/backup.py's own docstring says why.
+    BACKUP_ENABLED: bool = True
+    BACKUP_TIME: datetime.time = datetime.time(4, 0)
+    BACKUP_KEEP_DAILY: int = 14
+    BACKUP_KEEP_WEEKLY: int = 8
+    # Public age recipient only (age1...); the matching private key never
+    # touches the server. Empty by default -- until the user generates a
+    # keypair offline and sets this, app/ops/backup.py records
+    # backup_log.status='failed', error_code='not_configured' every
+    # night rather than crashing the heartbeat.
+    BACKUP_AGE_RECIPIENT: str = ""
+    BACKUP_S3_ENDPOINT: str = ""
+    BACKUP_S3_BUCKET: str = ""
+    # "auto" is Tigris's (Railway bucket) own convention for "the
+    # endpoint decides"; a real S3-compatible provider that requires a
+    # specific region can still set this explicitly.
+    BACKUP_S3_REGION: str = "auto"
+    BACKUP_S3_ACCESS_KEY_ID: str = ""
+    BACKUP_S3_SECRET_ACCESS_KEY: str = ""
+    # PATH by default. A setting rather than a hardcoded path so the
+    # Dockerfile's postgresql-client-18 install can be found regardless
+    # of where a given base image happens to put it, without a code
+    # change -- and so a test can point it at a specific pg_dump binary
+    # (e.g. /usr/lib/postgresql/18/bin/pg_dump) without touching PATH.
+    BACKUP_PG_DUMP: str = "pg_dump"
+
+    UPDATE_PAYLOAD_RETENTION_DAYS: int = 30
+    JOB_RETENTION_DAYS: int = 30
+    # 0 means "keep forever" -- not a threshold of zero days, an off
+    # switch. app/core/retention.py's own sweep treats it that way
+    # explicitly rather than the validator forbidding it, because the
+    # plan's own default is 0.
+    MESSAGE_RETENTION_DAYS: int = 0
+
+    # How long the heartbeat may go stale before /readyz fails and the
+    # in-process watchdog (app/worker.py) kills the process so Railway's
+    # restart policy brings it back (§9.6).
+    LIVENESS_STALE_MIN: int = 5
+
+    @field_validator("BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY", "LIVENESS_STALE_MIN")
+    @classmethod
+    def _backup_int_settings_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("UPDATE_PAYLOAD_RETENTION_DAYS", "JOB_RETENTION_DAYS")
+    @classmethod
+    def _retention_settings_at_least_one(cls, value: int, info) -> int:
+        # These two are genuinely mandatory sweeps (the plan gives them
+        # no "0 = off" meaning, unlike MESSAGE_RETENTION_DAYS below), so
+        # 0 is rejected the same way the notebook/orders caps reject it.
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("MESSAGE_RETENTION_DAYS")
+    @classmethod
+    def _message_retention_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"MESSAGE_RETENTION_DAYS must be >= 0, got {value}")
+        return value
+
+    @field_validator("IDLE_WINDOW")
+    @classmethod
+    def _idle_window_format(cls, value: str) -> str:
+        """`HH:MM-HH:MM`, both halves real wall-clock times.
+
+        Validated here (fail loudly at boot) and parsed again by
+        app/core/idle/gate.py's `parse_window` (the pure function the
+        gate actually calls) -- the same "settings shape is checked at
+        boot, business logic re-derives it" split TICK_HOURS and the
+        PACKET_* fields already use in this file.
+        """
+        import re as _re
+
+        match = _re.match(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$", value)
+        if not match:
+            raise ValueError(f"IDLE_WINDOW must be HH:MM-HH:MM, got {value!r}")
+        sh, sm, eh, em = (int(part) for part in match.groups())
+        if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+            raise ValueError(f"IDLE_WINDOW has an out-of-range time component: {value!r}")
+        return value
 
     @field_validator("DATABASE_URL")
     @classmethod

@@ -16,6 +16,13 @@ either when the note arrives as plain text (handled in app/core/turn.py,
 which owns that path because a pause word has to be checked first) or
 when Пропустить is pressed, which is the only completion this module
 performs itself.
+
+5c (phase-5 plan section 7) inserts one step per active standing order
+due today, between the due-action step and the note step: `c:o:<id>:
+<d|n>`. `_ask_order_or_note` is the fork every completed step (the
+rating step's auto-none branch, the due step, and the order step
+itself) funnels through -- it asks the next due, unanswered order if
+there is one, or falls through to the note step exactly as before.
 """
 
 from __future__ import annotations
@@ -25,9 +32,10 @@ import logging
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.core.clock import Clock, SystemClock
 from app.config import Settings
-from app.core import checkin
+from app.core import checkin, orders
+from app.core import clock as clock_module
+from app.core.clock import Clock, SystemClock
 from app.core.state import get_state
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
@@ -73,6 +81,21 @@ def note_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+ORDER_DONE = "Да"
+ORDER_NO = "Нет"
+
+
+def order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=ORDER_DONE, callback_data=f"c:o:{order_id}:d"),
+                InlineKeyboardButton(text=ORDER_NO, callback_data=f"c:o:{order_id}:n"),
+            ]
+        ]
+    )
+
+
 async def start(
     sessionmaker, bot: Bot, clock: Clock, *, chat_id: int, timezone: str
 ) -> None:
@@ -101,6 +124,40 @@ async def _advance_to_note(sessionmaker, bot: Bot, *, chat_id: int, message_id: 
     await edit_keyboard(bot, chat_id, message_id, NOTE_TEXT, note_keyboard())
 
 
+async def _ask_order_or_note(
+    sessionmaker,
+    settings: Settings,
+    clock: Clock,
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    checkin_id: int,
+    timezone: str,
+) -> None:
+    """The fork every completed step before the note funnels through
+    (5c, plan section 7): ask the next due, unanswered order, or fall
+    through to the note step. Stateless, like app/core/orders.py's
+    `next_due_order` itself -- nothing here remembers "which step" a
+    check-in is on beyond what that query already answers.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    async with sessionmaker() as session:
+        order = await orders.next_due_order(
+            session, checkin_id, local_date, settings.ORDERS_IN_CHECKIN_MAX
+        )
+    if order is not None:
+        await edit_keyboard(
+            bot,
+            chat_id,
+            message_id,
+            orders.CHECKIN_STEP_TEXT.format(text=order.text),
+            order_keyboard(order.id),
+        )
+        return
+    await _advance_to_note(sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=checkin_id)
+
+
 async def retire(bot: Bot, chat_id: int, message_id: int, streak: int) -> None:
     """Replace the check-in message with its result and drop the buttons.
 
@@ -125,7 +182,7 @@ async def handle_callback(
     update_id: int,
     data: str,
 ) -> None:
-    """`c:start` (3b) / `c:r:<n>` / `c:d:<result>` / `c:n:skip`."""
+    """`c:start` (3b) / `c:r:<n>` / `c:d:<result>` / `c:o:<id>:<d|n>` (5c) / `c:n:skip`."""
     clock = clock or SystemClock()
 
     async with sessionmaker() as session:
@@ -174,8 +231,9 @@ async def handle_callback(
             return
         async with sessionmaker() as session:
             await checkin.set_due_result(session, row.id, checkin.NONE)
-        await _advance_to_note(
-            sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=row.id
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
         )
         return
 
@@ -183,8 +241,27 @@ async def handle_callback(
         async with sessionmaker() as session:
             if await checkin.set_due_result(session, row.id, value) is None:
                 return
-        await _advance_to_note(
-            sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=row.id
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
+        )
+        return
+
+    if step == "o":
+        # 5c: `value` is `<order_id>:<d|n>` -- the generic `split(":", 2)`
+        # above only peeled off the leading `c:o:`, so the order id and
+        # the answer letter are still joined here.
+        order_id_str, _, letter = value.partition(":")
+        try:
+            order_id = int(order_id_str)
+        except ValueError:
+            return
+        result = checkin.DONE if letter == "d" else checkin.NO
+        async with sessionmaker() as session:
+            await orders.record_result(session, row.id, order_id, result, clock=clock)
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
         )
         return
 
@@ -236,7 +313,8 @@ async def finish_and_react(
         row, streak = await checkin.finish(session, clock, timezone)
         if row is None:
             return
-        line = checkin.synthetic_line(row)
+        order_results = await orders.results_for_checkin(session, row.id)
+        line = checkin.synthetic_line(row, order_results)
 
     if message_id is not None:
         await retire(bot, chat_id, message_id, streak)

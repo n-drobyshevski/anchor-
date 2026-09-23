@@ -1,4 +1,6 @@
 import asyncio
+import faulthandler
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -56,6 +58,11 @@ def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
+        # The running deploy keeps serving while the next one migrates, so
+        # an ALTER on a busy table can wait on its lock indefinitely -- the
+        # first 6e deploy sat silently until Railway's healthcheck gave up.
+        # Fail fast and loudly instead; the old deploy keeps running.
+        connection.exec_driver_sql("SET LOCAL lock_timeout = '30s'")
         context.run_migrations()
 
 
@@ -76,7 +83,15 @@ async def run_async_migrations() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
+    # Diagnostics for the 6e deploy, where `alembic upgrade head` never
+    # returned in the new Docker image: if we are still here after 45 s,
+    # dump every thread's stack to stderr (repeating) so the deploy log
+    # shows where. Cancelled on the normal path.
+    faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
+    print("alembic env: running migrations", file=sys.stderr, flush=True)
     asyncio.run(run_async_migrations())
+    print("alembic env: migrations done, engine disposed", file=sys.stderr, flush=True)
+    faulthandler.cancel_dump_traceback_later()
 
 
 if context.is_offline_mode():

@@ -40,6 +40,7 @@ from app.core.outbound_gate import (
     QUIET_HOURS,
     SILENCE,
     TICK,
+    WEEKLY_REVIEW,
     WELFARE_COOLDOWN,
     GateConfig,
     GateCounts,
@@ -313,6 +314,37 @@ def test_tick_with_no_prior_message_at_all_is_allowed():
     """Unlike the silence nudge, a tick has no elapsed-time floor to
     measure, so a null last_user_msg_at is not a blocker."""
     assert run(TICK, a_state(last_user_msg_at=None)) == (True, OK)
+
+
+# --- 5d: weekly_review's own kind rule ----------------------------------
+
+
+def test_weekly_review_fires_when_no_row_exists_this_week():
+    assert run(WEEKLY_REVIEW, facts=GateFacts(review_exists_this_week=False)) == (True, OK)
+
+
+def test_weekly_review_is_refused_when_a_row_already_exists_this_week():
+    """The current code otherwise treats any unmatched kind as TICK --
+    this is the explicit branch that stops that from silently applying
+    to weekly_review (implementation plan's "Decisions")."""
+    result = run(WEEKLY_REVIEW, facts=GateFacts(review_exists_this_week=True))
+    assert result.allowed is False
+    assert result.reason == KIND_RULE_PREFIX + "review_exists"
+
+
+def test_weekly_review_joins_the_welfare_cooldown_set():
+    """Announced in the plan's first response: weekly_review is a
+    *discretionary* kind for the welfare-cooldown purpose, like silence
+    and tick, even though it is planned like a fixed intent."""
+    state = a_state(welfare_at=hours_ago(5))
+    result = run(WEEKLY_REVIEW, state, facts=GateFacts(review_exists_this_week=False))
+    assert result == (False, WELFARE_COOLDOWN)
+
+
+def test_weekly_review_cooldown_expires_after_twenty_four_hours():
+    state = a_state(welfare_at=hours_ago(24.5))
+    result = run(WEEKLY_REVIEW, state, facts=GateFacts(review_exists_this_week=False))
+    assert result == (True, OK)
 
 
 # --- precedence --------------------------------------------------------

@@ -35,6 +35,19 @@ closes the client directly rather than through either one.
 
 from __future__ import annotations
 
+# ruff: noqa: E402 -- the diagnostics below must run before the imports.
+
+import faulthandler
+import sys
+
+# 6e deploy diagnostics: the process never logged anything in the
+# Docker image, so start the stack-dump timer before any heavy import.
+# If startup (imports included) has not finished within
+# STARTUP_TRACE_AFTER_S, every thread's stack goes to stderr, repeating.
+if __name__ == "__main__":  # `python -m app.main` only, never on import in tests
+    print("app.main: importing", file=sys.stderr, flush=True)
+    faulthandler.dump_traceback_later(90, repeat=True, file=sys.stderr)
+
 import asyncio
 import logging
 
@@ -151,14 +164,17 @@ async def _on_startup(app: web.Application) -> None:
     # `alembic upgrade head && python -m app.main`); this is the
     # "then upsert user_state... then persona_version" step that
     # follows, per plan section 5's last line.
+    logger.info("startup step", extra={"event": "startup_tasks"})
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    logger.info("startup step", extra={"event": "set_webhook"})
     await bot.set_webhook(
         url=settings.PUBLIC_URL.rstrip("/") + WEBHOOK_PATH,
         secret_token=settings.TELEGRAM_SECRET_TOKEN,
         allowed_updates=["message", "callback_query"],
     )
+    logger.info("startup step", extra={"event": "register_commands"})
     await register_commands(bot, web_ui_enabled=settings.WEB_UI_ENABLED)
 
     # Web-chat plan track 2: started only when WEB_UI_ENABLED, after the
@@ -170,6 +186,7 @@ async def _on_startup(app: web.Application) -> None:
     if web_bot is not None:
         app["web_tail_task"] = await start_tail(sessionmaker, app["web_hub"])
 
+    logger.info("startup step", extra={"event": "run_worker"})
     app["worker_tasks"] = await run_worker(
         sessionmaker,
         app["dp"],
@@ -181,6 +198,7 @@ async def _on_startup(app: web.Application) -> None:
         app["safety_provider"],
         web_bot,
     )
+    faulthandler.cancel_dump_traceback_later()
     logger.info("startup complete", extra={"event": "startup"})
 
 
@@ -289,6 +307,7 @@ async def _run_polling_mode(
     worker_tasks = await run_worker(
         sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
     )
+    faulthandler.cancel_dump_traceback_later()
     try:
         await run_polling(bot, sessionmaker, settings)
     finally:
@@ -298,7 +317,17 @@ async def _run_polling_mode(
         await bot.session.close()
 
 
+# If startup has not finished by then, dump every thread's stack to
+# stderr (and keep dumping) so a hang is visible in the deploy log
+# instead of a silent healthcheck timeout. Cancelled in _on_startup.
+STARTUP_TRACE_AFTER_S = 90
+
+
 def main() -> None:
+    # stderr, unbuffered, before anything that could hang: proves the
+    # process got past `alembic upgrade head &&` in the start command.
+    print("app.main: imports done, starting", file=sys.stderr, flush=True)
+    faulthandler.enable(file=sys.stderr)
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
     # Before anything is constructed: Bot() and the LLM client both

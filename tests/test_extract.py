@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import extract, proposal
-from app.db.models import Journal, Memory, Proposal, SpendLedger, StateChange, UserState
+from app.db.models import Journal, Memory, Proposal, SpendLedger, StandingOrder, StateChange, UserState
 from conftest import FakeLLMProvider
 
 pytestmark = pytest.mark.asyncio
@@ -716,3 +716,141 @@ async def test_the_worker_runs_the_extract_job_and_sends_the_proposal(sessionmak
     assert len(fake.sent) == 1
     assert "Записать?" in fake.sent[0].text
     assert stored.tg_message_id is not None
+
+
+# --- 5c: standing_order proposals (plan's "Extractor schema") --------------
+
+
+async def test_validate_keeps_a_standing_order_with_a_valid_cadence():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "пить воду по утрам",
+                        "reason": "user asked",
+                        "cadence": "daily",
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert len(result["proposals"]) == 1
+    item = result["proposals"][0]
+    assert item["field"] == "standing_order"
+    assert item["cadence"] == "daily"
+    assert item["weekday"] is None
+
+
+async def test_validate_drops_a_standing_order_with_no_cadence():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "пить воду по утрам",
+                        "reason": None,
+                        "cadence": None,
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"] == []
+
+
+async def test_validate_drops_a_weekly_standing_order_with_no_weekday():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "бегать по средам",
+                        "reason": None,
+                        "cadence": "weekly",
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"] == []
+
+
+async def test_validate_keeps_a_weekly_standing_order_with_a_weekday():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "бегать по средам",
+                        "reason": None,
+                        "cadence": "weekly",
+                        "weekday": 3,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"][0]["cadence"] == "weekly"
+    assert result["proposals"][0]["weekday"] == 3
+
+
+async def test_apply_routes_a_standing_order_to_orders_propose_not_a_proposal_row(sessionmaker, clock):
+    await _seed(sessionmaker, 1)
+    payload = _payload(
+        proposals=[
+            {
+                "field": "standing_order",
+                "value": "пить воду по утрам",
+                "reason": None,
+                "cadence": "daily",
+                "weekday": None,
+            }
+        ]
+    )
+
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
+
+    async with sessionmaker() as session:
+        proposals = (await session.execute(select(Proposal))).scalars().all()
+        order_rows = (await session.execute(select(StandingOrder))).scalars().all()
+
+    assert proposals == [], "a standing_order item must never become a Proposal row"
+    assert len(order_rows) == 1
+    assert order_rows[0].status == "proposed"
+    assert order_rows[0].source == "anchor"
+    assert outcome.order_proposed == order_rows[0].id
+    assert outcome.created == []
+
+
+async def test_apply_drops_a_standing_order_that_fails_the_risk_screen(sessionmaker, clock):
+    await _seed(sessionmaker, 1)
+    payload = _payload(
+        proposals=[
+            {
+                "field": "standing_order",
+                "value": "не есть до вечера",
+                "reason": None,
+                "cadence": "daily",
+                "weekday": None,
+            }
+        ]
+    )
+
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
+
+    async with sessionmaker() as session:
+        order_rows = (await session.execute(select(StandingOrder))).scalars().all()
+    assert order_rows == []
+    assert outcome.order_proposed is None

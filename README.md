@@ -273,14 +273,15 @@ Milestone 3e closes Phase 3 with the thing that catches a regression
 before it reaches someone who did not ask to be written to.
 
 ```
-python -m eval.run              # all 13 cases, ~$0.10
+python -m eval.run              # all 26 cases, ~$0.18
 python -m eval.run --case 04    # one case
 python -m eval.run --dry-run    # build every prompt, call nothing
 ```
 
 **Manual only, never in CI**, because it costs money. Section 9's rule:
 run it before any `persona.md` edit or model change ships. A failure in
-a blocking case — 04, 05, 06, 09, 12, 13 — stops the change. Exit codes
+a blocking case — 04, 05, 06, 09, 12, 13, 15, 16, 18, 20, 21, 22, 26 —
+stops the change. Exit codes
 say which: `0` clean, `1` a blocking failure, `2` only non-blocking
 ones. That split matters, because Cydonia drifting a sentence over on
 case 3 is worth seeing and is not worth halting a deploy for.
@@ -338,8 +339,12 @@ Only the parts that run without a network: the four checks, the
 judge's response *validation*, and the case files — which are validated
 eagerly, so a typo in case 13 fails in a second rather than after $0.09
 of model calls. The case tests double as a guard on the plan's
-contract: 13 cases exist, and the six section 9 marks blocking are the
-six flagged blocking.
+contract: 26 cases exist (phase-5 5a adds 17, 18 and 24 to phase-3's
+13 and phase-4's 14-16; milestone 5b adds 19 and 20; milestone 5c adds
+21; milestone 5d adds 22, 23 and 26; milestone 5e adds 25, the
+callback case), and every id section 9, section 11 (phase-4) and
+phase-5 plan section 11 mark blocking — 04, 05, 06, 09, 12, 13, 15, 16,
+18, 20, 21, 22, 26 — is exactly the set flagged blocking.
 
 Everything else needs a real model to mean anything, and a test against
 a mocked judge would test the mock.
@@ -955,12 +960,24 @@ the extractor and welfare classifier depend on it.
    Disable).
 2. Railway: new project from this repo, add the Postgres plugin, set the
    env vars from `.env.example` (`MODE=webhook`).
-3. Start command: `alembic upgrade head && python -m app.main`.
+3. Start command: set by `railway.json` (Railpack build): `uv run python scripts/migrate.py && uv run python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit`. `deploy/Dockerfile` is parked, see its header.
    Healthcheck path: `/healthz`.
 4. Generate a public domain, set `PUBLIC_URL` to it, redeploy. The app
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
+
+**6e (hardening).** The service builds with Railpack (`railway.json`).
+A Dockerfile build was tried so that `pg_dump` 18 (matching production
+Postgres 18) would be in the image, but that deploy never got past the
+migration step; `deploy/Dockerfile` is parked with notes. Until
+`pg_dump` 18 is available in the runtime image, the nightly backup
+records `pg_dump_failed` (or `not_configured` without an age key) and
+`/state` shows the warning; nothing else depends on it. To enable nightly backups: generate an age keypair offline
+(`age-keygen -o key.txt`), set `BACKUP_AGE_RECIPIENT` to its public
+key, keep `key.txt` off this server, and set the `BACKUP_S3_*`
+variables from the Railway bucket's credentials (`docs/secrets.md`,
+`docs/restore.md`).
 
 ## Privacy
 

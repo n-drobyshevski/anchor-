@@ -26,15 +26,18 @@ from sqlalchemy import func, select
 
 from app.config import Settings
 from app.core.clock import FrozenClock, combine_local, local_date
-from app.core.outbound_gate import EVENING_NAG, MORNING
+from app.core.outbound_gate import EVENING_NAG, MORNING, WEEKLY_REVIEW
 from app.core.scheduler import heartbeat
-from app.db.models import Checkin, Job, Outbound, UserState
+from app.db.models import Checkin, Job, Outbound, UserState, WeeklyReview
 
 TIMEZONE = "Europe/Paris"
 CHAT_ID = 4242
 
 # A plain Wednesday: no DST, nothing else load-bearing.
 DAY = datetime.date(2026, 9, 23)
+
+# The Sunday of that same week -- REVIEW_DOW's default (7).
+SUNDAY = datetime.date(2026, 9, 27)
 
 
 def at(hour: int, minute: int = 0, day: datetime.date = DAY) -> FrozenClock:
@@ -289,3 +292,112 @@ async def test_the_local_date_is_the_users_not_utcs(sessionmaker):
     await _tick(sessionmaker, clock)
     (row,) = await _rows(sessionmaker)
     assert row.local_date == local_date(clock, TIMEZONE)
+
+
+# --- 5d: the weekly review's own window ---------------------------------
+
+
+async def test_weekly_review_is_only_planned_on_review_dow(sessionmaker):
+    """DAY is a Wednesday; REVIEW_DOW defaults to 7 (Sunday)."""
+    await _seed(sessionmaker)
+    assert await _tick(sessionmaker, at(19, 0, DAY)) is None
+    assert await _rows(sessionmaker) == []
+
+
+async def test_weekly_review_is_planned_on_review_dow_at_review_time(sessionmaker):
+    await _seed(sessionmaker)
+    assert await _tick(sessionmaker, at(19, 0, SUNDAY)) is not None
+    rows = await _rows(sessionmaker)
+    assert [row.kind for row in rows] == [WEEKLY_REVIEW]
+    assert rows[0].local_date == SUNDAY
+
+
+async def test_weekly_review_respects_the_grace_window(sessionmaker):
+    """SEND_GRACE_MIN 180 from 19:00 is 22:00, inside the default
+    window -- one minute before target, nothing; on target, planned."""
+    await _seed(sessionmaker)
+    assert await _tick(sessionmaker, at(18, 59, SUNDAY)) is None
+    assert await _tick(sessionmaker, at(19, 0, SUNDAY)) is not None
+
+
+async def test_weekly_review_grace_window_ends_at_quiet_start(sessionmaker):
+    """REVIEW_TIME 22:00 + SEND_GRACE_MIN 180 would naively reach 01:00,
+    deep inside quiet hours -- clamped to QUIET_START, same as the
+    evening nag's own window. EVENING_TIME is moved well clear of 22:00
+    so its own (also quiet_start-clamped) window cannot also be due and
+    win on priority alone."""
+    await _seed(sessionmaker)
+    cfg = settings(EVENING_TIME="06:00", REVIEW_TIME="22:00")
+    assert await _tick(sessionmaker, at(22, 29, SUNDAY), cfg) is not None
+    assert [row.kind for row in await _rows(sessionmaker)] == [WEEKLY_REVIEW]
+
+
+async def test_weekly_review_is_not_planned_once_quiet_hours_start(sessionmaker):
+    await _seed(sessionmaker)
+    cfg = settings(EVENING_TIME="06:00", REVIEW_TIME="22:00")
+    assert await _tick(sessionmaker, at(22, 30, SUNDAY), cfg) is None
+    assert await _rows(sessionmaker) == []
+
+
+async def test_evening_nag_outranks_the_weekly_review(sessionmaker):
+    """PRIORITY: evening_nag > weekly_review > morning > silence. Only
+    reachable by config, since the default windows do not overlap."""
+    await _seed(sessionmaker)
+    cfg = settings(EVENING_TIME="19:00", REVIEW_TIME="19:00", SEND_GRACE_MIN=180)
+    await _tick(sessionmaker, at(19, 5, SUNDAY), cfg)
+    assert [row.kind for row in await _rows(sessionmaker)] == [EVENING_NAG]
+    # The weekly review is planned on the next tick, once the nag is done.
+    await _tick(sessionmaker, at(19, 6, SUNDAY), cfg)
+    assert {row.kind for row in await _rows(sessionmaker)} == {EVENING_NAG, WEEKLY_REVIEW}
+
+
+async def test_the_weekly_review_outranks_morning(sessionmaker):
+    await _seed(sessionmaker)
+    cfg = settings(MORNING_TIME="19:00", REVIEW_TIME="19:00", SEND_GRACE_MIN=180)
+    await _tick(sessionmaker, at(19, 5, SUNDAY), cfg)
+    assert [row.kind for row in await _rows(sessionmaker)] == [WEEKLY_REVIEW]
+    await _tick(sessionmaker, at(19, 6, SUNDAY), cfg)
+    assert {row.kind for row in await _rows(sessionmaker)} == {MORNING, WEEKLY_REVIEW}
+
+
+async def test_weekly_review_is_planned_once_the_nags_window_has_passed(sessionmaker):
+    """Plan section 8: "the review is planned once the nag is planned or
+    its window has passed." A refused-but-still-due evening nag ends the
+    tick entirely (scheduler.py's own documented rule: "a refused
+    higher-priority kind ends the tick"), so a completed check-in during
+    the nag's own (narrow, unclamped) window blocks the review that same
+    minute -- and only once that window has fully elapsed does the
+    heartbeat even consider the review."""
+    checkin_clock = at(18, 15, SUNDAY)
+    await _seed(sessionmaker, last_checkin_at=checkin_clock.now_utc())
+    cfg = settings(EVENING_TIME="18:00", REVIEW_TIME="19:00", SEND_GRACE_MIN=30)
+
+    # 18:15: the nag is due (18:00-18:30) but refused (checkin already
+    # done) -- the tick ends there, nothing planned at all.
+    assert await _tick(sessionmaker, checkin_clock, cfg) is None
+    assert await _rows(sessionmaker) == []
+
+    # 19:00: the nag's window (18:00-18:30) has closed, so it is no
+    # longer "due" and the loop moves on to the review, whose own window
+    # just opened.
+    assert await _tick(sessionmaker, at(19, 0, SUNDAY), cfg) is not None
+    assert [row.kind for row in await _rows(sessionmaker)] == [WEEKLY_REVIEW]
+
+
+async def test_weekly_review_does_not_replan_within_the_same_week(sessionmaker):
+    """A `weekly_review` row already exists for this local week (e.g.
+    from `/review`, which writes no Outbound row at all) -- the gate's
+    own kind rule refuses a second one, even though no Outbound row
+    exists yet to trip `_already_exists`."""
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(
+            WeeklyReview(
+                week_start=datetime.date(2026, 9, 21),  # SUNDAY's own Monday
+                analysis={"wins": [], "misses": [], "patterns": [], "intentions": [], "proposals": []},
+            )
+        )
+        await session.commit()
+
+    assert await _tick(sessionmaker, at(19, 0, SUNDAY)) is None
+    assert await _rows(sessionmaker) == []
