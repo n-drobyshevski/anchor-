@@ -394,7 +394,16 @@ async def test_main_builds_a_dispatcher_with_the_safety_provider(sessionmaker):
     from app import main as main_module
 
     source = inspect.getsource(main_module)
-    assert "build_dispatcher(sessionmaker, settings, provider, safety_provider, clock)" in source
+    # Web-chat plan track 2 appended trailing `hub` and `code_store`
+    # arguments (both None unless WEB_UI_ENABLED) to this same call; the
+    # assertion below is widened to match without weakening what it
+    # actually pins -- the first five positional arguments, in this
+    # order, are what matters for H2 (a wrong-order `hub` would still be
+    # a bug, but not this one).
+    assert (
+        "build_dispatcher(sessionmaker, settings, provider, safety_provider, clock, hub, code_store)"
+        in source
+    )
     assert (
         "provider, cheap_provider, safety_provider, llm_client = build_providers(settings)"
         in source

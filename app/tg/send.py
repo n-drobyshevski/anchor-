@@ -116,7 +116,26 @@ async def edit_keyboard(
     content and must be a no-op rather than an error the worker retries.
     Only that one 400 is swallowed; every other TelegramBadRequest
     propagates.
+
+    Web-chat plan track 1: a negative `message_id` only ever comes from
+    app/web/sink.py's WebSinkSession, which mints them so this guard and
+    `ck_telegram_update_source_sign` can both tell a web-issued id apart
+    from a real Telegram one purely by sign. Calling the *real* Bot with
+    one is the cross-transport bug the design's adversarial review named
+    concretely: a check-in note or proposal issued through the web sink
+    (app/tg/checkin.py's `retire`, app/tg/proposals.py) but later retired
+    or expired over a Telegram-side event would otherwise get Telegram's
+    "message to edit not found" 400, which this function does not
+    swallow, three times (MAX_ATTEMPTS), losing the retire. Refusing up
+    front instead makes it the same harmless no-op `_NOT_MODIFIED`
+    already is for a replay -- callers already treat a `False` return as
+    "nothing to do", never as an error. The reverse direction needs no
+    guard: WebSinkSession itself treats an edit of an id it never issued,
+    or a positive one, as a normal edit of an unknown message and simply
+    returns True (see that module).
     """
+    if message_id < 0 and not getattr(bot, "is_web_sink", False):
+        return False
     if len(text) > MESSAGE_LIMIT:
         raise ValueError(f"keyboard message is {len(text)} chars, limit is {MESSAGE_LIMIT}")
     try:

@@ -79,6 +79,19 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "error_code",
     "cards",
     "dropped",
+    # web-chat plan track 2 (design section 5). "source" is
+    # 'telegram'/'web' (app/db/models.py's TelegramUpdate.source), never
+    # which text or command a request carried; "route" is a fixed
+    # handler name (e.g. "auth_passphrase", "send"), never a URL path or
+    # query string, which -- unlike this closed, hand-written set of
+    # route names -- could carry a memory id, a card id or a search
+    # term. Every web-chat log line uses only these two plus the
+    # existing "event" key, with event values fixed to web_login_ok/
+    # web_login_fail/web_code_sent/web_lockout/web_logout/web_rejected
+    # (app/web/routes.py, app/tg/router.py's /weblogout) -- never the
+    # passphrase, the code, a session token, or an IP address.
+    "source",
+    "route",
 )
 
 

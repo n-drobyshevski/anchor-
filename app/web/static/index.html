@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Anchor</title>
+<link rel="icon" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer type="module"></script>
+</head>
+<body>
+
+<!-- Login screen: two steps (passphrase, then code), shown/hidden by app.js
+     based on GET /api/me. Kept in the DOM from the start (no template
+     cloning, no innerHTML) so app.js only ever toggles hidden/values. -->
+<section id="login" hidden>
+  <form id="login-passphrase" class="login-card" autocomplete="on">
+    <h1>Anchor</h1>
+    <p class="login-hint">Введи пароль.</p>
+    <label for="passphrase-input" class="sr-only">Пароль</label>
+    <input id="passphrase-input" name="passphrase" type="password"
+           autocomplete="current-password" required minlength="1" maxlength="4000">
+    <button type="submit">Войти</button>
+    <p id="passphrase-error" class="login-error" role="alert" hidden></p>
+  </form>
+
+  <form id="login-code" class="login-card" autocomplete="on" hidden>
+    <h1>Anchor</h1>
+    <p class="login-hint">Код отправлен в Telegram.</p>
+    <label for="code-input" class="sr-only">Код</label>
+    <input id="code-input" name="code" type="text" inputmode="text"
+           autocomplete="one-time-code" autocapitalize="characters"
+           autocorrect="off" spellcheck="false" required maxlength="9">
+    <button type="submit">Подтвердить</button>
+    <button type="button" id="code-back" class="link-button">Назад</button>
+    <p id="code-error" class="login-error" role="alert" hidden></p>
+  </form>
+</section>
+
+<!-- Chat screen -->
+<div id="chat" hidden>
+  <header id="chat-header">
+    <span class="brand">Anchor</span>
+    <span id="conn-dot" class="conn-dot" role="img" aria-label="нет связи"></span>
+    <div class="header-spacer"></div>
+    <button type="button" id="pause-button" class="header-button">Пауза</button>
+    <button type="button" id="logout-button" class="header-button">Выйти</button>
+  </header>
+
+  <div id="reconnect-banner" role="alert" hidden>Нет соединения. Переподключаемся…</div>
+
+  <main id="log" role="log" aria-live="polite" aria-relevant="additions">
+    <div id="top-sentinel"></div>
+    <p id="empty-state" hidden>Напиши что-нибудь. /out — пауза, /in — вернуться.</p>
+  </main>
+
+  <p id="typing-indicator" hidden>печатает…</p>
+
+  <button type="button" id="jump-down" class="jump-pill" hidden>↓ Новые</button>
+
+  <div id="toast-region" role="status" aria-live="polite"></div>
+
+  <form id="composer">
+    <textarea id="composer-input" rows="1" placeholder="Сообщение"
+              maxlength="4000" required autocomplete="off"></textarea>
+    <button type="submit" id="send-button" aria-label="Отправить">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <path d="M3 11.5 20.5 4 13 21.5l-2.2-7.3L3 11.5Z" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </form>
+</div>
+
+</body>
+</html>

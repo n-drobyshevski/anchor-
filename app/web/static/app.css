@@ -1,0 +1,495 @@
+/* Anchor web chat: styles.
+   Tokens on :root, redefined for dark under prefers-color-scheme.
+   No `style=` attributes anywhere (grep-enforced) — everything here or
+   set via CSSOM (element.style.x) from app.js, which the page's CSP
+   (require-trusted-types-for 'script') allows. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1c1c1a;
+  --text-muted: #6b6b66;
+  --border: #dcdcd6;
+  --accent: #2f6f4f;
+  --accent-text: #ffffff;
+  --bubble-user: #2f6f4f;
+  --bubble-user-text: #ffffff;
+  --bubble-bot: #ffffff;
+  --bubble-bot-text: #1c1c1a;
+  --bubble-muted: #eeeee8;
+  --bubble-muted-text: #57574f;
+  --danger: #a3362b;
+  --focus: #2f6f4f;
+  --dot-ok: #2f6f4f;
+  --dot-warn: #b8860b;
+  --dot-bad: #a3362b;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17181a;
+    --surface: #202225;
+    --text: #ececea;
+    --text-muted: #9a9a96;
+    --border: #34363a;
+    --accent: #5fae85;
+    --accent-text: #0c1210;
+    --bubble-user: #3f7f5c;
+    --bubble-user-text: #f4fbf6;
+    --bubble-bot: #26282b;
+    --bubble-bot-text: #ececea;
+    --bubble-muted: #201f1a;
+    --bubble-muted-text: #b8b6a8;
+    --danger: #e0796d;
+    --focus: #5fae85;
+    --dot-ok: #5fae85;
+    --dot-warn: #d3a441;
+    --dot-bad: #e0796d;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #17181a;
+  --surface: #202225;
+  --text: #ececea;
+  --text-muted: #9a9a96;
+  --border: #34363a;
+  --accent: #5fae85;
+  --accent-text: #0c1210;
+  --bubble-user: #3f7f5c;
+  --bubble-user-text: #f4fbf6;
+  --bubble-bot: #26282b;
+  --bubble-bot-text: #ececea;
+  --bubble-muted: #201f1a;
+  --bubble-muted-text: #b8b6a8;
+  --danger: #e0796d;
+  --focus: #5fae85;
+  --dot-ok: #5fae85;
+  --dot-warn: #d3a441;
+  --dot-bad: #e0796d;
+}
+
+* { box-sizing: border-box; }
+
+/* The UA stylesheet's `[hidden] { display: none }` loses to *any*
+   author declaration, regardless of specificity -- origin, not
+   specificity, breaks that tie. `#login { display: flex }`,
+   `.login-card { display: flex }` and `#chat { display: flex }` below
+   are all author rules that match these same elements, so without this
+   they kept every screen visible even while `hidden` was set: a
+   logged-out visitor saw the composer, and a logged-in one saw both
+   login cards stacked above the chat (a high-severity finding). This
+   one declaration re-asserts `hidden` over every one of them at once,
+   rather than scoping each of those selectors with `:not([hidden])`. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+}
+
+button, input, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+  padding: 0;
+  margin: -1px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Login ---------- */
+
+#login {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 22rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-card h1 {
+  margin: 0 0 4px;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.login-hint {
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.login-card input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 1rem;
+  width: 100%;
+}
+
+.login-card button[type="submit"] {
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-card button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 0;
+  align-self: flex-start;
+  font-size: 0.9rem;
+}
+
+.login-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+/* ---------- Chat shell ---------- */
+
+#chat {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  max-width: 42rem;
+  margin: 0 auto;
+  position: relative;
+}
+
+#chat-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  padding-top: max(12px, env(safe-area-inset-top));
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--dot-bad);
+  flex: none;
+}
+
+.conn-dot[data-state="ok"] { background: var(--dot-ok); }
+.conn-dot[data-state="reconnecting"] { background: var(--dot-warn); }
+.conn-dot[data-state="down"] { background: var(--dot-bad); }
+
+.header-spacer { flex: 1; }
+
+.header-button {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.9rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.header-button:hover { border-color: var(--text-muted); }
+
+#reconnect-banner {
+  background: var(--danger);
+  color: #fff;
+  text-align: center;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+/* ---------- Message log ---------- */
+
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overscroll-behavior-y: contain;
+}
+
+#top-sentinel {
+  height: 1px;
+}
+
+#empty-state {
+  margin: auto 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.msg-row {
+  display: flex;
+  flex-direction: column;
+  max-width: 84%;
+}
+
+.msg-row.role-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.msg-row.role-assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.bubble {
+  border-radius: 16px;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.98rem;
+}
+
+.role-user .bubble {
+  background: var(--bubble-user);
+  color: var(--bubble-user-text);
+  border-bottom-right-radius: 4px;
+}
+
+.role-assistant .bubble {
+  background: var(--bubble-bot);
+  color: var(--bubble-bot-text);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+
+.msg-row[data-kind="canned"] .bubble,
+.msg-row[data-kind="welfare"] .bubble,
+.msg-row[data-kind="system"] .bubble,
+.msg-row[data-kind="checkin"] .bubble {
+  background: var(--bubble-muted);
+  color: var(--bubble-muted-text);
+  border-color: var(--border);
+}
+
+.msg-time {
+  margin-top: 3px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+.msg-status {
+  margin-top: 3px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+.msg-retry {
+  margin-top: 4px;
+  background: none;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  align-self: flex-end;
+}
+
+.msg-note {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* Inline keyboards under a bot bubble. */
+.keyboard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.keyboard-row {
+  display: flex;
+  gap: 6px;
+}
+
+.keyboard-button {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.keyboard-button:hover:not(:disabled) { border-color: var(--accent); }
+
+.keyboard-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---------- Typing indicator ---------- */
+
+#typing-indicator {
+  margin: 0 16px 4px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* ---------- Jump-to-latest pill ---------- */
+
+.jump-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 4;
+}
+
+/* ---------- Toasts ---------- */
+
+#toast-region {
+  position: absolute;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.toast {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* ---------- Composer ---------- */
+
+#composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#composer-input {
+  flex: 1;
+  resize: none;
+  max-height: 40vh;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: var(--surface);
+  line-height: 1.35;
+  overflow-y: auto;
+}
+
+#send-button {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+#send-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

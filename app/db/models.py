@@ -69,10 +69,29 @@ class Base(DeclarativeBase):
 
 
 class TelegramUpdate(Base):
+    """The inbound queue (plan section 2 / 6.3), plus the web-chat transport.
+
+    `source` and `client_key` are the web-chat plan's addition (track 1
+    of that plan). `source` says which Bot app/worker.py must feed the
+    row to -- the real one for 'telegram', WebSinkSession's for 'web' --
+    and `ck_telegram_update_source_sign` below ties it to the sign of
+    `update_id` at the database level: Telegram's own ids are always
+    non-negative, web ids always come from `web_update_seq` and are
+    always negative (app/db/queue.py's enqueue_web), so the two id
+    spaces can never collide and a bug that mislabels a row is a
+    constraint violation, not a silent misroute.
+
+    `client_key` is POST /api/send's idempotency key: nullable because
+    only web rows carry one, with a partial unique index (see the
+    migration) rather than a plain one, so NULL telegram rows are never
+    compared against each other for uniqueness.
+    """
+
     __tablename__ = "telegram_update"
 
     # Telegram's own update_id, provided explicitly on insert — not a
-    # generated identity column.
+    # generated identity column. Web rows get a negative id from
+    # web_update_seq instead (app/db/queue.py's enqueue_web).
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
@@ -82,8 +101,55 @@ class TelegramUpdate(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    source: Mapped[str] = mapped_column(
+        String, nullable=False, default="telegram", server_default=text("'telegram'")
+    )
+    client_key: Mapped[str | None] = mapped_column(String)
 
-    __table_args__ = (Index("ix_telegram_update_status_update_id", "status", "update_id"),)
+    __table_args__ = (
+        Index("ix_telegram_update_status_update_id", "status", "update_id"),
+        CheckConstraint("source in ('telegram', 'web')", name="ck_telegram_update_source"),
+        CheckConstraint(
+            "(source = 'web') = (update_id < 0)", name="ck_telegram_update_source_sign"
+        ),
+        Index(
+            "uq_telegram_update_client_key",
+            "client_key",
+            unique=True,
+            postgresql_where=text("client_key IS NOT NULL"),
+        ),
+    )
+
+
+class WebSession(Base):
+    """A logged-in web-chat session (web-chat plan section 4, track 1).
+
+    `token_hash` is the primary key rather than a surrogate id: the only
+    read this table ever serves is "does this cookie's hashed token name
+    a live session" (app/web/auth.py, track 2), so a surrogate id would
+    be a second key nothing looks up by. Only sha256(token) is ever
+    stored -- never the token itself -- the same shape as
+    TELEGRAM_SECRET_TOKEN's hmac.compare_digest check in
+    app/tg/webhook.py: a leaked row cannot be replayed as a cookie.
+
+    `expires_at` is the absolute session ceiling (WEB_SESSION_MAX_DAYS);
+    `last_seen_at` is the idle timeout's clock (WEB_SESSION_IDLE_HOURS),
+    both enforced by track 2's session validation, not by a database
+    constraint -- there is no CHECK here for the same reason
+    `user_state.quiet_until` has none: "is this still valid" depends on
+    the current time, which a CHECK constraint cannot read.
+    """
+
+    __tablename__ = "web_session"
+
+    token_hash: Mapped[bytes] = mapped_column(sa.LargeBinary, primary_key=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Job(Base):

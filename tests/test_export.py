@@ -319,6 +319,14 @@ NOT_EXPORTED = {
     "job": "queue plumbing; payloads reference rows that are exported",
     "pending_memory": "unclassified /remember text, exported once it becomes a memory",
     "persona_version": "a hash of a file in this repo, not user data",
+    # Web-chat plan track 1 (app/db/models.py's WebSession). Holds only
+    # sha256(token) and timestamps -- a login credential's fingerprint,
+    # not conversation content -- and /export handing back a still-valid
+    # session's hash would be a second way to leak the very credential
+    # the design goes out of its way never to store in plaintext
+    # (app/web/auth.py, track 2). purge.py still wipes it: "delete all
+    # my data" and "give me all my data" are not the same promise.
+    "web_session": "a session credential's hash, not conversation content",
 }
 
 

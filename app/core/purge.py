@@ -93,6 +93,15 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # Web-chat plan track 1 (app/db/models.py's WebSession). A live
+    # session cookie is a credential, and "delete all my data" has to
+    # revoke every way back in along with the data itself -- leaving a
+    # `web_session` row behind after a wipe would mean the browser that
+    # ran /delete could still read the (now-empty) conversation through
+    # a cookie /delete never touched. tests/test_delete.py's coverage
+    # test is what forces this: `web_session` has to be listed here or
+    # in KEPT_TABLES, or that test fails.
+    "web_session",
 )
 
 # user_state is reset in place, never dropped. persona_version is a

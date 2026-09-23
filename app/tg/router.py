@@ -45,7 +45,7 @@ pool) is shared across every turn.
 
 from __future__ import annotations
 
-
+import logging
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -75,6 +75,10 @@ from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import welfare as welfare_ui
+from app.web import auth as web_auth
+from app.web.hub import WebHub
+
+logger = logging.getLogger(__name__)
 
 NON_TEXT_REPLY = "Пока только текст."
 
@@ -113,6 +117,15 @@ BOT_COMMANDS = [
     BotCommand(command="reject", description="Отклонить карточку"),
 ]
 
+# Web-chat plan track 2 (design section 4): the kill switch for a stolen
+# or merely forgotten-open web session. Kept out of BOT_COMMANDS proper
+# and added by register_commands() only when WEB_UI_ENABLED -- listing
+# it, and registering its handler above, unconditionally used to mean
+# the command showed in Telegram's menu and replied "closed" even on a
+# deploy where the web UI was never turned on (a low-severity finding:
+# "Telegram behavior changes even when WEB_UI_ENABLED=false").
+WEBLOGOUT_COMMAND = BotCommand(command="weblogout", description="Закрыть все веб-сессии")
+
 QUIET_SET = "Тихо до {until}."
 QUIET_OFF_REPLY = "Снова на связи."
 QUIET_USAGE = "Сколько? /quiet 2h, /quiet 30m, /quiet 1d или /quiet off."
@@ -137,10 +150,32 @@ FOCUS_USAGE = "Как именно? /focus on или /focus off."
 FOCUS_ON = "Фокус включён."
 FOCUS_OFF = "Фокус выключен."
 
+# Web-chat plan track 1: the second, independent layer of defense
+# against /export and /delete from the web (design section 2; the
+# adversarial review's finding 2 calls this out specifically -- ingress
+# blocking the text/callback is layer one, app/web/ingress.py, and must
+# not be the *only* layer). A guard checking `message.bot.is_web_sink` /
+# `callback.bot.is_web_sink` at the top of each handler below means
+# these stay safe even if a future change to ingress.py's tokenization
+# ever drifts from what this router actually matches.
+WEB_ONLY_REPLY = "Эта команда доступна только в Telegram."
 
-async def register_commands(bot) -> None:
-    """set_my_commands on startup (plan section 12)."""
-    await bot.set_my_commands(BOT_COMMANDS)
+# Web-chat plan track 2's /weblogout reply (design section 4).
+WEBLOGOUT_REPLY = "Все веб-сессии закрыты."
+
+
+async def register_commands(bot, *, web_ui_enabled: bool = False) -> None:
+    """set_my_commands on startup (plan section 12).
+
+    `web_ui_enabled` defaults to False so every call site and test that
+    predates the web UI keeps behaving exactly as before; app/main.py
+    passes settings.WEB_UI_ENABLED explicitly. Only then is /weblogout
+    added to the menu -- see BOT_COMMANDS' comment on WEBLOGOUT_COMMAND.
+    """
+    commands = list(BOT_COMMANDS)
+    if web_ui_enabled:
+        commands.append(WEBLOGOUT_COMMAND)
+    await bot.set_my_commands(commands)
 
 
 def _format_outbound(summary, tz: ZoneInfo, now_utc) -> list[str]:
@@ -289,8 +324,25 @@ def build_router(
     provider: LLMProvider,
     safety_provider: LLMProvider | None = None,
     clock: Clock | None = None,
+    hub: WebHub | None = None,
+    code_store: web_auth.CodeStore | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
+
+    `hub` (web-chat plan track 2) defaults to None so every test
+    predating the web UI keeps its shorter call; app/main.py passes the
+    process's one WebHub only when WEB_UI_ENABLED. It, and `code_store`
+    beside it, back exactly one handler, `/weblogout` below, which is
+    itself only registered -- and only listed in BOT_COMMANDS -- when
+    `hub is not None`: with the web UI disabled there is no web_session
+    table row and no hub to matter, so `/weblogout` behaves exactly as
+    it did before the web chat existed, falling through to an ordinary
+    persona turn like any other unrecognized-as-a-command text (a
+    low-severity finding: it used to always register, always show in
+    the Telegram command menu, and always reply "closed", even with the
+    web UI off). Every other handler in this router reaches the web
+    chat only indirectly, through `message.bot.is_web_sink`/`callback.
+    bot.is_web_sink`, which needs no hub at all.
 
     A factory rather than a shared module-level instance, because a
     Router can only ever be attached to one Dispatcher — tests that
@@ -569,6 +621,9 @@ def build_router(
     async def export_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
             return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
         async with sessionmaker() as session:
             user_state = await get_state(session)
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
@@ -591,6 +646,9 @@ def build_router(
     async def delete_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
             return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
             message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
@@ -598,6 +656,33 @@ def build_router(
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
         )
+
+    if hub is not None:
+
+        @router.message(Command("weblogout"))
+        async def weblogout(message: Message, event_update: Update) -> None:
+            """The kill switch (design section 4): end every web_session
+            row, close every live SSE stream/callback allowlist, and
+            invalidate every pending login code.
+
+            Telegram-only in practice already -- a stolen web session
+            cannot reach this handler at all, since it can only ever
+            produce a synthetic Update fed to WebSinkSession's Bot, not
+            a real Telegram message -- so this needs no is_web_sink
+            guard of its own the way export_command/delete_command do.
+            Only registered at all when `hub is not None` (the WEB_UI_
+            ENABLED signal): see build_router's docstring for why the
+            web-UI-disabled case is no longer "register it anyway and
+            reply as if something happened."
+            """
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                await web_auth.revoke_all(session, hub, code_store)
+            logger.info(
+                "web sessions revoked", extra={"event": "web_logout", "route": "weblogout"}
+            )
+            await _reply_once(message, event_update.update_id, WEBLOGOUT_REPLY)
 
     # --- 2b: memory (plan section 11) ---
 
@@ -886,7 +971,18 @@ def build_router(
         Deliberately not gated on _once: the wipe destroys the `message`
         rows that gate reads, and a replayed press is harmless anyway
         (see app/tg/data.py).
+
+        Web-chat plan track 1: guarded the same way export_command/
+        delete_command are, and belt-and-braces on top of that --
+        app/web/ingress.py refuses to ever enqueue a `d:`-prefixed press
+        in the first place, and delete_command's own guard above means
+        WebSinkSession never sends this keyboard to begin with. Three
+        independent things would all have to fail at once for this
+        branch to matter, which is the point.
         """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
         await data_ui.handle_delete_callback(
             sessionmaker,
             callback.bot,
@@ -896,6 +992,7 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+            hub=hub,
         )
 
     @router.callback_query(F.data.startswith("w:"))

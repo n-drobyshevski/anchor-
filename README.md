@@ -826,6 +826,56 @@ OpenRouter's reported `usage.cost` — and tells you whether annotations
 arrive at all. Then `python -m eval.run`, which must pass cases 15 and
 16 or exit non-zero.
 
+## Web UI
+
+A minimal Russian-language web chat for this same single-user bot,
+served by the same aiohttp process. Off by default (`WEB_UI_ENABLED=false`);
+turning it on requires `MODE=webhook` and an `https://` `PUBLIC_URL`
+(`http://localhost`/`127.0.0.1` only for local dev) — `check_runtime_settings`
+refuses to boot otherwise.
+
+**Enable it:**
+
+```bash
+uv run python scripts/web_passphrase.py   # prints WEB_PASSPHRASE_HASH=...
+```
+
+Set `WEB_UI_ENABLED=true` and the printed `WEB_PASSPHRASE_HASH` in the
+deployment environment, then open `PUBLIC_URL` in a browser.
+
+**Security model.** Every web message becomes a synthetic Telegram
+`Update` (negative `update_id`, `source='web'` in `telegram_update`)
+that the same single-concurrency worker feeds through the exact same
+`Dispatcher` as a real Telegram message — pause words, `/out`/`/in`,
+the daily spend cap, the welfare check, scenes and extraction all apply
+unchanged, because none of `app/core/` had to change at all. Replies to
+a web-origin message go to the web only (Telegram-origin and proactive
+messages are mirrored into the web view too, so it shows the whole
+conversation). Login is two factors: a passphrase (stdlib `hashlib.
+scrypt`, `N=2**17`), then an 8-character one-time code the *real* bot
+sends to `ALLOWED_CHAT_ID` — a stolen passphrase alone is not enough.
+Sessions are an opaque cookie whose sha256 alone is stored in Postgres;
+`/weblogout` (Telegram-only, obviously) revokes every session and
+closes every live connection at once. The page ships a strict CSP
+(`script-src 'self'`, `require-trusted-types-for 'script'`), renders
+all bot/user text with `textContent` only (no markdown, no
+auto-linking — model output is untrusted), and every `/api/*` request
+is checked against `Sec-Fetch-Site`/`Origin` before anything else runs,
+failing closed when either is missing or wrong.
+
+**Limitations.** `/delete` and `/export` are refused on the web, in two
+independent layers (an ingress-side command match, and an
+`is_web_sink` guard inside the handlers themselves) — a stolen web
+session must not be able to wipe the data or produce a bulk export;
+both stay Telegram-only. Proposal confirmations (due-action/focus/rule
+prompts) and the outbound nag's buttons are Telegram-only too — they
+are issued by the background job path, which always uses the real bot,
+not the per-row bot the update path picks; the web view shows their
+text but their buttons do not appear there, and the confirmation is
+Telegram-side. Rate limits and the in-memory login-code/session state
+are per-process, so this assumes the single Railway replica the rest of
+this README already assumes (see "Deploy" above).
+
 ## Decisions
 
 The `## Hardening H*` sections that used to live here have moved to
