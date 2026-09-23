@@ -1,4 +1,6 @@
 import asyncio
+import faulthandler
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -81,7 +83,15 @@ async def run_async_migrations() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
+    # Diagnostics for the 6e deploy, where `alembic upgrade head` never
+    # returned in the new Docker image: if we are still here after 45 s,
+    # dump every thread's stack to stderr (repeating) so the deploy log
+    # shows where. Cancelled on the normal path.
+    faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
+    print("alembic env: running migrations", file=sys.stderr, flush=True)
     asyncio.run(run_async_migrations())
+    print("alembic env: migrations done, engine disposed", file=sys.stderr, flush=True)
+    faulthandler.cancel_dump_traceback_later()
 
 
 if context.is_offline_mode():
