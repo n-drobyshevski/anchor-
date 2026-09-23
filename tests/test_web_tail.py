@@ -9,6 +9,10 @@
 - the second, state_change cursor: a mapped field publishes
   publish_invalidate(topic), an unmapped one publishes nothing, and it
   gets the same startup/reset semantics as the message cursor
+- the third, proposal fingerprint poll (W2): a create/accept/reject/
+  expire moves the fingerprint and publishes both "proposals" and
+  "state"; an unrelated poll with nothing new publishes nothing; the
+  fingerprint is seeded at boot the same way the other two cursors are
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 
+from app.core import proposal as proposal_core
+from app.core.clock import SystemClock
 from app.db.models import Message, StateChange, TelegramUpdate
 from app.web import tail as tail_module
 from app.web.hub import WebHub
@@ -23,7 +29,9 @@ from app.web.tail import (
     STATE_CHANGE_FIELD_TOPIC,
     _max_message_id,
     _max_state_change_id,
+    _proposals_fingerprint,
     _tail_once,
+    _tail_proposals_once,
     _tail_state_change_once,
     start_tail,
     stop_tail,
@@ -461,6 +469,128 @@ async def test_start_tail_seeds_both_cursors_so_pre_boot_rows_are_never_replayed
     task = await start_tail(sessionmaker, hub)
     try:
         await asyncio.sleep(0.05)  # let at least one poll run
+    finally:
+        await stop_tail(task)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert events.backlog == []
+
+
+# --- the proposal fingerprint poll (W2) ----------------------------------
+
+
+async def test_proposals_fingerprint_is_zero_on_an_empty_table(sessionmaker):
+    async with sessionmaker() as session:
+        assert await _proposals_fingerprint(session) == (0, None, 0)
+
+
+async def test_new_pending_proposal_publishes_proposals_and_state(sessionmaker):
+    clock = SystemClock()
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fp = await _tail_proposals_once(session, hub, (0, None, 0))
+
+    async with sessionmaker() as session:
+        await proposal_core.create(
+            session, clock, field=proposal_core.DUE_ACTION, value="сдать отчёт", reason=None
+        )
+
+    async with sessionmaker() as session:
+        fp = await _tail_proposals_once(session, hub, fp)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.data["topic"] for e in events.backlog] == ["proposals", "state"]
+
+
+async def test_a_repeat_poll_with_no_change_publishes_nothing(sessionmaker):
+    clock = SystemClock()
+    hub = WebHub()
+    async with sessionmaker() as session:
+        await proposal_core.create(
+            session, clock, field=proposal_core.DUE_ACTION, value="сдать отчёт", reason=None
+        )
+    async with sessionmaker() as session:
+        fp = await _tail_proposals_once(session, hub, (0, None, 0))
+
+    async with sessionmaker() as session:
+        fp_again = await _tail_proposals_once(session, hub, fp)
+    assert fp_again == fp
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    # One poll's worth of events only -- the repeat poll published nothing.
+    assert [e.data["topic"] for e in events.backlog] == ["proposals", "state"]
+
+
+async def test_accept_moves_the_fingerprint(sessionmaker):
+    from app.db.models import UserState
+
+    clock = SystemClock()
+    hub = WebHub()
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=4242, timezone="Europe/Paris"))
+        await session.commit()
+        created, _ = await proposal_core.create(
+            session, clock, field=proposal_core.FOCUS_ON, value="on", reason=None
+        )
+        pid = created.id
+    async with sessionmaker() as session:
+        fp = await _tail_proposals_once(session, hub, (0, None, 0))
+
+    async with sessionmaker() as session:
+        await proposal_core.accept(session, clock, pid)
+
+    async with sessionmaker() as session:
+        fp2 = await _tail_proposals_once(session, hub, fp)
+    assert fp2 != fp
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    # Two polls, each moving the fingerprint: create, then accept.
+    assert [e.data["topic"] for e in events.backlog] == [
+        "proposals", "state", "proposals", "state"
+    ]
+
+
+async def test_expire_via_a_second_create_moves_the_fingerprint(sessionmaker):
+    """create() itself expires any outstanding pending proposal (one
+    pending at a time), which flips the pending count 1 -> 1 but moves
+    max(id) -- the fingerprint still catches it."""
+    clock = SystemClock()
+    hub = WebHub()
+    async with sessionmaker() as session:
+        await proposal_core.create(
+            session, clock, field=proposal_core.DUE_ACTION, value="первое", reason=None
+        )
+    async with sessionmaker() as session:
+        fp = await _tail_proposals_once(session, hub, (0, None, 0))
+
+    async with sessionmaker() as session:
+        await proposal_core.create(
+            session, clock, field=proposal_core.FOCUS_ON, value="on", reason=None
+        )
+    async with sessionmaker() as session:
+        fp2 = await _tail_proposals_once(session, hub, fp)
+    assert fp2 != fp
+
+
+async def test_start_tail_also_seeds_the_proposals_fingerprint(sessionmaker, monkeypatch):
+    """The same low-severity-finding shape as the message/state_change
+    cursors' own boot test: a pre-boot proposal must not be replayed as
+    a live invalidate on the first poll after start."""
+    clock = SystemClock()
+    async with sessionmaker() as session:
+        await proposal_core.create(
+            session, clock, field=proposal_core.DUE_ACTION, value="до старта", reason=None
+        )
+
+    monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
+    hub = WebHub()
+    task = await start_tail(sessionmaker, hub)
+    try:
+        await asyncio.sleep(0.05)
     finally:
         await stop_tail(task)
 

@@ -81,6 +81,17 @@ export function connect() {
   reconnectTimer = null;
   es = new EventSource('/api/events');
   es.addEventListener('open', () => {
+    // An invalidate published while this stream was down (an outage,
+    // the reader's laptop asleep, ...) reaches no subscriber -- SSE
+    // has no replay/backlog. `'*'` tells every useAutoRefetch() (and
+    // main.js's own proposals-badge listener below, which treats it
+    // the same way) to resync unconditionally, the same recovery an
+    // ordinary tab-visibility change already gives a *mounted* screen;
+    // this is what covers one that was never mounted, or a signal
+    // whose screen was not open, during the drop. Gated on
+    // `sseErrorCount > 0` so an ordinary first connect-on-login (no
+    // prior error) does not fire a resync nothing has gone stale for.
+    if (sseErrorCount > 0) invalidate.value = { topic: '*' };
     sseErrorCount = 0;
     conn.value = 'ok';
     reconnectBanner.value = false;

@@ -5,7 +5,7 @@
 // only means adding its hash here and to ui/Nav.js's NAV_ITEMS.
 import { route } from './store.js';
 
-const KNOWN_ROUTES = ['#/chat'];
+const KNOWN_ROUTES = ['#/chat', '#/state', '#/proposals'];
 const DEFAULT_ROUTE = '#/chat';
 
 function normalize(hash) {

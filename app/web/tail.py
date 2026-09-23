@@ -28,6 +28,7 @@ import logging
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core import proposal as proposal_core
 from app.db.models import Message, StateChange
 from app.web.hub import WebHub
 
@@ -49,12 +50,16 @@ POLL_INTERVAL_SECONDS = 2.0
 # should assume "the invalidate fired" means "the change happened" --
 # only the reverse:
 # - app/core/proposal.py's create()/accept()/reject() change
-#   `proposal.status` with no state_change row of their own (a future
-#   Proposals screen would need one added there, mapped to a topic --
-#   INVALIDATE_TOPICS' own "proposals" entry has no producer yet and is
-#   left unused rather than wired to this table's "idle_run"-shaped
-#   workaround, which would be the wrong signal for a different kind of
-#   row).
+#   `proposal.status` with no state_change row of their own. W2 does
+#   *not* give them one -- see _tail_proposals_once below instead: a
+#   cheap fingerprint poll over the `proposal` table itself, run
+#   alongside this one, is what makes a Telegram-issued create/
+#   accept/reject/expire show up as an invalidate("proposals") on the
+#   web. A web-issued proposal write publishes its own invalidate()
+#   directly (app/web/panels/proposals.py), the same way app/web/
+#   panels/state.py does for "state" -- this fingerprint poll's job is
+#   only to cover the Telegram/extractor side, which writes no such
+#   event of its own.
 # - accept()'s RULE branch writes a memory row via app/core/memory.py's
 #   write_memory() without a matching state_change("memory") row.
 # - app/research/jobs.py inserts a new StudyCard with no state_change
@@ -312,11 +317,72 @@ async def _tail_state_change_once(session: AsyncSession, hub: WebHub, cursor: in
     return rows[-1].id if rows else cursor
 
 
+# --- the third cursor: proposal -> invalidate ----------------------------
+
+# A cheap fingerprint rather than a row cursor (W2 plan section 4): the
+# `proposal` table writes no `state_change` row for any of create(),
+# accept() or reject() (see STATE_CHANGE_FIELD_TOPIC's own comment
+# above), so there is no append-only log to page through the way
+# `message`/`state_change` have. `(max(id), max(decided_at), pending
+# count)` changes on every one of the three writes that matter here --
+# a new proposal bumps max(id); a decision bumps max(decided_at); an
+# expiry (the only one of the three that touches neither a fresh row
+# nor, necessarily, the *latest* decided_at if a newer proposal was
+# already decided) still moves the pending count from 1 to 0 -- so the
+# triple is enough to notice "something in this table changed" without
+# reading the whole table every two seconds.
+ProposalFingerprint = tuple[int, str | None, int]
+
+
+async def _proposals_fingerprint(session: AsyncSession) -> ProposalFingerprint:
+    result = await session.execute(
+        select(
+            func.max(proposal_core.Proposal.id),
+            func.max(proposal_core.Proposal.decided_at),
+            func.count().filter(proposal_core.Proposal.status == proposal_core.PENDING),
+        )
+    )
+    max_id, max_decided_at, pending_count = result.one()
+    return (
+        max_id or 0,
+        max_decided_at.isoformat() if max_decided_at is not None else None,
+        pending_count or 0,
+    )
+
+
+async def _tail_proposals_once(
+    session: AsyncSession, hub: WebHub, fingerprint: ProposalFingerprint
+) -> ProposalFingerprint:
+    """One poll of `proposal`'s fingerprint: publish_invalidate("proposals")
+    -- and, simply, "state" alongside it -- exactly once when the
+    fingerprint has moved since the last poll, then return the new one.
+
+    Publishing "state" on *every* fingerprint change, not only an accept
+    of `due_action`/`focus_on`, is a deliberate simplification: telling
+    those apart from here would mean re-reading the changed row(s) and
+    re-deriving what changed, for a query that already runs every two
+    seconds. An extra `invalidate("state")` a screen did not need is a
+    no-op refetch (the tail's own module docstring: "a hint, not a
+    payload"); a missing one is a stale screen. The cheap direction is
+    "both, every time, from Telegram or the extractor" -- app/web/
+    panels/proposals.py's own web-issued accept/reject still publishes
+    "state" only when the field actually warrants it, since that path
+    already knows exactly what changed and pays nothing extra to say so
+    precisely.
+    """
+    current = await _proposals_fingerprint(session)
+    if current != fingerprint:
+        hub.publish_invalidate("proposals")
+        hub.publish_invalidate("state")
+    return current
+
+
 async def _tail_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     hub: WebHub,
     cursor: int,
     state_change_cursor: int,
+    proposals_fingerprint: ProposalFingerprint,
 ) -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -326,6 +392,9 @@ async def _tail_loop(
                 state_change_cursor = await _tail_state_change_once(
                     session, hub, state_change_cursor
                 )
+                proposals_fingerprint = await _tail_proposals_once(
+                    session, hub, proposals_fingerprint
+                )
         except Exception as exc:  # noqa: BLE001 - a tail crash must never take the process down
             logger.warning("web tail failed", extra={"event": type(exc).__name__})
 
@@ -334,14 +403,16 @@ async def start_tail(
     sessionmaker: async_sessionmaker[AsyncSession], hub: WebHub
 ) -> asyncio.Task:
     """Start the tail task. Mirrors app/worker.py's run_worker() shape:
-    build both cursors, hand off to a background task, return it so the
+    build every cursor, hand off to a background task, return it so the
     caller (app/main.py's cleanup, track 2) can cancel it on shutdown.
     """
     async with sessionmaker() as session:
         cursor = await _max_message_id(session)
         state_change_cursor = await _max_state_change_id(session)
+        proposals_fingerprint = await _proposals_fingerprint(session)
     return asyncio.create_task(
-        _tail_loop(sessionmaker, hub, cursor, state_change_cursor), name="anchor-web-tail"
+        _tail_loop(sessionmaker, hub, cursor, state_change_cursor, proposals_fingerprint),
+        name="anchor-web-tail",
     )
 
 

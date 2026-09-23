@@ -42,6 +42,7 @@ from app.config import Settings
 from app.core.clock import Clock
 from app.db.models import Message
 from app.web import auth, ingress, security
+from app.web import panels
 from app.web.hub import TooManySubscribers, WebHub
 from app.web.http import (
     _clear_pre_cookie,
@@ -671,5 +672,8 @@ def setup_web(
     app.router.add_post("/api/send", send)
     app.router.add_post("/api/press", press)
     app.router.add_get("/api/events", events)
+
+    # W2: state + proposals panels (app/web/panels/).
+    panels.register(app)
 
     app.middlewares.append(security.build_middleware(settings))

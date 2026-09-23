@@ -833,3 +833,45 @@ blindness it replaces.
 **This would be wrong if** the two kinds turn out to move together in
 practice, in which case one `research` kind would read better than two.
 Nothing yet suggests that; they have different providers behind them.
+
+---
+
+## W2 — `state_change.source` gains `"web"` with no migration
+
+The web state/proposals panels (`app/web/panels/`) write `user_state`
+fields through the same `app/core/commands.py` functions Telegram's
+handlers now call, and every one of those writes needs its own
+`source` value -- distinct from `"command"` -- so the audit log can
+still answer "who changed this" once two transports can make the same
+change.
+
+The question worth writing down is whether adding `"web"` needs a
+migration. It does not, and the reasoning is a direct reuse of a
+pattern this codebase already established twice:
+
+- `app/db/models.py`'s `StateChange.source` column carries **no DB
+  CHECK constraint** -- confirmed by `migrations/versions/
+  a339f54e49de_create_idle_tables.py`'s own docstring, which states
+  outright that the column is deliberately open "the same way
+  `spend_ledger.category` is", specifically so a new source value never
+  needs a widening migration.
+- 6a's undo engine already added `source="undo"` this exact way: widen
+  the Python `Source` Literal in `app/core/state.py`, touch no schema.
+  `"web"` follows the identical path.
+
+**Decision: widen `app/core/state.py`'s `Source` Literal to include
+`"web"`. No migration, no `ALTER TABLE`, no lock.** This is also the
+conservative direction given the deploy-lock lessons two ALTERs on hot
+tables already taught this project (`telegram_update`'s commit
+2cd24c2/068e7e3, and `migrations/env.py`'s `SET LOCAL lock_timeout`
+fail-fast as the backstop for whichever online migration eventually
+does need to touch one) -- the safest move is simply not needing one
+here.
+
+**This would be wrong if** `state_change.source` ever gains a real
+CHECK constraint for an unrelated reason (nothing currently proposes
+one). That migration would need to enumerate `"web"` alongside the
+existing six values, and `migrations/env.py`'s `lock_timeout` guard is
+exactly what would make a blocked `ALTER TABLE ... ADD CONSTRAINT`
+fail fast rather than hang a deploy, the same backstop already in
+place for `telegram_update`.

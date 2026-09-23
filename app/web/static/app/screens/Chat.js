@@ -122,7 +122,18 @@ function MessageRow({ row, onPress }) {
   `;
 }
 
-export function Chat() {
+// `hidden`: ui/Shell.js renders Chat unconditionally (never unmounting
+// it on a tab switch, unlike State/Proposals) and toggles this instead
+// -- see Shell.js's own comment for why. `hidden` on the root element
+// hides it via app.css's `[hidden] { display: none !important; }`
+// while every ref, timer and SSE subscription below keeps running, so
+// switching back to #/chat needs no re-fetch and loses no scroll
+// position or composer draft, and a live SSE event that arrives while
+// the tab is elsewhere is still rendered into the log (just unseen)
+// instead of racing a fresh remount's history load -- the ordering bug
+// a per-tab mount/unmount used to reopen every time nav grew past one
+// screen.
+export function Chat({ hidden = false } = {}) {
   const logRef = useRef(null);
   const topSentinelRef = useRef(null);
   const composerFormRef = useRef(null);
@@ -551,7 +562,7 @@ export function Chat() {
   const showEmpty = messagesRef.current.length === 0 && oldestIdRef.current !== null;
 
   return html`
-    <div id="chat">
+    <div id="chat" hidden=${hidden}>
       <header id="chat-header">
         <span class="brand">Anchor</span>
         <${ConnDot} />

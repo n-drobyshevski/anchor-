@@ -40,19 +40,46 @@ export const toasts = signal([]);
 
 let nextToastId = 1;
 
+// At most TOAST_MAX on screen. The same text while it is still showing
+// (five quick "Сохранено." in a row) restarts that toast's timer instead
+// of stacking a copy of it.
+const TOAST_MAX = 3;
+const toastTimers = new Map();
+
 export function pushToast(text) {
-  const id = nextToastId++;
-  toasts.value = [...toasts.value, { id, text }];
-  setTimeout(() => {
-    toasts.value = toasts.value.filter((t) => t.id !== id);
-  }, 3500);
+  const existing = toasts.value.find((t) => t.text === text);
+  const id = existing ? existing.id : nextToastId++;
+  if (existing) {
+    clearTimeout(toastTimers.get(id));
+  } else {
+    toasts.value = [...toasts.value, { id, text }].slice(-TOAST_MAX);
+  }
+  toastTimers.set(
+    id,
+    setTimeout(() => {
+      toastTimers.delete(id);
+      toasts.value = toasts.value.filter((t) => t.id !== id);
+    }, 3500),
+  );
 }
 
 // Bumped to a fresh {topic} object on every SSE "invalidate" event.
-// No screen reads this in W1 -- it exists purely so sse.js can publish
-// the event without knowing who (if anyone) eventually cares, per the
-// contract's new "invalidate" event.
+// No screen read this in W1 -- it existed purely so sse.js could
+// publish the event without knowing who (if anyone) eventually cared.
+// W2's screens/State.js and screens/Proposals.js are the first
+// readers, via hooks.js's useAutoRefetch().
 export const invalidate = signal(null);
+
+// 1 when a proposal is awaiting a decision, 0 otherwise -- ui/Nav.js's
+// badge on the "Предложения" tab. Populated from two places, both
+// GET /api/proposals responses: main.js, right after login and on
+// every SSE invalidate("proposals") *regardless of which screen is
+// open* (the plan's "not only when the screen is open" rule -- a
+// proposal raised while the user sits on #/chat still needs to show
+// up here), and screens/Proposals.js's own reload while that screen is
+// mounted, which would otherwise wait on a second, redundant
+// round-trip from main.js's listener for the exact same event.
+export const proposalsBadge = signal(0);
 
 // The bot-is-typing indicator; mirrors the old #typing-indicator's
 // hidden flag. sse.js flips it on an SSE "typing" event and back off

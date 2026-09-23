@@ -594,3 +594,296 @@ button, input, textarea {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- Nav badge (ui/Nav.js) ---------- */
+
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ---------- Panel screens (screens/State.js, screens/Proposals.js) ----------
+   Shared layout for every screen other than #chat: a single scrolling
+   column capped at the same 42rem as the chat log.
+
+   `.screen-wrap` is the *non*-scrolling flex child of `.shell-screen`
+   (mirrors #chat's own role -- `#chat` never scrolls either; `#log`
+   inside it does) and is what `#toast-region` actually anchors to.
+   `.screen` is the scroller inside it. Splitting the two matters: a
+   panel screen can be taller than the viewport (State has 8 cards), so
+   if the toast region were `position: absolute` inside the *scrolling*
+   element, as it once was, it would scroll out of view along with the
+   content the instant the reader scrolls down -- exactly where the
+   Пауза and Траты cards sit -- leaving a toggle's only feedback
+   invisible. Each screen renders its own `.screen-wrap` > (`.screen` +
+   `<Toasts />`), so there is never more than one `#toast-region` in the
+   tree at a time to fight over the pill's placement. */
+
+.screen-wrap {
+  flex: 1;
+  min-height: 0;
+  max-width: 42rem;
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.screen {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  max-width: 42rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.screen-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.empty-hint {
+  margin: auto 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.field-value {
+  margin: 0;
+  font-size: 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.field-edit {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg);
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.inline-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.88rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+
+.btn:disabled { opacity: 0.55; cursor: default; }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.btn-ghost {
+  background: none;
+}
+
+/* Toggle switch (role="switch", screens/State.js's FocusCard/
+   PauseCard): a plain <button>, never a checkbox input -- this repo
+   renders every interactive control as a real element with no
+   `style=` string, and the on/off paint below comes entirely from the
+   `aria-checked` attribute selector, which is also what a screen
+   reader announces. */
+.switch {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  flex: none;
+}
+
+.switch:disabled { cursor: default; opacity: 0.6; }
+
+.switch-track {
+  display: block;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--border);
+  position: relative;
+  transition: background-color 0.15s ease;
+}
+
+.switch[aria-checked="true"] .switch-track {
+  background: var(--accent);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 0.15s ease;
+}
+
+.switch[aria-checked="true"] .switch-thumb {
+  transform: translateX(18px);
+}
+
+/* Spend progress bar (screens/State.js's SpendCard): a native
+   <progress>, not a div sized via a `style=` string -- CSS alone
+   covers this one since a native element takes `value`/`max`
+   attributes instead. */
+progress {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: none;
+  accent-color: var(--accent);
+  background: var(--bubble-muted);
+}
+
+progress::-webkit-progress-bar { background: var(--bubble-muted); }
+progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
+
+.category-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.category-list li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.counters-row {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+#tz-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  width: 100%;
+}
+
+/* ---------- Proposals (screens/Proposals.js) ---------- */
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.history-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.status-chip {
+  flex: none;
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bubble-muted);
+  color: var(--bubble-muted-text);
+  white-space: nowrap;
+}
+
+.status-chip[data-status="accepted"] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.status-chip[data-status="rejected"] {
+  background: var(--danger);
+  color: #fff;
+}

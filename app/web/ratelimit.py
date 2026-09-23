@@ -50,6 +50,13 @@ SEND_PER_DAY_WINDOW_S = 24 * 60 * 60
 MAX_PENDING_WEB_ROWS = 20
 PRESS_PER_MINUTE_LIMIT = 30
 PRESS_PER_MINUTE_WINDOW_S = 60
+# W2 (roadmap section 3): one shared bucket for every mutating panel
+# endpoint (state field writes, the pause toggle, proposal decisions) --
+# a single-user app has no reason to give each screen's own "Save" a
+# separate budget, and one bucket is one fewer thing a new panel has to
+# remember to wire up correctly.
+PANEL_WRITE_PER_MINUTE_LIMIT = 60
+PANEL_WRITE_PER_MINUTE_WINDOW_S = 60
 
 LOCKOUT_ALERT_TEXT = "5 неудачных входов в веб"
 
@@ -108,6 +115,9 @@ class WebRateLimiter:
         self._send_minute = _SlidingWindow(SEND_PER_MINUTE_LIMIT, SEND_PER_MINUTE_WINDOW_S)
         self._send_day = _SlidingWindow(SEND_PER_DAY_LIMIT, SEND_PER_DAY_WINDOW_S)
         self._press_minute = _SlidingWindow(PRESS_PER_MINUTE_LIMIT, PRESS_PER_MINUTE_WINDOW_S)
+        self._panel_write_minute = _SlidingWindow(
+            PANEL_WRITE_PER_MINUTE_LIMIT, PANEL_WRITE_PER_MINUTE_WINDOW_S
+        )
         self._lockout_until: float | None = None
 
     def _now(self) -> float:
@@ -162,6 +172,11 @@ class WebRateLimiter:
 
     def check_press(self) -> float | None:
         return self._press_minute.hit(self._now())
+
+    # --- W2 panel writes: 60/min shared across state + proposals ---
+
+    def check_panel_write(self) -> float | None:
+        return self._panel_write_minute.hit(self._now())
 
 
 async def pending_web_count(session: AsyncSession) -> int:

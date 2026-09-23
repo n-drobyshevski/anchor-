@@ -58,17 +58,18 @@ from app.core import turn
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
+from app.core import commands as commands_core
 from app.core import memory as memory_core
 from app.core import mood as mood_core
 from app.core import safety_events
 from app.core import proposal as proposal_core
-from app.core.outbound import cancel_outbound, load_state_summary
+from app.core.outbound import load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
 from app.core.idle.facts import idle_jobs_today, latest_canary_status
 from app.core.spend import today_by_category, today_idle_usd, today_usd
-from app.core.state import get_state, update_state
+from app.core.state import get_state
 from app.llm.provider import LLMProvider
 from app.ops.backup import latest_backup_status
 from app.tg.send import send_keyboard
@@ -595,19 +596,17 @@ def build_router(
         """A direct command outranks an outstanding proposal for the same field.
 
         Otherwise a live `Принять` would sit there waiting to overwrite
-        what the user just typed. Reuses the expiry machinery plan
-        section 8 already defines for one proposal superseding another.
+        what the user just typed. The expiry itself is
+        commands_core.expire_proposal_for (W2: shared with the web
+        panels); this wrapper adds what only Telegram has, the message
+        and bot to retire the stale buttons on.
         """
         async with sessionmaker() as session:
-            pending = await proposal_core.get_pending(session)
-            if pending is None or pending.field != field:
-                return
-            proposal_id = pending.id
-            pending.status = proposal_core.EXPIRED
-            pending.decided_at = clock.now_utc()
-            await session.commit()
+            expired = await commands_core.expire_proposal_for(session, clock, field)
+        if expired is None:
+            return
         await proposals_ui.retire_buttons(
-            sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=proposal_id
+            sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=expired.id
         )
 
     @router.message(Command("checkin"))
@@ -632,14 +631,7 @@ def build_router(
     async def due(message: Message, event_update: Update, command: CommandObject) -> None:
         text = (command.args or "").strip()
         async with sessionmaker() as session:
-            if text:
-                await update_state(session, "due_action", text, "command")
-                await update_state(
-                    session, "due_set_at", clock.now_utc(), "command"
-                )
-            else:
-                await update_state(session, "due_action", None, "command")
-                await update_state(session, "due_set_at", None, "command")
+            await commands_core.set_due(session, clock, text, "command")
         await _expire_proposal_for(message, proposal_core.DUE_ACTION)
         await _reply_once(
             message,
@@ -657,13 +649,7 @@ def build_router(
         # and a button can never disagree about what "on" means.
         enabled = proposal_core.parse_focus(raw)
         async with sessionmaker() as session:
-            await update_state(session, "focus_on", enabled, "command")
-            await update_state(
-                session,
-                "focus_since",
-                clock.now_utc() if enabled else None,
-                "command",
-            )
+            await commands_core.set_focus(session, clock, enabled, "command")
         await _expire_proposal_for(message, proposal_core.FOCUS_ON)
         await _reply_once(
             message, event_update.update_id, FOCUS_ON if enabled else FOCUS_OFF
@@ -689,7 +675,7 @@ def build_router(
 
         if parsed == QUIET_OFF:
             async with sessionmaker() as session:
-                await update_state(session, "quiet_until", None, "command")
+                await commands_core.set_quiet(session, clock, None, "command")
             await _reply_once(message, event_update.update_id, QUIET_OFF_REPLY)
             return
 
@@ -697,8 +683,7 @@ def build_router(
         until = clock.now_utc() + capped
         async with sessionmaker() as session:
             user_state = await get_state(session)
-            await update_state(session, "quiet_until", until, "command")
-            await cancel_outbound(session, clock)
+            await commands_core.set_quiet(session, clock, until, "command")
 
         local = until.astimezone(ZoneInfo(user_state.timezone)).strftime("%d.%m %H:%M")
         template = QUIET_CLAMPED if capped < parsed else QUIET_SET
@@ -725,16 +710,14 @@ def build_router(
             await _reply_once(message, event_update.update_id, TZ_USAGE)
             return
 
-        try:
-            zone = ZoneInfo(raw)
-        except Exception:  # noqa: BLE001 - ZoneInfoNotFoundError, ValueError, OSError
-            await _reply_once(message, event_update.update_id, TZ_UNKNOWN)
-            return
-
         async with sessionmaker() as session:
-            await update_state(session, "timezone", raw, "command")
+            try:
+                await commands_core.set_timezone(session, raw, "command")
+            except commands_core.InvalidTimezone:
+                await _reply_once(message, event_update.update_id, TZ_UNKNOWN)
+                return
 
-        now_there = clock.now_utc().astimezone(zone).strftime("%H:%M")
+        now_there = clock.now_utc().astimezone(ZoneInfo(raw)).strftime("%H:%M")
         await _reply_once(
             message,
             event_update.update_id,
