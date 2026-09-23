@@ -37,7 +37,16 @@ from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core.outbound_send import build_outbound_messages, hidden_flag
 from app.core.prompt import build_messages, build_neutral_messages
-from app.db.models import Base, Checkin, Message, NotebookEntry, Scene, StandingOrder, UserState
+from app.db.models import (
+    Base,
+    Checkin,
+    Message,
+    NotebookEntry,
+    PersonaAmendment,
+    Scene,
+    StandingOrder,
+    UserState,
+)
 from app.llm.provider import LLMMessage
 from eval.cases import CHECKIN, NEUTRAL, OUTBOUND, Case
 
@@ -62,8 +71,20 @@ def _ago(clock: Clock, hours: float | None) -> datetime.datetime | None:
     return clock.now_utc() - datetime.timedelta(hours=hours)
 
 
-async def seed(session: AsyncSession, case: Case, clock: Clock) -> UserState:
-    """Put the case's world into the database. Returns the user_state row."""
+async def seed(
+    session: AsyncSession, case: Case, clock: Clock, *, amendments: list[str] | None = None
+) -> UserState:
+    """Put the case's world into the database. Returns the user_state row.
+
+    `amendments` (5d) is `eval.trial.run_blocking_subset`'s own override
+    -- when given (even as an empty list), it replaces `setup.amendments`
+    entirely, which is what lets an amendment_trial exercise every
+    blocking case with the candidate amendment (plus every other active
+    one) actually seeded, regardless of what a case file's own `setup`
+    happens to say. `None` (the default) falls back to the case's own
+    `setup.amendments` list -- case 23's own way of seeding "меньше
+    вопросов" for a plain eval.run.py invocation.
+    """
     setup = case.setup
 
     state = UserState(
@@ -155,6 +176,19 @@ async def seed(session: AsyncSession, case: Case, clock: Clock) -> UserState:
     if setup.get("orders"):
         await session.commit()
 
+    # 5d: `amendments = ["текст", ...]`, inserted directly as active
+    # PersonaAmendment rows -- same "bypass the writer" reasoning as the
+    # notebook/orders seed keys above: a case (or a trial run) seeds the
+    # *world* an amendment already being active, not the adopt/trial
+    # negotiation that got it there. `persona_sha="eval"` is a
+    # placeholder -- these rows never outlive the throwaway database, so
+    # there is no real persona.md hash for them to be compared against.
+    amendment_texts = amendments if amendments is not None else setup.get("amendments") or []
+    for text in amendment_texts:
+        session.add(PersonaAmendment(text=text, status="active", persona_sha="eval"))
+    if amendment_texts:
+        await session.commit()
+
     await session.refresh(state)
     return state
 
@@ -179,6 +213,11 @@ async def build(
             clock=clock,
             kind=case.input["outbound_kind"],
             tick_note=case.input.get("tick_note"),
+            # 5d: case 22's own note text for a weekly_review outbound
+            # case -- eval.run.py never calls app.core.review.analyze_week
+            # (that would cost a second, real safety-model call per run),
+            # so the case file supplies the {note} substitution directly.
+            review_note=case.input.get("review_note"),
         )
 
     flags = [FLAGS[name] for name in case.input.get("flags", [])]
@@ -215,6 +254,7 @@ async def build(
         notebook=persona_ctx.notebook,
         orders=list(persona_ctx.orders),
         orders_yesterday=persona_ctx.orders_yesterday,
+        amendments=list(persona_ctx.amendments),
     )
 
 
@@ -270,6 +310,7 @@ def situation(case: Case) -> str:
         return (
             f"Бот пишет первым, без запроса пользователя "
             f"({case.input['outbound_kind']}). "
-            f"Скрытая инструкция: {hidden_flag(case.input['outbound_kind'], case.input.get('tick_note'))}"
+            f"Скрытая инструкция: "
+            f"{hidden_flag(case.input['outbound_kind'], case.input.get('tick_note'), note=case.input.get('review_note'))}"
         )
     return f"Сообщение пользователя: {case.input['text']}"

@@ -403,7 +403,7 @@ class SafetyEvent(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search', 'notebook')",
+            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search', 'notebook', 'review')",
             name="ck_safety_event_kind",
         ),
         CheckConstraint(
@@ -684,7 +684,8 @@ class Outbound(Base):
     __table_args__ = (
         UniqueConstraint("kind", "local_date", "bucket", name="uq_outbound_kind_date_bucket"),
         CheckConstraint(
-            "kind in ('morning', 'evening_nag', 'silence', 'tick')", name="ck_outbound_kind"
+            "kind in ('morning', 'evening_nag', 'silence', 'tick', 'weekly_review')",
+            name="ck_outbound_kind",
         ),
         CheckConstraint(
             "status in ('planned', 'sent', 'skipped', 'cancelled', 'failed')",
@@ -1015,6 +1016,15 @@ class StandingOrder(Base):
     )
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     retired_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 5d (phase-5 plan section 3): links a review-proposed order back to
+    # its review_proposal row, so app/tg/orders.py's so:a/so:r callbacks
+    # can call review.mark_proposal() on it -- see that migration's own
+    # docstring for why ON DELETE SET NULL. Written only by
+    # app/core/orders.py's own targeted UPDATE (link_review_proposal),
+    # never by app/core/review.py directly.
+    review_proposal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("review_proposal.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (
         CheckConstraint('char_length("text") <= 200', name="ck_standing_order_text_length"),
@@ -1071,4 +1081,123 @@ class CheckinOrderResult(Base):
 
     __table_args__ = (
         CheckConstraint("result in ('done', 'no')", name="ck_checkin_order_result_result"),
+    )
+
+
+class WeeklyReview(Base):
+    """One local week's safety-model analysis (phase-5 plan sections 3
+    and 8; milestone 5d).
+
+    `week_start` is the local Monday, unique -- the scheduled review
+    skips any week that already has a row (enforced by the outbound
+    gate's own `weekly_review` kind rule), and `/review` upserts against
+    it to regenerate. `analysis` is the validated JSON
+    (wins/misses/patterns/intentions/proposals), never the raw model
+    output. `message_id` points at the persona message that carried the
+    summary -- nullable because the row is written by
+    app/core/review.py before that message exists yet (the send path
+    generates the message after the analysis, then calls
+    `review.set_message_id`).
+    """
+
+    __tablename__ = "weekly_review"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    week_start: Mapped[datetime.date] = mapped_column(Date, nullable=False, unique=True)
+    analysis: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("message.id"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ReviewProposal(Base):
+    """One suggestion from a weekly review, sent as its own card (phase-5
+    plan sections 3 and 8; milestone 5d).
+
+    `kind='standing_order'` also gets its own `standing_order` row (via
+    `app/core/orders.py`'s `propose(..., source='review')`, linked back
+    by `standing_order.review_proposal_id`); `kind='persona_note'`
+    becomes a `persona_amendment` on adoption. `status` mirrors
+    `Proposal`'s own vocabulary (pending/adopted/rejected/expired) --
+    the same shape, a different table, because a review proposal is not
+    the extractor's pending-change-to-user_state kind of thing.
+    """
+
+    __tablename__ = "review_proposal"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    review_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("weekly_review.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    # `sa.text(...)`, not the bare `text(...)` every other model in this
+    # file uses: this class has a `text` *column* (Memory's and
+    # NotebookEntry's own docstrings warn about exactly this trap), so
+    # by the time `status`'s server_default below runs, `text` already
+    # names the mapped_column() above, not sqlalchemy's `text()`.
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=sa.text("'pending'")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('standing_order', 'persona_note')", name="ck_review_proposal_kind"
+        ),
+        CheckConstraint(
+            "status in ('pending', 'adopted', 'rejected', 'expired')",
+            name="ck_review_proposal_status",
+        ),
+        CheckConstraint('char_length("text") <= 200', name="ck_review_proposal_text_length"),
+        CheckConstraint(
+            'reason is null or char_length(reason) <= 160', name="ck_review_proposal_reason_length"
+        ),
+        Index("ix_review_proposal_status", "status"),
+    )
+
+
+class PersonaAmendment(Base):
+    """A `persona_note` proposal the user adopted (phase-5 plan sections
+    3 and 9; milestone 5d).
+
+    `status` is `trial` (the `amendment_trial` job is running or
+    queued) -> `active` | `failed`, or `active` -> `revoked` via
+    `/amendments`' own button. `persona_sha` is `persona.md`'s hash at
+    adoption -- **persona.md is never written by this codebase**; an
+    amendment only ever changes what the live prompt carries under
+    `## Поправки (одобрены тобой)` (app/core/prompt.py), never the file
+    itself. If a later manual edit changes the hash, the amendment stays
+    active but `/amendments` flags it "(персона изменилась — проверь)".
+
+    `eval_report` holds pass/fail per blocking case only -- no model
+    text, per the implementation plan's non-negotiable on that point.
+    """
+
+    __tablename__ = "persona_amendment"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    proposal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_proposal.id"))
+    eval_report: Mapped[dict | None] = mapped_column(JSONB)
+    persona_sha: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    activated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('trial', 'active', 'failed', 'revoked')",
+            name="ck_persona_amendment_status",
+        ),
+        CheckConstraint('char_length("text") <= 200', name="ck_persona_amendment_text_length"),
+        Index("ix_persona_amendment_status", "status"),
     )

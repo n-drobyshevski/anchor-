@@ -76,6 +76,17 @@ PURGED_TABLES = (
     # even though both its FKs are ON DELETE CASCADE.
     "checkin_order_result",
     "checkin",
+    # 5d: the weekly review and persona amendments (phase-5 plan sections
+    # 3, 8 and 9). Listed child-first -- persona_amendment.proposal_id
+    # references review_proposal, and standing_order.review_proposal_id
+    # (already listed above, ON DELETE SET NULL) references it too --
+    # same "TRUNCATE the whole list in one statement" reasoning as
+    # study_card/study_clip/study_job below: every table any of these
+    # three FKs into is itself in this list, so ordering is for
+    # readability, not correctness.
+    "persona_amendment",
+    "review_proposal",
+    "weekly_review",
     "standing_order",
     "proposal",
     "journal",

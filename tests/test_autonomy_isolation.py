@@ -40,6 +40,9 @@ MODULES = [
     pathlib.Path("app/core/screen.py"),
     # 5c.
     pathlib.Path("app/core/orders.py"),
+    # 5d.
+    pathlib.Path("app/core/review.py"),
+    pathlib.Path("app/core/amendments.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -250,6 +253,14 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     # tables; UserState is the same narrow awaiting/awaiting_ref write
     # ALLOWED_USER_STATE_COLUMNS["orders.py"] covers above.
     "orders.py": {"StandingOrder", "CheckinOrderResult", "UserState"},
+    # 5d: review.py writes WeeklyReview and ReviewProposal (plus the
+    # shared SpendLedger, like every other H2 job body); amendments.py
+    # writes PersonaAmendment (plus SpendLedger). Neither writes
+    # StandingOrder, NotebookEntry or Message directly -- those go
+    # through orders.py/notebook.py's own writers, or (for the persona
+    # message itself) app/core/outbound_send.py / app/tg/review.py.
+    "review.py": {"WeeklyReview", "ReviewProposal", "SpendLedger"},
+    "amendments.py": {"PersonaAmendment", "SpendLedger"},
 }
 
 # Names a write call might be imported under -- this repo's own
@@ -340,3 +351,162 @@ def test_orders_module_actually_writes_standing_order_for_this_test_to_see():
     """Same self-test shape as notebook.py's, for app/core/orders.py."""
     targets = _write_targets(pathlib.Path("app/core/orders.py"))
     assert {"StandingOrder", "CheckinOrderResult"} <= targets
+
+
+def test_review_module_actually_writes_weekly_review_for_this_test_to_see():
+    """Same self-test shape as notebook.py's, for app/core/review.py."""
+    targets = _write_targets(pathlib.Path("app/core/review.py"))
+    assert {"WeeklyReview", "ReviewProposal"} <= targets
+
+
+def test_amendments_module_actually_writes_persona_amendment_for_this_test_to_see():
+    """Same self-test shape as notebook.py's, for app/core/amendments.py."""
+    targets = _write_targets(pathlib.Path("app/core/amendments.py"))
+    assert "PersonaAmendment" in targets
+
+
+# --- 5d: nothing under app/ or eval/ ever writes to persona/ ---------------
+#
+# The non-negotiable the whole milestone hinges on: persona.md is never
+# written by this codebase. An amendment only ever changes what the live
+# prompt carries under "## Поправки"; it never touches the file. This is
+# the third structural guard in this file, after the import and
+# own-table-write scans above, and it is deliberately a *repo-wide* AST
+# walk rather than one more entry in MODULES -- the invariant is not
+# "these particular modules don't write persona/", it is "nothing does".
+
+
+def _writing_open_mode(node: ast.Call) -> ast.expr | None:
+    """The `mode` argument of an `open(...)` call, positional or keyword,
+    or None if `node` is not a call to `open` at all. `open(path)` alone
+    (mode omitted) defaults to `"r"` and is not itself returned as a
+    writing call -- callers check the mode string."""
+    if not (isinstance(node.func, ast.Name) and node.func.id == "open"):
+        return None
+    if len(node.args) >= 2:
+        return node.args[1]
+    for keyword in node.keywords:
+        if keyword.arg == "mode":
+            return keyword.value
+    return None
+
+
+def _mode_writes(mode_arg: ast.expr | None) -> bool:
+    """True for a mode that truncates or appends ("w"/"a"/"x", and any
+    combination like "w+"/"rb+"). A non-literal (dynamic) mode fails
+    closed -- treated as writing, since this scanner cannot know what
+    string it evaluates to."""
+    if mode_arg is None:
+        return False
+    if not (isinstance(mode_arg, ast.Constant) and isinstance(mode_arg.value, str)):
+        return True
+    return any(letter in mode_arg.value for letter in "wax")
+
+
+def _mentions_persona(node: ast.expr) -> bool:
+    """True iff `persona` (case-insensitively) appears anywhere in
+    `node`'s own source -- the heuristic that tells "this call writes
+    somewhere under persona/" from "this call writes an eval report or a
+    database row", since a pure AST walk cannot evaluate a variable or a
+    joined path to its runtime value. Matches a `Path(...) / "persona"`
+    join, a literal `"persona/persona.md"`, or a name like
+    `PERSONA_PATH` alike -- all three spell the word somewhere in the
+    unparsed expression.
+    """
+    return "persona" in ast.unparse(node).lower()
+
+
+def _persona_write_violations(path: pathlib.Path) -> list[str]:
+    """Every `write_text`/`write_bytes` call whose receiver mentions
+    `persona`, and every writing `open(...)` call whose path argument
+    does, in `path` -- named with the file and line."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write_text", "write_bytes")
+            and _mentions_persona(node.func.value)
+        ):
+            hits.append(f"{path}:{node.lineno}: .{node.func.attr}(...) on {ast.unparse(node.func.value)}")
+            continue
+        mode_arg = _writing_open_mode(node)
+        if mode_arg is not None and _mode_writes(mode_arg) and node.args and _mentions_persona(node.args[0]):
+            hits.append(f"{path}:{node.lineno}: open({ast.unparse(node.args[0])}, ...)")
+    return hits
+
+
+def _all_source_files(*roots: str) -> list[pathlib.Path]:
+    files: list[pathlib.Path] = []
+    for root in roots:
+        files.extend(sorted(pathlib.Path(root).rglob("*.py")))
+    return files
+
+
+def test_nothing_under_app_or_eval_writes_to_persona_directory():
+    """AST scan, repo-wide: no `write_text`, `write_bytes` or a
+    truncating/appending `open()` call anywhere under app/ or eval/ that
+    targets anything mentioning `persona` -- persona.md is never written
+    by this codebase (implementation plan's non-negotiable, restated by
+    app/core/amendments.py's and app/core/prompt.py's own docstrings).
+
+    Scoped to calls whose target mentions `persona` (see
+    `_mentions_persona`'s docstring), not to every writing call in the
+    tree -- eval/run.py legitimately writes its own report file, and a
+    scanner that flagged that too would be too broad to trust the day it
+    stays green.
+    """
+    violations: list[str] = []
+    for path in _all_source_files("app", "eval"):
+        violations.extend(_persona_write_violations(path))
+    assert not violations, "\n".join(violations)
+
+
+def test_the_persona_write_scan_would_catch_a_violation(tmp_path):
+    """Guards the guard: a synthetic module that does write persona.md,
+    every way this scanner knows to look for one, must be caught."""
+    sample = tmp_path / "offender.py"
+    sample.write_text(
+        "from pathlib import Path\n"
+        "PERSONA_PATH = Path('persona/persona.md')\n"
+        "def a():\n"
+        "    PERSONA_PATH.write_text('x')\n"
+        "def b():\n"
+        "    PERSONA_PATH.write_bytes(b'x')\n"
+        "def c():\n"
+        "    with open('persona/persona.md', 'w') as f:\n"
+        "        f.write('x')\n"
+        "def d():\n"
+        "    with open('persona/persona.md', mode='a') as f:\n"
+        "        f.write('x')\n"
+    )
+    hits = _persona_write_violations(sample)
+    assert len(hits) == 4
+
+
+def test_the_persona_write_scan_does_not_flag_a_read_or_an_unrelated_write(tmp_path):
+    """A plain read -- the one thing every persona-aware module actually
+    does -- must not trip the scanner, or the test above would be
+    meaningless noise on every run; neither should a write that has
+    nothing to do with persona/ (eval/run.py's own report file)."""
+    sample = tmp_path / "clean.py"
+    sample.write_text(
+        "from pathlib import Path\n"
+        "PERSONA_PATH = Path('persona/persona.md')\n"
+        "def f():\n"
+        "    return PERSONA_PATH.read_text(encoding='utf-8')\n"
+        "def g():\n"
+        "    with open('persona/persona.md') as fh:\n"
+        "        return fh.read()\n"
+        "def h():\n"
+        "    with open('persona/persona.md', 'r') as fh:\n"
+        "        return fh.read()\n"
+        "def report(path, report_text):\n"
+        "    path.write_text(report_text, encoding='utf-8')\n"
+        "def other(path):\n"
+        "    with open(path, 'w') as fh:\n"
+        "        fh.write('x')\n"
+    )
+    assert _persona_write_violations(sample) == []

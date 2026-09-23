@@ -167,6 +167,30 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         )
         await session.commit()
 
+    # 5d. A third flush -- weekly_review needs its id before
+    # review_proposal, which needs its own before persona_amendment.
+    async with sessionmaker() as session:
+        review = models.WeeklyReview(
+            week_start=today,
+            analysis={"wins": [], "misses": [], "patterns": [], "intentions": [], "proposals": []},
+        )
+        session.add(review)
+        await session.flush()
+        proposal = models.ReviewProposal(
+            review_id=review.id, kind="persona_note", text="меньше вопросов утром"
+        )
+        session.add(proposal)
+        await session.flush()
+        session.add(
+            models.PersonaAmendment(
+                text="меньше вопросов утром",
+                status="trial",
+                proposal_id=proposal.id,
+                persona_sha="deadbeef",
+            )
+        )
+        await session.commit()
+
 
 # --- contents ---
 

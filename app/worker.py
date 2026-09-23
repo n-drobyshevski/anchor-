@@ -72,6 +72,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core.clock import Clock, to_local, within_window
+from app.core import amendments as amendments_module
+from app.core.amendments import AMENDMENT_TRIAL
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.notebook import (
     NOTEBOOK_EXPIRY,
@@ -83,17 +85,27 @@ from app.core import orders as orders_module
 from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
+from app.core import review as review_module
+from app.core.review import REVIEW_EXPIRY
 from app.core.scheduler import (
     TICK_DECIDE,
     heartbeat,
     maybe_enqueue_notebook_expiry,
     maybe_enqueue_orders_expiry,
     maybe_enqueue_research_sweep,
+    maybe_enqueue_review_expiry,
 )
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
 from app.core.state import get_state
-from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
+from app.db.jobs import (
+    claim_job,
+    complete_job,
+    defer_job,
+    fail_job,
+    recover_stuck_jobs,
+    touch_job_lock,
+)
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.research.jobs import RESEARCH, run_research_job
@@ -168,6 +180,7 @@ async def _run_job(
     kind: str,
     payload: dict,
     safety_provider: LLMProvider | None = None,
+    job_id: int | None = None,
 ) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
@@ -218,6 +231,11 @@ async def _run_job(
             bot,
             clock=clock,
             outbound_id=payload["outbound_id"],
+            # 5d: threaded through so a weekly_review row's analysis step
+            # (app/core/review.py's analyze_week) has a safety-model
+            # provider to run on. Falls back like every other H2 job
+            # kind above, which is what the tests predating 5d rely on.
+            safety_provider=safety_provider or cheap_provider,
         )
         return ExtractOutcome()
 
@@ -279,6 +297,36 @@ async def _run_job(
         await orders_module.expire_stale(session, clock=clock)
         return ExtractOutcome()
 
+    if kind == REVIEW_EXPIRY:
+        # 5d: moves stale pending review_proposal rows to expired (plan
+        # section 8's "A daily sweep (review_expiry)") -- plain SQL
+        # housekeeping like NOTEBOOK_EXPIRY/ORDERS_EXPIRY above.
+        await review_module.run_review_expiry(session, settings, clock=clock)
+        return ExtractOutcome()
+
+    if kind == AMENDMENT_TRIAL:
+        # 5d: the blocking eval subset, against a throwaway database
+        # only (app/core/amendments.py's own docstring). `job_id` lets
+        # the trial extend its own lease across a run of ~13 cases --
+        # see app/db/jobs.touch_job_lock's docstring for why that
+        # matters here specifically.
+        outcome = ExtractOutcome()
+
+        async def _on_case_done() -> None:
+            if job_id is not None:
+                await touch_job_lock(session, job_id)
+
+        result = await amendments_module.run_trial(
+            session,
+            settings,
+            clock=clock,
+            amendment_id=payload["amendment_id"],
+            on_case_done=_on_case_done,
+        )
+        if result is not None:
+            outcome.amendment_trial_id = result.amendment_id
+        return outcome
+
     if kind == TICK_DECIDE:
         # H2: the safety model decides whether there is a natural reason
         # to write first -- another strict-schema verdict. It plans an
@@ -325,7 +373,7 @@ async def process_one_job(
         async with sessionmaker() as session:
             outcome = await _run_job(
                 session, settings, provider, cheap_provider, bot, clock, kind, payload,
-                safety_provider,
+                safety_provider, job_id,
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -366,6 +414,13 @@ async def process_one_job(
         # ExtractOutcome.order_proposed's own docstring).
         if outcome.order_proposed is not None and bot is not None:
             await _send_order_proposal(sessionmaker, bot, outcome.order_proposed)
+        # 5d: the amendment_trial result message ("Поправка принята."/
+        # "не прошла проверку и не применена."), sent through
+        # app/tg/amendments.py -- never through app/tg/proposals.py, for
+        # the same reason ExtractOutcome.order_proposed's own docstring
+        # gives: this is not a Proposal row either.
+        if outcome.amendment_trial_id is not None and bot is not None:
+            await _send_amendment_result(sessionmaker, bot, outcome.amendment_trial_id)
 
     return True
 
@@ -466,6 +521,23 @@ async def _send_order_proposal(
         )
 
 
+async def _send_amendment_result(
+    sessionmaker: async_sessionmaker[AsyncSession], bot: Bot, amendment_id: int
+) -> None:
+    """The amendment_trial result message (5d)."""
+    from app.tg.amendments import send_trial_result
+
+    async with sessionmaker() as session:
+        user_state = await get_state(session)
+    try:
+        await send_trial_result(sessionmaker, bot, chat_id=user_state.chat_id, amendment_id=amendment_id)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning(
+            "amendment trial result send failed",
+            extra={"amendment_id": amendment_id, "event": type(exc).__name__},
+        )
+
+
 async def _claim_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     dp: Dispatcher,
@@ -536,6 +608,11 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_orders_expiry(session, clock, state.timezone)
+            # 5d: the weekly review's own daily sweep, same cadence and
+            # same "not inside heartbeat()" reasoning as the three above.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_review_expiry(session, clock, state.timezone)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

@@ -31,7 +31,7 @@ from app.config import Settings
 from app.core import prompt, turn
 from app.core.clock import FrozenClock, combine_local
 from app.core.outbound import cancel_outbound
-from app.core.outbound_gate import EVENING_NAG, MORNING
+from app.core.outbound_gate import EVENING_NAG, MORNING, WEEKLY_REVIEW
 from app.core.outbound_send import (
     COMMON_FLAG,
     KIND_FLAGS,
@@ -39,14 +39,18 @@ from app.core.outbound_send import (
     hidden_flag,
     run_send_outbound,
 )
+from app.core import review as review_module
 from app.core.state import get_state
 from app.db.models import (
     Job,
     Message,
     Outbound,
+    ReviewProposal,
     SpendLedger,
+    StandingOrder,
     TelegramUpdate,
     UserState,
+    WeeklyReview,
 )
 from app.llm.provider import LLMError
 from conftest import FakeLLMProvider, FakeSession
@@ -93,7 +97,7 @@ async def _plan_row(sessionmaker, *, kind=MORNING, status="planned", **fields) -
         return row.id
 
 
-async def _run(sessionmaker, provider, bot, clock, outbound_id, cfg=None) -> None:
+async def _run(sessionmaker, provider, bot, clock, outbound_id, cfg=None, safety_provider=None) -> None:
     async with sessionmaker() as session:
         await run_send_outbound(
             session,
@@ -102,7 +106,16 @@ async def _run(sessionmaker, provider, bot, clock, outbound_id, cfg=None) -> Non
             bot,
             clock=clock,
             outbound_id=outbound_id,
+            safety_provider=safety_provider,
         )
+
+
+# A REVIEW_SCHEMA-shaped strict-JSON reply, for the safety provider.
+REVIEW_ANALYSIS_JSON = (
+    '{"wins": ["сдал отчёт вовремя"], "misses": ["пропустил вторник"], '
+    '"patterns": ["активнее по будням"], "intentions": ["чек-ины по вечерам"], '
+    '"proposals": [{"kind": "persona_note", "text": "меньше вопросов", "reason": "устаёт от них"}]}'
+)
 
 
 async def _row(sessionmaker, outbound_id) -> Outbound:
@@ -678,3 +691,167 @@ async def test_a_job_whose_send_fails_is_retried_not_lost(sessionmaker):
         job = (await session.execute(select(Job))).scalars().one()
     assert job.status == "pending", "back on the queue for another attempt"
     assert job.attempts == 1
+
+
+# --- 5d: the weekly review's own send path ------------------------------
+
+
+async def test_a_weekly_review_is_analyzed_generated_stored_and_ledgered(sessionmaker):
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    safety_provider = FakeLLMProvider(text=REVIEW_ANALYSIS_JSON)
+    persona_provider = FakeLLMProvider(text="Хорошая неделя. Дальше — так же ровно.")
+    bot, fake = _bot()
+    clock = at(19, 0)
+
+    await _run(sessionmaker, persona_provider, bot, clock, outbound_id, safety_provider=safety_provider)
+
+    assert safety_provider.calls == 1
+    assert persona_provider.calls == 1
+    assert [m.text for m in fake.sent][0] == "Хорошая неделя. Дальше — так же ровно."
+
+    row = await _row(sessionmaker, outbound_id)
+    assert row.status == "sent"
+
+    async with sessionmaker() as session:
+        ledger = list((await session.execute(select(SpendLedger).order_by(SpendLedger.id))).scalars())
+    categories = [entry.category for entry in ledger]
+    assert review_module.REVIEW_CATEGORY in categories
+    assert review_module.REVIEW_MSG_CATEGORY in categories
+    assert OUTBOUND_CATEGORY not in categories, "ledgered as review_msg, not outbound"
+
+    async with sessionmaker() as session:
+        review_row = (await session.execute(select(WeeklyReview))).scalars().one()
+    assert review_row.analysis["wins"] == ["сдал отчёт вовремя"]
+    assert review_row.message_id is not None
+
+
+async def test_a_weekly_reviews_persona_note_becomes_a_card_with_am_buttons(sessionmaker):
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    safety_provider = FakeLLMProvider(text=REVIEW_ANALYSIS_JSON)
+    bot, fake = _bot()
+
+    await _run(sessionmaker, FakeLLMProvider(text="Итог."), bot, at(19, 0), outbound_id, safety_provider=safety_provider)
+
+    # First send is the review message itself; the second is the
+    # persona_note proposal's own card.
+    assert len(fake.sent) == 2
+    card = fake.sent[1]
+    assert "меньше вопросов" in card.text
+    assert card.reply_markup is not None
+    buttons = card.reply_markup.inline_keyboard[0]
+    assert [b.callback_data for b in buttons][0].startswith("am:a:")
+    assert [b.callback_data for b in buttons][1].startswith("am:r:")
+
+    async with sessionmaker() as session:
+        proposal = (await session.execute(select(ReviewProposal))).scalars().one()
+    assert proposal.kind == "persona_note"
+    assert proposal.status == "pending"
+
+
+async def test_a_weekly_reviews_standing_order_proposal_gets_the_5c_card(sessionmaker):
+    order_json = (
+        '{"wins": [], "misses": [], "patterns": [], "intentions": [], '
+        '"proposals": [{"kind": "standing_order", "text": "пить воду по утрам", "reason": null}]}'
+    )
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    safety_provider = FakeLLMProvider(text=order_json)
+    bot, fake = _bot()
+
+    await _run(sessionmaker, FakeLLMProvider(text="Итог."), bot, at(19, 0), outbound_id, safety_provider=safety_provider)
+
+    card = fake.sent[1]
+    assert "пить воду по утрам" in card.text
+    labels = [b.text for b in card.reply_markup.inline_keyboard[0]]
+    assert labels == ["Принять", "Изменить", "Отклонить"]
+
+    async with sessionmaker() as session:
+        order = (await session.execute(select(StandingOrder))).scalars().one()
+        proposal = (await session.execute(select(ReviewProposal))).scalars().one()
+    assert order.status == "proposed"
+    assert order.source == "review"
+    assert order.review_proposal_id == proposal.id
+
+
+async def test_a_weekly_review_is_skipped_by_the_authoritative_gates_own_cap_check(sessionmaker):
+    """The gate's row-5 cap check runs before the analysis step at all
+    (step 3, generic across every kind), so a cap already reached by
+    send time never even reaches `analyze_week`."""
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    async with sessionmaker() as session:
+        session.add(SpendLedger(local_date=DAY, category="chat", usd_cost=decimal.Decimal("1.00")))
+        await session.commit()
+
+    persona_provider = FakeLLMProvider(text="НЕ ДОЛЖНО ПОЯВИТЬСЯ")
+    safety_provider = FakeLLMProvider(text=REVIEW_ANALYSIS_JSON)
+    bot, fake = _bot()
+    await _run(sessionmaker, persona_provider, bot, at(19, 0), outbound_id, safety_provider=safety_provider)
+
+    row = await _row(sessionmaker, outbound_id)
+    assert row.status == "skipped"
+    assert row.skip_reason == "cap"
+    assert safety_provider.calls == 0, "the gate refuses before the analysis call"
+    assert persona_provider.calls == 0
+    assert fake.sent == []
+    async with sessionmaker() as session:
+        assert await session.scalar(select(func.count()).select_from(WeeklyReview)) == 0
+
+
+async def test_a_weekly_review_is_skipped_when_the_analysis_is_unparseable(sessionmaker):
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    safety_provider = FakeLLMProvider(text="not json at all")
+    persona_provider = FakeLLMProvider()
+    bot, fake = _bot()
+
+    await _run(sessionmaker, persona_provider, bot, at(19, 0), outbound_id, safety_provider=safety_provider)
+
+    row = await _row(sessionmaker, outbound_id)
+    assert row.status == "skipped"
+    assert row.skip_reason == review_module.REVIEW_UNAVAILABLE
+    assert persona_provider.calls == 0
+    assert fake.sent == []
+
+
+async def test_a_weekly_review_is_skipped_with_no_safety_provider(sessionmaker):
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    persona_provider = FakeLLMProvider()
+    bot, fake = _bot()
+
+    await _run(sessionmaker, persona_provider, bot, at(19, 0), outbound_id, safety_provider=None)
+
+    row = await _row(sessionmaker, outbound_id)
+    assert row.status == "skipped"
+    assert row.skip_reason == review_module.REVIEW_UNAVAILABLE
+    assert persona_provider.calls == 0
+
+
+async def test_a_weekly_review_still_respects_the_authoritative_gate(sessionmaker):
+    """A weekly_review row already exists for this week by send time
+    (e.g. the user ran /review in the meantime) -- the same authoritative
+    re-check every other kind gets."""
+    await _seed(sessionmaker)
+    outbound_id = await _plan_row(sessionmaker, kind=WEEKLY_REVIEW)
+    async with sessionmaker() as session:
+        session.add(
+            WeeklyReview(
+                week_start=review_module.week_start_for(DAY),
+                analysis={"wins": [], "misses": [], "patterns": [], "intentions": [], "proposals": []},
+            )
+        )
+        await session.commit()
+
+    safety_provider = FakeLLMProvider(text=REVIEW_ANALYSIS_JSON)
+    persona_provider = FakeLLMProvider()
+    bot, fake = _bot()
+    await _run(sessionmaker, persona_provider, bot, at(19, 0), outbound_id, safety_provider=safety_provider)
+
+    row = await _row(sessionmaker, outbound_id)
+    assert row.status == "skipped"
+    assert row.skip_reason == "kind_rule:review_exists"
+    assert safety_provider.calls == 0
+    assert persona_provider.calls == 0

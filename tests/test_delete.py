@@ -31,8 +31,10 @@ from app.db.models import (
     Outbound,
     Message,
     PendingMemory,
+    PersonaAmendment,
     PersonaVersion,
     Proposal,
+    ReviewProposal,
     SafetyEvent,
     Scene,
     SpendLedger,
@@ -43,6 +45,7 @@ from app.db.models import (
     StudyJob,
     TelegramUpdate,
     UserState,
+    WeeklyReview,
 )
 from app.tg import data as data_ui
 from app.tg.router import build_router
@@ -199,6 +202,32 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         await session.flush()
         session.add(
             CheckinOrderResult(checkin_id=checkin_row.id, order_id=order.id, result="no")
+        )
+        await session.commit()
+
+        # 5d: the weekly review and persona amendments (phase-5 plan
+        # sections 3, 8 and 9) -- weekly_review needs its id before
+        # review_proposal, which needs its own before persona_amendment,
+        # same "added last, needs the ids above it" reasoning as
+        # study_clip/study_card and checkin_order_result above.
+        review = WeeklyReview(
+            week_start=today, analysis={"wins": [], "misses": [], "patterns": [],
+                                          "intentions": [], "proposals": []},
+        )
+        session.add(review)
+        await session.flush()
+        proposal = ReviewProposal(
+            review_id=review.id, kind="persona_note", text="меньше вопросов утром"
+        )
+        session.add(proposal)
+        await session.flush()
+        session.add(
+            PersonaAmendment(
+                text="меньше вопросов утром",
+                status="trial",
+                proposal_id=proposal.id,
+                persona_sha="deadbeef",
+            )
         )
         await session.commit()
 

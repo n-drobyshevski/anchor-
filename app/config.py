@@ -263,6 +263,34 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name} must be >= 1, got {value}")
         return value
 
+    # --- 5d: weekly review and persona amendments (implementation plan
+    # §"Config") ---
+    # ISO weekday (1=Monday .. 7=Sunday) the review is planned on, local
+    # to user_state.timezone -- matches StandingOrder.weekday's own
+    # convention rather than Python's Monday=0.
+    REVIEW_DOW: int = 7
+    REVIEW_TIME: datetime.time = datetime.time(19, 0)
+    # The cap on `active` plus `trial` amendments together (plan's
+    # "Adopt": "The cap counts active plus trial rows against
+    # AMENDMENTS_MAX_ACTIVE"). >= 1 for the same reason as the notebook
+    # and orders caps above: 0 would be "the feature is off" wearing a
+    # cap's clothes.
+    AMENDMENTS_MAX_ACTIVE: int = 10
+
+    @field_validator("REVIEW_DOW")
+    @classmethod
+    def _review_dow_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 7:
+            raise ValueError(f"REVIEW_DOW must be between 1 and 7, got {value}")
+        return value
+
+    @field_validator("AMENDMENTS_MAX_ACTIVE")
+    @classmethod
+    def _amendments_max_active_at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"AMENDMENTS_MAX_ACTIVE must be >= 1, got {value}")
+        return value
+
     # Silence longer than this closes the open scene and opens a new one
     # (phase-2 plan section 5).
     SCENE_IDLE_HOURS: int = 6

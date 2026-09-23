@@ -30,7 +30,7 @@ NEUTRAL = "neutral"
 OUTBOUND = "outbound"
 INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND)
 
-OUTBOUND_KINDS = ("morning", "evening_nag", "silence", "tick")
+OUTBOUND_KINDS = ("morning", "evening_nag", "silence", "tick", "weekly_review")
 
 
 @dataclasses.dataclass(frozen=True)

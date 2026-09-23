@@ -35,6 +35,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
 from app.core import orders
+from app.core import review as review_module
 from app.core.clock import Clock
 from app.db.models import StandingOrder
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
@@ -226,6 +227,27 @@ async def handle_decision_callback(
             await edit_keyboard(bot, chat_id, message_id, STALE, None)
             return
         order = await session.get(StandingOrder, order_id)
+
+        # 5d: a review-proposed order (implementation plan's
+        # "Proposals": "app/tg/orders.py callbacks then call
+        # review.mark_proposal(id, 'adopted'|'rejected')") -- only on an
+        # actual accept/decline decision, never on `cap` (the row is not
+        # yet decided) or on starting a counter (still under
+        # negotiation). `review_proposal_id` is None for every
+        # user-authored order and for a counter row, so this is a no-op
+        # for both.
+        if (
+            action in ("a", "r")
+            and result == "ok"
+            and order is not None
+            and order.review_proposal_id is not None
+        ):
+            await review_module.mark_proposal(
+                session,
+                order.review_proposal_id,
+                review_module.ADOPTED if action == "a" else review_module.REJECTED,
+                clock=clock,
+            )
 
     if result == "stale" or order is None:
         await edit_keyboard(bot, chat_id, message_id, STALE, None)

@@ -638,6 +638,60 @@ async def add_user_intention(
     return "ok"
 
 
+async def replace_review_intentions(
+    session: AsyncSession, settings: Settings, texts: list[str], *, clock: Clock
+) -> None:
+    """The weekly review's own intentions writer (phase-5 plan section 8;
+    milestone 5d's implementation plan §"Intentions").
+
+    Closes every active `source='review'` intention (`closed_by=
+    'anchor'` -- the record of *who* closed it, not a claim that the
+    reflection job did; that job is structurally barred from touching a
+    review-sourced entry, see `_close()`'s own docstring, so this
+    function sets the fields directly rather than going through it),
+    then inserts the new ones as `source='review'`. This -- and
+    `add_user_intention` -- are the **only** two writers of
+    `kind='intention'` in the codebase: "Only the weekly review and the
+    user write intentions" (module docstring above).
+
+    Deduped against active entries by the same trigram-similarity rule
+    every other write here uses, and capped by `NOTEBOOK_MAX_INTENTIONS`
+    the same way `add_user_intention` is -- a review intention that
+    does not fit is simply dropped (oldest-offered-first, since the
+    model's own ordering is trusted for priority), never by closing the
+    user's own intentions to make room. Callers (app/core/review.py) are
+    expected to hand this already-screened text (`validate()`'s own
+    `screen()` pass); this function re-checks only the length, which is
+    this table's own constraint, not the risk rules.
+    """
+    result = await session.execute(
+        select(NotebookEntry)
+        .where(NotebookEntry.active.is_(True))
+        .where(NotebookEntry.kind == INTENTION)
+        .where(NotebookEntry.source == "review")
+    )
+    now = clock.now_utc()
+    for entry in result.scalars().all():
+        entry.active = False
+        entry.closed_by = "anchor"
+        entry.closed_at = now
+
+    added = 0
+    for text in texts:
+        cleaned = text.strip()
+        if not cleaned or len(cleaned) > TEXT_MAX:
+            continue
+        if await _count_active(session, INTENTION) >= settings.NOTEBOOK_MAX_INTENTIONS:
+            break
+        if await _near_duplicate(session, cleaned):
+            continue
+        session.add(NotebookEntry(kind=INTENTION, text=cleaned, source="review"))
+        added += 1
+
+    await session.commit()
+    logger.info("review intentions replaced", extra={"added": added})
+
+
 async def close_entry(session: AsyncSession, entry_id: int, *, by: str, clock: Clock) -> bool:
     """Close one entry. True only if it was active and `by` may close it.
 
@@ -681,6 +735,7 @@ __all__ = [
     "add_user_intention",
     "build_input",
     "close_entry",
+    "replace_review_intentions",
     "run_notebook_expiry",
     "run_notebook_reflect",
     "validate",

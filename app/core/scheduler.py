@@ -86,6 +86,7 @@ from app.core.outbound_gate import (
     MORNING,
     OK,
     SILENCE,
+    WEEKLY_REVIEW,
     Kind,
     config_from_settings,
     gate,
@@ -93,6 +94,7 @@ from app.core.outbound_gate import (
 from app.core.notebook import NOTEBOOK_EXPIRY
 from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
+from app.core.review import REVIEW_EXPIRY
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
 from app.db.models import Outbound
@@ -100,8 +102,13 @@ from app.research.sweeps import RESEARCH_SWEEP
 
 logger = logging.getLogger(__name__)
 
-# Highest first (plan section 6).
-PRIORITY: tuple[Kind, ...] = (EVENING_NAG, MORNING, SILENCE)
+# Highest first (plan section 6; phase-5 plan section 8: "evening_nag >
+# weekly_review > morning > silence"). 5d: on a Sunday evening the
+# evening nag may take a few ticks to be planned or refused, and the
+# review is only planned once that has happened -- the grace window
+# below (clamped to QUIET_START, same as the evening nag's own) leaves
+# room for that, and tests/test_scheduler.py covers it.
+PRIORITY: tuple[Kind, ...] = (EVENING_NAG, WEEKLY_REVIEW, MORNING, SILENCE)
 
 # Fixed intents and the silence nudge are one-per-local-date, so their
 # bucket is always 0. Only the tick (3d) uses it, for the local hour.
@@ -149,14 +156,31 @@ def _window(
         time_of_day = settings.MORNING_TIME
     elif kind == EVENING_NAG:
         time_of_day = settings.EVENING_TIME
+    elif kind == WEEKLY_REVIEW:
+        time_of_day = settings.REVIEW_TIME
     else:
         return None
 
     today = clock_module.local_date(clock, timezone)
+
+    # 5d: the review only has a window at all on REVIEW_DOW. Returning
+    # None here (like the silence nudge's "no window") would be wrong --
+    # it would make _is_due() true on every day of the week instead of
+    # none. A window whose grace_end equals its own target is never due
+    # (`target <= now < grace_end` is false for target==grace_end), which
+    # is the correct "not today" answer while keeping the same tuple
+    # shape every other caller of this function expects.
+    if kind == WEEKLY_REVIEW and today.isoweekday() != settings.REVIEW_DOW:
+        target = clock_module.combine_local(today, time_of_day, timezone)
+        return target, target
+
     target = clock_module.combine_local(today, time_of_day, timezone)
     grace_end = target + datetime.timedelta(minutes=settings.SEND_GRACE_MIN)
 
-    if kind == EVENING_NAG:
+    if kind in (EVENING_NAG, WEEKLY_REVIEW):
+        # The grace runs until QUIET_START, same clamp for both: a nag or
+        # a review that lands during quiet hours is exactly what quiet
+        # hours exist to prevent (plan section 2; phase-5 plan section 8).
         quiet_start = clock_module.combine_local(today, settings.QUIET_START, timezone)
         grace_end = min(grace_end, quiet_start)
 
@@ -442,6 +466,29 @@ async def maybe_enqueue_orders_expiry(session: AsyncSession, clock: Clock, timez
     )
     if enqueued:
         logger.info("orders expiry queued", extra={"event": ORDERS_EXPIRY})
+    return enqueued
+
+
+def review_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `orders_expiry_dedup_key`."""
+    return f"review_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_review_expiry(session: AsyncSession, clock: Clock, timezone: str) -> bool:
+    """Queue today's review-proposal expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_orders_expiry` right above -- same
+    dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a fifth sibling
+    step), for the same reason: several existing tests call `heartbeat()`
+    directly and assert an exact `job` table state afterwards.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, REVIEW_EXPIRY, {}, dedup_key=review_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("review expiry queued", extra={"event": REVIEW_EXPIRY})
     return enqueued
 
 

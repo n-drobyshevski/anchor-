@@ -945,6 +945,7 @@ async def run(
                     notebook=turn_persona_context.notebook,
                     orders=list(turn_persona_context.orders),
                     orders_yesterday=turn_persona_context.orders_yesterday,
+                    amendments=list(turn_persona_context.amendments),
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1082,6 +1083,7 @@ async def run(
                 notebook=turn_persona_context.notebook,
                 orders=list(turn_persona_context.orders),
                 orders_yesterday=turn_persona_context.orders_yesterday,
+                amendments=list(turn_persona_context.amendments),
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id

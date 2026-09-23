@@ -47,7 +47,8 @@ from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core import clock as clock_module
 from app.core.prompt import REPO_ROOT
-from app.db.models import UserState
+from app.db.models import PersonaAmendment, UserState
+from sqlalchemy import select
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,6 +148,16 @@ async def gather(
     yesterday = clock_module.local_date(clock, state.timezone) - datetime.timedelta(days=1)
     orders_yesterday = await orders_module.yesterday_tally(session, yesterday)
 
+    # 5d: active persona amendments (phase-5 plan section 9's "## Поправки
+    # (одобрены тобой)"). Texts only, oldest-adopted first -- same "no
+    # ids in the persona prompt" rule notebook/orders already follow.
+    amendment_rows = await session.execute(
+        select(PersonaAmendment.text)
+        .where(PersonaAmendment.status == "active")
+        .order_by(PersonaAmendment.id)
+    )
+    amendments = tuple(row[0] for row in amendment_rows.all())
+
     return PersonaContext(
         mood=computed_mood,
         voice_lines=anchors,
@@ -155,4 +166,5 @@ async def gather(
         notebook=notebook,
         orders=order_lines,
         orders_yesterday=orders_yesterday,
+        amendments=amendments,
     )

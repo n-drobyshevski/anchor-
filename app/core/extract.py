@@ -351,13 +351,20 @@ class ExtractOutcome:
     app/tg/proposals.send_proposal.
     """
 
-    __slots__ = ("memories", "created", "expired", "order_proposed")
+    __slots__ = ("memories", "created", "expired", "order_proposed", "amendment_trial_id")
 
     def __init__(self) -> None:
         self.memories: list[int] = []
         self.created: list[int] = []
         self.expired: list[int] = []
         self.order_proposed: int | None = None
+        # 5d: the id of a PersonaAmendment whose `amendment_trial` job
+        # just finished, or None. app/worker.py's process_one_job reads
+        # this the same way it reads `order_proposed`, to send the
+        # result message ("Поправка принята."/"не прошла") through
+        # app/tg/amendments.py rather than app/tg/proposals.py -- an
+        # amendment_trial outcome is not a Proposal row either.
+        self.amendment_trial_id: int | None = None
 
 
 async def _apply(

@@ -566,6 +566,27 @@ async def submit_counter(
     return CounterOutcome("ok", counter)
 
 
+async def link_review_proposal(
+    session: AsyncSession, order_id: int, review_proposal_id: int
+) -> None:
+    """Set a review-proposed order's back-link to its `review_proposal`
+    row (phase-5 plan section 3; milestone 5d). A targeted UPDATE,
+    mirroring `set_message_id` right above -- this module owns
+    `StandingOrder`, so the write belongs here rather than in
+    app/core/review.py, which may write only `WeeklyReview`,
+    `ReviewProposal` and `SpendLedger` (tests/test_autonomy_isolation.py's
+    OWN_TABLE_WRITES). `app/tg/orders.py`'s `so:a`/`so:r` callbacks read
+    this column back to find which `review_proposal` (if any) to mark
+    `adopted`/`rejected` via `review.mark_proposal`.
+    """
+    await session.execute(
+        sql_update(StandingOrder)
+        .where(StandingOrder.id == order_id)
+        .values(review_proposal_id=review_proposal_id)
+    )
+    await session.commit()
+
+
 async def expire_stale(session: AsyncSession, *, clock: Clock) -> int:
     """Daily sweep: `proposed`/`awaiting_counter`/`countered` rows older
     than `PROPOSAL_TTL_DAYS` become `expired` (plan section 7). If
@@ -634,6 +655,7 @@ __all__ = [
     "decline",
     "due_today",
     "expire_stale",
+    "link_review_proposal",
     "next_due_order",
     "parse_cadence",
     "propose",

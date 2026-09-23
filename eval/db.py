@@ -69,13 +69,22 @@ def _upgrade(database_url: str) -> None:
 
 
 @contextlib.asynccontextmanager
-async def throwaway_sessionmaker():
-    """Yield a sessionmaker on a fresh, migrated database; drop it after."""
+async def throwaway_sessionmaker(admin_url: str | None = None):
+    """Yield a sessionmaker on a fresh, migrated database; drop it after.
+
+    `admin_url` (5d) lets a caller point the admin connection somewhere
+    other than `REPO_ADMIN_URL` -- app/core/amendments.py's
+    `amendment_trial` job uses it to reach `ANCHOR_ADMIN_DATABASE_URL`
+    (or `DATABASE_URL` with its database name swapped for `postgres`)
+    rather than whatever a *manual* `eval.run.py` invocation happens to
+    have in its environment. Defaulting to None preserves this
+    function's exact previous behaviour for every existing caller.
+    """
     suffix = "".join(random.choices(string.ascii_lowercase, k=8))
     name = f"anchor_eval_{suffix}"
 
     admin_engine = create_async_engine(
-        _async_url(REPO_ADMIN_URL), isolation_level="AUTOCOMMIT"
+        _async_url(admin_url or REPO_ADMIN_URL), isolation_level="AUTOCOMMIT"
     )
     from sqlalchemy import text as sql_text
 
@@ -84,7 +93,7 @@ async def throwaway_sessionmaker():
             sql_text(f"CREATE DATABASE {name} TEMPLATE template0 LOCALE 'C.UTF-8'")
         )
 
-    raw_url = _with_database(REPO_ADMIN_URL, name)
+    raw_url = _with_database(admin_url or REPO_ADMIN_URL, name)
     await asyncio.to_thread(_upgrade, raw_url)
 
     engine = create_async_engine(_async_url(raw_url))

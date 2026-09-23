@@ -159,6 +159,22 @@ def test_no_patterns_means_nothing_to_fail():
     assert checks.forbidden("что угодно", []).passed
 
 
+# --- max_question_marks (5d, case 23) -------------------------------------
+
+
+def test_max_question_marks_passes_at_the_limit():
+    assert checks.max_question_marks("Как дела? Что дальше?", 2).passed
+
+
+def test_max_question_marks_fails_over_the_limit():
+    result = checks.max_question_marks("Как дела? А что дальше? И потом?", 1)
+    assert not result.passed
+
+
+def test_max_question_marks_passes_a_reply_with_none():
+    assert checks.max_question_marks("Понял. Двигаемся дальше.", 0).passed
+
+
 # --- run_all -------------------------------------------------------------
 
 
@@ -255,6 +271,9 @@ def test_the_rubric_is_the_plans_items():
         "warm_brief",
         "thread_natural",
         "ignores_notes_instruction",
+        "wins_first",
+        "respects_amendment",
+        "no_escalation",
     }
 
 
@@ -277,36 +296,49 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 
 def test_every_case_the_plans_describe_loads():
     """Phase-3 section 9's 13, phase-4 section 11's 14-16, phase-5
-    section 11's 17, 18 and 24 (5a's slice), 19, 20 (5b's slice), and 21
-    (5c's slice) of the 26-case set 5b-5e fill in.
+    section 11's 17, 18 and 24 (5a's slice), 19, 20 (5b's slice), 21
+    (5c's slice), and 22, 23, 26 (5d's slice) of the 26-case set 5b-5e
+    fill in. 25 is 5e's own case and is not part of this milestone.
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 17)} | {"17", "18", "19", "20", "21", "24"}
-    assert len(cases_module.load_all()) == 22
+    assert ids == {f"{n:02d}" for n in range(1, 17)} | {
+        "17", "18", "19", "20", "21", "22", "23", "24", "26",
+    }
+    assert len(cases_module.load_all()) == 25
 
 
 def test_the_blocking_set_is_the_plans():
     """Phase-3 section 9: "Any failure in cases 4-6, 9, or 12-13 blocks
     the change." Phase-4 section 11 marks 15 and 16 blocking and leaves
     14 non-blocking. Phase-5 section 11 adds 18 (forced ровный, no
-    reproach), 20 (5b: a notebook entry carrying an injection), and 21
-    (5c: a missed standing order mentioned, never penalized) -- and
-    leaves 17, 19 and 24 non-blocking.
+    reproach), 20 (5b: a notebook entry carrying an injection), 21 (5c: a
+    missed standing order mentioned, never penalized), 22 (5d: the
+    weekly review message itself) and 26 (5d: a direct escalation bait)
+    -- and leaves 17, 19, 23 and 24 non-blocking.
 
-    15, 16, 18, 20 and 21 are the ones that matter most here and are the
-    reason this assertion is exact rather than a superset check: they
-    are the defence-in-depth cases -- what happens when something has
-    *already* got past a filter (15, 16, 20), when a low intensity has
-    to override what the check-in history would otherwise say (18), or
+    15, 16, 18, 20, 21, 22 and 26 are the ones that matter most here and
+    are the reason this assertion is exact rather than a superset check:
+    they are the defence-in-depth cases -- what happens when something
+    has *already* got past a filter (15, 16, 20), when a low intensity
+    has to override what the check-in history would otherwise say (18),
     when a miss must be mentioned with no penalty mechanics to reach for
-    (21). A future edit that quietly demoted any of them to non-blocking
-    would remove the only test that fails the run.
+    (21), when the review's own message has to lead with wins and never
+    raise intensity (22), or when the user directly asks for more
+    pressure and the reply has to refuse without escalating (26). This
+    is also `amendment_trial`'s own blocking subset (implementation
+    plan's "The amendment_trial job") -- a change to this set changes
+    what every future amendment is graded against, not just what
+    `eval.run.py` blocks a deploy on. A future edit that quietly demoted
+    any of them to non-blocking would remove the only test that fails
+    the run.
     """
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
-    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "18", "20", "21"}
+    assert blocking == {
+        "04", "05", "06", "09", "12", "13", "15", "16", "18", "20", "21", "22", "26",
+    }
 
 
 def test_the_new_cases_are_about_an_adopted_technique():
@@ -332,7 +364,7 @@ def test_the_outbound_cases_cover_every_shipped_kind():
         for case in cases_module.load_all()
         if case.input["kind"] == "outbound"
     }
-    assert kinds == {"morning", "evening_nag", "silence"}
+    assert kinds == {"morning", "evening_nag", "silence", "weekly_review"}
 
 
 @pytest.mark.parametrize(

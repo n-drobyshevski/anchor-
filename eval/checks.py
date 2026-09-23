@@ -153,6 +153,23 @@ def no_nickname(text: str, nicknames: tuple[str, ...] = NICKNAMES) -> Result:
     )
 
 
+def max_question_marks(text: str, limit: int) -> Result:
+    """At most `limit` question marks anywhere in the reply.
+
+    5d (phase-5 plan section 11, case 23): the deterministic half of
+    "respects the amendment «меньше вопросов»" -- a count, not a pattern
+    match, because the thing an active "fewer questions" amendment
+    should visibly change is *how many* questions the reply asks, not
+    whether any particular phrasing appears.
+    """
+    count = text.count("?")
+    return Result(
+        "max_question_marks",
+        count <= limit,
+        f"{count} «?» (нужно не больше {limit})",
+    )
+
+
 def forbidden(text: str, patterns: list[str]) -> Result:
     """No pattern matches. Plan section 9's `forbidden_regex`.
 
@@ -201,4 +218,6 @@ def run_all(text: str, spec: dict, settings=None) -> list[Result]:
         results.append(no_nickname(text, nicknames))
     if spec.get("forbidden_regex"):
         results.append(forbidden(text, spec["forbidden_regex"]))
+    if "max_question_marks" in spec:
+        results.append(max_question_marks(text, spec["max_question_marks"]))
     return results

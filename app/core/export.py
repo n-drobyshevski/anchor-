@@ -37,7 +37,9 @@ from app.db.models import (
     Outbound,
     Memory,
     Message,
+    PersonaAmendment,
     Proposal,
+    ReviewProposal,
     SafetyEvent,
     Scene,
     SpendLedger,
@@ -47,6 +49,7 @@ from app.db.models import (
     StudyClip,
     StudyJob,
     UserState,
+    WeeklyReview,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +99,14 @@ EXPORTED_MODELS = (
     # their own daily answers about them.
     StandingOrder,
     CheckinOrderResult,
+    # 5d: the weekly review and persona amendments (phase-5 plan
+    # sections 3, 8 and 9). weekly_review.analysis is the validated
+    # summary of the user's own week; review_proposal is what it
+    # suggested and how the user answered; persona_amendment is what the
+    # user adopted and its (pass/fail only, no model text) eval_report.
+    WeeklyReview,
+    ReviewProposal,
+    PersonaAmendment,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

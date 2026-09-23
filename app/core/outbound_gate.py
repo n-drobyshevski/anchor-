@@ -34,14 +34,21 @@ from typing import Literal, NamedTuple
 
 from app.core.clock import to_local, within_window
 
-Kind = Literal["morning", "evening_nag", "silence", "tick"]
+Kind = Literal["morning", "evening_nag", "silence", "tick", "weekly_review"]
 
 MORNING: Kind = "morning"
 EVENING_NAG: Kind = "evening_nag"
 SILENCE: Kind = "silence"
 TICK: Kind = "tick"
+# 5d (phase-5 plan section 8; implementation plan's "Decisions"). The
+# weekly review goes through the full gate like the two fixed intents,
+# but joins the welfare-cooldown set with SILENCE and TICK: it is
+# discretionary in the same sense they are (nobody agreed to a fixed
+# time the way morning/evening are the routine itself), so a recent
+# welfare trigger holds it back too.
+WEEKLY_REVIEW: Kind = "weekly_review"
 
-KINDS: tuple[Kind, ...] = (MORNING, EVENING_NAG, SILENCE, TICK)
+KINDS: tuple[Kind, ...] = (MORNING, EVENING_NAG, SILENCE, TICK, WEEKLY_REVIEW)
 
 # Reason codes. `OK` is the only one that accompanies allowed=True.
 OK = "ok"
@@ -67,6 +74,7 @@ _RECENT_NUDGE = KIND_RULE_PREFIX + "recent_nudge"
 _USER_ACTIVE = KIND_RULE_PREFIX + "user_active"
 _TICK_CAP = KIND_RULE_PREFIX + "tick_cap"
 _RECENT_OUTBOUND = KIND_RULE_PREFIX + "recent_outbound"
+_REVIEW_EXISTS = KIND_RULE_PREFIX + "review_exists"
 
 
 class GateResult(NamedTuple):
@@ -105,6 +113,15 @@ class GateFacts:
     """Facts about today that only a query can answer."""
 
     checkin_today: bool = False
+    # 5d: whether a weekly_review row already exists for the local
+    # week_start the current instant falls in. The current code treats
+    # any unknown kind as TICK (see _kind_rule's fallthrough below), so
+    # WEEKLY_REVIEW needs its own explicit branch -- this is the fact
+    # that branch reads. Only load_gate_inputs(kind=WEEKLY_REVIEW) (or
+    # kind=None) ever populates it as True; every other caller leaves
+    # the default, which is the conservative direction (a stale False
+    # never blocks a legitimate review).
+    review_exists_this_week: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,10 +223,12 @@ def gate(
     if state.ignored_in_row >= config.max_ignored_in_row:
         return GateResult(False, IGNORED)
 
-    # 7. Welfare cooldown. Only the two *discretionary* kinds are held
-    #    back; morning and evening are part of the agreed routine and
-    #    resume with the persona.
-    if kind in (SILENCE, TICK) and _elapsed_under(
+    # 7. Welfare cooldown. Only the *discretionary* kinds are held back;
+    #    morning and evening are part of the agreed routine and resume
+    #    with the persona. 5d: weekly_review joins silence and tick here
+    #    (implementation plan's "Decisions": announced ahead of this
+    #    milestone).
+    if kind in (SILENCE, TICK, WEEKLY_REVIEW) and _elapsed_under(
         now, state.welfare_at, config.welfare_cooldown_h
     ):
         return GateResult(False, WELFARE_COOLDOWN)
@@ -261,6 +280,17 @@ def _kind_rule(
         # since local_date dedup alone would allow one every midnight.
         if _elapsed_under(now, counts.last_silence_sent_at, config.silence_nudge_h):
             return GateResult(False, _RECENT_NUDGE)
+        return GateResult(True, OK)
+
+    if kind == WEEKLY_REVIEW:
+        # 5d: refuse when this local week already has a row -- the
+        # scheduled review must never re-plan the same week, and
+        # /review bypasses the gate entirely (it regenerates on
+        # purpose). The current code otherwise treats any kind not
+        # matched above as TICK, which is exactly wrong for this one,
+        # hence the explicit branch (implementation plan's "Decisions").
+        if facts.review_exists_this_week:
+            return GateResult(False, _REVIEW_EXISTS)
         return GateResult(True, OK)
 
     # TICK
