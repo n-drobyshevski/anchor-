@@ -28,13 +28,14 @@ def _settings(**overrides) -> Settings:
 # --- telegram_update.payload -------------------------------------------
 
 
-async def test_forget_update_payloads_nulls_old_payload_only(sessionmaker):
+async def test_forget_update_payloads_blanks_old_finished_payload_only(sessionmaker):
     settings = _settings(UPDATE_PAYLOAD_RETENTION_DAYS=30)
     old = NOW - datetime.timedelta(days=31)
     fresh = NOW - datetime.timedelta(days=1)
     async with sessionmaker() as session:
-        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, created_at=old))
-        session.add(TelegramUpdate(update_id=2, payload={"b": 2}, created_at=fresh))
+        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, status="done", created_at=old))
+        session.add(TelegramUpdate(update_id=2, payload={"b": 2}, status="done", created_at=fresh))
+        session.add(TelegramUpdate(update_id=3, payload={"c": 3}, status="pending", created_at=old))
         await session.commit()
 
         count = await retention.forget_update_payloads(session, settings, FrozenClock(NOW))
@@ -42,15 +43,17 @@ async def test_forget_update_payloads_nulls_old_payload_only(sessionmaker):
 
     async with sessionmaker() as session:
         rows = {row.update_id: row.payload for row in (await session.execute(select(TelegramUpdate))).scalars()}
-    assert rows[1] is None
+    assert rows[1] == {}
     assert rows[2] == {"b": 2}
+    # A pending row keeps its payload: the worker still needs it.
+    assert rows[3] == {"c": 3}
 
 
 async def test_forget_update_payloads_is_idempotent(sessionmaker):
     settings = _settings(UPDATE_PAYLOAD_RETENTION_DAYS=30)
     old = NOW - datetime.timedelta(days=31)
     async with sessionmaker() as session:
-        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, created_at=old))
+        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, status="done", created_at=old))
         await session.commit()
         first = await retention.forget_update_payloads(session, settings, FrozenClock(NOW))
         second = await retention.forget_update_payloads(session, settings, FrozenClock(NOW))
@@ -196,7 +199,7 @@ async def test_run_retention_sweep_runs_all_three_rules(sessionmaker):
     )
     old = NOW - datetime.timedelta(days=60)
     async with sessionmaker() as session:
-        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, created_at=old))
+        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, status="done", created_at=old))
         session.add(Job(kind="extract", payload={}, status="done", created_at=old))
         scene = await _scene(session, summary="итог")
         session.add(Message(role="user", content="старое", scene_id=scene.id, created_at=old))
@@ -206,7 +209,7 @@ async def test_run_retention_sweep_runs_all_three_rules(sessionmaker):
 
     async with sessionmaker() as session:
         update = (await session.execute(select(TelegramUpdate))).scalars().one()
-        assert update.payload is None
+        assert update.payload == {}
         assert (await session.execute(select(Job))).scalars().all() == []
         assert (await session.execute(select(Message))).scalars().all() == []
 
@@ -257,7 +260,7 @@ async def test_worker_dispatches_the_retention_sweep_job(sessionmaker):
 
     async with sessionmaker() as session:
         session.add(UserState(id=1, chat_id=555, timezone="UTC"))
-        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, created_at=old))
+        session.add(TelegramUpdate(update_id=1, payload={"a": 1}, status="done", created_at=old))
         await session.commit()
         await _run_job(
             session, settings, None, None, None, clock, retention.RETENTION_SWEEP, {}
@@ -265,4 +268,4 @@ async def test_worker_dispatches_the_retention_sweep_job(sessionmaker):
 
     async with sessionmaker() as session:
         update = (await session.execute(select(TelegramUpdate))).scalars().one()
-    assert update.payload is None
+    assert update.payload == {}

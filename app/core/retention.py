@@ -6,7 +6,8 @@ cadence (once a local day), same injected Clock, same plain-SQL-no-
 provider-call shape, same "a bug here is a bug in a WHERE clause"
 failure mode:
 
-1. `telegram_update.payload := null` after `UPDATE_PAYLOAD_RETENTION_DAYS`.
+1. `telegram_update.payload := '{}'` (an empty object) after
+   `UPDATE_PAYLOAD_RETENTION_DAYS`, for rows that are done or failed.
 2. Terminal `job` rows (`done`/`failed`) deleted after `JOB_RETENTION_DAYS`.
 3. If `MESSAGE_RETENTION_DAYS > 0`: messages older than that, **only**
    if their scene has a summary, are deleted.
@@ -37,7 +38,7 @@ from __future__ import annotations
 import datetime
 import logging
 
-from sqlalchemy import delete as sql_delete, null, select, update as sql_update
+from sqlalchemy import delete as sql_delete, literal_column, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -57,26 +58,34 @@ FORGET_OLD_MESSAGES = "forget_old_messages"
 # a job row only ever reaches 'done' or 'failed', never anything else
 # once claiming has finished with it.
 _JOB_TERMINAL_STATUSES = ("done", "failed")
+_UPDATE_TERMINAL_STATUSES = ("done", "failed")
 
 
 async def forget_update_payloads(session: AsyncSession, settings: Settings, clock: Clock) -> int:
-    """Null `telegram_update.payload` for rows older than the retention
-    window. Row identity, status and attempts all survive -- only the
-    Telegram envelope (which can carry message text) is cleared.
+    """Blank `telegram_update.payload` for finished rows older than the
+    retention window. Row identity, status and attempts all survive --
+    only the Telegram envelope (which can carry message text) is cleared.
 
-    `.values(payload=null())`, not `payload=None` -- SQLAlchemy's JSON/
-    JSONB type binds a Python `None` as the *JSON* null literal (a
-    non-NULL column value containing the JSON token `null`) unless told
-    otherwise, so the naive spelling would leave `payload.is_not(None)`
-    matching the very rows this sweep just "forgot", making it re-run
-    forever instead of becoming a no-op once a row is done.
+    The plan says "payload := null", but the column has been NOT NULL
+    since Phase 1, and relaxing it means `ALTER TABLE telegram_update`,
+    which needs an ACCESS EXCLUSIVE lock on the busiest table in the
+    schema. The first 6e deploy sat on exactly that lock until Railway's
+    healthcheck gave up. An empty JSON object removes the same content
+    with no schema change: the privacy outcome is identical.
+
+    Pending and processing rows are never touched -- the worker still
+    needs their payload to handle them.
     """
     cutoff = clock.now_utc() - datetime.timedelta(days=settings.UPDATE_PAYLOAD_RETENTION_DAYS)
+    # A literal, not a bound parameter: SQLAlchemy would bind "{}" as a
+    # JSON *string*, not an empty object.
+    empty = literal_column("'{}'::jsonb")
     result = await session.execute(
         sql_update(TelegramUpdate)
         .where(TelegramUpdate.created_at < cutoff)
-        .where(TelegramUpdate.payload.is_not(None))
-        .values(payload=null())
+        .where(TelegramUpdate.status.in_(_UPDATE_TERMINAL_STATUSES))
+        .where(TelegramUpdate.payload != empty)
+        .values(payload=empty)
     )
     await session.commit()
     count = result.rowcount or 0

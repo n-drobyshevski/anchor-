@@ -56,6 +56,11 @@ def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
+        # The running deploy keeps serving while the next one migrates, so
+        # an ALTER on a busy table can wait on its lock indefinitely -- the
+        # first 6e deploy sat silently until Railway's healthcheck gave up.
+        # Fail fast and loudly instead; the old deploy keeps running.
+        connection.exec_driver_sql("SET LOCAL lock_timeout = '30s'")
         context.run_migrations()
 
 
