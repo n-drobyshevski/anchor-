@@ -24,17 +24,27 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
-from sqlalchemy import func, select, update as sql_update
+from sqlalchemy import Sequence, func, select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
-from app.db.models import TelegramUpdate
+from app.db.models import TelegramUpdate, WebUpdate
 
 MAX_ATTEMPTS = 3
 STUCK_AFTER = datetime.timedelta(minutes=5)
+
+# Web-chat plan track 1: web update_ids are always negative, so they can
+# never collide with a Telegram update_id (always non-negative) or with
+# each other's key space. Subtracting this offset from a strictly
+# increasing Postgres sequence keeps them both negative and increasing
+# over time -- FIFO among web rows -- with headroom no realistic
+# nextval() will ever close: 2**53 is JavaScript's/Postgres bigint's safe
+# integer ceiling, a number web_update_seq would need trillions of years
+# of continuous traffic to approach.
+WEB_ID_OFFSET = 2**53
 
 
 @dataclass(frozen=True)
@@ -45,10 +55,17 @@ class QueueSpec:
     of the row, which is Telegram's own update_id for the inbound queue
     and a surrogate bigserial for jobs.
 
-    `order_by` is the claim order. For updates it is update_id alone,
-    which is Telegram's own monotonic sequence and therefore arrival
-    order. For jobs it is (run_after, id): due-soonest first, then
-    insertion order among rows due at the same instant.
+    `order_by` is the claim order. For updates it is (created_at,
+    update_id): `created_at` is arrival order across *both* transports,
+    and `update_id` is the tiebreaker for two rows inserted in the same
+    instant. Web-chat plan track 1 changed this from `update_id` alone
+    -- Telegram's ids are a monotonic arrival sequence only within their
+    own transport, and web ids (always negative, see WEB_ID_OFFSET
+    above) would otherwise always sort first regardless of when either
+    message actually arrived, reordering the single conversation the
+    whole synthetic-update trick depends on the moment both queues have
+    a backlog at once. For jobs it is (run_after, id): due-soonest
+    first, then insertion order among rows due at the same instant.
 
     `due_column`, when set, adds `<= now()` to the claim predicate.
     `now()` here is Postgres' transaction_timestamp, not Python's
@@ -65,7 +82,7 @@ class QueueSpec:
 UPDATE_SPEC = QueueSpec(
     model=TelegramUpdate,
     id_column=TelegramUpdate.update_id,
-    order_by=(TelegramUpdate.update_id,),
+    order_by=(TelegramUpdate.created_at, TelegramUpdate.update_id),
 )
 
 
@@ -162,6 +179,90 @@ async def enqueue(session: AsyncSession, update_id: int, payload: dict) -> bool:
     result = await session.execute(stmt)
     await session.commit()
     return result.first() is not None
+
+
+async def _next_web_update_id(session: AsyncSession) -> int:
+    """Reserve the next negative web update_id from web_update_seq."""
+    result = await session.execute(select(Sequence("web_update_seq").next_value()))
+    return result.scalar_one() - WEB_ID_OFFSET
+
+
+async def enqueue_web(
+    session: AsyncSession, build_payload: Callable[[int], dict], client_key: str | None
+) -> int:
+    """Insert a synthetic web update; idempotent on `client_key`. Returns its update_id.
+
+    `client_key=None` (app/web/ingress.py's `press`, whose HTTP contract
+    carries no client_key) always inserts a fresh row: NULL is never
+    equal to another NULL under the partial unique index the migration
+    creates (`WHERE client_key IS NOT NULL`), so a NULL-keyed insert can
+    never conflict via that arbiter and the fallback SELECT below is
+    unreachable for it.
+
+    Web-chat plan track 1 (design section 8, "enqueue_web's retry
+    contract is underspecified" in the second adversarial critique).
+    Not generalized alongside `enqueue` above for the same reason that
+    one is not generalized either: the two dedup keys are shaped
+    differently (Telegram's is the primary key itself and arrives from
+    the caller; this one is a nullable unique column we mint a fresh
+    negative id for), so a shared insert helper would need a parameter
+    that is always meaningful here and never there.
+
+    **Two tables, one transaction, no foreign key between them** (see
+    `app/db/models.py`'s `TelegramUpdate`/`WebUpdate` docstrings for
+    why: an FK into `telegram_update` would take a lock this rework
+    exists to avoid). The idempotency arbiter is now `WebUpdate.
+    client_key`, checked *first* so a conflicting retry never leaves a
+    wasted `telegram_update` row behind: on a `client_key` replay the
+    `web_update` insert's ON CONFLICT DO NOTHING fires, RETURNING yields
+    nothing, and the matching `telegram_update` insert is skipped
+    entirely -- a fallback SELECT reads back the update_id the *first*
+    call used. That id is what POST /api/send hands back on every
+    retry: same client_key in, same update_id out, every time.
+
+    A fresh update_id is reserved from web_update_seq first, then handed
+    to `build_payload` so the synthetic Update's own message_id/update_id
+    fields (app/web/ingress.py) can embed it -- the payload cannot be
+    built before the id exists. It is always negative (Telegram's own
+    ids are always non-negative); asserted here in code rather than by a
+    database CHECK, since the sign-of-update_id invariant is no longer
+    enforced by the schema at all (see `TelegramUpdate`'s docstring).
+    A reserved id that loses the client_key race is simply never used --
+    a gap in a sequence costs nothing, and Postgres sequences are not
+    gapless by design.
+    """
+    update_id = await _next_web_update_id(session)
+    assert update_id < 0, f"web update_id must be negative, got {update_id}"
+
+    web_stmt = (
+        pg_insert(WebUpdate)
+        .values(update_id=update_id, client_key=client_key)
+        .on_conflict_do_nothing(
+            index_elements=[WebUpdate.client_key],
+            index_where=WebUpdate.client_key.isnot(None),
+        )
+        .returning(WebUpdate.update_id)
+    )
+    web_result = await session.execute(web_stmt)
+    web_row = web_result.first()
+    if web_row is None:
+        # client_key already claimed by an earlier call -- the reserved
+        # id above goes unused, and no telegram_update row is inserted
+        # for it.
+        existing = await session.execute(
+            select(WebUpdate.update_id).where(WebUpdate.client_key == client_key)
+        )
+        await session.commit()
+        return existing.scalar_one()
+
+    payload = build_payload(update_id)
+    await session.execute(
+        pg_insert(TelegramUpdate).values(
+            update_id=update_id, payload=payload, status="pending", attempts=0
+        )
+    )
+    await session.commit()
+    return update_id
 
 
 async def claim(session: AsyncSession) -> TelegramUpdate | None:

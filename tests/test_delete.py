@@ -9,6 +9,7 @@ this code exists, which is the only day it matters.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import decimal
 import time
@@ -50,6 +51,8 @@ from app.db.models import (
     StudyJob,
     TelegramUpdate,
     UserState,
+    WebSession,
+    WebUpdate,
     WeeklyReview,
 )
 from app.tg import data as data_ui
@@ -94,11 +97,13 @@ def _callback_update(update_id: int, data: str, *, message_id: int = 1) -> dict:
     }
 
 
-def _build_dp(sessionmaker):
+def _build_dp(sessionmaker, hub=None):
     fake = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake)
     dp = Dispatcher()
-    dp.include_router(build_router(sessionmaker, Settings(), FakeLLMProvider(), FakeLLMProvider()))
+    dp.include_router(
+        build_router(sessionmaker, Settings(), FakeLLMProvider(), FakeLLMProvider(), hub=hub)
+    )
     return dp, bot, fake
 
 
@@ -164,6 +169,19 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     outcome="ok",
                     model="fake-safety",
                 ),
+                # Web-chat plan track 1: a live session cookie is a
+                # credential, so "delete all my data" purges it too
+                # (app/core/purge.py's PURGED_TABLES).
+                WebSession(
+                    token_hash=b"\x00" * 32,
+                    expires_at=now + datetime.timedelta(days=1),
+                ),
+                # Web-chat plan track 2: the idempotency marker for a
+                # browser-originated update, no content of its own but
+                # purged for the same reason (app/core/purge.py's
+                # PURGED_TABLES). update_id is negative by the
+                # sign-derived-origin convention (app/db/queue.py).
+                WebUpdate(update_id=-1, client_key="test-client-key"),
             ]
         )
         await session.commit()
@@ -497,6 +515,67 @@ async def test_confirming_wipes_everything(sessionmaker):
     assert after["message"] == 0
     assert fake.edits[-1].text == data_ui.DELETED_TEXT
     assert fake.edits[-1].reply_markup is None
+
+
+async def test_confirming_also_closes_the_web_hub(sessionmaker):
+    """Medium-severity finding: a Telegram-issued /delete used to leave
+    the WebHub entirely untouched -- purge.py truncates `message` and
+    `web_session`, but the hub's own 200-event ring buffer (and any
+    still-open SSE stream) kept the supposedly deleted conversation
+    replayable to anyone who opened GET /api/events afterwards. /delete
+    now closes the same hub /weblogout does, once the wipe commits."""
+    from app.web.hub import WebHub
+
+    await _seed_everything(sessionmaker, 2, 3)
+    hub = WebHub()
+    hub.publish_message(
+        id=1, role="user", text="секрет до удаления", kind="chat", keyboard=None,
+        ts=datetime.datetime.now(datetime.timezone.utc),
+    )
+    sub = hub.subscribe()
+    dp, bot, fake = _build_dp(sessionmaker, hub=hub)
+
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    issued = int(time.time())
+    await dp.feed_update(
+        bot,
+        Update.model_validate(_callback_update(3, f"d:yes:{issued}"), context={"bot": bot}),
+    )
+
+    # The stream got the poison pill...
+    remaining = [event async for event in sub.events()]
+    assert remaining == []
+    # ...and the ring buffer no longer replays the pre-delete text to a
+    # brand new subscriber either.
+    fresh = hub.subscribe(last_event_id=0)
+    fresh.close()
+    assert fresh.backlog == []
+
+
+async def test_cancelling_does_not_touch_the_web_hub(sessionmaker):
+    """Only a *successful* wipe closes the hub -- "Отмена" must not end
+    a session's live view for no reason."""
+    from app.web.hub import WebHub
+
+    await _seed_everything(sessionmaker, 2, 3)
+    hub = WebHub()
+    sub = hub.subscribe()
+    dp, bot, fake = _build_dp(sessionmaker, hub=hub)
+
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    await dp.feed_update(
+        bot, Update.model_validate(_callback_update(3, "d:no"), context={"bot": bot})
+    )
+
+    # Still open: nothing closed it.
+    hub.publish_toast("живой")
+    event = await asyncio.wait_for(sub.events().__anext__(), timeout=1)
+    assert event.event == "toast"
+    sub.close()
 
 
 async def test_the_confirmation_names_the_real_provider(sessionmaker):

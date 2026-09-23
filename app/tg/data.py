@@ -38,6 +38,7 @@ from app.core.clock import Clock, SystemClock
 from app.core.outbound import cancel_outbound
 from app.ops import backup
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
+from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +126,24 @@ async def handle_delete_callback(
     chat_id: int,
     message_id: int,
     data: str,
+    hub: WebHub | None = None,
 ) -> None:
-    """`d:yes:<epoch>` / `d:no`."""
+    """`d:yes:<epoch>` / `d:no`.
+
+    `hub` (web-chat plan track 1/2, optional and keyword-only so every
+    call site predating it -- there is exactly one production caller,
+    app/tg/router.py's delete_decision, which always has a hub to pass
+    once WEB_UI_ENABLED -- keeps working unchanged) is closed after a
+    successful wipe below. Without this, a Telegram-issued `/delete`
+    truncated `message` and `web_session` but never touched the hub's
+    in-memory ring buffer: any later GET /api/events with a low
+    Last-Event-ID would still replay the supposedly deleted
+    conversation's text straight out of that buffer (a medium-severity
+    finding). `/weblogout`'s own kill switch (app/web/auth.py's
+    revoke_all) already does this for its own path; `/delete` needed
+    the same call on this one, since app/core/purge.py itself has no
+    idea a WebHub exists (by design -- see app/web/sink.py's docstring).
+    """
     clock = clock or SystemClock()
     await answer_callback(bot, callback_id)
     parts = data.split(":")
@@ -166,5 +183,8 @@ async def handle_delete_callback(
         # must not silently resurrect a scheduled message.
         await cancel_outbound(session, clock)
         await purge.delete_everything(session, settings, clock)
+
+    if hub is not None:
+        hub.close_all()
 
     await edit_keyboard(bot, chat_id, message_id, DELETED_TEXT, None)

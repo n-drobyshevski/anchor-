@@ -69,10 +69,31 @@ class Base(DeclarativeBase):
 
 
 class TelegramUpdate(Base):
+    """The inbound queue (plan section 2 / 6.3), plus the web-chat transport.
+
+    Origin is derived from the *sign* of `update_id`, not a stored
+    column: Telegram's own ids are always non-negative, and every
+    web-origin row gets a negative id from `web_update_seq`
+    (app/db/queue.py's `enqueue_web`), so `update_id < 0` is exactly
+    "this came from the browser" with no column that could ever drift
+    out of sync with it. This replaces an earlier design (web-chat plan
+    track 1) that added `source`/`client_key` columns and two CHECK
+    constraints directly on this table via an ALTER; that ALTER takes an
+    ACCESS EXCLUSIVE lock and hung a Railway deploy exactly the way
+    migration f7da7c8741fd did (see that migration's docstring and
+    commits 2cd24c2/068e7e3), so the web-chat plan's own schema was
+    reworked the same way: no ALTER on this hot table. The idempotency
+    key for a web-origin row lives on `WebUpdate.client_key` instead, in
+    a table this one has no foreign key into (an FK would itself take a
+    SHARE ROW EXCLUSIVE lock here) -- see `app/db/queue.py`'s
+    `enqueue_web` for how the two rows are written together.
+    """
+
     __tablename__ = "telegram_update"
 
     # Telegram's own update_id, provided explicitly on insert — not a
-    # generated identity column.
+    # generated identity column. Web rows get a negative id from
+    # web_update_seq instead (app/db/queue.py's enqueue_web).
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     # 6e (migration f7da7c8741fd, already applied in production): the
     # column is nullable in the schema, but the retention sweep (app/core/
@@ -87,7 +108,86 @@ class TelegramUpdate(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("ix_telegram_update_status_update_id", "status", "update_id"),)
+    __table_args__ = (
+        Index("ix_telegram_update_status_update_id", "status", "update_id"),
+    )
+
+
+class WebUpdate(Base):
+    """The web-chat transport's own idempotency marker (web-chat plan
+    track 2, reworked to avoid an ALTER on `telegram_update` -- see that
+    model's docstring for why).
+
+    One row per web-origin update, `update_id`-keyed to the matching
+    `telegram_update` row but with **no foreign key** to it: an FK
+    constraint takes a SHARE ROW EXCLUSIVE lock on the referenced table
+    at creation time, which is exactly the kind of lock this rework
+    exists to avoid taking on `telegram_update`. The two rows are
+    written together, in one transaction, by `app/db/queue.py`'s
+    `enqueue_web` -- application code keeps them in sync since the
+    database no longer does.
+
+    `client_key` is POST /api/send's idempotency key, nullable because a
+    retried request may not always carry one, with a partial unique
+    index (see the migration) rather than a plain one, so NULL rows are
+    never compared against each other for uniqueness. `enqueue_web`
+    conflicts on this index (`ON CONFLICT (client_key) WHERE client_key
+    IS NOT NULL DO NOTHING`), then re-selects on a conflict, so a
+    retried POST with the same key returns the same `update_id`.
+
+    Holds no conversation content -- see app/core/purge.py's
+    PURGED_TABLES (it is purged like `web_session`) and
+    tests/test_export.py's NOT_EXPORTED (it is not exported, for the
+    same reason).
+    """
+
+    __tablename__ = "web_update"
+
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    client_key: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_web_update_client_key",
+            "client_key",
+            unique=True,
+            postgresql_where=text("client_key IS NOT NULL"),
+        ),
+    )
+
+
+class WebSession(Base):
+    """A logged-in web-chat session (web-chat plan section 4, track 1).
+
+    `token_hash` is the primary key rather than a surrogate id: the only
+    read this table ever serves is "does this cookie's hashed token name
+    a live session" (app/web/auth.py, track 2), so a surrogate id would
+    be a second key nothing looks up by. Only sha256(token) is ever
+    stored -- never the token itself -- the same shape as
+    TELEGRAM_SECRET_TOKEN's hmac.compare_digest check in
+    app/tg/webhook.py: a leaked row cannot be replayed as a cookie.
+
+    `expires_at` is the absolute session ceiling (WEB_SESSION_MAX_DAYS);
+    `last_seen_at` is the idle timeout's clock (WEB_SESSION_IDLE_HOURS),
+    both enforced by track 2's session validation, not by a database
+    constraint -- there is no CHECK here for the same reason
+    `user_state.quiet_until` has none: "is this still valid" depends on
+    the current time, which a CHECK constraint cannot read.
+    """
+
+    __tablename__ = "web_session"
+
+    token_hash: Mapped[bytes] = mapped_column(sa.LargeBinary, primary_key=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Job(Base):
@@ -470,7 +570,7 @@ class Memory(Base):
     pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
-    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt
+    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt|consolidate
     confidence: Mapped[float | None] = mapped_column(Float)
     superseded_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

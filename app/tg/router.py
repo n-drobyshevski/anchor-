@@ -45,7 +45,7 @@ pool) is shared across every turn.
 
 from __future__ import annotations
 
-
+import logging
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -58,17 +58,18 @@ from app.core import turn
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
+from app.core import commands as commands_core
 from app.core import memory as memory_core
 from app.core import mood as mood_core
 from app.core import safety_events
 from app.core import proposal as proposal_core
-from app.core.outbound import cancel_outbound, load_state_summary
+from app.core.outbound import load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
 from app.core.idle.facts import idle_jobs_today, latest_canary_status
 from app.core.spend import today_by_category, today_idle_usd, today_usd
-from app.core.state import get_state, update_state
+from app.core.state import get_state
 from app.llm.provider import LLMProvider
 from app.ops.backup import latest_backup_status
 from app.tg.send import send_keyboard
@@ -84,6 +85,10 @@ from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
+from app.web import auth as web_auth
+from app.web.hub import WebHub
+
+logger = logging.getLogger(__name__)
 
 NON_TEXT_REPLY = "Пока только текст."
 
@@ -164,6 +169,15 @@ BOT_COMMANDS = [
     BotCommand(command="privacy", description="Приватность и хранение данных"),
 ]
 
+# Web-chat plan track 2 (design section 4): the kill switch for a stolen
+# or merely forgotten-open web session. Kept out of BOT_COMMANDS proper
+# and added by register_commands() only when WEB_UI_ENABLED -- listing
+# it, and registering its handler above, unconditionally used to mean
+# the command showed in Telegram's menu and replied "closed" even on a
+# deploy where the web UI was never turned on (a low-severity finding:
+# "Telegram behavior changes even when WEB_UI_ENABLED=false").
+WEBLOGOUT_COMMAND = BotCommand(command="weblogout", description="Закрыть все веб-сессии")
+
 QUIET_SET = "Тихо до {until}."
 QUIET_OFF_REPLY = "Снова на связи."
 QUIET_USAGE = "Сколько? /quiet 2h, /quiet 30m, /quiet 1d или /quiet off."
@@ -188,10 +202,32 @@ FOCUS_USAGE = "Как именно? /focus on или /focus off."
 FOCUS_ON = "Фокус включён."
 FOCUS_OFF = "Фокус выключен."
 
+# Web-chat plan track 1: the second, independent layer of defense
+# against /export and /delete from the web (design section 2; the
+# adversarial review's finding 2 calls this out specifically -- ingress
+# blocking the text/callback is layer one, app/web/ingress.py, and must
+# not be the *only* layer). A guard checking `message.bot.is_web_sink` /
+# `callback.bot.is_web_sink` at the top of each handler below means
+# these stay safe even if a future change to ingress.py's tokenization
+# ever drifts from what this router actually matches.
+WEB_ONLY_REPLY = "Эта команда доступна только в Telegram."
 
-async def register_commands(bot) -> None:
-    """set_my_commands on startup (plan section 12)."""
-    await bot.set_my_commands(BOT_COMMANDS)
+# Web-chat plan track 2's /weblogout reply (design section 4).
+WEBLOGOUT_REPLY = "Все веб-сессии закрыты."
+
+
+async def register_commands(bot, *, web_ui_enabled: bool = False) -> None:
+    """set_my_commands on startup (plan section 12).
+
+    `web_ui_enabled` defaults to False so every call site and test that
+    predates the web UI keeps behaving exactly as before; app/main.py
+    passes settings.WEB_UI_ENABLED explicitly. Only then is /weblogout
+    added to the menu -- see BOT_COMMANDS' comment on WEBLOGOUT_COMMAND.
+    """
+    commands = list(BOT_COMMANDS)
+    if web_ui_enabled:
+        commands.append(WEBLOGOUT_COMMAND)
+    await bot.set_my_commands(commands)
 
 
 def _format_outbound(summary, tz: ZoneInfo, now_utc) -> list[str]:
@@ -393,8 +429,25 @@ def build_router(
     provider: LLMProvider,
     safety_provider: LLMProvider | None = None,
     clock: Clock | None = None,
+    hub: WebHub | None = None,
+    code_store: web_auth.CodeStore | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
+
+    `hub` (web-chat plan track 2) defaults to None so every test
+    predating the web UI keeps its shorter call; app/main.py passes the
+    process's one WebHub only when WEB_UI_ENABLED. It, and `code_store`
+    beside it, back exactly one handler, `/weblogout` below, which is
+    itself only registered -- and only listed in BOT_COMMANDS -- when
+    `hub is not None`: with the web UI disabled there is no web_session
+    table row and no hub to matter, so `/weblogout` behaves exactly as
+    it did before the web chat existed, falling through to an ordinary
+    persona turn like any other unrecognized-as-a-command text (a
+    low-severity finding: it used to always register, always show in
+    the Telegram command menu, and always reply "closed", even with the
+    web UI off). Every other handler in this router reaches the web
+    chat only indirectly, through `message.bot.is_web_sink`/`callback.
+    bot.is_web_sink`, which needs no hub at all.
 
     A factory rather than a shared module-level instance, because a
     Router can only ever be attached to one Dispatcher — tests that
@@ -543,19 +596,17 @@ def build_router(
         """A direct command outranks an outstanding proposal for the same field.
 
         Otherwise a live `Принять` would sit there waiting to overwrite
-        what the user just typed. Reuses the expiry machinery plan
-        section 8 already defines for one proposal superseding another.
+        what the user just typed. The expiry itself is
+        commands_core.expire_proposal_for (W2: shared with the web
+        panels); this wrapper adds what only Telegram has, the message
+        and bot to retire the stale buttons on.
         """
         async with sessionmaker() as session:
-            pending = await proposal_core.get_pending(session)
-            if pending is None or pending.field != field:
-                return
-            proposal_id = pending.id
-            pending.status = proposal_core.EXPIRED
-            pending.decided_at = clock.now_utc()
-            await session.commit()
+            expired = await commands_core.expire_proposal_for(session, clock, field)
+        if expired is None:
+            return
         await proposals_ui.retire_buttons(
-            sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=proposal_id
+            sessionmaker, message.bot, chat_id=message.chat.id, proposal_id=expired.id
         )
 
     @router.message(Command("checkin"))
@@ -580,14 +631,7 @@ def build_router(
     async def due(message: Message, event_update: Update, command: CommandObject) -> None:
         text = (command.args or "").strip()
         async with sessionmaker() as session:
-            if text:
-                await update_state(session, "due_action", text, "command")
-                await update_state(
-                    session, "due_set_at", clock.now_utc(), "command"
-                )
-            else:
-                await update_state(session, "due_action", None, "command")
-                await update_state(session, "due_set_at", None, "command")
+            await commands_core.set_due(session, clock, text, "command")
         await _expire_proposal_for(message, proposal_core.DUE_ACTION)
         await _reply_once(
             message,
@@ -605,13 +649,7 @@ def build_router(
         # and a button can never disagree about what "on" means.
         enabled = proposal_core.parse_focus(raw)
         async with sessionmaker() as session:
-            await update_state(session, "focus_on", enabled, "command")
-            await update_state(
-                session,
-                "focus_since",
-                clock.now_utc() if enabled else None,
-                "command",
-            )
+            await commands_core.set_focus(session, clock, enabled, "command")
         await _expire_proposal_for(message, proposal_core.FOCUS_ON)
         await _reply_once(
             message, event_update.update_id, FOCUS_ON if enabled else FOCUS_OFF
@@ -637,7 +675,7 @@ def build_router(
 
         if parsed == QUIET_OFF:
             async with sessionmaker() as session:
-                await update_state(session, "quiet_until", None, "command")
+                await commands_core.set_quiet(session, clock, None, "command")
             await _reply_once(message, event_update.update_id, QUIET_OFF_REPLY)
             return
 
@@ -645,8 +683,7 @@ def build_router(
         until = clock.now_utc() + capped
         async with sessionmaker() as session:
             user_state = await get_state(session)
-            await update_state(session, "quiet_until", until, "command")
-            await cancel_outbound(session, clock)
+            await commands_core.set_quiet(session, clock, until, "command")
 
         local = until.astimezone(ZoneInfo(user_state.timezone)).strftime("%d.%m %H:%M")
         template = QUIET_CLAMPED if capped < parsed else QUIET_SET
@@ -673,16 +710,14 @@ def build_router(
             await _reply_once(message, event_update.update_id, TZ_USAGE)
             return
 
-        try:
-            zone = ZoneInfo(raw)
-        except Exception:  # noqa: BLE001 - ZoneInfoNotFoundError, ValueError, OSError
-            await _reply_once(message, event_update.update_id, TZ_UNKNOWN)
-            return
-
         async with sessionmaker() as session:
-            await update_state(session, "timezone", raw, "command")
+            try:
+                await commands_core.set_timezone(session, raw, "command")
+            except commands_core.InvalidTimezone:
+                await _reply_once(message, event_update.update_id, TZ_UNKNOWN)
+                return
 
-        now_there = clock.now_utc().astimezone(zone).strftime("%H:%M")
+        now_there = clock.now_utc().astimezone(ZoneInfo(raw)).strftime("%H:%M")
         await _reply_once(
             message,
             event_update.update_id,
@@ -692,6 +727,9 @@ def build_router(
     @router.message(Command("export"))
     async def export_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
             return
         async with sessionmaker() as session:
             user_state = await get_state(session)
@@ -715,6 +753,9 @@ def build_router(
     async def delete_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
             return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
             message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
@@ -727,8 +768,39 @@ def build_router(
     async def privacy(message: Message, event_update: Update) -> None:
         # 6e (plan section 9.5). Fixed text, no arguments, same
         # store-and-send-idempotently shape as /focus's usage line --
-        # see _reply_once's own docstring.
+        # see _reply_once's own docstring. No is_web_sink guard: unlike
+        # /export and /delete this sends neither a document nor a data
+        # mutation, only a canned informational reply, so there is
+        # nothing here a web-origin update could do that a Telegram one
+        # could not.
         await _reply_once(message, event_update.update_id, PRIVACY_TEXT)
+
+    if hub is not None:
+
+        @router.message(Command("weblogout"))
+        async def weblogout(message: Message, event_update: Update) -> None:
+            """The kill switch (design section 4): end every web_session
+            row, close every live SSE stream/callback allowlist, and
+            invalidate every pending login code.
+
+            Telegram-only in practice already -- a stolen web session
+            cannot reach this handler at all, since it can only ever
+            produce a synthetic Update fed to WebSinkSession's Bot, not
+            a real Telegram message -- so this needs no is_web_sink
+            guard of its own the way export_command/delete_command do.
+            Only registered at all when `hub is not None` (the WEB_UI_
+            ENABLED signal): see build_router's docstring for why the
+            web-UI-disabled case is no longer "register it anyway and
+            reply as if something happened."
+            """
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                await web_auth.revoke_all(session, hub, code_store)
+            logger.info(
+                "web sessions revoked", extra={"event": "web_logout", "route": "weblogout"}
+            )
+            await _reply_once(message, event_update.update_id, WEBLOGOUT_REPLY)
 
     # --- 2b: memory (plan section 11) ---
 
@@ -1151,7 +1223,18 @@ def build_router(
         Deliberately not gated on _once: the wipe destroys the `message`
         rows that gate reads, and a replayed press is harmless anyway
         (see app/tg/data.py).
+
+        Web-chat plan track 1: guarded the same way export_command/
+        delete_command are, and belt-and-braces on top of that --
+        app/web/ingress.py refuses to ever enqueue a `d:`-prefixed press
+        in the first place, and delete_command's own guard above means
+        WebSinkSession never sends this keyboard to begin with. Three
+        independent things would all have to fail at once for this
+        branch to matter, which is the point.
         """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
         await data_ui.handle_delete_callback(
             sessionmaker,
             callback.bot,
@@ -1161,6 +1244,7 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+            hub=hub,
         )
 
     @router.callback_query(F.data.startswith("w:"))
