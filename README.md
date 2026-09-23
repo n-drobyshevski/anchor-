@@ -910,7 +910,7 @@ the extractor and welfare classifier depend on it.
    Disable).
 2. Railway: new project from this repo, add the Postgres plugin, set the
    env vars from `.env.example` (`MODE=webhook`).
-3. Start command: `alembic upgrade head && python -m app.main`.
+3. Start command: set by `railway.json` (Dockerfile build): `/app/.venv/bin/python scripts/migrate.py && /app/.venv/bin/python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit` -- see its docstring for why.
    Healthcheck path: `/healthz`.
 4. Generate a public domain, set `PUBLIC_URL` to it, redeploy. The app
    sets its own webhook on boot (`set_webhook` in `app/main.py`).

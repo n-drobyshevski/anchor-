@@ -2,5 +2,8 @@
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "/app/.venv/bin/python scripts/migrate.py && /app/.venv/bin/python -m app.main"
   }
 }

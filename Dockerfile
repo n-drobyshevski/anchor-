@@ -55,6 +55,7 @@ RUN uv sync --frozen --no-dev
 # pip-audit) over the network. The image is already synced; run as is.
 ENV PYTHONUNBUFFERED=1 UV_NO_SYNC=1
 
-# Equivalent to the Railway start command this service already runs
-# (README.md's "Deploy (Railway)"): migrate, then start the app.
-CMD ["sh", "-c", "uv run alembic upgrade head && uv run python -m app.main"]
+# The same command railway.json sets as the Railway start command:
+# migrate (scripts/migrate.py exits via os._exit, see its docstring),
+# then start the app -- the venv's python directly, no `uv run`.
+CMD ["sh", "-c", "/app/.venv/bin/python scripts/migrate.py && /app/.venv/bin/python -m app.main"]
