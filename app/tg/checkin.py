@@ -55,6 +55,22 @@ STALE = "Устарело."
 
 DONE_TEXT = "Записал. Серия: {streak} дн."
 
+# W4: the note step's Пропустить, as a named constant (the router's
+# `c:` handler and the tests read the same value this keyboard sends).
+SKIP_CALLBACK = "c:n:skip"
+
+# W4: the completion row app/web/ingress.py's `checkin_complete` queues
+# for a check-in filled on the web. Never on a keyboard: only the
+# server builds it, with the check-in's own minted message id, and it
+# finishes exactly that check-in (core `finish_submitted`) without the
+# note step ever being opened.
+WEB_SUBMIT_CALLBACK = "c:n:web"
+
+# W4: what a live Telegram check-in keyboard is replaced with when the
+# same day's check-in is then filled in on the web (app/web/panels/
+# checkin.py), so a leftover button can never restart or finish it.
+WEB_TAKEOVER_TEXT = "Чек-ин заполнен в вебе."
+
 
 def rating_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -77,7 +93,7 @@ def due_keyboard() -> InlineKeyboardMarkup:
 
 def note_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=SKIP, callback_data="c:n:skip")]]
+        inline_keyboard=[[InlineKeyboardButton(text=SKIP, callback_data=SKIP_CALLBACK)]]
     )
 
 
@@ -168,6 +184,20 @@ async def retire(bot: Bot, chat_id: int, message_id: int, streak: int) -> None:
     await edit_keyboard(bot, chat_id, message_id, DONE_TEXT.format(streak=streak), None)
 
 
+async def retire_for_web(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Drop a check-in keyboard made stale by a web submission (W4).
+
+    The web form restarts today's row with a fresh, web-minted message
+    id, so this keyboard's buttons would already answer STALE -- this
+    just makes that visible instead of leaving dead buttons live.
+    app/web/panels/checkin.py calls it with the real bot for a positive
+    (Telegram) id and with the web bot for a negative one (a /checkin
+    typed into the web chat); edit_keyboard itself refuses the
+    mismatched combinations.
+    """
+    await edit_keyboard(bot, chat_id, message_id, WEB_TAKEOVER_TEXT, None)
+
+
 async def handle_callback(
     sessionmaker,
     bot: Bot,
@@ -219,8 +249,9 @@ async def handle_callback(
 
         # Step 2 only exists when there is a main action to report on
         # (plan section 9); otherwise record 'none' and skip straight
-        # to the note.
-        if user_state.due_action:
+        # to the note. The rule itself lives in app/core/checkin.py (W4),
+        # shared with the web form.
+        if checkin.due_step_needed(user_state.due_action):
             await edit_keyboard(
                 bot,
                 chat_id,
@@ -230,7 +261,9 @@ async def handle_callback(
             )
             return
         async with sessionmaker() as session:
-            await checkin.set_due_result(session, row.id, checkin.NONE)
+            await checkin.set_due_result(
+                session, row.id, checkin.resolve_due_result(user_state.due_action, None)
+            )
         await _ask_order_or_note(
             sessionmaker, settings, clock, bot,
             chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
@@ -272,10 +305,15 @@ async def handle_callback(
             settings,
             provider,
             safety_provider,
+            # W4 fix: the router's clock, not finish_and_react's own
+            # SystemClock default -- otherwise `finish` computes "today"
+            # from a different clock than `_current` just did.
+            clock,
             chat_id=chat_id,
             update_id=update_id,
             message_id=message_id,
             timezone=timezone,
+            web_submission=data == WEB_SUBMIT_CALLBACK,
         )
 
 
@@ -291,8 +329,15 @@ async def finish_and_react(
     update_id: int,
     message_id: int | None,
     timezone: str,
+    web_submission: bool = False,
 ) -> None:
     """Complete the check-in with no note, then run the in-character turn.
+
+    `web_submission=True` (W4, WEB_SUBMIT_CALLBACK): the check-in was
+    filled -- note included -- by the web form, which never opens the
+    note step. It is finished by its message id instead
+    (`checkin.finish_submitted`), whose own guard plays the part of the
+    note-step guard below.
 
     The note-supplied path does not come through here: app/core/turn.py
     handles it inline, because a pause word must be matched before the
@@ -307,10 +352,18 @@ async def finish_and_react(
 
     clock = clock or SystemClock()
     async with sessionmaker() as session:
-        user_state = await get_state(session)
-        if user_state.awaiting != checkin.AWAITING_NOTE:
-            return
-        row, streak = await checkin.finish(session, clock, timezone)
+        if web_submission:
+            # Web-minted ids are always negative: a positive one would be
+            # a Telegram message, whose check-ins finish only through the
+            # note step.
+            if message_id is None or message_id >= 0:
+                return
+            row, streak = await checkin.finish_submitted(session, clock, timezone, message_id)
+        else:
+            user_state = await get_state(session)
+            if user_state.awaiting != checkin.AWAITING_NOTE:
+                return
+            row, streak = await checkin.finish(session, clock, timezone)
         if row is None:
             return
         order_results = await orders.results_for_checkin(session, row.id)

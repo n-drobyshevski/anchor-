@@ -126,8 +126,8 @@ app/web/static/
 
 ### W4 Check-in + Journal
 - **Check-in** (one form: rating 1–5, due action result, note up to 500 characters):
-  - `POST /api/checkin` validates, then goes through `checkin.start` → `set_rating` → `set_due_result` → `set_awaiting_note`.
-  - Then it **enqueues a synthetic web update**: the note text, or the callback `c:n:skip` if there is no note. From there the existing path runs: `finish_and_react` → `turn.run(CHECKIN_FLAG)` inside the single worker, including the guard against a double LLM call and the pause-word check. No new LLM path is added. Anchor's reaction arrives in the chat over SSE.
+  - `POST /api/checkin` validates, then goes through `checkin.submit` (`start` → `set_rating` → `set_due_result` → order answers → `set_note` → the minted message id). It never opens the global note step (`awaiting`): the worker reads that flag for whichever queued row it claims next, so an older queued message would be filed as the note.
+  - Then it **enqueues a synthetic web update**: the completion callback `c:n:web` carrying the check-in's minted message id (a pause-word note is queued as an ordinary message instead, and the check-in stays unfinished, as in Telegram). From there the existing path runs: `finish_and_react` (finishing exactly that check-in via `finish_submitted`, whose cleared id is the double-LLM guard) → `turn.run(CHECKIN_FLAG)` inside the single worker. No new LLM path is added. Anchor's reaction arrives in the chat over SSE.
   - The daily state machine and the "redo on the same day" behavior come from core.
 - **Journal:**
   - Add a new core function `list_journal(session, offset, limit)`; tick's private helper is left alone.

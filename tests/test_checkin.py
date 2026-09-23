@@ -555,3 +555,267 @@ async def test_order_results_are_stored_and_the_synthetic_line_lists_them(sessio
         stored = (await session.execute(select(Message))).scalars().all()
     user_rows = [row for row in stored if row.role == "user"]
     assert any("договорённости: «пить воду» — нет" in row.content for row in user_rows)
+
+
+# --- W4: the shared step rules and `submit` (app/core/checkin.py) ---
+
+
+async def test_due_step_needed():
+    assert checkin.due_step_needed("сдать отчёт") is True
+    assert checkin.due_step_needed(None) is False
+    assert checkin.due_step_needed("") is False
+
+
+@pytest.mark.parametrize(
+    "due_action,requested,expected",
+    [
+        (None, None, checkin.NONE),
+        (None, checkin.DONE, checkin.NONE),
+        ("", "partial", checkin.NONE),
+        ("отчёт", checkin.DONE, checkin.DONE),
+        ("отчёт", checkin.PARTIAL, checkin.PARTIAL),
+        ("отчёт", checkin.NO, checkin.NO),
+        ("отчёт", checkin.NONE, None),
+        ("отчёт", None, None),
+        ("отчёт", "maybe", None),
+    ],
+)
+async def test_resolve_due_result(due_action, requested, expected):
+    assert checkin.resolve_due_result(due_action, requested) == expected
+
+
+async def test_telegram_rating_with_an_empty_due_action_still_records_none(sessionmaker):
+    """W4 moved the rule into core (`due_step_needed`/`resolve_due_result`);
+    an empty-string due action behaves exactly like none at all."""
+    await _seed(sessionmaker, 1, 2, due_action="")
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+
+    assert fake.edits[-1].text == checkin_ui.NOTE_TEXT
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Checkin))).scalars().one()
+    assert row.due_result == checkin.NONE
+
+
+async def test_telegram_rating_step_asks_through_the_core_rule(sessionmaker, monkeypatch):
+    await _seed(sessionmaker, 1, 2, due_action="сдать отчёт")
+    seen = []
+    real = checkin.due_step_needed
+
+    def spy(due_action):
+        seen.append(due_action)
+        return real(due_action)
+
+    monkeypatch.setattr(checkin, "due_step_needed", spy)
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/checkin"))
+    await _feed(dp, bot, _callback_update(2, "c:r:3"))
+    assert seen == ["сдать отчёт"]
+    assert "сдать отчёт" in fake.edits[-1].text
+
+
+async def test_the_note_keyboard_uses_the_shared_skip_callback():
+    (button,) = [b for row in checkin_ui.note_keyboard().inline_keyboard for b in row]
+    assert button.callback_data == checkin_ui.SKIP_CALLBACK == "c:n:skip"
+
+
+async def test_retire_for_web_drops_the_keyboard():
+    fake = FakeSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    await checkin_ui.retire_for_web(bot, TEST_CHAT_ID, 42)
+    (edit,) = fake.edits
+    assert (edit.chat_id, edit.message_id, edit.text) == (
+        TEST_CHAT_ID,
+        42,
+        checkin_ui.WEB_TAKEOVER_TEXT,
+    )
+    assert edit.reply_markup is None
+    assert fake.sent == []
+
+
+async def test_retire_for_web_refuses_a_web_id_on_the_real_bot():
+    fake = FakeSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    await checkin_ui.retire_for_web(bot, TEST_CHAT_ID, -42)
+    assert fake.edits == []
+
+
+async def test_form_orders_are_todays_due_orders_capped(sessionmaker, clock):
+    await _seed(sessionmaker)
+    ids = [await _add_order(sessionmaker, f"дело {i}") for i in range(4)]
+    today = _today()
+    other_weekday = (today.isoweekday() % 7) + 1
+    await _add_order(sessionmaker, "не сегодня", cadence="weekly", weekday=other_weekday)
+    async with sessionmaker() as session:
+        got = await checkin.form_orders(session, clock, TIMEZONE, 3)
+    assert [o.id for o in got] == ids[:3]
+
+
+async def test_submit_fills_every_step_without_opening_the_note_step(sessionmaker, clock):
+    """Review fix: the web path never opens the global note step, which
+    whatever queued row the worker claims next would read."""
+    await _seed(sessionmaker)
+    order_id = await _add_order(sessionmaker, "пить воду")
+    async with sessionmaker() as session:
+        row = await checkin.submit(
+            session,
+            clock,
+            TIMEZONE,
+            rating=4,
+            due_result=checkin.PARTIAL,
+            order_results=[(order_id, checkin.DONE)],
+            note="заметка",
+            message_id=-777,
+        )
+    assert (row.day_rating, row.due_result, row.note, row.tg_message_id) == (
+        4, "partial", "заметка", -777,
+    )
+    assert row.local_date == _today()
+    state = await _state(sessionmaker)
+    assert (state.awaiting, state.awaiting_ref) == (None, None)
+    assert state.streak == 0, "submit never finishes"
+    async with sessionmaker() as session:
+        assert await orders.results_for_checkin(session, row.id) == [("пить воду", "done")]
+
+
+async def test_submit_on_the_same_day_overwrites(sessionmaker, clock):
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        first = await checkin.submit(
+            session, clock, TIMEZONE, rating=2, due_result=checkin.NONE,
+            order_results=[], note="старое", message_id=-1,
+        )
+        second = await checkin.submit(
+            session, clock, TIMEZONE, rating=5, due_result=checkin.NONE,
+            order_results=[], note=None, message_id=-2,
+        )
+    assert second.id == first.id
+    assert (second.day_rating, second.note, second.tg_message_id) == (5, None, -2)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rating": 0},
+        {"rating": 6},
+        {"rating": True},
+        {"due_result": "maybe"},
+        {"order_results": [(1, "partial")]},
+    ],
+)
+async def test_submit_rejects_bad_values_before_writing(sessionmaker, clock, kwargs):
+    await _seed(sessionmaker)
+    args = {
+        "rating": 3, "due_result": checkin.NONE, "order_results": [], "note": None, "message_id": -1,
+    }
+    args.update(kwargs)
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError):
+            await checkin.submit(session, clock, TIMEZONE, **args)
+        assert (await session.execute(select(Checkin))).scalars().all() == []
+
+
+async def test_finish_submitted_finishes_only_the_named_checkin_once(sessionmaker, clock):
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        await checkin.submit(
+            session, clock, TIMEZONE, rating=3, due_result=checkin.NONE,
+            order_results=[], note=None, message_id=-5,
+        )
+        assert await checkin.finish_submitted(session, clock, TIMEZONE, -6) == (None, 0)
+        row, streak = await checkin.finish_submitted(session, clock, TIMEZONE, -5)
+        assert row is not None and streak == 1
+        assert row.tg_message_id is None
+        # A replayed completion finds nothing left to finish.
+        assert await checkin.finish_submitted(session, clock, TIMEZONE, -5) == (None, 0)
+    assert (await _state(sessionmaker)).last_checkin_at is not None
+
+
+async def test_note_is_pause_word():
+    assert checkin.note_is_pause_word("жёлтый") is True
+    assert checkin.note_is_pause_word("пурпурный") is True
+    assert checkin.note_is_pause_word("устал, но сделал") is False
+    assert checkin.note_is_pause_word(None) is False
+
+
+async def test_form_orders_on_a_redo_skip_answered_orders_and_respect_the_cap(sessionmaker, clock):
+    """Review fix: a same-day redo keeps the day's order answers (and an
+    answered `once` order is already retired), so the web form must ask
+    exactly what Telegram's `next_due_order` walk would -- here nothing,
+    since two answers already fill a cap of 2."""
+    await _seed(sessionmaker)
+    once = await _add_order(sessionmaker, "разово", cadence="once")
+    daily_a = await _add_order(sessionmaker, "ежедневно а")
+    daily_b = await _add_order(sessionmaker, "ежедневно б")
+    async with sessionmaker() as session:
+        assert [o.id for o in await checkin.form_orders(session, clock, TIMEZONE, 2)] == [once, daily_a]
+        row = await checkin.submit(
+            session, clock, TIMEZONE, rating=3, due_result=checkin.NONE,
+            order_results=[(once, checkin.DONE), (daily_a, checkin.NO)], note=None, message_id=-1,
+        )
+        assert await checkin.form_orders(session, clock, TIMEZONE, 2) == []
+        assert await orders.next_due_order(session, row.id, _today(), 2) is None
+        # With room left under the cap, only the unanswered order is asked.
+        assert [o.id for o in await checkin.form_orders(session, clock, TIMEZONE, 3)] == [daily_b]
+        assert (await orders.next_due_order(session, row.id, _today(), 3)).id == daily_b
+
+
+async def test_list_range_is_inclusive_and_ascending(sessionmaker):
+    base = datetime.date(2026, 3, 10)
+    async with sessionmaker() as session:
+        for offset in (3, 0, 1, 5):
+            session.add(Checkin(local_date=base + datetime.timedelta(days=offset)))
+        await session.commit()
+        rows = await checkin.list_range(
+            session, base, base + datetime.timedelta(days=3)
+        )
+    assert [r.local_date.day for r in rows] == [10, 11, 13]
+
+
+async def test_results_for_checkins_batches_with_the_same_ordering(sessionmaker):
+    await _seed(sessionmaker)
+    first = await _add_order(sessionmaker, "первое")
+    second = await _add_order(sessionmaker, "второе")
+    async with sessionmaker() as session:
+        a = Checkin(local_date=datetime.date(2026, 3, 1))
+        b = Checkin(local_date=datetime.date(2026, 3, 2))
+        c = Checkin(local_date=datetime.date(2026, 3, 3))
+        session.add_all([a, b, c])
+        await session.commit()
+        session.add_all(
+            [
+                CheckinOrderResult(checkin_id=a.id, order_id=second, result="no"),
+                CheckinOrderResult(checkin_id=a.id, order_id=first, result="done"),
+                CheckinOrderResult(checkin_id=b.id, order_id=first, result="no"),
+            ]
+        )
+        await session.commit()
+        batched = await orders.results_for_checkins(session, [a.id, b.id, c.id])
+        singles = {i: await orders.results_for_checkin(session, i) for i in (a.id, b.id)}
+        assert await orders.results_for_checkins(session, []) == {}
+    assert batched == singles
+    assert batched[a.id] == [("первое", "done"), ("второе", "no")]
+    assert c.id not in batched
+
+
+async def test_list_journal_is_newest_first_with_a_total(sessionmaker):
+    from app.core import journal
+    from app.db.models import Journal
+
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                Journal(local_date=datetime.date(2026, 3, 1), text="a"),
+                Journal(local_date=datetime.date(2026, 3, 3), text="b"),
+                Journal(local_date=datetime.date(2026, 3, 3), text="c"),
+                Journal(local_date=datetime.date(2026, 3, 2), text="d"),
+            ]
+        )
+        await session.commit()
+        rows, total = await journal.list_journal(session, 0, 3)
+        rest, total2 = await journal.list_journal(session, 3, 3)
+    assert [r.text for r in rows] == ["c", "b", "d"]
+    assert [r.text for r in rest] == ["a"]
+    assert total == total2 == 4

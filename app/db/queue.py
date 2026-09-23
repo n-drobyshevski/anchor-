@@ -181,10 +181,42 @@ async def enqueue(session: AsyncSession, update_id: int, payload: dict) -> bool:
     return result.first() is not None
 
 
+async def reserve_web_id(session: AsyncSession) -> int:
+    """Reserve the next negative id from web_update_seq. Public (W4) so a
+    caller that needs a web-origin id *without* a queued row -- app/web/
+    panels/checkin.py mints the id it stores as a web check-in's
+    `tg_message_id`, which the synthetic `c:n:skip` callback then echoes
+    back as its `message_id` -- draws from the same always-negative,
+    never-colliding id space `enqueue_web` itself uses, rather than
+    inventing a second one. Does not commit: `nextval()` is
+    non-transactional in Postgres, so the reservation holds regardless.
+    """
+    result = await session.execute(select(Sequence("web_update_seq").next_value()))
+    web_id = result.scalar_one() - WEB_ID_OFFSET
+    assert web_id < 0, f"web id must be negative, got {web_id}"
+    return web_id
+
+
+async def web_callback_pending(session: AsyncSession, message_id: int, data: str) -> bool:
+    """Whether a web-origin callback row with this (message_id, data) is
+    still queued or in flight (W4: the web check-in's "a submission is
+    waiting for the worker" -- its completion row carries the check-in's
+    own minted message id). Read-only."""
+    callback = TelegramUpdate.payload["callback_query"]
+    result = await session.execute(
+        select(func.count())
+        .select_from(TelegramUpdate)
+        .where(TelegramUpdate.update_id < 0)
+        .where(TelegramUpdate.status.in_(("pending", "processing")))
+        .where(callback["data"].astext == data)
+        .where(callback["message"]["message_id"].astext == str(message_id))
+    )
+    return result.scalar_one() > 0
+
+
 async def _next_web_update_id(session: AsyncSession) -> int:
     """Reserve the next negative web update_id from web_update_seq."""
-    result = await session.execute(select(Sequence("web_update_seq").next_value()))
-    return result.scalar_one() - WEB_ID_OFFSET
+    return await reserve_web_id(session)
 
 
 async def enqueue_web(

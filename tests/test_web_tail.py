@@ -32,6 +32,8 @@ from app.web import tail as tail_module
 from app.web.hub import WebHub
 from app.web.tail import (
     STATE_CHANGE_FIELD_TOPIC,
+    _checkin_fingerprint,
+    _tail_checkin_once,
     _max_message_id,
     _max_state_change_id,
     _memory_fingerprint,
@@ -342,7 +344,7 @@ async def test_every_distinct_topic_publishes_once_per_poll_deduplicated(session
     """Low-severity finding: one `invalidate` per *distinct* topic among
     the rows a single poll sees, not one per row -- several
     STATE_CHANGE_FIELD_TOPIC fields share a topic (all of "state"'s
-    eight fields, "checkin"'s four, "memory"'s three), and a real update
+    eight fields, "checkin"'s five, "memory"'s two), and a real update
     routinely writes more than one of them in the same transaction/poll
     window. Publishing every one of them would flood the hub's shared,
     fixed-size ring buffer with events a client cannot tell apart from
@@ -726,3 +728,134 @@ async def test_start_tail_also_seeds_the_memory_fingerprint(sessionmaker, monkey
     events = hub.subscribe(last_event_id=0)
     events.close()
     assert events.backlog == []
+
+
+# --- W4: journal -> "checkin", and the check-in/journal fingerprint ---------
+
+
+async def test_journal_is_mapped_to_the_checkin_topic(sessionmaker):
+    """W4: the journal feed lives on the Check-in screen, so the
+    extractor's journal state_change row refreshes that screen, not
+    Memory."""
+    assert STATE_CHANGE_FIELD_TOPIC["journal"] == "checkin"
+    await _add_state_change(sessionmaker, field="journal", source="extractor")
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        await _tail_state_change_once(session, hub, 0)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert [e.data["topic"] for e in events.backlog] == ["checkin"]
+
+
+def _checkin_topics(hub: WebHub) -> list[str]:
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    return [e.data["topic"] for e in events.backlog if e.event == "invalidate"]
+
+
+async def test_checkin_fingerprint_is_zero_on_empty_tables(sessionmaker):
+    async with sessionmaker() as session:
+        assert await _checkin_fingerprint(session) == (0,) * 10
+
+
+async def test_each_checkin_step_moves_the_fingerprint(sessionmaker):
+    """Every per-step write the Telegram flow makes without a
+    state_change row of its own (start, rating, due result, order
+    answer, note), plus an extractor journal line, publishes exactly one
+    invalidate("checkin") on the next poll -- and a quiet poll none."""
+    import datetime as _dt
+
+    from app.core import checkin as checkin_core
+    from app.core import orders as orders_core
+    from app.db.models import Journal, StandingOrder
+
+    clock = SystemClock()
+    async with sessionmaker() as session:
+        order = StandingOrder(text="дело", cadence="daily", status=orders_core.ACTIVE, source="user")
+        session.add(order)
+        await session.commit()
+        order_id = order.id
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fp = await _checkin_fingerprint(session)
+
+    async def step(write):
+        nonlocal fp
+        async with sessionmaker() as session:
+            await write(session)
+        before = len(_checkin_topics(hub))
+        async with sessionmaker() as session:
+            fp = await _tail_checkin_once(session, hub, fp)
+        assert _checkin_topics(hub)[before:] == ["checkin"]
+
+    row_id = None
+
+    async def start(session):
+        nonlocal row_id
+        row_id = (await checkin_core.start(session, clock, "Europe/Paris")).id
+
+    await step(start)
+    await step(lambda s: checkin_core.set_rating(s, row_id, 3))
+    await step(lambda s: checkin_core.set_rating(s, row_id, 4))
+    await step(lambda s: checkin_core.set_due_result(s, row_id, "none"))
+    await step(lambda s: orders_core.record_result(s, row_id, order_id, "done", clock=clock))
+    await step(lambda s: checkin_core.set_note(s, row_id, "заметка"))
+    await step(lambda s: checkin_core.set_note(s, row_id, "заметка длиннее"))
+
+    async def journal(session):
+        session.add(Journal(local_date=_dt.date(2026, 1, 1), text="строка"))
+        await session.commit()
+
+    await step(journal)
+
+    before = len(_checkin_topics(hub))
+    async with sessionmaker() as session:
+        fp = await _tail_checkin_once(session, hub, fp)
+    assert _checkin_topics(hub)[before:] == []
+
+
+async def test_start_tail_also_seeds_the_checkin_fingerprint(sessionmaker, monkeypatch):
+    import datetime as _dt
+
+    from app.db.models import Checkin, Journal
+
+    async with sessionmaker() as session:
+        session.add(Checkin(local_date=_dt.date(2026, 1, 1), day_rating=3))
+        session.add(Journal(local_date=_dt.date(2026, 1, 1), text="до старта"))
+        await session.commit()
+
+    monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
+    hub = WebHub()
+    task = await start_tail(sessionmaker, hub)
+    try:
+        await asyncio.sleep(0.05)
+    finally:
+        await stop_tail(task)
+
+    events = hub.subscribe(last_event_id=0)
+    events.close()
+    assert events.backlog == []
+
+
+async def test_the_tail_loop_publishes_a_checkin_change(sessionmaker, monkeypatch):
+    import datetime as _dt
+
+    from app.db.models import Checkin
+
+    monkeypatch.setattr(tail_module, "POLL_INTERVAL_SECONDS", 0.01)
+    hub = WebHub()
+    task = await start_tail(sessionmaker, hub)
+    try:
+        async with sessionmaker() as session:
+            session.add(Checkin(local_date=_dt.date(2026, 1, 2), day_rating=5))
+            await session.commit()
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if "checkin" in _checkin_topics(hub):
+                break
+    finally:
+        await stop_tail(task)
+    assert "checkin" in _checkin_topics(hub)

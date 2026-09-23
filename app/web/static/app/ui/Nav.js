@@ -2,8 +2,10 @@
 // sidebar at/above it (app.css's `.nav`/`.nav-item` media query does
 // the actual layout switch). Array-driven per the plan, so a future
 // screen only means adding a row here and to ui/Shell.js's SCREENS
-// map. Per the roadmap's mobile-nav rule (5 items max), 4 is fine for
-// now: Чат · Состояние · Память · Предложения.
+// map. Per the roadmap's mobile-nav rule (5 items max) this is now
+// full: Чат · Состояние · Память · Чек-ин · Предложения (W4). app.css
+// narrows the bottom-bar items and lifts the badge out of the flow so
+// all five fit a 390px-wide phone.
 import { html } from '../html.js';
 import { proposalsBadge, route } from '../store.js';
 
@@ -11,6 +13,7 @@ const NAV_ITEMS = [
   { route: '#/chat', label: 'Чат' },
   { route: '#/state', label: 'Состояние' },
   { route: '#/memory', label: 'Память' },
+  { route: '#/checkin', label: 'Чек-ин' },
   { route: '#/proposals', label: 'Предложения' },
 ];
 

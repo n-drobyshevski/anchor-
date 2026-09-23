@@ -10,3 +10,6 @@ dist/
 
 # local Postgres data dir, if one is ever initdb'd for tests
 pgdata/
+
+# screenshots from scripts/web_e2e.py
+.e2e-out/

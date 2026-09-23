@@ -247,6 +247,27 @@ async def results_for_checkin(
     return [(text, result_value) for text, result_value in result.all()]
 
 
+async def results_for_checkins(
+    session: AsyncSession, checkin_ids: list[int]
+) -> dict[int, list[tuple[str, str]]]:
+    """`results_for_checkin` for many check-ins in one query (W4: the web
+    Check-in screen's 30-day history). Same per-check-in ordering
+    (StandingOrder.id ascending); a check-in with no answers is simply
+    absent from the dict."""
+    if not checkin_ids:
+        return {}
+    result = await session.execute(
+        select(CheckinOrderResult.checkin_id, StandingOrder.text, CheckinOrderResult.result)
+        .join(CheckinOrderResult, CheckinOrderResult.order_id == StandingOrder.id)
+        .where(CheckinOrderResult.checkin_id.in_(list(checkin_ids)))
+        .order_by(CheckinOrderResult.checkin_id, StandingOrder.id)
+    )
+    grouped: dict[int, list[tuple[str, str]]] = {}
+    for checkin_id, text, result_value in result.all():
+        grouped.setdefault(checkin_id, []).append((text, result_value))
+    return grouped
+
+
 async def next_due_order(
     session: AsyncSession, checkin_id: int, local_date: datetime.date, limit: int
 ) -> StandingOrder | None:
@@ -254,13 +275,27 @@ async def next_due_order(
     section 7's check-in extension: "the first order due today, ordered
     by id, that has no checkin_order_result for this check-in", capped
     at `limit`)."""
-    answered = await answered_order_ids(session, checkin_id)
-    if len(answered) >= limit:
-        return None
-    for order in await due_today(session, local_date, limit):
-        if order.id not in answered:
-            return order
-    return None
+    remaining = await remaining_due_orders(session, checkin_id, local_date, limit)
+    return remaining[0] if remaining else None
+
+
+async def remaining_due_orders(
+    session: AsyncSession, checkin_id: int | None, local_date: datetime.date, limit: int
+) -> list[StandingOrder]:
+    """Every order this check-in still has to ask about, in the order
+    `next_due_order` would hand them out one at a time: today's due
+    orders (capped at `limit`) minus the ones already answered, and no
+    more than `limit - len(answered)` of them -- so a same-day redo
+    (which keeps the day's earlier answers, and whose answered `once`
+    orders are already retired) never asks past the cap. The one rule
+    both the Telegram walk and the web form (W4) read. `checkin_id=None`
+    (no row yet today) means nothing is answered."""
+    answered = await answered_order_ids(session, checkin_id) if checkin_id is not None else set()
+    room = limit - len(answered)
+    if room <= 0:
+        return []
+    due = [order for order in await due_today(session, local_date, limit) if order.id not in answered]
+    return due[:room]
 
 
 async def record_result(

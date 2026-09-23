@@ -23,6 +23,7 @@ from app.web.ingress import (
     PressRejected,
     build_callback_update,
     build_message_update,
+    checkin_complete,
     is_blocked_command,
     press,
     send_text,
@@ -227,3 +228,43 @@ async def test_press_never_dedupes_across_calls(sessionmaker):
         first = await press(session, hub, settings=_settings(), message_id=-1, data="w:resume")
         second = await press(session, hub, settings=_settings(), message_id=-1, data="w:resume")
     assert first != second
+
+
+# --- W4: reserve_web_id and checkin_complete ---
+
+
+async def test_reserve_web_id_is_negative_distinct_and_shares_the_update_id_space(sessionmaker):
+    from app.db import queue
+
+    async with sessionmaker() as session:
+        first = await queue.reserve_web_id(session)
+        second = await queue.reserve_web_id(session)
+        update_id = await send_text(session, settings=_settings(), text="привет", client_key="k-r")
+    assert first < 0 and second < 0
+    assert len({first, second, update_id}) == 3
+    assert first < second < update_id, "one increasing sequence behind all three"
+
+
+async def test_checkin_complete_enqueues_the_web_submit_callback_for_the_given_message_id(sessionmaker):
+    hub = WebHub()
+    async with sessionmaker() as session:
+        update_id = await checkin_complete(session, settings=_settings(), message_id=-12345)
+        rows = list((await session.execute(select(TelegramUpdate))).scalars())
+        web_rows = list((await session.execute(select(WebUpdate))).scalars())
+
+    assert len(rows) == 1 and rows[0].update_id == update_id < 0
+    assert web_rows[0].client_key is None
+    update = Update.model_validate(rows[0].payload)
+    assert update.callback_query.data == "c:n:web"
+    assert update.callback_query.message.message_id == -12345
+    assert update.callback_query.from_user.id == ALLOWED_CHAT_ID
+    assert update.callback_query.message.chat.id == ALLOWED_CHAT_ID
+    # Server-issued, so it needs (and has) no hub allowlist entry.
+    assert hub.allow_press(-12345, "c:n:web") is False
+
+
+async def test_checkin_complete_never_dedupes(sessionmaker):
+    async with sessionmaker() as session:
+        a = await checkin_complete(session, settings=_settings(), message_id=-1)
+        b = await checkin_complete(session, settings=_settings(), message_id=-1)
+    assert a != b

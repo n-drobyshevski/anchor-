@@ -24,6 +24,12 @@
   --dot-ok: #2f6f4f;
   --dot-warn: #b8860b;
   --dot-bad: #a3362b;
+  /* Check-in chart (screens/Checkin.js): one series in the accent hue,
+     a recessive grid one step off the card surface. */
+  --chart-bar: #2f6f4f;
+  --chart-bar-active: #3f8a63;
+  --chart-grid: #ebebe6;
+  --chart-empty: #cfcfc8;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
           Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
 }
@@ -48,6 +54,10 @@
     --dot-ok: #5fae85;
     --dot-warn: #d3a441;
     --dot-bad: #e0796d;
+    --chart-bar: #5fae85;
+    --chart-bar-active: #82c6a2;
+    --chart-grid: #2d2f33;
+    --chart-empty: #45484d;
   }
 }
 
@@ -70,6 +80,10 @@
   --dot-ok: #5fae85;
   --dot-warn: #d3a441;
   --dot-bad: #e0796d;
+  --chart-bar: #5fae85;
+  --chart-bar-active: #82c6a2;
+  --chart-grid: #2d2f33;
+  --chart-empty: #45484d;
 }
 
 * { box-sizing: border-box; }
@@ -255,6 +269,48 @@ button, input, textarea {
 
 .nav-label {
   line-height: 1.1;
+}
+
+/* Bottom bar only (the sidebar query below restores all of this): five
+   tabs share one phone-width bar, and «Предложения» alone needs ~74px
+   at this size (~78px bold, as the current tab) -- more than an equal
+   fifth of a 360-390px screen. So each item starts from its own label's
+   width (`flex: 1 1 auto`) and shares only the space left over: the
+   five labels together need ~270px, so every label fits whole down to
+   a 320px screen, current tab included. Items may still shrink below
+   their label (min-width: 0, ellipsis as a last resort), and the
+   proposals badge sits in the item's top-right corner, out of the text
+   flow, instead of widening the tab by its own 20px. */
+@media (max-width: 899.98px) {
+  .nav-item {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 16px 2px 9px;
+    font-size: 0.72rem;
+  }
+
+  .nav-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nav-item .nav-badge {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    min-width: 14px;
+    height: 14px;
+    font-size: 0.62rem;
+  }
+}
+
+@media (max-width: 340px) {
+  .nav-item {
+    font-size: 0.66rem;
+  }
 }
 
 @media (min-width: 900px) {
@@ -1071,4 +1127,318 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .confirm-dialog::backdrop {
   background: rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- Check-in (screens/Checkin.js) ---------- */
+
+.card h3.subheading,
+.subheading {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.card h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
+.checkin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Radio groups: real <input type="radio"> inside a <fieldset>/<legend>
+   (keyboard arrows, form semantics and screen-reader grouping all come
+   from the platform); the input is visually hidden but still focusable,
+   and the adjacent .radio-face paints the segmented button. */
+.radio-group {
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.radio-group:disabled {
+  opacity: 0.6;
+}
+
+.radio-legend {
+  padding: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.radio-hint {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.radio-option {
+  position: relative;
+  display: inline-flex;
+}
+
+.radio-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.radio-group:disabled .radio-input {
+  cursor: default;
+}
+
+.radio-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.radio-group-compact .radio-face {
+  min-width: 48px;
+  font-variant-numeric: tabular-nums;
+}
+
+.radio-option:hover .radio-input:not(:disabled) + .radio-face {
+  border-color: var(--accent);
+}
+
+.radio-input:checked + .radio-face {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.radio-input:focus-visible + .radio-face {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.checkin-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.checkin-note .radio-legend .field-hint {
+  font-weight: 400;
+}
+
+.inline-error:empty {
+  display: none;
+}
+
+.chat-link {
+  align-self: flex-start;
+  display: inline-block;
+  text-decoration: none;
+}
+
+.checkin-summary {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 0.92rem;
+}
+
+.summary-row dt {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.summary-row dd {
+  margin: 0;
+  flex: none;
+  max-width: 60%;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.summary-row-note {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.summary-row-note dd {
+  max-width: none;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+/* Chart: the SVG's width/height attributes are the measured card width
+   and a fixed pixel height (plot + x-axis band), so nothing here sizes
+   it -- CSS only paints. Text wears ink tokens, never the series hue. */
+.chart {
+  position: relative;
+  width: 100%;
+  padding-top: 4px;
+}
+
+.chart-placeholder {
+  height: 168px;
+}
+
+.chart-svg {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+  touch-action: pan-y;
+  border-radius: 6px;
+}
+
+.chart-svg:focus {
+  outline: none;
+}
+
+.chart-svg:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.chart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart-cursor {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  opacity: 0.35;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.chart-tick {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-bar {
+  fill: var(--chart-bar);
+  transition: fill 0.12s ease;
+}
+
+.chart-bar.is-active {
+  fill: var(--chart-bar-active);
+}
+
+.chart-empty {
+  fill: var(--chart-empty);
+}
+
+.chart-empty.is-active {
+  fill: var(--text-muted);
+}
+
+.chart-tip {
+  position: absolute;
+  top: -30px;
+  left: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.chart-tip-value {
+  font-weight: 700;
+}
+
+.chart-tip-label {
+  color: var(--text-muted);
+}
+
+.checkin-history .history-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.checkin-note-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rating-chip {
+  font-variant-numeric: tabular-nums;
+}
+
+.journal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.journal-day {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.journal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.journal-item {
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  font-size: 0.92rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
