@@ -1,3 +1,8 @@
+# PARKED (not used by Railway): the service builds with Railpack, see
+# railway.json. In the Docker image the deploy never got past the
+# migration step (no app output, healthcheck timeout), cause unknown.
+# Kept here as the starting point for getting pg_dump 18 into the image.
+#
 # Milestone 6e (Phase 6 plan section 9.1 and the approved decision on
 # pg_dump 18). Railway's own buildpack has no way to add a system
 # package (the postgres-client matching the server's major version,

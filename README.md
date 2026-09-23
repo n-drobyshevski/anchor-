@@ -910,22 +910,20 @@ the extractor and welfare classifier depend on it.
    Disable).
 2. Railway: new project from this repo, add the Postgres plugin, set the
    env vars from `.env.example` (`MODE=webhook`).
-3. Start command: set by `railway.json` (Dockerfile build): `/app/.venv/bin/python scripts/migrate.py && /app/.venv/bin/python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit` -- see its docstring for why.
+3. Start command: set by `railway.json` (Railpack build): `uv run python scripts/migrate.py && uv run python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit`. `deploy/Dockerfile` is parked, see its header.
    Healthcheck path: `/healthz`.
 4. Generate a public domain, set `PUBLIC_URL` to it, redeploy. The app
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
 
-**6e (hardening).** The service builds from the root `Dockerfile` now
-(`railway.json` sets `"builder": "DOCKERFILE"`), not Railway's default
-buildpack — production Postgres is version 18, and `app/ops/backup.py`
-needs `pg_dump` on that same major version, which only a Dockerfile
-build can install. The start command and healthcheck path above are
-unchanged and stay configured on the Railway service itself;
-`railway.json` deliberately has no `deploy` section. Switch the
-service's builder to "Dockerfile" in Railway's settings once this
-lands. To enable nightly backups: generate an age keypair offline
+**6e (hardening).** The service builds with Railpack (`railway.json`).
+A Dockerfile build was tried so that `pg_dump` 18 (matching production
+Postgres 18) would be in the image, but that deploy never got past the
+migration step; `deploy/Dockerfile` is parked with notes. Until
+`pg_dump` 18 is available in the runtime image, the nightly backup
+records `pg_dump_failed` (or `not_configured` without an age key) and
+`/state` shows the warning; nothing else depends on it. To enable nightly backups: generate an age keypair offline
 (`age-keygen -o key.txt`), set `BACKUP_AGE_RECIPIENT` to its public
 key, keep `key.txt` off this server, and set the `BACKUP_S3_*`
 variables from the Railway bucket's credentials (`docs/secrets.md`,
