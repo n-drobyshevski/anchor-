@@ -35,10 +35,21 @@ closes the client directly rather than through either one.
 
 from __future__ import annotations
 
-import asyncio
+# ruff: noqa: E402 -- the diagnostics below must run before the imports.
+
 import faulthandler
-import logging
 import sys
+
+# 6e deploy diagnostics: the process never logged anything in the
+# Docker image, so start the stack-dump timer before any heavy import.
+# If startup (imports included) has not finished within
+# STARTUP_TRACE_AFTER_S, every thread's stack goes to stderr, repeating.
+if __name__ == "__main__":  # `python -m app.main` only, never on import in tests
+    print("app.main: importing", file=sys.stderr, flush=True)
+    faulthandler.dump_traceback_later(90, repeat=True, file=sys.stderr)
+
+import asyncio
+import logging
 
 from aiogram import Bot, Dispatcher
 from aiohttp import web
@@ -239,9 +250,8 @@ STARTUP_TRACE_AFTER_S = 90
 def main() -> None:
     # stderr, unbuffered, before anything that could hang: proves the
     # process got past `alembic upgrade head &&` in the start command.
-    print("app.main: starting", file=sys.stderr, flush=True)
+    print("app.main: imports done, starting", file=sys.stderr, flush=True)
     faulthandler.enable(file=sys.stderr)
-    faulthandler.dump_traceback_later(STARTUP_TRACE_AFTER_S, repeat=True, file=sys.stderr)
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
     # Before anything is constructed: Bot() and the LLM client both
