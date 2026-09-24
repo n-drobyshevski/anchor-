@@ -93,6 +93,9 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # Grok access: "delete all my data" also closes every door that was
+    # opened onto it. Truncating revokes all grants at once.
+    "access_grant",
 )
 
 # user_state is reset in place, never dropped. persona_version is a

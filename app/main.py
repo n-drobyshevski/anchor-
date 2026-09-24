@@ -51,6 +51,7 @@ from app.startup import run_startup_tasks
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
+from app.web import mcp
 from app.worker import run_worker, stop_worker
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,8 @@ def build_webhook_app(
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+    if settings.GROK_ACCESS_ENABLED:
+        mcp.register(app, settings)
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -248,7 +251,9 @@ def main() -> None:
             llm_client,
             clock,
         )
-        web.run_app(app, host="0.0.0.0", port=settings.PORT)
+        # access_log=None: the default access log prints the request
+        # path, and /mcp/{token} carries a credential in its path.
+        web.run_app(app, host="0.0.0.0", port=settings.PORT, access_log=None)
     else:
         asyncio.run(
             _run_polling_mode(

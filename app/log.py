@@ -79,6 +79,8 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "error_code",
     "cards",
     "dropped",
+    # Grok access (app/web/mcp.py)
+    "grant_id",
 )
 
 

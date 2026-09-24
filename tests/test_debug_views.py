@@ -35,6 +35,7 @@ CONTENT_COLUMNS = {
     "study_job": {"packet", "query"},
     "study_clip": {"text", "url", "title", "text_sha256"},
     "study_card": {"text", "quote", "source_url"},
+    "access_grant": {"token_sha256"},
 }
 
 

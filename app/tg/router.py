@@ -71,6 +71,7 @@ from app.llm.provider import LLMProvider
 from app.tg.send import send_keyboard
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
+from app.tg import grok as grok_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
@@ -100,6 +101,8 @@ BOT_COMMANDS = [
     BotCommand(command="tz", description="Часовой пояс"),
     BotCommand(command="export", description="Выгрузить все данные"),
     BotCommand(command="delete", description="Удалить все данные"),
+    BotCommand(command="grok", description="Открыть данные для Grok"),
+    BotCommand(command="revoke", description="Закрыть доступ для Grok"),
     # 4b (phase-4 plan section 9): read/notes/card/adopt/reject, /read's
     # loop end to end. 4c adds /study alongside them -- see the module
     # docstring on why all six are worth a menu entry (mirrors /forget,
@@ -599,6 +602,39 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id
         )
 
+    @router.message(Command("grok"))
+    async def grok_command(message: Message, event_update: Update) -> None:
+        """Opt-in read access for grok.com (docs/grok-access.md).
+
+        Sends the scope picker only; nothing is opened until the
+        [Разрешить] callback.
+        """
+        reason = grok_ui.available(settings)
+        if reason is not None:
+            await _reply_once(message, event_update.update_id, reason)
+            return
+        if not await _once(event_update.update_id):
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        await send_keyboard(
+            message.bot,
+            message.chat.id,
+            await grok_ui.opening_text(sessionmaker, clock, 0, 0),
+            grok_ui.grant_keyboard(0, 0, 0, int(clock.now_utc().timestamp())),
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/grok]", scene_id=scene_id
+        )
+
+    @router.message(Command("revoke"))
+    async def revoke_command(message: Message, event_update: Update) -> None:
+        """Closes every open grant. Works even with the feature switched
+        off, so turning the flag off never strands a live grant."""
+        if not await _once(event_update.update_id):
+            return
+        text = await grok_ui.revoke(sessionmaker, clock)
+        await _reply_once(message, event_update.update_id, text)
+
     # --- 2b: memory (plan section 11) ---
 
     async def _once(update_id: int) -> bool:
@@ -959,6 +995,20 @@ def build_router(
         await research_ui.handle_page_callback(
             sessionmaker,
             callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("g:"))
+    async def grok_decision(callback: CallbackQuery) -> None:
+        """`g:<action>:<mask>:<period>:<ttl>:<epoch>` -- the /grok picker."""
+        await grok_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

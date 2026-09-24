@@ -933,3 +933,11 @@ the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
 a role that can read only the content-free `debug.*` views. See
 [docs/claude-access.md](docs/claude-access.md).
+
+### Grok (opt-in)
+
+With `GROK_ACCESS_ENABLED=true`, `/grok` lets you open chosen data
+(memory, journal, dialogs over a set period, state) to grok.com's custom
+MCP connector, read-only and for 1 h – 7 d. Every read is reported in
+Telegram and `/revoke` closes access at once. What Grok has already read
+stays with xAI. See [docs/grok-access.md](docs/grok-access.md).

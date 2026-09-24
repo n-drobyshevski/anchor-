@@ -319,6 +319,7 @@ NOT_EXPORTED = {
     "job": "queue plumbing; payloads reference rows that are exported",
     "pending_memory": "unclassified /remember text, exported once it becomes a memory",
     "persona_version": "a hash of a file in this repo, not user data",
+    "access_grant": "token hashes and grant bookkeeping, not user data",
 }
 
 

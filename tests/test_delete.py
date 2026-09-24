@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from app.config import Settings
 from app.core import purge
 from app.db.models import (
+    AccessGrant,
     Base,
     Checkin,
     Job,
@@ -179,6 +180,17 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 risk_model="low",
                 risk_rules="low",
                 risk_final="low",
+            )
+        )
+        await session.commit()
+
+        # Grok access: an open grant must not survive "delete all my data".
+        session.add(
+            AccessGrant(
+                token_sha256="0" * 64,
+                scopes=["memory"],
+                created_at=now,
+                expires_at=now + datetime.timedelta(hours=1),
             )
         )
         await session.commit()
