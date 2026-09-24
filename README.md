@@ -923,3 +923,13 @@ As of 4a the same rule covers the web: logs may carry a domain, an HTTP
 status, an error code, a count and a cost, and never a URL path or
 query, page text, card text, a quote or a topic. A path can carry
 personal information as easily as a message can.
+
+### Claude Code
+
+Claude Code debugs this project without seeing the conversation. The
+project's `.claude/settings.json` and `.claude/hooks/guard_private_data.py`
+block the Railway tools that reveal the database URL or the bot token,
+the `.env` file, and the Telegram Bot API. Logs, deployment status and
+metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
+a role that can read only the content-free `debug.*` views. See
+[docs/claude-access.md](docs/claude-access.md).
