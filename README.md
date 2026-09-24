@@ -931,13 +931,24 @@ private) event titles are included in that agenda (`partner="shared"`)
 -- and because that agenda can be quoted back to you by the persona,
 **the partner's shared event titles do go to OpenRouter** as part of
 the prompt, same as anything else in the now-block. `LLM_DATA_COLLECTION
-=deny` still applies to that call. Sleep data is never included. The
-partner's private events, and their id/description/location, are never
+=deny` still applies to that call. Sleep and heart-rate data is never
+included by `get_agenda` itself -- only `PLANNER_HEALTH` (below) adds
+it, and only your own. The partner's private events, and their
+id/description/location, are never
 emitted by the planner's `get_agenda` tool in the first place. `/delete`
 purges the planner link, the cached agenda and any pending planner
 action; `/export` includes the cached agenda but never the OAuth
 tokens themselves (see `app/core/export.py`'s `NOT_EXPORTED`-equivalent
 comment on `PlannerCredential`).
+
+**Anchor (sleep/recovery).** With `PLANNER_HEALTH=true`, each
+`PLANNER_SYNC` also calls the planner's `get_health` tool for your own
+data only, and the now-block gets up to one extra line built from it
+(e.g. "Сон: 6ч10м (глубокий 14%), HRV ниже твоей нормы, пульс покоя
+58"). **Your sleep and heart-rate metrics do go to OpenRouter** as part
+of that line, same as the rest of the now-block, whenever the flag is
+on. Off by default. The persona is instructed to use it for tone only
+-- never a diagnosis or medical advice (`persona/persona.md`).
 
 **P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
 a regex prefilter on your own message (never the partner's, and never

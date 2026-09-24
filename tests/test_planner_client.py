@@ -248,3 +248,28 @@ async def test_complete_task_sends_the_right_tool_and_arguments(sessionmaker, fr
 
 async def test_the_write_tools_are_all_allowlisted() -> None:
     assert {"create_task", "create_event", "complete_task"} <= ALLOWED_TOOLS
+
+
+# --- Anchor plan, "Anchor" section: get_health ------------------------------
+
+
+async def test_get_health_sends_the_right_tool_and_arguments(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    await _seed_credential(sessionmaker, clock)
+    fake = _FakeMcpServer()
+    app = web.Application()
+    app.router.add_post("/mcp", fake.handle)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("/mcp"))
+        planner_client = PlannerClient(client.session, url)
+        async with sessionmaker() as session:
+            await planner_client.get_health(
+                _settings(), session, clock, date="2026-09-23", days=14
+            )
+    call = next(c for c in fake.calls if c.get("method") == "tools/call")
+    assert call["params"]["name"] == "get_health"
+    assert call["params"]["arguments"] == {"date": "2026-09-23", "days": 14}
+
+
+async def test_get_health_is_allowlisted() -> None:
+    assert "get_health" in ALLOWED_TOOLS

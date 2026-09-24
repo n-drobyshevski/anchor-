@@ -50,8 +50,20 @@ _TIMEOUT = aiohttp.ClientTimeout(total=5)
 # Plan section 2.3: no update or delete tool. update_event can edit the
 # partner's own joint events (design review, table 1), and nothing here
 # needs to remove anything.
+#
+# Anchor plan, "Anchor" section: get_health, read-only, caller's own
+# data only (same as get_agenda). No get_sleep_summary -- get_health's
+# `sleep` field is enough for the one health line render_lines() adds.
 ALLOWED_TOOLS: frozenset[str] = frozenset(
-    {"get_agenda", "list_tasks", "get_workspace", "create_task", "create_event", "complete_task"}
+    {
+        "get_agenda",
+        "list_tasks",
+        "get_workspace",
+        "create_task",
+        "create_event",
+        "complete_task",
+        "get_health",
+    }
 )
 
 
@@ -238,6 +250,22 @@ class PlannerClient:
             clock,
             "get_agenda",
             {"date": date, "timeZone": timezone, "days": days, "partner": partner},
+        )
+
+    async def get_health(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        date: str,
+        days: int = 1,
+    ) -> dict:
+        # PLANNER_HEALTH: called once per sync (app/planner/snapshot.py),
+        # never per-turn -- days=14 covers "today" plus the baseline
+        # window snapshot.py's median needs.
+        return await self.call_tool(
+            settings, session, clock, "get_health", {"date": date, "days": days}
         )
 
     # --- P3: writes (app/planner/jobs.py's PLANNER_WRITE job) -------------

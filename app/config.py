@@ -413,6 +413,12 @@ class Settings(BaseSettings):
     # forever: without a cutoff, a card from weeks ago could still be
     # accepted and write an event in the past (design review finding 10).
     PLANNER_PENDING_TTL_HOURS: int = 24
+    # Anchor plan, "Anchor" section: gates both the one extra
+    # `get_health` MCP call each PLANNER_SYNC makes and the one health
+    # line render_lines() adds to the now-block. Off by default --
+    # sleep and heart metrics reach OpenRouter only when this is true
+    # (README privacy note), same discipline as every other planner flag.
+    PLANNER_HEALTH: bool = False
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
