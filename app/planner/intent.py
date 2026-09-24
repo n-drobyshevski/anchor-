@@ -41,7 +41,7 @@ import re
 
 from app.config import Settings
 from app.core import clock as clock_module
-from app.core.clock import Clock, combine_local
+from app.core.clock import Clock, combine_local, floating_utc_midnight
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
 from app.planner import actions as planner_actions
 from app.planner.parse import (
@@ -167,8 +167,8 @@ def _event_result(payload: dict, timezone: str, clock: Clock) -> IntentResult | 
 
     all_day = bool(payload.get("all_day"))
     if all_day:
-        start = combine_local(date, datetime.time(0, 0), timezone)
-        end = combine_local(date + datetime.timedelta(days=1), datetime.time(0, 0), timezone)
+        start = floating_utc_midnight(date)
+        end = floating_utc_midnight(date + datetime.timedelta(days=1))
     else:
         try:
             start_h, start_m = (int(x) for x in (payload.get("start_time") or "").split(":"))

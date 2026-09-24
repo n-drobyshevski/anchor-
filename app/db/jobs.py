@@ -64,6 +64,7 @@ async def enqueue_job(
     *,
     dedup_key: str | None = None,
     run_after: datetime.datetime | None = None,
+    commit: bool = True,
 ) -> bool:
     """Insert a job; returns True iff a row was actually inserted.
 
@@ -75,6 +76,12 @@ async def enqueue_job(
     With `dedup_key=None` the insert always succeeds: NULLs do not
     conflict in a unique index, which is the correct reading of "this
     job is not deduplicated".
+
+    `commit=False` folds the insert into the caller's own transaction
+    (see app/planner/actions.py's accept(), which must flip the action
+    to `accepted` and enqueue its write job atomically -- a crash
+    between two separate commits would otherwise leave an `accepted`
+    action with no job ever enqueued for it).
     """
     values: dict = {"kind": kind, "payload": payload, "dedup_key": dedup_key}
     if run_after is not None:
@@ -87,7 +94,8 @@ async def enqueue_job(
         .returning(Job.id)
     )
     result = await session.execute(stmt)
-    await session.commit()
+    if commit:
+        await session.commit()
     return result.first() is not None
 
 
@@ -100,8 +108,9 @@ async def complete_job(session: AsyncSession, job_id: int) -> None:
     await _complete(session, JOB_SPEC, job_id)
 
 
-async def fail_job(session: AsyncSession, job_id: int, error: str) -> None:
-    await _fail(session, JOB_SPEC, job_id, error)
+async def fail_job(session: AsyncSession, job_id: int, error: str) -> bool:
+    """Returns True iff this failure was terminal (retries exhausted)."""
+    return await _fail(session, JOB_SPEC, job_id, error)
 
 
 async def defer_job(session: AsyncSession, job_id: int, run_after: datetime.datetime) -> None:

@@ -144,6 +144,12 @@ def render_lines(
         return []
 
     payload = snapshot.payload or {}
+    # `is_stale` only checks age, so right after local midnight a
+    # snapshot fetched a few minutes ago (well within max_age_min) can
+    # still hold yesterday's agenda -- the next PLANNER_SYNC has not
+    # run yet. Check the calendar date it actually covers too.
+    if payload.get("date") != clock_module.local_date(clock, timezone).isoformat():
+        return []
     lines = [_event_line(event, timezone) for event in payload.get("events", [])[:max_items]]
     for task in payload.get("tasks", []):
         if len(lines) >= max_items:

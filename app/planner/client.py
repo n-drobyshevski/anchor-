@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.clock import Clock
-from app.planner.auth import get_access_token
+from app.planner.auth import PlannerUnavailable, force_expire, get_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +53,6 @@ _TIMEOUT = aiohttp.ClientTimeout(total=5)
 ALLOWED_TOOLS: frozenset[str] = frozenset(
     {"get_agenda", "list_tasks", "get_workspace", "create_task", "create_event", "complete_task"}
 )
-
-
-class PlannerUnavailable(Exception):
-    """Network failure or timeout talking to the planner."""
 
 
 class PlannerToolError(Exception):
@@ -185,6 +181,18 @@ class PlannerClient:
             "params": {"name": name, "arguments": arguments},
         }
         status, payload, _ = await self._post(call_body, token=token)
+        if status == 401:
+            # The cached token was rejected even though our local
+            # expires_at said it was still good (early revocation or
+            # rotation on the planner side). Force a refresh and retry
+            # exactly once, rather than retrying with the same stale
+            # token until it locally "expires" and burning the whole
+            # write job's retry budget on our own bookkeeping being wrong.
+            await force_expire(session, clock)
+            token = await get_access_token(session, settings, clock)
+            call_body["id"] = self._id()
+            status, payload, _ = await self._post(call_body, token=token)
+
         if status in (400, 404):
             self._initialized = False
             await self._ensure_initialized(token)
@@ -192,8 +200,6 @@ class PlannerClient:
             status, payload, _ = await self._post(call_body, token=token)
 
         if status == 401:
-            # Let the caller re-derive a fresh token on the next attempt
-            # via get_access_token rather than papering over it here.
             raise PlannerToolError("planner rejected the access token (401)")
         if payload is None:
             raise PlannerUnavailable(f"unparseable response: status {status}")
@@ -250,13 +256,13 @@ class PlannerClient:
         due_date: str | None,
         client_request_id: str,
     ) -> dict:
-        return await self.call_tool(
-            settings,
-            session,
-            clock,
-            "create_task",
-            {"title": title, "dueDate": due_date, "clientRequestId": client_request_id},
-        )
+        # The planner's schema is `dueDate: z.string().optional()`, which
+        # rejects an explicit null -- omit the key entirely rather than
+        # sending `"dueDate": null` for a dateless task.
+        arguments: dict[str, Any] = {"title": title, "clientRequestId": client_request_id}
+        if due_date is not None:
+            arguments["dueDate"] = due_date
+        return await self.call_tool(settings, session, clock, "create_task", arguments)
 
     async def create_event(
         self,
@@ -270,7 +276,11 @@ class PlannerClient:
         all_day: bool,
         is_private: bool,
         client_request_id: str,
+        timezone: str,
     ) -> dict:
+        # create_event has no timeZone default that means "the user's
+        # zone" -- an omitted timeZone defaults to UTC on the planner
+        # side (tools.ts:198), so it must always be sent explicitly.
         return await self.call_tool(
             settings,
             session,
@@ -283,6 +293,7 @@ class PlannerClient:
                 "allDay": all_day,
                 "isPrivate": is_private,
                 "clientRequestId": client_request_id,
+                "timeZone": timezone,
             },
         )
 

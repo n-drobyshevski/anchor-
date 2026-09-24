@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -768,6 +769,14 @@ class PlannerAction(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Independent of `id`, which a /delete purge can reuse (purge.py
+    # TRUNCATEs with RESTART IDENTITY) -- app/planner/jobs.py derives
+    # the MCP clientRequestId from this instead, so a write made after a
+    # purge never collides with the planner's own idempotency index on
+    # a pre-purge row's id.
+    request_key: Mapped[str] = mapped_column(
+        String, nullable=False, default=lambda: uuid.uuid4().hex
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -775,10 +784,11 @@ class PlannerAction(Base):
             name="ck_planner_action_kind",
         ),
         CheckConstraint(
-            "status in ('pending', 'accepted', 'rejected', 'expired')",
+            "status in ('pending', 'accepted', 'rejected', 'expired', 'written', 'failed')",
             name="ck_planner_action_status",
         ),
         Index("ix_planner_action_status", "status"),
+        Index("ix_planner_action_request_key", "request_key", unique=True),
     )
 
 

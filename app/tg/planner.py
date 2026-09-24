@@ -89,7 +89,10 @@ ACTION_STALE = "Устарело."
 DONE_HEADER = "Какую задачу отметить сделанной?"
 DONE_EMPTY = "Открытых задач нет — либо всё сделано, либо план ещё не синхронизировался."
 DONE_STALE = "Данные устарели. Набери /plan, чтобы обновить, и попробуй снова."
-DONE_MARKED = "Отмечено: «{title}»."
+# Not "Отмечено" -- the write has not happened yet at this point (the
+# PLANNER_WRITE job runs after this callback returns). run_planner_jobs's
+# WRITE_OK_DONE is the message that actually says "done", once it is.
+DONE_MARKING = "Отмечаю: «{title}»…"
 DONE_TITLE_MAX = 40
 
 
@@ -193,6 +196,7 @@ async def send_confirm_card(
 async def handle_confirm_callback(
     sessionmaker,
     bot: Bot,
+    settings: Settings,
     clock: Clock,
     *,
     callback_id: str,
@@ -221,7 +225,9 @@ async def handle_confirm_callback(
         action = await planner_actions.get(session, action_id)
         base_text = _confirm_text(action, timezone) if action is not None else None
         if decision == "y":
-            decided = await planner_actions.accept(session, clock, action_id)
+            decided = await planner_actions.accept(
+                session, clock, action_id, ttl_hours=settings.PLANNER_PENDING_TTL_HOURS
+            )
         else:
             decided = await planner_actions.reject(session, clock, action_id)
 
@@ -295,6 +301,16 @@ async def handle_done_callback(
     await answer_callback(bot, callback_id)
 
     async with sessionmaker() as session:
+        # A replayed callback_query update (the worker re-runs it after
+        # a crash) or a double tap before the keyboard is redrawn must
+        # not create a second planner_action for the same button press
+        # -- see app/planner/actions.py's get_by_message_id.
+        existing = await planner_actions.get_by_message_id(session, message_id)
+        if existing is not None:
+            title = existing.payload.get("title") or task_id
+            await edit_keyboard(bot, chat_id, message_id, DONE_MARKING.format(title=title), None)
+            return
+
         snap = await planner_snapshot.get_snapshot(session)
         title = _task_title(snap, task_id)
         count = await planner_actions.count_today(session, clock, timezone)
@@ -305,9 +321,12 @@ async def handle_done_callback(
         action = await planner_actions.create(
             session, clock, kind=planner_actions.COMPLETE_TASK, payload={"task_id": task_id, "title": title}
         )
+        await planner_actions.set_message_id(session, action.id, message_id)
         await planner_actions.accept(session, clock, action.id)
 
-    await edit_keyboard(bot, chat_id, message_id, DONE_MARKED.format(title=title or task_id), None)
+    # Not "Отмечено": the write itself runs afterwards, in the
+    # PLANNER_WRITE job -- see DONE_MARKING's docstring above.
+    await edit_keyboard(bot, chat_id, message_id, DONE_MARKING.format(title=title or task_id), None)
 
 
 __all__ = [
@@ -330,7 +349,7 @@ __all__ = [
     "DONE_HEADER",
     "DONE_EMPTY",
     "DONE_STALE",
-    "DONE_MARKED",
+    "DONE_MARKING",
     "render_plan_text",
     "render_status_text",
     "confirm_task_text",

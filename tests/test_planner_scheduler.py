@@ -196,7 +196,7 @@ async def test_worker_dispatches_planner_write(sessionmaker, frozen_clock, fake_
         )
 
     assert len(client.calls) == 1
-    assert client.calls[0]["client_request_id"] == f"anchor:{action.id}"
+    assert client.calls[0]["client_request_id"] == f"anchor:{action.request_key}"
 
 
 async def test_worker_dispatch_of_planner_write_raises_without_a_planner_client(

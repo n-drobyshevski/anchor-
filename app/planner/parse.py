@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
-from app.core.clock import Clock, combine_local
+from app.core.clock import Clock, combine_local, floating_utc_midnight
 from app.core.spend import check_cap, priced
 from app.db.models import SpendLedger
 from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
@@ -103,6 +103,10 @@ _RU_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b")
 _TRAILING_MARKER_RE = re.compile(r"(?:^|\s)(?:на|to|by|due)\s*$", re.IGNORECASE)
 
 
+class _InvalidDateToken(Exception):
+    """A token shaped like a date (`31.02`) does not name a real one."""
+
+
 def _resolve_date_token(match: re.Match, today: datetime.date) -> datetime.date | None:
     """The date a single matched token names, or None if it does not parse
     (e.g. `31.02`)."""
@@ -128,14 +132,22 @@ def _resolve_date_token(match: re.Match, today: datetime.date) -> datetime.date 
 
 def _extract_date(text: str, today: datetime.date) -> tuple[str, datetime.date | None]:
     """The first date token found (relative word, ISO, or DD.MM[.YYYY]),
-    removed from `text`. `(text, None)` if none is found or the token
-    that looked like a date does not parse (e.g. `31.02`) -- the caller
-    treats that the same as "no date found" and falls back to the model."""
+    removed from `text`. `(text, None)` if none is found at all.
+
+    Raises `_InvalidDateToken` when a token that looks like a date does
+    not name a real one (e.g. `31.02`) -- the caller treats that as a
+    regex *miss*, not as "no date": the text still needs a date, just
+    one this deterministic path cannot read, so it falls back to the
+    model instead of silently dropping the token and proceeding
+    dateless.
+    """
     for regex in (_ISO_DATE_RE, _RU_DATE_RE, _RELATIVE_RE):
         match = regex.search(text)
         if match is None:
             continue
         date = _resolve_date_token(match, today)
+        if date is None:
+            raise _InvalidDateToken(match.group(0))
         before = text[: match.start()]
         marker = _TRAILING_MARKER_RE.search(before)
         cut_start = marker.start() if marker else match.start()
@@ -200,7 +212,10 @@ def _within_horizon(moment: datetime.datetime, clock: Clock) -> bool:
 
 def _regex_parse_task(text: str, clock: Clock, timezone: str) -> TaskInput | None:
     today = clock_module.local_date(clock, timezone)
-    remainder, due_date = _extract_date(text, today)
+    try:
+        remainder, due_date = _extract_date(text, today)
+    except _InvalidDateToken:
+        return None
     title = _clean_title(remainder)
     if title is None:
         return None
@@ -217,15 +232,18 @@ def _regex_parse_event(text: str, clock: Clock, timezone: str) -> EventInput | N
         else text
     )
 
-    without_date, date = _extract_date(without_all_day, today)
+    try:
+        without_date, date = _extract_date(without_all_day, today)
+    except _InvalidDateToken:
+        return None
     date = date or today
 
     if all_day_match:
         title = _clean_title(without_date)
         if title is None:
             return None
-        start = combine_local(date, datetime.time(0, 0), timezone)
-        end = combine_local(date + datetime.timedelta(days=1), datetime.time(0, 0), timezone)
+        start = floating_utc_midnight(date)
+        end = floating_utc_midnight(date + datetime.timedelta(days=1))
         return EventInput(title=title, start=start, end=end, all_day=True)
 
     without_time, time_of_day = _extract_time(without_date)
@@ -429,8 +447,8 @@ async def _llm_parse_event(
 
     all_day = bool(payload.get("all_day"))
     if all_day:
-        start = combine_local(date, datetime.time(0, 0), timezone)
-        end = combine_local(date + datetime.timedelta(days=1), datetime.time(0, 0), timezone)
+        start = floating_utc_midnight(date)
+        end = floating_utc_midnight(date + datetime.timedelta(days=1))
     else:
         try:
             start_h, start_m = (int(x) for x in (payload.get("start_time") or "").split(":"))

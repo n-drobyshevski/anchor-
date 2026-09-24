@@ -187,6 +187,14 @@ async def _on_startup(app: web.Application) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    # build_planner() must run inside a running event loop: aiohttp
+    # 3.14's ClientSession() calls asyncio.get_running_loop() in its
+    # constructor. main() is synchronous, so the session is built here
+    # instead, once on_startup is actually running on the loop.
+    planner_client, planner_http = build_planner(settings)
+    app["planner_client"] = planner_client
+    app["planner_http"] = planner_http
+
     await bot.set_webhook(
         url=settings.PUBLIC_URL.rstrip("/") + WEBHOOK_PATH,
         secret_token=settings.TELEGRAM_SECRET_TOKEN,
@@ -269,11 +277,13 @@ async def _run_polling_mode(
     llm_client,
     clock: Clock,
     provider: LLMProvider | None = None,
-    planner_client: PlannerClient | None = None,
-    planner_http: aiohttp.ClientSession | None = None,
 ) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
+
+    # See _on_startup: built here, inside the running loop, not in
+    # main() before asyncio.run() starts it.
+    planner_client, planner_http = build_planner(settings)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
@@ -307,7 +317,9 @@ def main() -> None:
     provider, cheap_provider, safety_provider, llm_client = build_providers(settings)
     clock = SystemClock()
     dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock)
-    planner_client, planner_http = build_planner(settings)
+    # planner_client/planner_http are NOT built here: see _on_startup
+    # and _run_polling_mode, which build them once the event loop is
+    # actually running.
 
     if settings.MODE == "webhook":
         app = build_webhook_app(
@@ -321,8 +333,6 @@ def main() -> None:
             safety_provider,
             llm_client,
             clock,
-            planner_client,
-            planner_http,
         )
         web.run_app(app, host="0.0.0.0", port=settings.PORT)
     else:
@@ -338,8 +348,6 @@ def main() -> None:
                 llm_client,
                 clock,
                 provider,
-                planner_client,
-                planner_http,
             )
         )
 

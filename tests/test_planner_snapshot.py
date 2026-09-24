@@ -59,12 +59,32 @@ def test_render_lines_stale_snapshot_is_empty(frozen_clock):
     assert snapshot.render_lines(old, clock, TZ, max_age_min=30) == []
 
 
+def test_render_lines_yesterdays_date_is_empty_even_when_fresh(frozen_clock):
+    # Just after local midnight: the snapshot is well within max_age_min
+    # but still holds yesterday's agenda, because PLANNER_SYNC has not
+    # run yet today.
+    clock = frozen_clock(2026, 9, 24, 0, 5, tz=TZ)
+    snap = PlannerSnapshot(
+        id=1,
+        fetched_at=clock.now_utc(),
+        payload={
+            "date": "2026-09-23",
+            "events": [
+                {"owner": "me", "title": "Вчера", "start": "2026-09-23T10:00:00Z", "end": "2026-09-23T11:00:00Z", "allDay": False},
+            ],
+            "tasks": [],
+        },
+    )
+    assert snapshot.render_lines(snap, clock, TZ, max_age_min=30) == []
+
+
 def test_render_lines_fresh_snapshot_renders_events_then_tasks(frozen_clock):
     clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
     snap = PlannerSnapshot(
         id=1,
         fetched_at=clock.now_utc(),
         payload={
+            "date": "2026-09-23",
             "events": [
                 {"owner": "me", "title": "Встреча", "start": "2026-09-23T10:00:00Z", "end": "2026-09-23T11:00:00Z", "allDay": False},
             ],
@@ -88,7 +108,9 @@ def test_render_lines_caps_at_max_items(frozen_clock):
         {"owner": "me", "title": f"E{i}", "start": "2026-09-23T10:00:00Z", "end": "2026-09-23T11:00:00Z", "allDay": False}
         for i in range(10)
     ]
-    snap = PlannerSnapshot(id=1, fetched_at=clock.now_utc(), payload={"events": events, "tasks": []})
+    snap = PlannerSnapshot(
+        id=1, fetched_at=clock.now_utc(), payload={"date": "2026-09-23", "events": events, "tasks": []}
+    )
     lines = snapshot.render_lines(snap, clock, TZ, max_age_min=30, max_items=3)
     assert len(lines) == 3
 
@@ -99,6 +121,7 @@ def test_render_lines_partner_busy_event_hides_the_title(frozen_clock):
         id=1,
         fetched_at=clock.now_utc(),
         payload={
+            "date": "2026-09-23",
             "events": [
                 {"owner": "partner", "busy": True, "start": "2026-09-23T14:00:00Z", "end": "2026-09-23T15:00:00Z", "allDay": False},
             ],
@@ -116,6 +139,7 @@ def test_render_lines_partner_shared_event_is_labelled(frozen_clock):
         id=1,
         fetched_at=clock.now_utc(),
         payload={
+            "date": "2026-09-23",
             "events": [
                 {"owner": "partner", "title": "Ужин", "start": "2026-09-23T18:00:00Z", "end": "2026-09-23T19:00:00Z", "allDay": False},
             ],
@@ -133,6 +157,7 @@ def test_render_lines_a_title_that_fails_injection_is_replaced(frozen_clock):
         id=1,
         fetched_at=clock.now_utc(),
         payload={
+            "date": "2026-09-23",
             "events": [
                 {
                     "owner": "me",
@@ -156,6 +181,7 @@ def test_render_lines_all_day_event_shows_no_clock_time(frozen_clock):
         id=1,
         fetched_at=clock.now_utc(),
         payload={
+            "date": "2026-09-23",
             "events": [
                 {"owner": "me", "title": "День рождения", "start": "2026-09-23", "end": "2026-09-24", "allDay": True},
             ],

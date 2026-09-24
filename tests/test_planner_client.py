@@ -215,6 +215,7 @@ async def test_create_event_sends_the_right_tool_and_arguments(sessionmaker, fro
                 _settings(), session, clock,
                 title="Встреча", start="2026-09-24T18:00:00+02:00", end="2026-09-24T19:00:00+02:00",
                 all_day=False, is_private=True, client_request_id="anchor:2",
+                timezone="Europe/Berlin",
             )
     call = next(c for c in fake.calls if c.get("method") == "tools/call")
     assert call["params"]["name"] == "create_event"
@@ -225,6 +226,7 @@ async def test_create_event_sends_the_right_tool_and_arguments(sessionmaker, fro
         "allDay": False,
         "isPrivate": True,
         "clientRequestId": "anchor:2",
+        "timeZone": "Europe/Berlin",
     }
 
 

@@ -408,6 +408,11 @@ class Settings(BaseSettings):
     # only by spend, and a stray planner_action is a calendar entry, not
     # a few cents.
     PLANNER_MAX_WRITES_PER_DAY: int = 20
+    # A pending planner_action (a /task, /event or chat-proposed card
+    # nobody has tapped) older than this is expired rather than shown
+    # forever: without a cutoff, a card from weeks ago could still be
+    # accepted and write an event in the past (design review finding 10).
+    PLANNER_PENDING_TTL_HOURS: int = 24
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod

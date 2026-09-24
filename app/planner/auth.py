@@ -72,7 +72,22 @@ _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
 class PlannerAuthError(Exception):
-    """The planner is not linked, or the grant was revoked."""
+    """The planner is not linked, or the grant was revoked.
+
+    Permanent: retrying will not fix it. Reserved for "not linked yet"
+    and an actual `invalid_grant` response -- never for a network
+    hiccup or a 5xx on the refresh call, see PlannerUnavailable.
+    """
+
+
+class PlannerUnavailable(Exception):
+    """A temporary failure talking to the planner: network error, timeout,
+    or a non-2xx response on refresh that is not `invalid_grant`.
+
+    Retryable, unlike PlannerAuthError -- the job queue's ordinary
+    retry/backoff applies. Also raised (from app/planner/client.py, which
+    re-exports this class) for a failed tool call's own network layer.
+    """
 
 
 class _InvalidGrant(Exception):
@@ -103,32 +118,55 @@ def _issuer(settings: Settings) -> str:
     return settings.PLANNER_SUPABASE_URL.rstrip("/") + "/auth/v1"
 
 
-async def _discover(settings: Settings) -> dict[str, str]:
-    """`{authorization_endpoint, token_endpoint}`, from RFC 8414 metadata.
-
-    Falls back to the conventional GoTrue paths on any fetch or parse
-    failure -- a network hiccup during discovery must not make
-    /planner_link itself the thing that failed.
-    """
-    issuer = _issuer(settings)
-    fallback = {
-        "authorization_endpoint": f"{issuer}/authorize",
-        "token_endpoint": f"{issuer}/token",
-    }
-    url = f"{issuer}/.well-known/oauth-authorization-server"
+async def _fetch_metadata(url: str) -> dict[str, str] | None:
     try:
         async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as http:
             async with http.get(url) as resp:
                 if resp.status != 200:
-                    return fallback
-                data = await resp.json(content_type=None)
+                    return None
+                return await resp.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        return fallback
-    return {
-        "authorization_endpoint": data.get("authorization_endpoint")
-        or fallback["authorization_endpoint"],
-        "token_endpoint": data.get("token_endpoint") or fallback["token_endpoint"],
+        return None
+
+
+async def _discover(settings: Settings) -> dict[str, str]:
+    """`{authorization_endpoint, token_endpoint}`, from RFC 8414 metadata.
+
+    Supabase's own OAuth 2.1 server lives under `/oauth/...` beneath the
+    GoTrue issuer, not at `<issuer>/authorize` / `<issuer>/token` (those
+    are GoTrue's social-login and password-grant endpoints) -- so the
+    fallback below matches Supabase's server, not plain GoTrue.
+
+    Tries the RFC 8414 well-known URL relative to the issuer first
+    (`<issuer>/.well-known/oauth-authorization-server`), then the form
+    RFC 8414 actually specifies for an issuer with a path component
+    (`<host>/.well-known/oauth-authorization-server/auth/v1`), then
+    falls back to the conventional Supabase paths -- a fetch or parse
+    failure at every step must not make /planner_link itself the thing
+    that failed.
+    """
+    issuer = _issuer(settings)
+    host = settings.PLANNER_SUPABASE_URL.rstrip("/")
+    fallback = {
+        "authorization_endpoint": f"{issuer}/oauth/authorize",
+        "token_endpoint": f"{issuer}/oauth/token",
     }
+    for url in (
+        f"{issuer}/.well-known/oauth-authorization-server",
+        f"{host}/.well-known/oauth-authorization-server/auth/v1",
+    ):
+        data = await _fetch_metadata(url)
+        if data is not None:
+            return {
+                "authorization_endpoint": data.get("authorization_endpoint")
+                or fallback["authorization_endpoint"],
+                "token_endpoint": data.get("token_endpoint") or fallback["token_endpoint"],
+            }
+    logger.warning(
+        "planner oauth discovery failed; using conventional endpoints",
+        extra={"event": "planner_oauth_discovery_fallback"},
+    )
+    return fallback
 
 
 def start_link(clock: Clock) -> tuple[str, str, str]:
@@ -234,10 +272,14 @@ async def _refresh_request(endpoints: dict[str, str], settings: Settings, refres
                 if resp.status == 400 and body.get("error") == "invalid_grant":
                     raise _InvalidGrant()
                 if resp.status != 200 or "access_token" not in body:
-                    raise PlannerAuthError(f"refresh failed: status {resp.status}")
+                    # A non-200 that is not invalid_grant is a temporary
+                    # failure (5xx, rate limit, a transient 4xx from a
+                    # flaky proxy) -- not proof the grant itself is bad.
+                    # Only invalid_grant means "the user must re-link".
+                    raise PlannerUnavailable(f"refresh failed: status {resp.status}")
                 return body
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        raise PlannerAuthError(f"refresh failed: {type(exc).__name__}") from exc
+        raise PlannerUnavailable(f"refresh failed: {type(exc).__name__}") from exc
 
 
 # One process-wide lock: worker concurrency is 1 for job/update handling,
@@ -291,6 +333,31 @@ async def get_access_token(session: AsyncSession, settings: Settings, clock: Clo
         row.updated_at = clock.now_utc()
         await session.commit()
         return row.access_token
+
+
+async def force_expire(session: AsyncSession, clock: Clock) -> None:
+    """Mark the cached access token as already expired.
+
+    Called by app/planner/client.py when the planner itself rejects the
+    token with a 401: our local `expires_at` bookkeeping cannot predict
+    that (the planner may revoke or rotate ahead of the TTL we were
+    told), so the next get_access_token() call would otherwise keep
+    handing back the same rejected token until it naturally expires,
+    burning a write job's retry budget on a fully client-side mistake.
+    A no-op if there is no credential row yet.
+    """
+    async with _refresh_lock:
+        result = await session.execute(
+            select(PlannerCredential)
+            .where(PlannerCredential.id == CREDENTIAL_ID)
+            .with_for_update()
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            await session.commit()
+            return
+        row.expires_at = clock.now_utc() - REFRESH_SKEW
+        await session.commit()
 
 
 async def get_status(session: AsyncSession) -> PlannerCredential | None:
@@ -351,12 +418,14 @@ __all__ = [
     "REVOKED",
     "STATE_TTL",
     "PlannerAuthError",
+    "PlannerUnavailable",
     "generate_pkce",
     "start_link",
     "build_authorize_url",
     "link_url",
     "complete_link",
     "get_access_token",
+    "force_expire",
     "get_status",
     "is_enabled",
     "set_enabled",

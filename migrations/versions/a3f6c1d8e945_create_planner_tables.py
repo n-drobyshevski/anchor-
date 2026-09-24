@@ -82,12 +82,24 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column('decided_at', sa.DateTime(timezone=True), nullable=True),
+        # A random key, independent of `id` -- app/planner/jobs.py's
+        # clientRequestId is derived from this, not from `id` directly,
+        # because `id` is not stable across a /delete purge (purge.py
+        # TRUNCATEs with RESTART IDENTITY, so a later row can reuse an
+        # old id and collide with the planner's
+        # (owner_id, client_request_id) unique index).
+        sa.Column(
+            'request_key',
+            sa.String(),
+            server_default=sa.text('gen_random_uuid()::text'),
+            nullable=False,
+        ),
         sa.CheckConstraint(
             "kind in ('create_task', 'create_event', 'complete_task')",
             name='ck_planner_action_kind',
         ),
         sa.CheckConstraint(
-            "status in ('pending', 'accepted', 'rejected', 'expired')",
+            "status in ('pending', 'accepted', 'rejected', 'expired', 'written', 'failed')",
             name='ck_planner_action_status',
         ),
         sa.PrimaryKeyConstraint('id'),
@@ -95,10 +107,14 @@ def upgrade() -> None:
     op.create_index(
         'ix_planner_action_status', 'planner_action', ['status'], unique=False
     )
+    op.create_index(
+        'ix_planner_action_request_key', 'planner_action', ['request_key'], unique=True
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.drop_index('ix_planner_action_request_key', table_name='planner_action')
     op.drop_index('ix_planner_action_status', table_name='planner_action')
     op.drop_table('planner_action')
     op.drop_table('planner_snapshot')

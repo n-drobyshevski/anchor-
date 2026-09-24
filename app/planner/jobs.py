@@ -52,6 +52,13 @@ WRITE_AUTH_FAILED_NOTICE = (
     "Набери /planner_link, чтобы подключить его заново."
 )
 
+# Sent by app/worker.py when a PLANNER_WRITE job exhausts its retries
+# (MAX_ATTEMPTS) without ever raising PlannerAuthError -- e.g. the
+# planner staying unreachable the whole time. Without this, a write
+# abandoned this way leaves the action stuck `accepted` with the user
+# never told it was not, in fact, written.
+WRITE_ABANDONED_NOTICE = "Не записалось в планер — попробуй ещё раз."
+
 # Canned, out-of-character confirmations (app/tg/proposals.py's ACCEPTED_TEXT
 # is the model this follows): the persona never claims a write on its own,
 # and this is the one place that gets to say it actually happened.
@@ -91,7 +98,12 @@ async def run_planner_sync(
 async def _do_write(client: PlannerClient, settings: Settings, session: AsyncSession, clock: Clock, action, timezone: str) -> str:
     """Make the one MCP call `action.kind` names. Returns the confirmation text."""
     payload = action.payload
-    request_id = f"anchor:{action.id}"
+    # Derived from action.request_key, not action.id: an id can be
+    # reused after a /delete purge (purge.py TRUNCATEs with RESTART
+    # IDENTITY), which would otherwise collide with the planner's
+    # unique index on (owner_id, client_request_id) and make a genuine
+    # new write silently return the old, pre-purge row instead.
+    request_id = f"anchor:{action.request_key}"
 
     if action.kind == actions.CREATE_TASK:
         await client.create_task(
@@ -106,7 +118,7 @@ async def _do_write(client: PlannerClient, settings: Settings, session: AsyncSes
             settings, session, clock,
             title=payload["title"], start=payload["start"], end=payload["end"],
             all_day=payload.get("all_day", False), is_private=settings.PLANNER_WRITE_PRIVATE,
-            client_request_id=request_id,
+            client_request_id=request_id, timezone=timezone,
         )
         return WRITE_OK_EVENT.format(title=payload["title"])
 
@@ -149,6 +161,7 @@ async def run_planner_write(
     try:
         confirmation = await _do_write(client, settings, session, clock, action, timezone)
     except PlannerAuthError:
+        await actions.mark_failed(session, planner_action_id)
         if await auth.mark_notice_sent(session) and bot is not None and chat_id is not None:
             await bot.send_message(chat_id=chat_id, text=WRITE_AUTH_FAILED_NOTICE)
         return
@@ -158,6 +171,12 @@ async def run_planner_write(
             extra={"event": type(exc).__name__, "planner_action_id": planner_action_id},
         )
         raise
+
+    # Flipped out of `accepted` right after the one MCP call succeeds,
+    # before anything else that could crash -- a replayed job then hits
+    # the `action.status != ACCEPTED` guard above and does nothing,
+    # instead of calling MCP again and sending a second confirmation.
+    await actions.mark_written(session, planner_action_id)
 
     # Best-effort: a stale snapshot after a successful write is a minor
     # inconvenience (the next PLANNER_SYNC catches it up), not worth
@@ -180,6 +199,7 @@ __all__ = [
     "PLANNER_WRITE",
     "RELINK_NOTICE",
     "WRITE_AUTH_FAILED_NOTICE",
+    "WRITE_ABANDONED_NOTICE",
     "WRITE_OK_TASK",
     "WRITE_OK_EVENT",
     "WRITE_OK_DONE",

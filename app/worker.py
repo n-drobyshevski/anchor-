@@ -87,8 +87,15 @@ from app.core.state import get_state
 from app.db.jobs import claim_job, complete_job, defer_job, fail_job, recover_stuck_jobs
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
+from app.planner import actions as planner_actions
 from app.planner.client import PlannerClient
-from app.planner.jobs import PLANNER_SYNC, PLANNER_WRITE, run_planner_sync, run_planner_write
+from app.planner.jobs import (
+    PLANNER_SYNC,
+    PLANNER_WRITE,
+    WRITE_ABANDONED_NOTICE,
+    run_planner_sync,
+    run_planner_write,
+)
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
@@ -332,7 +339,17 @@ async def process_one_job(
         logger.info("job deferred", extra={"job_id": job_id, "kind": kind})
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see module docstring
         async with sessionmaker() as session:
-            await fail_job(session, job_id, type(exc).__name__)
+            terminal = await fail_job(session, job_id, type(exc).__name__)
+            # A PLANNER_WRITE job that exhausts its retries without ever
+            # raising PlannerAuthError (e.g. the planner stayed
+            # unreachable the whole time) would otherwise leave the
+            # planner_action stuck `accepted` with the user never told
+            # the write did not happen -- see design review finding 6.
+            if terminal and kind == PLANNER_WRITE:
+                await planner_actions.mark_failed(session, payload["planner_action_id"])
+                if bot is not None:
+                    user_state = await get_state(session)
+                    await bot.send_message(chat_id=user_state.chat_id, text=WRITE_ABANDONED_NOTICE)
         logger.warning(
             "job failed",
             extra={

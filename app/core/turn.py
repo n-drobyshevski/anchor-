@@ -913,10 +913,13 @@ async def run(
                     # for; a card created *this* turn shows up starting
                     # the *next* one, since the intent call below runs
                     # concurrently with this very prompt, not before it.
+                    await planner_actions.expire_stale(
+                        session, clock, settings.PLANNER_PENDING_TTL_HOURS
+                    )
                     pending = await planner_actions.pending(session)
                     planner_lines.extend(
                         PLANNER_PENDING_NOTE.format(title=action.payload.get("title", "?"))
-                        for action in pending
+                        for action in pending[: planner_actions.MAX_PENDING_NOTES]
                     )
                 messages = await build_messages(
                     session,

@@ -141,7 +141,11 @@ async def test_write_calls_create_task_with_the_anchor_client_request_id_and_con
         )
 
     assert client.create_task_calls == [
-        {"title": "Купить молоко", "due_date": "2026-09-24", "client_request_id": f"anchor:{action.id}"}
+        {
+            "title": "Купить молоко",
+            "due_date": "2026-09-24",
+            "client_request_id": f"anchor:{action.request_key}",
+        }
     ]
     assert len(fake_session.sent) == 1
     assert fake_session.sent[0].text == WRITE_OK_TASK.format(title="Купить молоко")
@@ -167,7 +171,7 @@ async def test_write_calls_create_event_with_is_private_from_settings(sessionmak
 
     assert len(client.create_event_calls) == 1
     assert client.create_event_calls[0]["is_private"] is True
-    assert client.create_event_calls[0]["client_request_id"] == f"anchor:{action.id}"
+    assert client.create_event_calls[0]["client_request_id"] == f"anchor:{action.request_key}"
 
 
 async def test_write_calls_complete_task_with_the_task_id(sessionmaker, frozen_clock):
@@ -189,6 +193,35 @@ async def test_write_calls_complete_task_with_the_task_id(sessionmaker, frozen_c
 
     assert client.complete_task_calls == [{"task_id": "abc-123"}]
     assert fake_session.sent[0].text == WRITE_OK_DONE.format(title="Позвонить маме")
+
+
+async def test_a_replayed_write_after_success_calls_mcp_only_once(sessionmaker, frozen_clock):
+    """A worker killed right after the MCP write but before the job is
+    marked done replays the same job -- it must not call create_task a
+    second time or send a second confirmation (design review finding 8)."""
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    settings = Settings(_env_file=None, PLANNER_ENABLED=True)
+    bot, fake_session = make_bot()
+    client = _WriteClient()
+
+    async with sessionmaker() as session:
+        action = await actions.create(
+            session, clock, kind=actions.CREATE_TASK, payload={"title": "A", "due_date": None}
+        )
+        await actions.accept(session, clock, action.id)
+        await run_planner_write(
+            session, settings, client, clock,
+            planner_action_id=action.id, timezone=TZ, bot=bot, chat_id=4242,
+        )
+        await run_planner_write(
+            session, settings, client, clock,
+            planner_action_id=action.id, timezone=TZ, bot=bot, chat_id=4242,
+        )
+        row = await actions.get(session, action.id)
+
+    assert row.status == actions.WRITTEN
+    assert len(client.create_task_calls) == 1
+    assert len(fake_session.sent) == 1
 
 
 async def test_write_on_a_non_accepted_action_does_nothing(sessionmaker, frozen_clock):

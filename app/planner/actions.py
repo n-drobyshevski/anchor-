@@ -51,6 +51,8 @@ __all__ = [
     "ACCEPTED",
     "REJECTED",
     "EXPIRED",
+    "WRITTEN",
+    "FAILED",
     "CREATE_TASK",
     "CREATE_EVENT",
     "COMPLETE_TASK",
@@ -58,17 +60,35 @@ __all__ = [
     "PLANNER_WRITE_DEDUP_PREFIX",
     "create",
     "get",
+    "get_by_message_id",
     "set_message_id",
     "accept",
     "reject",
+    "mark_written",
+    "mark_failed",
     "count_today",
     "pending",
+    "expire_stale",
 ]
+
+# design review finding 10: capped at the now-block, same idea as
+# snapshot.render_lines()'s own max_items -- a backlog of unanswered
+# cards should not crowd out the rest of the now-block.
+MAX_PENDING_NOTES = 3
 
 PENDING = "pending"
 ACCEPTED = "accepted"
 REJECTED = "rejected"
 EXPIRED = "expired"
+# Terminal states for a write that actually ran (app/planner/jobs.py's
+# run_planner_write): needed because "accepted" alone cannot tell a
+# write that already made its one MCP call apart from one still
+# waiting to. Without them, a worker killed right after the MCP write
+# but before the job was marked done replays the same job, which finds
+# the row still `accepted`, calls MCP a second time, and sends a
+# second confirmation -- see design review finding 8.
+WRITTEN = "written"
+FAILED = "failed"
 
 CREATE_TASK = "create_task"
 CREATE_EVENT = "create_event"
@@ -111,6 +131,21 @@ async def get(session: AsyncSession, action_id: int) -> PlannerAction | None:
     return await session.get(PlannerAction, action_id)
 
 
+async def get_by_message_id(session: AsyncSession, message_id: int) -> PlannerAction | None:
+    """The action already tied to this Telegram message, if any.
+
+    Backs /done's dedupe (app/tg/planner.py's handle_done_callback): a
+    replayed callback_query update, or a genuine double tap before the
+    keyboard is removed, must not create a second planner_action (and
+    spend a second slot of PLANNER_MAX_WRITES_PER_DAY) for the same
+    button press.
+    """
+    result = await session.execute(
+        select(PlannerAction).where(PlannerAction.tg_message_id == message_id)
+    )
+    return result.scalars().first()
+
+
 async def set_message_id(session: AsyncSession, action_id: int, message_id: int) -> None:
     action = await session.get(PlannerAction, action_id)
     if action is not None:
@@ -118,7 +153,9 @@ async def set_message_id(session: AsyncSession, action_id: int, message_id: int)
         await session.commit()
 
 
-async def accept(session: AsyncSession, clock: Clock, action_id: int) -> PlannerAction | None:
+async def accept(
+    session: AsyncSession, clock: Clock, action_id: int, *, ttl_hours: int | None = None
+) -> PlannerAction | None:
     """Confirm a pending action: flip it to `accepted` and enqueue its write.
 
     Returns None (and enqueues nothing) if the row is not pending --
@@ -126,26 +163,51 @@ async def accept(session: AsyncSession, clock: Clock, action_id: int) -> Planner
     callback, or a replayed worker update, idempotent (design review
     P3's "done when": "tapping OK creates exactly one item, including
     under a replayed job").
+
+    `ttl_hours` re-checks the action's age at accept time, not only when
+    it was last listed: a card can sit unanswered for a while, and
+    nothing should let a tap on a weeks-old card write an event dated
+    in the past (design review finding 10). None skips the check (the
+    caller did not pass PLANNER_PENDING_TTL_HOURS).
     """
     action = await session.get(PlannerAction, action_id)
     if action is None or action.status != PENDING:
         return None
 
+    if ttl_hours is not None and clock.now_utc() - action.created_at > datetime.timedelta(
+        hours=ttl_hours
+    ):
+        action.status = EXPIRED
+        action.decided_at = clock.now_utc()
+        await session.commit()
+        logger.info(
+            "planner_action expired at accept", extra={"planner_action_id": action_id}
+        )
+        return None
+
     action.status = ACCEPTED
     action.decided_at = clock.now_utc()
-    await session.commit()
-    await session.refresh(action)
 
     # The literal kind string, not an import of app.planner.jobs.PLANNER_WRITE:
     # jobs.py imports this module (to load the action a claimed job names),
     # so importing jobs.py back here would be circular. tests/test_planner_actions.py
     # pins that this string equals jobs.PLANNER_WRITE.
+    #
+    # commit=False: the status flip and the enqueue share this one
+    # commit below, so a crash between them is impossible -- either
+    # both land or neither does. Two separate commits here (the
+    # original shape) could leave an `accepted` row with no job ever
+    # queued for it, which a replayed tap then shows as "Устарело"
+    # with the write permanently lost (design review finding 8).
     await enqueue_job(
         session,
         "planner_write",
         {"planner_action_id": action.id},
         dedup_key=_write_dedup_key(action.id),
+        commit=False,
     )
+    await session.commit()
+    await session.refresh(action)
     logger.info("planner_action accepted", extra={"planner_action_id": action_id, "kind": action.kind})
     return action
 
@@ -161,6 +223,57 @@ async def reject(session: AsyncSession, clock: Clock, action_id: int) -> Planner
     await session.refresh(action)
     logger.info("planner_action rejected", extra={"planner_action_id": action_id, "kind": action.kind})
     return action
+
+
+async def mark_written(session: AsyncSession, action_id: int) -> None:
+    """Flip an `accepted` action to `written`, right after its one MCP
+    call succeeds and before the confirmation is sent.
+
+    The guard every caller of run_planner_write relies on ("if not
+    accepted, do nothing") only works once a successful write actually
+    leaves `accepted` -- otherwise a worker killed right after the MCP
+    call but before the job is marked done replays the same job, which
+    finds the row still `accepted`, calls MCP a second time (harmless,
+    the planner's own clientRequestId idempotency absorbs it), and
+    sends a second confirmation (not harmless).
+    """
+    action = await session.get(PlannerAction, action_id)
+    if action is not None and action.status == ACCEPTED:
+        action.status = WRITTEN
+        await session.commit()
+
+
+async def mark_failed(session: AsyncSession, action_id: int) -> None:
+    """Flip an `accepted` action to `failed` when its write is abandoned
+    (a revoked grant, or retries exhausted) rather than leaving it
+    `accepted` forever with no record that it was never written."""
+    action = await session.get(PlannerAction, action_id)
+    if action is not None and action.status == ACCEPTED:
+        action.status = FAILED
+        await session.commit()
+
+
+async def expire_stale(session: AsyncSession, clock: Clock, ttl_hours: int) -> int:
+    """Flip every `pending` row older than `ttl_hours` to `expired`.
+
+    Called from `pending()` below before it lists anything, so a card
+    nobody ever answered eventually stops showing up in the now-block
+    (design review finding 10: EXPIRED was defined but never set).
+    Returns the number of rows expired.
+    """
+    cutoff = clock.now_utc() - datetime.timedelta(hours=ttl_hours)
+    result = await session.execute(
+        select(PlannerAction).where(
+            PlannerAction.status == PENDING, PlannerAction.created_at < cutoff
+        )
+    )
+    rows = list(result.scalars().all())
+    for row in rows:
+        row.status = EXPIRED
+        row.decided_at = clock.now_utc()
+    if rows:
+        await session.commit()
+    return len(rows)
 
 
 async def pending(session: AsyncSession) -> list[PlannerAction]:

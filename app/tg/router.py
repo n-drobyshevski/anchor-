@@ -1145,6 +1145,7 @@ def build_router(
         await planner_ui.handle_confirm_callback(
             sessionmaker,
             callback.bot,
+            settings,
             clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
