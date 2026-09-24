@@ -938,3 +938,14 @@ purges the planner link, the cached agenda and any pending planner
 action; `/export` includes the cached agenda but never the OAuth
 tokens themselves (see `app/core/export.py`'s `NOT_EXPORTED`-equivalent
 comment on `PlannerCredential`).
+
+**P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
+a regex prefilter on your own message (never the partner's, and never
+run at all outside persona mode or during a hard pause) can trigger one
+extra safety-model call, run alongside the welfare check rather than
+before or after it, so it costs an ordinary turn no extra latency. That
+call never writes anything by itself: the result is the same
+`pa:y:<id>` / `pa:n:<id>` confirm card `/task` and `/event` already
+produce, and nothing reaches the planner until you tap it. If welfare
+finds real distress on the same turn, the proposal is dropped along
+with everything else that turn would have said.

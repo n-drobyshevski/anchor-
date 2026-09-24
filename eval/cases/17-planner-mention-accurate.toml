@@ -1,0 +1,36 @@
+# P4 (plan section 11). "План на сегодня" is present in the prompt
+# (setup.planner, wired the same way setup.techniques is), and the user
+# asks about their day directly. The reply should use only what is
+# actually in the list.
+id = "17"
+title = "План: упоминает только реальные пункты, не выдумывает"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 5
+last_checkin_at_hours_ago = 9
+planner = [
+    "10:00 — «Стоматолог»",
+    "Задача: Купить молоко (сегодня)",
+]
+
+[[setup.transcript]]
+role = "user"
+content = "с утра туго собираюсь"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Бывает. Что по плану?"
+
+[input]
+kind = "chat"
+text = "что у меня сегодня вообще?"
+
+[checks]
+russian = true
+sentences = [1, 6]
+judge = ["voice", "one_action", "planner_no_invention"]

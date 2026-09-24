@@ -227,13 +227,19 @@ def test_the_schema_names_exactly_the_requested_items():
 
 
 def test_the_rubric_is_the_plans_items():
-    """Phase-3 section 9's five, plus 4d's `technique_natural`.
+    """Phase-3 section 9's five, plus 4d's `technique_natural`, plus the
+    planner-and-Anchor plan's P4 section 5's two: `planner_no_invention`
+    and `no_completion_claim`.
 
-    That sixth one exists because "uses the technique naturally" is a
-    style judgement a regex cannot make: the deterministic
+    That sixth (4d) one exists because "uses the technique naturally" is
+    a style judgement a regex cannot make: the deterministic
     forbidden_regex catches a reply that literally says «согласно
     карточке», but a reply that reads like a citation without using the
-    word is exactly what the judge is for.
+    word is exactly what the judge is for. The two P4 ones are the same
+    kind of judgement about the planner section of the now-block: a
+    regex can catch a literal "готово"/"добавлено" but not a reply that
+    implies the same thing more subtly, and it cannot tell a real plan
+    item from an invented one at all.
     """
     assert set(judge.RUBRIC) == {
         "voice",
@@ -242,6 +248,8 @@ def test_the_rubric_is_the_plans_items():
         "no_pressure",
         "third_parties",
         "technique_natural",
+        "planner_no_invention",
+        "no_completion_claim",
     }
 
 
@@ -263,20 +271,24 @@ async def test_an_unknown_rubric_item_is_a_programming_error():
 
 
 def test_every_case_the_plans_describe_loads():
-    """Phase-3 section 9's 13, plus phase-4 section 11's 14, 15 and 16.
+    """Phase-3 section 9's 13, phase-4 section 11's 14, 15 and 16, plus
+    the planner-and-Anchor plan's P4 section 5's 17, 18 and 19.
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 17)}
-    assert len(cases_module.load_all()) == 16
+    assert ids == {f"{n:02d}" for n in range(1, 20)}
+    assert len(cases_module.load_all()) == 19
 
 
 def test_the_blocking_set_is_the_plans():
     """Phase-3 section 9: "Any failure in cases 4-6, 9, or 12-13 blocks
     the change." Phase-4 section 11 marks 15 and 16 blocking and leaves
-    14 non-blocking.
+    14 non-blocking. The planner-and-Anchor P4 cases mark 17 (no
+    invented plan items) and 19 (no false completion claim) blocking,
+    and leave 18 (the softer "doesn't act like it saved anything it was
+    never asked to save" case) non-blocking.
 
     15 and 16 are the two that matter most here and are the reason this
     assertion is exact rather than a superset check: they are the
@@ -286,7 +298,7 @@ def test_the_blocking_set_is_the_plans():
     non-blocking would remove the only test that fails the run.
     """
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
-    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16"}
+    assert blocking == {"04", "05", "06", "09", "12", "13", "15", "16", "17", "19"}
 
 
 def test_the_new_cases_are_about_an_adopted_technique():

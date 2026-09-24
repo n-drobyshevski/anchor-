@@ -140,6 +140,13 @@ async def build(
         # `techniques` key, so this stays None and their prompts are
         # byte-for-byte unchanged.
         techniques=setup.get("techniques"),
+        # P4 (plan section 11): a case's `setup.planner` is the exact
+        # rendered-lines list app/planner/snapshot.py's render_lines()
+        # would hand build_messages() in production -- see
+        # app/core/prompt.py's build_now_block docstring for why the
+        # section is simply omitted when this stays None, same as
+        # `techniques` and `retrieved` above.
+        planner=setup.get("planner"),
         focus_on=state.focus_on,
         due_action=state.due_action,
         due_set_at=state.due_set_at,

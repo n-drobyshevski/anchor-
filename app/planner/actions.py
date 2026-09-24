@@ -62,6 +62,7 @@ __all__ = [
     "accept",
     "reject",
     "count_today",
+    "pending",
 ]
 
 PENDING = "pending"
@@ -160,6 +161,21 @@ async def reject(session: AsyncSession, clock: Clock, action_id: int) -> Planner
     await session.refresh(action)
     logger.info("planner_action rejected", extra={"planner_action_id": action_id, "kind": action.kind})
     return action
+
+
+async def pending(session: AsyncSession) -> list[PlannerAction]:
+    """Every still-`pending` row, oldest first.
+
+    P4 (app/core/turn.py): backs the "ждёт подтверждения" now-block
+    note, so the persona is never mid-conversation with a card sitting
+    unanswered and no idea it exists. Ordered by id (== creation order,
+    ids are a strictly increasing serial) so a user who typed two
+    `/task`s back to back sees them in the order they asked.
+    """
+    result = await session.execute(
+        select(PlannerAction).where(PlannerAction.status == PENDING).order_by(PlannerAction.id)
+    )
+    return list(result.scalars().all())
 
 
 async def count_today(session: AsyncSession, clock: Clock, timezone: str) -> int:

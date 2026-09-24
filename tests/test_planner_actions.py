@@ -132,6 +132,19 @@ async def test_create_rejects_an_unknown_kind(sessionmaker, frozen_clock) -> Non
             await actions.create(session, clock, kind="delete_everything", payload={})
 
 
+async def test_pending_lists_only_pending_rows_oldest_first(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    async with sessionmaker() as session:
+        first = await actions.create(session, clock, kind=actions.CREATE_TASK, payload={"title": "A"})
+        second = await actions.create(session, clock, kind=actions.CREATE_TASK, payload={"title": "B"})
+        third = await actions.create(session, clock, kind=actions.CREATE_TASK, payload={"title": "C"})
+        await actions.accept(session, clock, second.id)
+
+    async with sessionmaker() as session:
+        rows = await actions.pending(session)
+    assert [row.id for row in rows] == [first.id, third.id]
+
+
 async def test_count_today_counts_only_rows_created_in_the_local_day(sessionmaker, frozen_clock):
     clock = frozen_clock(2026, 9, 23, 23, 30, tz=TZ)
     async with sessionmaker() as session:

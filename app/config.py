@@ -399,6 +399,10 @@ class Settings(BaseSettings):
     # P4: writes proposed from ordinary chat, behind their own flag.
     # False until 4d-equivalent evals exist for this feature.
     PLANNER_INTENT: bool = False
+    # P4: the safety-model intent call runs beside welfare.classify in
+    # the same asyncio.gather (app/core/turn.py), so it shares that
+    # call's fail-open discipline -- same shape as WELFARE_TIMEOUT_SECONDS.
+    PLANNER_INTENT_TIMEOUT_SECONDS: float = 8.0
     # P3: a daily ceiling on planner writes, independent of DAILY_USD_CAP
     # -- a loop that kept proposing writes would otherwise be bounded
     # only by spend, and a stray planner_action is a calendar entry, not
