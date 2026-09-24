@@ -40,12 +40,19 @@ from app.db import queue
 from app.tg.checkin import WEB_SUBMIT_CALLBACK
 from app.web.hub import WebHub
 
-# The two commands the design blocks on the web (design section 2 and
+# The commands the design blocks on the web (design section 2 and
 # section 13's decision #3): a stolen web session must not be able to
 # wipe the data or produce a bulk export. Matched case-insensitively
 # against the command name only, after the "/" prefix and any "@mention"
 # have been stripped -- see is_blocked_command.
-BLOCKED_COMMANDS = frozenset({"delete", "export"})
+#
+# `planner_link` joins this set for the same reason: it sends back a
+# live OAuth authorize URL that completes a credential link on
+# whichever browser opens it, so a stolen web session must not be able
+# to trigger or read that reply either -- see planner_link_command's
+# own is_web_sink guard in app/tg/router.py for the second, redundant
+# layer, matching /delete's and /export's own belt-and-braces shape.
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather

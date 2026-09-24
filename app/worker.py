@@ -98,6 +98,7 @@ from app.core.scheduler import (
     maybe_enqueue_backup,
     maybe_enqueue_notebook_expiry,
     maybe_enqueue_orders_expiry,
+    maybe_enqueue_planner_sync,
     maybe_enqueue_research_sweep,
     maybe_enqueue_retention_sweep,
     maybe_enqueue_review_expiry,
@@ -118,6 +119,15 @@ from app.db.jobs import (
 from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.ops.backup import BACKUP, run_backup
+from app.planner import actions as planner_actions
+from app.planner.client import PlannerClient
+from app.planner.jobs import (
+    PLANNER_SYNC,
+    PLANNER_WRITE,
+    WRITE_ABANDONED_NOTICE,
+    run_planner_sync,
+    run_planner_write,
+)
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
@@ -236,6 +246,7 @@ async def _run_job(
     safety_provider: LLMProvider | None = None,
     job_id: int | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> ExtractOutcome:
     """Dispatch one claimed job to its handler.
 
@@ -423,6 +434,40 @@ async def _run_job(
         )
         return ExtractOutcome()
 
+    if kind == PLANNER_SYNC:
+        # P2: no LLM call, no bot needed to do the work -- a bot is only
+        # used, best-effort, for the once-only "reconnect the planner"
+        # notice on a revoked grant (see app/planner/jobs.py).
+        if planner_client is None:
+            raise ValueError("planner_sync needs a PlannerClient")
+        await run_planner_sync(
+            session,
+            settings,
+            planner_client,
+            clock,
+            timezone=user_state.timezone,
+            bot=bot,
+            chat_id=user_state.chat_id,
+        )
+        return ExtractOutcome()
+
+    if kind == PLANNER_WRITE:
+        # P3: same shape as PLANNER_SYNC above -- no LLM call, bot used
+        # only for the canned confirmation / revoked-grant notice.
+        if planner_client is None:
+            raise ValueError("planner_write needs a PlannerClient")
+        await run_planner_write(
+            session,
+            settings,
+            planner_client,
+            clock,
+            planner_action_id=payload["planner_action_id"],
+            timezone=user_state.timezone,
+            bot=bot,
+            chat_id=user_state.chat_id,
+        )
+        return ExtractOutcome()
+
     if kind == TICK_DECIDE:
         # H2: the safety model decides whether there is a natural reason
         # to write first -- another strict-schema verdict. It plans an
@@ -449,6 +494,7 @@ async def process_one_job(
     bot: Bot | None = None,
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> bool:
     """Claim and run a single due job. Returns True iff a job was claimed.
 
@@ -469,7 +515,7 @@ async def process_one_job(
         async with sessionmaker() as session:
             outcome = await _run_job(
                 session, settings, provider, cheap_provider, bot, clock, kind, payload,
-                safety_provider, job_id, sessionmaker,
+                safety_provider, job_id, sessionmaker, planner_client,
             )
     except Deferred as deferred:
         async with sessionmaker() as session:
@@ -477,7 +523,17 @@ async def process_one_job(
         logger.info("job deferred", extra={"job_id": job_id, "kind": kind})
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see module docstring
         async with sessionmaker() as session:
-            await fail_job(session, job_id, type(exc).__name__)
+            terminal = await fail_job(session, job_id, type(exc).__name__)
+            # A PLANNER_WRITE job that exhausts its retries without ever
+            # raising PlannerAuthError (e.g. the planner stayed
+            # unreachable the whole time) would otherwise leave the
+            # planner_action stuck `accepted` with the user never told
+            # the write did not happen -- see design review finding 6.
+            if terminal and kind == PLANNER_WRITE:
+                await planner_actions.mark_failed(session, payload["planner_action_id"])
+                if bot is not None:
+                    user_state = await get_state(session)
+                    await bot.send_message(chat_id=user_state.chat_id, text=WRITE_ABANDONED_NOTICE)
         logger.warning(
             "job failed",
             extra={
@@ -644,13 +700,15 @@ async def _claim_loop(
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
     web_bot: Bot | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> None:
     """Updates first, then due jobs, then idle (phase-2 plan section 3)."""
     while True:
         if await process_one_update(sessionmaker, dp, bot, clock, web_bot):
             continue
         if await process_one_job(
-            sessionmaker, settings, cheap_provider, clock, bot, provider, safety_provider
+            sessionmaker, settings, cheap_provider, clock, bot, provider, safety_provider,
+            planner_client,
         ):
             continue
         await asyncio.sleep(IDLE_SLEEP_SECONDS)
@@ -693,6 +751,12 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_research_sweep(session, clock, state.timezone)
+            # P2: same shape and the same reason as the research sweep
+            # right above -- see app/core/scheduler.py's module docstring
+            # for why this is a sibling step and not inside heartbeat().
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_planner_sync(session, settings, clock, state.timezone)
             # 5b: the notebook's own daily sweep, same cadence and same
             # "not inside heartbeat()" reasoning as the research sweep
             # right above it -- see app/core/scheduler.py's module
@@ -838,6 +902,7 @@ async def run_worker(
     provider: LLMProvider | None = None,
     safety_provider: LLMProvider | None = None,
     web_bot: Bot | None = None,
+    planner_client: PlannerClient | None = None,
 ) -> list[asyncio.Task]:
     """Start the claim loop, the recovery sweep and the heartbeat.
 
@@ -845,7 +910,11 @@ async def run_worker(
     falls back to `cheap_provider` -- which is what the tests predating
     H2 rely on. app/main.py always supplies it. `web_bot` (web-chat plan
     track 1) similarly defaults to None; track 2's app/main.py supplies
-    it only when WEB_UI_ENABLED.
+    it only when WEB_UI_ENABLED. `planner_client` (P2) likewise defaults
+    to None; it is only required when a PLANNER_SYNC job is actually
+    claimed, which cannot happen with PLANNER_ENABLED off (app/core/
+    scheduler.py's maybe_enqueue_planner_sync never enqueues one), so
+    tests that do not touch the planner pass no client.
     """
     claim_task = asyncio.create_task(
         _claim_loop(
@@ -858,6 +927,7 @@ async def run_worker(
             provider,
             safety_provider,
             web_bot,
+            planner_client,
         ),
         name="anchor-claim-loop",
     )

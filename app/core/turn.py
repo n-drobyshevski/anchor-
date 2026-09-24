@@ -138,12 +138,20 @@ from app.core import checkin, memory, orders, welfare
 from app.core import persona_context as persona_context_module
 from app.core.prompt import build_messages, build_neutral_messages
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
+from app.planner import actions as planner_actions
+from app.planner import auth as planner_auth
+from app.planner import intent as planner_intent
+from app.planner import snapshot as planner_snapshot
+from app.planner.jobs import PLANNER_SYNC
+from app.planner.parse import PLANNER_CATEGORY as PLANNER_LEDGER_CATEGORY
+from app.core.scheduler import planner_sync_dedup_key
 from app.core.spend import Priced, check_cap, priced
 from app.core.state import Source, get_state, update_state
 from app.core.voice import remember_nickname
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
 from app.llm.provider import LLMError, LLMProvider, LLMRetryableError
+from app.tg import planner as planner_ui
 from app.tg.send import send_reply, start_typing, stop_typing
 
 # 5a: the nickname coin flip's source of randomness. Module-level so a
@@ -182,6 +190,11 @@ OOC_CATEGORY = "ooc"
 # to keep turn.py free of any dependency on the extractor itself -- the
 # turn's job is to hand off, not to know what happens next.
 EXTRACT = "extract"
+
+# P4: the now-block note for a still-pending planner_action -- see the
+# comment where planner_lines is built for why this must never read as
+# "done".
+PLANNER_PENDING_NOTE = "[план: предложено «{title}», ждёт подтверждения]"
 
 # message.kind (phase-2 plan section 4), distinct from the ledger's
 # category above: `kind` says what sort of message this is, `category`
@@ -901,6 +914,8 @@ async def run(
     # mood, the voice anchors or the nickname; see app/core/
     # persona_context.py's docstring.
     turn_persona_context: persona_context_module.PersonaContext | None = None
+    planner_active = False  # P4: only ever set True inside the persona branch below.
+    planner_lines: list[str] = []  # P4: same -- reused verbatim by the boundary retry.
     try:
         async with sessionmaker() as session:
             if user_state.persona_active:
@@ -954,6 +969,56 @@ async def run(
                 injected_memory_ids = [
                     row.id for row in pinned_rows + retrieved_rows + technique_rows
                 ]
+                # P2: a snapshot read only -- never a live call to the
+                # planner. A stale snapshot (or PLANNER_ENABLED off)
+                # means an empty `planner_lines`, which
+                # build_now_block(planner=None-or-[]) already renders as
+                # no section at all. If it is stale, a PLANNER_SYNC job
+                # is queued so the *next* turn sees a fresher one; this
+                # turn never waits on it.
+                planner_lines: list[str] = []
+                planner_active = settings.PLANNER_ENABLED and await planner_auth.is_enabled(
+                    session
+                )
+                if planner_active:
+                    snap = await planner_snapshot.get_snapshot(session)
+                    if planner_snapshot.is_stale(
+                        snap, clock, settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+                    ):
+                        now_local = clock_module.now_local(clock, user_state.timezone)
+                        await enqueue_job(
+                            session,
+                            PLANNER_SYNC,
+                            {},
+                            dedup_key=planner_sync_dedup_key(
+                                now_local.date(), now_local.hour, now_local.minute // 5
+                            ),
+                        )
+                    else:
+                        planner_lines = planner_snapshot.render_lines(
+                            snap,
+                            clock,
+                            user_state.timezone,
+                            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+                        )
+                    # P4: a still-pending planner_action -- typed as
+                    # /task, /event, or proposed from chat -- gets a
+                    # notice here regardless of snapshot staleness, so
+                    # the persona never claims (or implies) a write is
+                    # already done while its confirm card is still
+                    # sitting unanswered. This is the "[план: предложено
+                    # ..., ждёт подтверждения]" line the P4 plan asks
+                    # for; a card created *this* turn shows up starting
+                    # the *next* one, since the intent call below runs
+                    # concurrently with this very prompt, not before it.
+                    await planner_actions.expire_stale(
+                        session, clock, settings.PLANNER_PENDING_TTL_HOURS
+                    )
+                    pending = await planner_actions.pending(session)
+                    planner_lines.extend(
+                        PLANNER_PENDING_NOTE.format(title=action.payload.get("title", "?"))
+                        for action in pending[: planner_actions.MAX_PENDING_NOTES]
+                    )
                 messages = await build_messages(
                     session,
                     clock=clock,
@@ -980,6 +1045,7 @@ async def run(
                     orders_yesterday=turn_persona_context.orders_yesterday,
                     amendments=list(turn_persona_context.amendments),
                     callback=turn_persona_context.callback,
+                    planner=planner_lines,
                 )
             else:
                 messages = await build_neutral_messages(
@@ -996,14 +1062,40 @@ async def run(
         run_welfare = (
             safety_provider is not None and user_state.persona_active and level != "hard"
         )
+        # P4: same gate as welfare -- persona mode, not a hard pause --
+        # plus the feature flag, planner being linked at all, and the
+        # prefilter (checked again inside detect(), so a caller mistake
+        # here would still cost nothing; checked here too so a prefilter
+        # miss never even joins the gather).
+        run_intent = (
+            run_welfare
+            and settings.PLANNER_INTENT
+            and planner_active
+            and planner_intent.prefilter_hit(user_text)
+        )
         welfare_context = []
+        intent_result: planner_intent.IntentResult | None = None
+        intent_response = None
         if run_welfare:
             async with sessionmaker() as session:
                 welfare_context = await _welfare_context(session, update_id)
-            response, (verdict, welfare_usage, welfare_outcome) = await asyncio.gather(
-                _complete_with_retries(provider, messages, update_id=update_id),
-                welfare.classify(safety_provider, settings, welfare_context, user_text),
-            )
+            if run_intent:
+                response, (verdict, welfare_usage, welfare_outcome), (
+                    intent_result,
+                    intent_response,
+                ) = await asyncio.gather(
+                    _complete_with_retries(provider, messages, update_id=update_id),
+                    welfare.classify(safety_provider, settings, welfare_context, user_text),
+                    planner_intent.detect(
+                        safety_provider, settings, clock,
+                        user_text=user_text, timezone=user_state.timezone,
+                    ),
+                )
+            else:
+                response, (verdict, welfare_usage, welfare_outcome) = await asyncio.gather(
+                    _complete_with_retries(provider, messages, update_id=update_id),
+                    welfare.classify(safety_provider, settings, welfare_context, user_text),
+                )
         else:
             verdict, welfare_usage = welfare.Verdict(), None
             welfare_outcome = None
@@ -1021,6 +1113,20 @@ async def run(
                 settings=settings,
                 local_date=clock_module.local_date(clock, user_state.timezone),
                 category=welfare.WELFARE_CATEGORY,
+            )
+
+    # P4: same rule for the intent call -- category "planner", the same
+    # ledger category app/planner/parse.py's own fallback calls use, so
+    # /state's spend breakdown does not grow a third planner-shaped row
+    # to explain.
+    if intent_response is not None:
+        async with sessionmaker() as session:
+            await _ledger_only(
+                session,
+                response=intent_response,
+                settings=settings,
+                local_date=clock_module.local_date(clock, user_state.timezone),
+                category=PLANNER_LEDGER_CATEGORY,
             )
 
     # H2: the deterministic backstop. A classifier that timed out, errored
@@ -1119,6 +1225,7 @@ async def run(
                 orders_yesterday=turn_persona_context.orders_yesterday,
                 amendments=list(turn_persona_context.amendments),
                 callback=turn_persona_context.callback,
+                planner=planner_lines,
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id
@@ -1236,4 +1343,32 @@ async def run(
                 EXTRACT,
                 {"update_id": update_id, "memory_ids": injected_memory_ids},
                 dedup_key=f"extract:{update_id}",
+            )
+
+    # P4: a chat-detected intent becomes exactly the same pending card
+    # /task and /event produce -- never a write of its own (module
+    # docstring of app/planner/intent.py). This sits after the reply is
+    # already sent, so the confirm card always arrives as a follow-up
+    # message, never mixed into (or ahead of) the persona's own line.
+    # The daily write cap is honoured here too (count_today), same as
+    # app/tg/router.py's _handle_write_command -- a chat-inferred
+    # proposal is not exempt from the cap a typed /task or /event
+    # would hit.
+    if intent_result is not None:
+        async with sessionmaker() as session:
+            count = await planner_actions.count_today(session, clock, user_state.timezone)
+            if count < settings.PLANNER_MAX_WRITES_PER_DAY:
+                action = await planner_actions.create(
+                    session, clock, kind=intent_result.kind, payload=intent_result.payload
+                )
+                action_id = action.id
+            else:
+                action_id = None
+        if action_id is not None:
+            await planner_ui.send_confirm_card(
+                sessionmaker,
+                bot,
+                chat_id=chat_id,
+                action_id=action_id,
+                timezone=user_state.timezone,
             )

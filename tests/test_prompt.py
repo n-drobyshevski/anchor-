@@ -19,7 +19,13 @@ import datetime
 from zoneinfo import ZoneInfo
 
 from app.core import prompt
-from app.core.prompt import PERSONA_PATH, build_messages, build_now_block, load_persona
+from app.core.prompt import (
+    PERSONA_PATH,
+    PLAN_HEADER,
+    build_messages,
+    build_now_block,
+    load_persona,
+)
 from app.db.models import Message, TelegramUpdate
 
 
@@ -413,3 +419,49 @@ def test_build_now_block_weekday_does_not_rely_on_locale(clock):
 
     now_local = datetime.datetime.now(ZoneInfo("Europe/Paris"))
     assert weekday_names[now_local.weekday()] in block
+
+
+# --- P2: the planner section --------------------------------------------
+
+
+def test_build_now_block_planner_none_is_byte_identical(clock):
+    """planner=None (every pre-P2 call site) must change nothing at all."""
+    without_param = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3)
+    with_none = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, planner=None)
+    assert without_param == with_none
+    assert PLAN_HEADER not in without_param
+
+
+def test_build_now_block_planner_empty_list_omits_the_section(clock):
+    block = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, planner=[])
+    assert PLAN_HEADER not in block
+
+
+def test_build_now_block_planner_lines_appear_after_due_action(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        due_action="сдать отчёт",
+        planner=["10:00 — «Встреча»"],
+    )
+    assert PLAN_HEADER in block
+    assert "10:00 — «Встреча»" in block
+    due_idx = block.index("Главное действие")
+    plan_idx = block.index(PLAN_HEADER)
+    retrieved_idx = block.find("Может быть важно")
+    assert due_idx < plan_idx
+    # No retrieved-memories section in this call, so there is nothing to
+    # compare against; when there is one (below), plan must still come first.
+    assert retrieved_idx == -1
+
+
+def test_build_now_block_planner_precedes_retrieved_memories(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        planner=["10:00 — «Встреча»"],
+        retrieved=["любит утренний кофе"],
+    )
+    assert block.index(PLAN_HEADER) < block.index("Может быть важно")

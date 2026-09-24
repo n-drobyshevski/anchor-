@@ -132,6 +132,10 @@ _NOTEBOOK_LABELS = (
 # -- these arrived from the open web and are in this prompt only
 # because the user read one and pressed [Принять].
 TECHNIQUES_HEADER = "## Приёмы (одобрены тобой)"
+# P2 (planner read path). Its own header, placed right after "Главное
+# действие" and before the retrieved-memories section -- see
+# build_now_block's docstring for why.
+PLAN_HEADER = "## План на сегодня (из планера)"
 
 # strftime("%A") depends on a ru_RU locale that is not installed in the
 # container, so the weekday name is a hardcoded lookup instead
@@ -221,6 +225,7 @@ def build_now_block(
     nickname_directive: str | None = None,
     orders_yesterday: str | None = None,
     callback: str | None = None,
+    planner: list[str] | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -247,6 +252,14 @@ def build_now_block(
     order -- plan section 10 states it that way and no existing test
     encoded the old relative order (only substring checks), so nothing
     else needed updating for the swap.
+
+    P2 adds `planner`, the rendered agenda lines from
+    app/planner/snapshot.py's render_lines() -- never ORM rows, never a
+    partner id, same discipline as `pinned`/`retrieved`/`techniques`
+    above. `planner=None` (the default, and every call site predating
+    P2) must produce byte-identical output to before this parameter
+    existed: `_bullets` already returns `[]` for `None`, so the section
+    is simply omitted, exactly like an empty `retrieved` list is.
     """
     now_local = clock_module.now_local(clock, timezone)
     weekday = _RU_WEEKDAYS[now_local.weekday()]
@@ -276,6 +289,7 @@ def build_now_block(
         lines.append(f"Договорённости вчера: {orders_yesterday}")
     if nickname_directive:
         lines.append(nickname_directive)
+    lines.extend(_bullets(PLAN_HEADER, planner or []))
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     # After the retrieved memories and before the flags: a technique is
     # less volatile than what this turn happened to match, and the flags
@@ -379,6 +393,7 @@ async def build_messages(
     due_set_at: datetime.datetime | None = None,
     streak: int = 0,
     last_checkin_at: datetime.datetime | None = None,
+    planner: list[str] | None = None,
     persona_path: Path = PERSONA_PATH,
     amendments: list[str] | None = None,
     voice_lines: list[str] | None = None,
@@ -464,6 +479,7 @@ async def build_messages(
                 nickname_directive=nickname_directive,
                 orders_yesterday=orders_yesterday,
                 callback=callback,
+                planner=planner,
             ),
         )
     )

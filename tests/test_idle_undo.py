@@ -294,9 +294,22 @@ async def test_refuses_already_undone(sessionmaker):
 
 
 async def test_refuses_older_than_idle_undo_days(sessionmaker):
+    """`created_at` is set explicitly to `base_clock`'s time rather than
+    left to the column's `server_default=func.now()` -- that default is
+    real wall-clock time, not the fake clock this test otherwise runs
+    on, so leaving it out would make "8 days after creation" drift by
+    however far the real clock has moved past `base_clock`'s fixed
+    date, rather than reliably being 8 days.
+    """
     base_clock = _clock()
     async with sessionmaker() as session:
-        run = IdleRun(kind="backfill", local_date=base_clock.now_utc().date(), status="done", reversible=True)
+        run = IdleRun(
+            kind="backfill",
+            local_date=base_clock.now_utc().date(),
+            status="done",
+            reversible=True,
+            created_at=base_clock.now_utc(),
+        )
         session.add(run)
         await session.commit()
         await session.refresh(run)

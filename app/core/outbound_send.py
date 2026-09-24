@@ -204,6 +204,7 @@ async def build_outbound_messages(
     from app.core.prompt import build_messages
     from app.core.scene import recent_summaries
     from app.core.turn import NICKNAME_RNG
+    from app.planner import snapshot as planner_snapshot
 
     # 4d: adopted techniques are for in-character generation, which a
     # proactive message is (phase-4 plan section 10: "chat turns and
@@ -232,6 +233,18 @@ async def build_outbound_messages(
             rng=NICKNAME_RNG,
         )
 
+    # P2: MORNING is the one proactive kind that most benefits from a
+    # fresh agenda ("Sent after ... makes MORNING richer" -- design
+    # review section 2.3). Read for every kind rather than only MORNING
+    # so the persona never contradicts a plan it would show a moment
+    # later in a /plan reply; a snapshot read costs nothing extra here.
+    planner_lines: list[str] = []
+    if settings.PLANNER_ENABLED:
+        snap = await planner_snapshot.get_snapshot(session)
+        planner_lines = planner_snapshot.render_lines(
+            snap, clock, state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
+
     return await build_messages(
         session,
         clock=clock,
@@ -254,6 +267,7 @@ async def build_outbound_messages(
         orders=list(persona_ctx.orders),
         orders_yesterday=persona_ctx.orders_yesterday,
         amendments=list(persona_ctx.amendments),
+        planner=planner_lines,
     )
 
 

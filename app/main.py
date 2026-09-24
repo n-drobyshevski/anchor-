@@ -51,6 +51,7 @@ if __name__ == "__main__":  # `python -m app.main` only, never on import in test
 import asyncio
 import logging
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiohttp import web
 
@@ -60,7 +61,10 @@ from app.db.session import create_engine_and_sessionmaker, dispose_engine
 from app.llm.openrouter import OpenRouterProvider, build_client
 from app.llm.provider import LLMProvider
 from app.log import setup_logging
+from app.planner import auth as planner_auth
+from app.planner.client import PlannerClient, build_planner_client
 from app.startup import run_startup_tasks
+from app.tg.planner import LINK_FAILED, LINKED_OK
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
@@ -155,6 +159,56 @@ def build_dispatcher(
     return dp
 
 
+def build_planner(settings: Settings) -> tuple[PlannerClient, aiohttp.ClientSession] | tuple[None, None]:
+    """The PlannerClient and the aiohttp session it borrows requests from.
+
+    (None, None) when PLANNER_ENABLED is off -- nothing under
+    app/planner/ is ever reached in that case (app/core/scheduler.py's
+    maybe_enqueue_planner_sync never enqueues, and app/worker.py's
+    dispatch for PLANNER_SYNC is unreachable with no job to claim), so
+    there is nothing worth holding an idle connection pool open for.
+
+    The caller owns the aiohttp.ClientSession and must close it on
+    shutdown, exactly as it owns and closes the LLM client (see
+    build_providers above) -- PlannerClient.close() is a no-op by the
+    same design.
+    """
+    if not settings.PLANNER_ENABLED:
+        return None, None
+    http = aiohttp.ClientSession()
+    return build_planner_client(settings, http), http
+
+
+async def handle_planner_oauth_callback(request: web.Request) -> web.Response:
+    """`GET /planner/oauth/callback` -- the browser lands here after consent.
+
+    Plain text, never JSON or HTML: this is a one-shot page a human
+    reads once in a browser tab and then closes, not an API response.
+    """
+    settings: Settings = request.app["settings"]
+    if not settings.PLANNER_ENABLED:
+        return web.Response(status=404, text="not found")
+
+    error = request.query.get("error")
+    if error:
+        return web.Response(status=400, text=f"planner denied: {error}")
+
+    code = request.query.get("code")
+    state = request.query.get("state")
+    if not code or not state:
+        return web.Response(status=400, text="missing code or state")
+
+    sessionmaker = request.app["sessionmaker"]
+    clock: Clock = request.app["clock"]
+    async with sessionmaker() as session:
+        try:
+            await planner_auth.complete_link(session, settings, clock, code=code, state=state)
+        except planner_auth.PlannerAuthError as exc:
+            return web.Response(status=400, text=LINK_FAILED.format(reason=str(exc)))
+
+    return web.Response(status=200, text=LINKED_OK)
+
+
 async def _on_startup(app: web.Application) -> None:
     settings: Settings = app["settings"]
     bot: Bot = app["bot"]
@@ -167,6 +221,14 @@ async def _on_startup(app: web.Application) -> None:
     logger.info("startup step", extra={"event": "startup_tasks"})
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
+
+    # build_planner() must run inside a running event loop: aiohttp
+    # 3.14's ClientSession() calls asyncio.get_running_loop() in its
+    # constructor. main() is synchronous, so the session is built here
+    # instead, once on_startup is actually running on the loop.
+    planner_client, planner_http = build_planner(settings)
+    app["planner_client"] = planner_client
+    app["planner_http"] = planner_http
 
     logger.info("startup step", extra={"event": "set_webhook"})
     await bot.set_webhook(
@@ -197,6 +259,7 @@ async def _on_startup(app: web.Application) -> None:
         app["provider"],
         app["safety_provider"],
         web_bot,
+        app["planner_client"],
     )
     faulthandler.cancel_dump_traceback_later()
     logger.info("startup complete", extra={"event": "startup"})
@@ -216,6 +279,8 @@ async def _on_cleanup(app: web.Application) -> None:
         # close() actually does.
         await web_bot.session.close()
     await app["llm_client"].close()
+    if app["planner_http"] is not None:
+        await app["planner_http"].close()
     await dispose_engine(app["engine"])
     await app["bot"].session.close()
     logger.info("cleanup complete", extra={"event": "cleanup"})
@@ -234,6 +299,8 @@ def build_webhook_app(
     clock: Clock,
     hub: WebHub | None = None,
     code_store: web_auth.CodeStore | None = None,
+    planner_client: PlannerClient | None = None,
+    planner_http: aiohttp.ClientSession | None = None,
 ) -> web.Application:
     """`hub` (web-chat plan track 2) is passed in, not built here, so the
     same WebHub instance `main()` handed to `build_dispatcher()` (for
@@ -258,10 +325,16 @@ def build_webhook_app(
     app["safety_provider"] = safety_provider
     app["llm_client"] = llm_client
     app["clock"] = clock
+    app["planner_client"] = planner_client
+    app["planner_http"] = planner_http
 
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+    # P2: registered unconditionally, like the planner's own /api/mcp
+    # route mirrors -- the handler itself 404s when PLANNER_ENABLED is
+    # off, rather than the route's existence leaking the setting.
+    app.router.add_get("/planner/oauth/callback", handle_planner_oauth_callback)
 
     if hub is not None:
         web_bot = make_web_bot(settings.TELEGRAM_BOT_TOKEN, hub)
@@ -302,16 +375,26 @@ async def _run_polling_mode(
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    # See _on_startup: built here, inside the running loop, not in
+    # main() before asyncio.run() starts it.
+    planner_client, planner_http = build_planner(settings)
+
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
     worker_tasks = await run_worker(
-        sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
+        sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider,
+        planner_client=planner_client,
     )
     faulthandler.cancel_dump_traceback_later()
     try:
+        # Polling mode serves no HTTP (plan/AGENTS: dev only), so
+        # /planner_link's callback has nowhere to land here -- linking
+        # is a webhook-mode-only flow, same as PUBLIC_URL itself.
         await run_polling(bot, sessionmaker, settings)
     finally:
         await stop_worker(worker_tasks)
+        if planner_http is not None:
+            await planner_http.close()
         await llm_client.close()
         await dispose_engine(engine)
         await bot.session.close()
@@ -350,6 +433,9 @@ def main() -> None:
     # build_webhook_app's docstring).
     code_store = web_auth.CodeStore() if settings.WEB_UI_ENABLED else None
     dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock, hub, code_store)
+    # planner_client/planner_http are NOT built here: see _on_startup
+    # and _run_polling_mode, which build them once the event loop is
+    # actually running.
 
     if settings.MODE == "webhook":
         app = build_webhook_app(

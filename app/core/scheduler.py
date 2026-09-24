@@ -98,6 +98,8 @@ from app.core.review import REVIEW_EXPIRY
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
 from app.db.models import Outbound
+from app.planner import auth as planner_auth
+from app.planner.jobs import PLANNER_SYNC
 from app.research.sweeps import RESEARCH_SWEEP
 from app.core import retention as retention_module
 from app.ops import backup as backup_module
@@ -550,6 +552,70 @@ async def maybe_enqueue_retention_sweep(
     )
     if enqueued:
         logger.info("retention sweep queued", extra={"event": retention_module.RETENTION_SWEEP})
+    return enqueued
+
+
+def planner_sync_dedup_key(local_date: datetime.date, hour: int, bucket: int) -> str:
+    """One planner sync per (local date, hour, bucket) -- mirrors tick_dedup_key.
+
+    `bucket` is left to the caller rather than fixed here: the heartbeat
+    below uses `minute // 15` (its own steady cadence), while
+    app/core/turn.py's stale-snapshot trigger uses a finer `minute // 5`
+    so a chat turn that notices staleness does not wait a full quarter
+    hour for the next fetch. The two never need to collide -- a losing
+    duplicate enqueue is free, same as every other dedup-keyed job here.
+    """
+    return f"planner_sync:{local_date.isoformat()}:{hour}:{bucket}"
+
+
+async def maybe_enqueue_planner_sync(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue a PLANNER_SYNC job, roughly every PLANNER_SYNC_EVERY_MIN minutes.
+
+    Shaped like maybe_enqueue_research_sweep: this only decides whether
+    to ask, app/planner/jobs.py does the actual work. Deliberately not
+    called from inside heartbeat() either, for the identical reason that
+    function's docstring gives for the research sweep -- several
+    existing tests call heartbeat() directly and assert an exact job
+    table state afterwards. app/worker.py's _heartbeat_loop calls this as
+    a second sibling step, alongside maybe_enqueue_research_sweep.
+
+    Also queues one extra sync ~10 minutes before MORNING_TIME (design
+    review section 2.3), on its own dedup key, so the morning message
+    reflects a same-morning agenda rather than whatever the last
+    15-minute tick happened to catch.
+
+    No-ops entirely when PLANNER_ENABLED is False -- the whole feature
+    stays dark, unlike the research sweep, which runs regardless of its
+    own switch because it is retention hygiene on rows that may already
+    exist. There is no equivalent backlog here: with the feature off,
+    nothing ever populated planner_snapshot in the first place.
+    """
+    if not settings.PLANNER_ENABLED:
+        return False
+    if not await planner_auth.is_enabled(session):
+        return False
+
+    now_local = clock_module.now_local(clock, timezone)
+    today = now_local.date()
+    enqueued = False
+
+    key = planner_sync_dedup_key(today, now_local.hour, now_local.minute // 15)
+    if await enqueue_job(session, PLANNER_SYNC, {}, dedup_key=key):
+        enqueued = True
+
+    premorning_target = clock_module.combine_local(
+        today, settings.MORNING_TIME, timezone
+    ) - datetime.timedelta(minutes=10)
+    now = clock.now_utc()
+    if premorning_target <= now < premorning_target + datetime.timedelta(minutes=1):
+        premorning_key = f"planner_sync:{today.isoformat()}:premorning"
+        if await enqueue_job(session, PLANNER_SYNC, {}, dedup_key=premorning_key):
+            enqueued = True
+
+    if enqueued:
+        logger.info("planner sync queued", extra={"event": PLANNER_SYNC})
     return enqueued
 
 

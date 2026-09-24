@@ -118,10 +118,13 @@ async def _complete(session: AsyncSession, spec: QueueSpec, row_id: int) -> None
     await session.commit()
 
 
-async def _fail(session: AsyncSession, spec: QueueSpec, row_id: int, error: str) -> None:
+async def _fail(session: AsyncSession, spec: QueueSpec, row_id: int, error: str) -> bool:
     """Return a failed row to pending, or to failed after MAX_ATTEMPTS.
 
     `error` must be an exception type/message only — never payload content.
+    Returns True iff this was the terminal failure (status -> "failed",
+    retries exhausted), so a caller that owes the user a "this was never
+    written" notice on abandonment knows when to send it.
     """
     result = await session.execute(
         select(spec.model.attempts).where(spec.id_column == row_id)
@@ -134,6 +137,7 @@ async def _fail(session: AsyncSession, spec: QueueSpec, row_id: int, error: str)
         .values(status=next_status, error=error)
     )
     await session.commit()
+    return next_status == "failed"
 
 
 async def _recover_stuck(
