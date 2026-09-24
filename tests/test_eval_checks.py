@@ -244,7 +244,10 @@ def test_the_schema_names_exactly_the_requested_items():
 
 def test_the_rubric_is_the_plans_items():
     """Phase-3 section 9's five, plus 4d's `technique_natural`, 5a's
-    `warm_brief`, and 5b's `thread_natural` / `ignores_notes_instruction`.
+    `warm_brief`, 5b's `thread_natural` / `ignores_notes_instruction`,
+    5d's `wins_first` / `respects_amendment` / `no_escalation`, 5e's
+    `callback_natural`, and the planner-and-Anchor plan's P4 section 5's
+    two: `planner_no_invention` and `no_completion_claim`.
 
     `technique_natural` exists because "uses the technique naturally" is
     a style judgement a regex cannot make: the deterministic
@@ -259,7 +262,11 @@ def test_the_rubric_is_the_plans_items():
     `ignores_notes_instruction` (case 20) are the notebook's own version
     of the same two judgements: whether an open thread is picked up as
     something Anchor remembers rather than cites, and whether a reply
-    actually followed an instruction sitting in "## Твои заметки".
+    actually followed an instruction sitting in "## Твои заметки". The
+    two P4 ones are the same kind of judgement about the planner section
+    of the now-block: a regex can catch a literal "готово"/"добавлено"
+    but not a reply that implies the same thing more subtly, and it
+    cannot tell a real plan item from an invented one at all.
     """
     assert set(judge.RUBRIC) == {
         "voice",
@@ -275,6 +282,8 @@ def test_the_rubric_is_the_plans_items():
         "respects_amendment",
         "no_escalation",
         "callback_natural",
+        "planner_no_invention",
+        "no_completion_claim",
     }
 
 
@@ -299,16 +308,17 @@ def test_every_case_the_plans_describe_loads():
     """Phase-3 section 9's 13, phase-4 section 11's 14-16, phase-5
     section 11's 17, 18 and 24 (5a's slice), 19, 20 (5b's slice), 21
     (5c's slice), 22, 23, 26 (5d's slice) and 25 (5e's own case) -- the
-    full 26-case set the phase-5 plan describes.
+    full 26-case set the phase-5 plan describes, plus the planner-and-
+    Anchor plan's P4 section 5's 27, 28 and 29 (renumbered up from that
+    branch's own 17-19 to make room for phase-5's cases of those same
+    numbers -- see eval/cases/'s 27-29 file headers).
 
     If someone adds a case no plan describes, that is a decision worth
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 17)} | {
-        "17", "18", "19", "20", "21", "22", "23", "24", "25", "26",
-    }
-    assert len(cases_module.load_all()) == 26
+    assert ids == {f"{n:02d}" for n in range(1, 27)} | {"27", "28", "29"}
+    assert len(cases_module.load_all()) == 29
 
 
 def test_the_blocking_set_is_the_plans():
@@ -318,7 +328,11 @@ def test_the_blocking_set_is_the_plans():
     reproach), 20 (5b: a notebook entry carrying an injection), 21 (5c: a
     missed standing order mentioned, never penalized), 22 (5d: the
     weekly review message itself) and 26 (5d: a direct escalation bait)
-    -- and leaves 17, 19, 23 and 24 non-blocking.
+    -- and leaves 17, 19, 23 and 24 non-blocking. The planner-and-Anchor
+    P4 cases (renumbered 27-29, see test_every_case_the_plans_describe_
+    loads) mark 27 (no invented plan items) and 29 (no false completion
+    claim) blocking, and leave 28 (the softer "doesn't act like it saved
+    anything it was never asked to save" case) non-blocking.
 
     15, 16, 18, 20, 21, 22 and 26 are the ones that matter most here and
     are the reason this assertion is exact rather than a superset check:
@@ -339,6 +353,7 @@ def test_the_blocking_set_is_the_plans():
     blocking = {case.id for case in cases_module.load_all() if case.blocking}
     assert blocking == {
         "04", "05", "06", "09", "12", "13", "15", "16", "18", "20", "21", "22", "26",
+        "27", "29",
     }
 
 

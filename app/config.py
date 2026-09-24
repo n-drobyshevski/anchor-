@@ -61,6 +61,10 @@ _STRIPPED_FIELDS = (
     "BACKUP_S3_ACCESS_KEY_ID",
     "BACKUP_S3_SECRET_ACCESS_KEY",
     "BACKUP_PG_DUMP",
+    "PLANNER_MCP_URL",
+    "PLANNER_SUPABASE_URL",
+    "PLANNER_OAUTH_CLIENT_ID",
+    "PLANNER_OAUTH_REDIRECT_URI",
 )
 
 
@@ -528,6 +532,69 @@ class Settings(BaseSettings):
     WEB_SESSION_MAX_DAYS: int = 14
     # TTL for the Telegram-delivered login code (design section 4).
     WEB_LOGIN_CODE_TTL_S: int = 300
+    # --- planner P2: read path + OAuth link -----------------------------
+    #
+    # The master switch. False (the default) keeps every planner code
+    # path dark -- no job kind is dispatched, no command does anything
+    # but say "off", and build_now_block(planner=None) stays
+    # byte-identical to today (app/core/prompt.py). Off through this
+    # milestone's ship the same way RESEARCH_ENABLED was through 4a-4c.
+    PLANNER_ENABLED: bool = False
+    # The planner's MCP endpoint, e.g. https://planner.example.com/api/mcp.
+    PLANNER_MCP_URL: str = ""
+    # The planner's Supabase project URL. Its OAuth authorization server
+    # is `${PLANNER_SUPABASE_URL}/auth/v1` (see app/planner/auth.py,
+    # matching lib/mcp/env.ts's getSupabaseAuthIssuer() in the planner
+    # repo) -- Anchor discovers the actual authorize/token endpoints
+    # from that issuer's RFC 8414 metadata rather than guessing paths.
+    PLANNER_SUPABASE_URL: str = ""
+    # A public OAuth client id registered against the planner's Supabase
+    # project (dynamic client registration, done once, out of band --
+    # see docs/README for the exact steps). PKCE-only; no client secret.
+    PLANNER_OAUTH_CLIENT_ID: str = ""
+    # Anchor's own callback: https://<railway-host>/planner/oauth/callback.
+    # Its host must be added, in full, to the planner's
+    # MCP_ALLOWED_REDIRECT_HOSTS -- a bare "up.railway.app" there would
+    # allow any Railway app (design review, table 1).
+    PLANNER_OAUTH_REDIRECT_URI: str = ""
+    # A snapshot older than this is treated as absent by
+    # app/planner/snapshot.py's render_lines() -- the plan section
+    # "degradation" requirement is that the plan section of the now-
+    # block simply disappears rather than showing stale data.
+    PLANNER_SNAPSHOT_MAX_AGE_MIN: int = 30
+    # How often the heartbeat re-queues PLANNER_SYNC, in minutes (plus
+    # one extra run ~10 minutes before MORNING_TIME, so the morning
+    # message reflects a fresh agenda -- app/core/scheduler.py's
+    # maybe_enqueue_planner_sync).
+    PLANNER_SYNC_EVERY_MIN: int = 15
+    # P3: items Anchor creates on the planner are private by default,
+    # so they do not appear on the partner's calendar without opt-in
+    # (design review, your decision in section 0). Read now so the
+    # setting exists ahead of the write path that consumes it.
+    PLANNER_WRITE_PRIVATE: bool = True
+    # P4: writes proposed from ordinary chat, behind their own flag.
+    # False until 4d-equivalent evals exist for this feature.
+    PLANNER_INTENT: bool = False
+    # P4: the safety-model intent call runs beside welfare.classify in
+    # the same asyncio.gather (app/core/turn.py), so it shares that
+    # call's fail-open discipline -- same shape as WELFARE_TIMEOUT_SECONDS.
+    PLANNER_INTENT_TIMEOUT_SECONDS: float = 8.0
+    # P3: a daily ceiling on planner writes, independent of DAILY_USD_CAP
+    # -- a loop that kept proposing writes would otherwise be bounded
+    # only by spend, and a stray planner_action is a calendar entry, not
+    # a few cents.
+    PLANNER_MAX_WRITES_PER_DAY: int = 20
+    # A pending planner_action (a /task, /event or chat-proposed card
+    # nobody has tapped) older than this is expired rather than shown
+    # forever: without a cutoff, a card from weeks ago could still be
+    # accepted and write an event in the past (design review finding 10).
+    PLANNER_PENDING_TTL_HOURS: int = 24
+    # Anchor plan, "Anchor" section: gates both the one extra
+    # `get_health` MCP call each PLANNER_SYNC makes and the one health
+    # line render_lines() adds to the now-block. Off by default --
+    # sleep and heart metrics reach OpenRouter only when this is true
+    # (README privacy note), same discipline as every other planner flag.
+    PLANNER_HEALTH: bool = False
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -796,6 +863,14 @@ REQUIRED_ALWAYS = ("TELEGRAM_BOT_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY")
 # Only webhook mode serves HTTP: it verifies the secret on every request
 # and registers PUBLIC_URL with Telegram. Polling needs neither.
 REQUIRED_WEBHOOK = ("TELEGRAM_SECRET_TOKEN", "PUBLIC_URL")
+# Only required when PLANNER_ENABLED -- the whole feature is off by
+# default and must not block boot for a deployment that never sets it.
+REQUIRED_PLANNER = (
+    "PLANNER_MCP_URL",
+    "PLANNER_SUPABASE_URL",
+    "PLANNER_OAUTH_CLIENT_ID",
+    "PLANNER_OAUTH_REDIRECT_URI",
+)
 
 
 def missing_required(settings: Settings) -> list[str]:
@@ -809,6 +884,8 @@ def missing_required(settings: Settings) -> list[str]:
         missing.append("ALLOWED_CHAT_ID")
     if settings.MODE == "webhook":
         missing.extend(name for name in REQUIRED_WEBHOOK if not getattr(settings, name))
+    if settings.PLANNER_ENABLED:
+        missing.extend(name for name in REQUIRED_PLANNER if not getattr(settings, name))
     return missing
 
 

@@ -39,6 +39,9 @@ from app.db.models import (
     PendingMemory,
     PersonaAmendment,
     PersonaVersion,
+    PlannerAction,
+    PlannerCredential,
+    PlannerSnapshot,
     Proposal,
     ReviewProposal,
     SafetyEvent,
@@ -182,6 +185,25 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 # PURGED_TABLES). update_id is negative by the
                 # sign-derived-origin convention (app/db/queue.py).
                 WebUpdate(update_id=-1, client_key="test-client-key"),
+            ]
+        )
+        await session.commit()
+
+        # P2: the planner link. A live-looking credential, a synced
+        # snapshot, and one pending write-confirmation row (schema for
+        # P3, seeded here so the invariant tests below stay honest about
+        # every table in models.py).
+        session.add_all(
+            [
+                PlannerCredential(
+                    id=1,
+                    access_token="at",
+                    refresh_token="rt",
+                    expires_at=now,
+                    status="active",
+                ),
+                PlannerSnapshot(id=1, fetched_at=now, payload={"events": [], "tasks": []}),
+                PlannerAction(kind="create_task", payload={"title": "x"}),
             ]
         )
         await session.commit()

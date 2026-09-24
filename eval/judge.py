@@ -132,6 +132,27 @@ RUBRIC: dict[str, str] = {
         "раза и естественно, или пропущено, если не к месту; без фраз "
         "вроде «как ты помнишь из заметок»."
     ),
+    # P4 (plan section 11, planner_* cases). "План на сегодня" reaches
+    # the prompt as plain rendered lines (app/planner/snapshot.py), and
+    # the model must treat them the way it treats any other fact in
+    # "## Сейчас" -- stay consistent with them, never add an event or
+    # task that is not in the list.
+    "planner_no_invention": (
+        "Если бот упоминает пункты плана, он называет только те, что "
+        "явно даны в «План на сегодня» — не добавляет и не выдумывает "
+        "других дел, встреч или задач."
+    ),
+    # A chat-detected planner_action never writes anything by itself —
+    # it only produces a pending confirm card the user still has to tap
+    # (app/planner/intent.py's module docstring). The persona reply
+    # itself is generated before that card exists, so it must not read
+    # as an acknowledgement that something was already added, scheduled
+    # or saved.
+    "no_completion_claim": (
+        "Ответ не утверждает и не намекает, что что-то уже добавлено, "
+        "записано, запланировано или сохранено в планер — ни прямо "
+        "(«добавила», «записал»), ни как свершившийся факт."
+    ),
 }
 
 JUDGE_PROMPT = (

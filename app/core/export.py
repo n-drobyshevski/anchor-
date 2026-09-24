@@ -42,6 +42,8 @@ from app.db.models import (
     Memory,
     Message,
     PersonaAmendment,
+    PlannerAction,
+    PlannerSnapshot,
     Proposal,
     ReviewProposal,
     SafetyEvent,
@@ -121,6 +123,15 @@ EXPORTED_MODELS = (
     IdleChange,
     BriefNote,
     InterestTopic,
+    # P2: the cached agenda and (from P3) pending planner writes are user
+    # data by the same reasoning as `outbound` and `safety_event` just
+    # above. `planner_credential` is deliberately **not** here -- it
+    # holds a live access/refresh token pair, and "give me all my data"
+    # must never be the thing that puts a usable credential in a
+    # downloadable file (design review section 3.2 item 6's "no tokens
+    # exported", plan section 4's file-list note).
+    PlannerSnapshot,
+    PlannerAction,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

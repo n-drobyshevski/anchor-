@@ -72,6 +72,10 @@ from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state
 from app.llm.provider import LLMProvider
 from app.ops.backup import latest_backup_status
+from app.planner import actions as planner_actions
+from app.planner import auth as planner_auth
+from app.planner import parse as planner_parse
+from app.planner import snapshot as planner_snapshot
 from app.tg.send import send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
@@ -81,6 +85,7 @@ from app.tg import interests as interests_ui
 from app.tg import memory as memory_ui
 from app.tg import notebook as notebook_ui
 from app.tg import orders as orders_ui
+from app.tg import planner as planner_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
 from app.tg import review as review_ui
@@ -114,6 +119,9 @@ PRIVACY_TEXT = (
     "Запросы к модели идут через OpenRouter с запретом на сбор данных "
     "(data collection: deny); сам провайдер модели хранит данные по своим "
     "правилам.\n"
+    "Если подключён планер: агенда (включая общие события партнёра) и, при "
+    "PLANNER_HEALTH, метрики сна/пульса попадают в запрос к модели; токены "
+    "планера хранятся в базе и не выгружаются в /export.\n"
     "Переписка в Telegram не имеет сквозного шифрования — сообщения "
     "проходят через серверы Telegram и этого бота.\n"
     "Резервные копии базы зашифрованы (age) и хранятся: 14 ежедневных + 8 "
@@ -167,6 +175,15 @@ BOT_COMMANDS = [
     BotCommand(command="interests", description="Темы для фонового поиска"),
     # 6e (Phase 6 plan section 9.5).
     BotCommand(command="privacy", description="Приватность и хранение данных"),
+    # P2 (design review section 2.3): the read path + link flow.
+    BotCommand(command="plan", description="План на сегодня"),
+    BotCommand(command="planner", description="Статус планера, on/off"),
+    BotCommand(command="planner_link", description="Подключить планер"),
+    # P3: explicit writes, behind a confirm card (/task, /event) or a
+    # pick-from-list button (/done).
+    BotCommand(command="task", description="Добавить задачу в планер"),
+    BotCommand(command="event", description="Добавить событие в планер"),
+    BotCommand(command="done", description="Отметить задачу сделанной"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1149,6 +1166,222 @@ def build_router(
         reply = await research_ui.run_reject(sessionmaker, clock, card_id=card_id)
         await _reply_once(message, event_update.update_id, reply)
 
+    # --- P2: planner read path + link flow ---
+
+    @router.message(Command("plan"))
+    async def plan_command(message: Message, event_update: Update) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.render_plan_text(
+            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("planner"))
+    async def planner_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+
+        raw = (command.args or "").strip().lower()
+        if raw in ("on", "off"):
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                row = await planner_auth.set_enabled(session, raw == "on")
+            if row is None:
+                await _reply_once(message, event_update.update_id, planner_ui.ON_OFF_NOT_LINKED)
+                return
+            await _reply_once(
+                message,
+                event_update.update_id,
+                planner_ui.ON_REPLY if raw == "on" else planner_ui.OFF_REPLY,
+            )
+            return
+        if raw:
+            await _reply_once(message, event_update.update_id, planner_ui.ON_OFF_USAGE)
+            return
+
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            credential = await planner_auth.get_status(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.render_status_text(
+            credential,
+            snap,
+            clock,
+            user_state.timezone,
+            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+        )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("planner_link"))
+    async def planner_link_command(message: Message, event_update: Update) -> None:
+        """Telegram-only, same shape and reasoning as export_command/
+        delete_command: this sends a live OAuth authorize URL that
+        completes a credential link, so a stolen web session must not
+        be able to trigger or read it -- app/web/ingress.py's
+        BLOCKED_COMMANDS refuses to ever enqueue a `/planner_link`
+        request from the web sink in the first place; this is the same
+        belt-and-braces second layer those two handlers already use.
+        """
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.LINK_DISABLED)
+            return
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            existing = await planner_auth.get_status(session)
+        if existing is not None and existing.status == planner_auth.ACTIVE:
+            await _reply_once(message, event_update.update_id, planner_ui.LINK_ALREADY)
+            return
+        try:
+            url = await planner_auth.link_url(settings, clock)
+        except Exception as exc:  # noqa: BLE001 - a failed discovery must still reply
+            await _reply_once(
+                message, event_update.update_id, planner_ui.LINK_FAILED.format(
+                    reason=type(exc).__name__
+                )
+            )
+            return
+        # Not _reply_once: that stores the sent text as a `message` row,
+        # and app/web/tail.py's _mirror_query / GET /api/history show
+        # every sent assistant row regardless of kind, with no filter for
+        # a live OAuth authorize URL. Same shape as export_command/
+        # delete_command above -- send the real reply straight to
+        # Telegram and store only a placeholder, via mark_update_handled.
+        await message.answer(planner_ui.LINK_INTRO.format(url=url))
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/planner_link]"
+        )
+
+    # --- P3: /task, /event (deterministic parse, then a confirm card) ---
+
+    async def _handle_write_command(
+        message: Message,
+        event_update: Update,
+        *,
+        text: str,
+        usage: str,
+        kind: str,
+        parser,
+    ) -> None:
+        """Shared shape for /task and /event: usage check, replay gate,
+        the daily write cap, parse (regex, then the safety-model
+        fallback), a planner_action row, then its confirm card.
+
+        Not a canned reply (like /remember): a card carries a keyboard,
+        so it is sent directly once mark_update_handled records the
+        text-only trace of what was typed.
+        """
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        if not text:
+            await _reply_once(message, event_update.update_id, usage)
+            return
+        if not await _once(event_update.update_id):
+            return
+
+        reply: str | None = None
+        action_id: int | None = None
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            timezone = user_state.timezone
+            count = await planner_actions.count_today(session, clock, timezone)
+            if count >= settings.PLANNER_MAX_WRITES_PER_DAY:
+                reply = planner_ui.WRITE_CAP_REACHED.format(
+                    count=count, cap=settings.PLANNER_MAX_WRITES_PER_DAY
+                )
+            else:
+                try:
+                    payload = await parser(session, timezone)
+                except planner_parse.ParseError as exc:
+                    reply = exc.message
+                else:
+                    action = await planner_actions.create(session, clock, kind=kind, payload=payload)
+                    action_id = action.id
+
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text=f"[/{kind}]"
+        )
+        if action_id is None:
+            await message.answer(reply)
+            return
+        await planner_ui.send_confirm_card(
+            sessionmaker, message.bot, chat_id=message.chat.id, action_id=action_id, timezone=timezone
+        )
+
+    @router.message(Command("task"))
+    async def task_command(message: Message, event_update: Update, command: CommandObject) -> None:
+        async def _parse(session, timezone: str) -> dict:
+            parsed = await planner_parse.parse_task(
+                session, settings, safety_provider or provider, clock,
+                text=(command.args or "").strip(), timezone=timezone,
+            )
+            return {
+                "title": parsed.title,
+                "due_date": parsed.due_date.isoformat() if parsed.due_date else None,
+            }
+
+        await _handle_write_command(
+            message, event_update,
+            text=(command.args or "").strip(), usage=planner_ui.TASK_USAGE,
+            kind=planner_actions.CREATE_TASK, parser=_parse,
+        )
+
+    @router.message(Command("event"))
+    async def event_command(message: Message, event_update: Update, command: CommandObject) -> None:
+        async def _parse(session, timezone: str) -> dict:
+            parsed = await planner_parse.parse_event(
+                session, settings, safety_provider or provider, clock,
+                text=(command.args or "").strip(), timezone=timezone,
+            )
+            return {
+                "title": parsed.title,
+                "start": parsed.start.isoformat(),
+                "end": parsed.end.isoformat(),
+                "all_day": parsed.all_day,
+            }
+
+        await _handle_write_command(
+            message, event_update,
+            text=(command.args or "").strip(), usage=planner_ui.EVENT_USAGE,
+            kind=planner_actions.CREATE_EVENT, parser=_parse,
+        )
+
+    # --- P3: /done (pick a task from a list; the tap is the confirmation) ---
+
+    @router.message(Command("done"))
+    async def done_command(message: Message, event_update: Update) -> None:
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text, tasks = planner_ui.render_done_list(
+            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+        )
+        if not tasks:
+            await _reply_once(message, event_update.update_id, text)
+            return
+        if not await _once(event_update.update_id):
+            return
+        await send_keyboard(message.bot, message.chat.id, text, planner_ui.done_keyboard(tasks))
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/done]"
+        )
+
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
         await turn.run(
@@ -1336,6 +1569,40 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("pa:"))
+    async def planner_action_decision(callback: CallbackQuery) -> None:
+        """`pa:y:<id>` / `pa:n:<id>` -- the /task and /event confirm card."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        await planner_ui.handle_confirm_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            timezone=user_state.timezone,
+        )
+
+    @router.callback_query(F.data.startswith("pl:d:"))
+    async def planner_done(callback: CallbackQuery) -> None:
+        """`pl:d:<task id>` -- a /done list button."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+        await planner_ui.handle_done_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            timezone=user_state.timezone,
         )
 
     @router.callback_query(F.data.startswith("r:a:"))

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -822,6 +823,121 @@ class Outbound(Base):
         # cancel_outbound sweeps them, /state shows the next one.
         Index("ix_outbound_status_planned_for", "status", "planned_for"),
         Index("ix_outbound_local_date", "local_date"),
+    )
+
+
+class PlannerCredential(Base):
+    """Anchor's OAuth grant on the planner -- one singleton row (P2).
+
+    `id` is pinned to 1 exactly like `UserState`: there is one planner
+    account linked, ever, so there is never an ambiguous row to update.
+    The refresh token rotates on every use (app/planner/auth.py), so an
+    env var can only ever seed it once -- this row is the durable copy.
+
+    `notified` is the once-only gate for the "reconnect the planner"
+    message: flips True the first time a revoked credential is noticed,
+    so a retried PLANNER_SYNC job against a still-revoked grant does not
+    resend it. See app/planner/auth.py's mark_notice_sent().
+    """
+
+    __tablename__ = "planner_credential"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    access_token: Mapped[str] = mapped_column(String, nullable=False)
+    refresh_token: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    client_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="active", server_default=text("'active'")
+    )
+    # /planner on|off (app/tg/planner.py) -- a user-facing pause distinct
+    # from `status`, which is the OAuth grant's own health. Turning this
+    # off stops app/core/scheduler.py's maybe_enqueue_planner_sync from
+    # queueing further syncs; PLANNER_ENABLED (the deploy-level switch in
+    # Settings) still gates everything above that.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    notified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_planner_credential_id_singleton"),
+        CheckConstraint("status in ('active', 'revoked')", name="ck_planner_credential_status"),
+    )
+
+
+class PlannerSnapshot(Base):
+    """The local cache of `get_agenda`'s output -- one singleton row (P2).
+
+    Written only by app/planner/jobs.py's PLANNER_SYNC job. Read by the
+    chat-turn path (app/core/turn.py) and never fetched from there live,
+    which is what keeps a slow or unreachable planner from adding
+    latency to a reply -- see app/planner/snapshot.py's module docstring.
+    """
+
+    __tablename__ = "planner_snapshot"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    fetched_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_planner_snapshot_id_singleton"),)
+
+
+class PlannerAction(Base):
+    """A planner write awaiting the user's confirmation (schema for P3).
+
+    Created now, alongside planner_credential/planner_snapshot, because
+    all three ship in one migration -- P2 itself never writes a row
+    here. Deliberately its own table rather than a reuse of `proposal`:
+    `proposal.create()` expires any other outstanding proposal, and a
+    planner action must not silently expire (or be expired by) an
+    unrelated extractor proposal (design review, table 1, "reusing
+    proposal for planner writes is harmless" -- it is not).
+    """
+
+    __tablename__ = "planner_action"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=text("'pending'")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Independent of `id`, which a /delete purge can reuse (purge.py
+    # TRUNCATEs with RESTART IDENTITY) -- app/planner/jobs.py derives
+    # the MCP clientRequestId from this instead, so a write made after a
+    # purge never collides with the planner's own idempotency index on
+    # a pre-purge row's id.
+    request_key: Mapped[str] = mapped_column(
+        String, nullable=False, default=lambda: uuid.uuid4().hex
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('create_task', 'create_event', 'complete_task')",
+            name="ck_planner_action_kind",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'accepted', 'rejected', 'expired', 'written', 'failed')",
+            name="ck_planner_action_status",
+        ),
+        Index("ix_planner_action_status", "status"),
+        Index("ix_planner_action_request_key", "request_key", unique=True),
     )
 
 

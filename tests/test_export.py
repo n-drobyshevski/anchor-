@@ -205,6 +205,16 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(models.InterestTopic(text="сон", packet="ref"))
         await session.commit()
 
+    # P2. planner_credential is deliberately not seeded here -- it is
+    # not in EXPORTED_MODELS (see NOT_EXPORTED below) and this function
+    # exists to cover exported tables only.
+    async with sessionmaker() as session:
+        session.add(
+            models.PlannerSnapshot(id=1, fetched_at=now, payload={"events": [], "tasks": []})
+        )
+        session.add(models.PlannerAction(kind="create_task", payload={"title": "x"}))
+        await session.commit()
+
 
 # --- contents ---
 
@@ -392,6 +402,7 @@ NOT_EXPORTED = {
     # 6a.
     "backup_log": "ciphertext object keys and sizes, not user data (plan section 3)",
     "heartbeat_state": "operational liveness marker, not user data",
+    "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
 }
 
 
