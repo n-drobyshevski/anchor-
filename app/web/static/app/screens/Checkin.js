@@ -425,7 +425,7 @@ const CH = {
   right: 4,
   maxBar: 16,
   minBar: 3,
-  radius: 3,
+  radius: 4,
 };
 
 // A column path: square at the baseline, rounded at the data end.
@@ -732,6 +732,14 @@ function MonthSection({ range, failed, onRetry }) {
 
 // ---------- «Журнал» ----------
 
+// A journal line's time of day, in the browser's zone (like Chat's
+// message times).
+function hmLocal(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 function groupByDay(items) {
   const groups = [];
   for (const item of items) {
@@ -768,7 +776,16 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
                       <div class="journal-day" key=${g.key}>
                         <h3 class="subheading">${dayHeading(g.key, todayKey)}</h3>
                         <ul class="journal-list">
-                          ${g.items.map((it) => html`<li key=${it.id} class="journal-item">${it.text}</li>`)}
+                          ${g.items.map(
+                            (it) => html`
+                              <li key=${it.id} class="journal-item">
+                                ${it.created_at
+                                  ? html`<span class="journal-time mono">${hmLocal(it.created_at)}</span>`
+                                  : null}
+                                <span>${it.text}</span>
+                              </li>
+                            `,
+                          )}
                         </ul>
                       </div>
                     `,

@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiGet, apiPost } from '../api.js';
 import { forceLogout, pushToast } from '../store.js';
 import { useAutoRefetch } from '../hooks.js';
+import { Icon } from '../ui/Icon.js';
 import { Toasts } from '../ui/Toasts.js';
 
 // Mirrors app/core/memory.py's MEMORY_TEXT_MAX. Unlike State.js's
@@ -184,7 +185,7 @@ function MemoryCard({ item, forgetBusy, onPin, onEdit, onForgetClick }) {
           disabled=${pinBusy}
           onClick=${togglePin}
         >
-          <span aria-hidden="true">📌</span>
+          <${Icon} name="pin" size=${16} />
         </button>
       </div>
       ${editing

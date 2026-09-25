@@ -606,11 +606,13 @@ button, input, textarea {
 }
 
 #reconnect-banner {
-  background: var(--danger);
-  color: var(--surface);
+  background: color-mix(in oklab, var(--danger) 10%, var(--bg));
+  color: var(--danger);
+  border-bottom: 1px solid color-mix(in oklab, var(--danger) 20%, transparent);
   text-align: center;
-  padding: 6px 10px;
-  font-size: 0.85rem;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* ---------- Message log ---------- */
@@ -633,7 +635,7 @@ button, input, textarea {
   margin: auto 0;
   text-align: center;
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: 14px;
 }
 
 .msg-row {
@@ -653,68 +655,81 @@ button, input, textarea {
 }
 
 .bubble {
-  border-radius: 16px;
-  padding: 10px 14px;
+  padding: 10px 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 0.98rem;
+  font-size: 15px;
+  line-height: 1.5;
 }
 
 .role-user .bubble {
   background: var(--bubble-user);
   color: var(--bubble-user-text);
-  border-bottom-right-radius: 4px;
+  border-radius: 16px 16px 6px 16px;
 }
 
 .role-assistant .bubble {
   background: var(--bubble-bot);
   color: var(--bubble-bot-text);
-  border: 1px solid var(--border);
-  border-bottom-left-radius: 4px;
+  box-shadow: var(--hairline);
+  border-radius: 16px 16px 16px 6px;
 }
 
-.msg-row[data-kind="canned"] .bubble,
-.msg-row[data-kind="welfare"] .bubble,
-.msg-row[data-kind="system"] .bubble,
-.msg-row[data-kind="checkin"] .bubble {
+/* System and check-in rows (canned replies, welfare notes, system
+   notes, check-in cards): a centred muted pill, not a speech bubble. */
+.msg-row[data-kind] {
+  align-self: center;
+  align-items: center;
+  max-width: 92%;
+}
+
+.msg-row[data-kind] .bubble {
+  min-height: 24px;
+  padding: 3px 12px;
+  border-radius: 12px;
   background: var(--bubble-muted);
   color: var(--bubble-muted-text);
-  border-color: var(--border);
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
 }
 
-.msg-time {
-  margin-top: 3px;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  padding: 0 4px;
-}
-
+.msg-time,
 .msg-status {
   margin-top: 3px;
-  font-size: 0.78rem;
-  color: var(--text-muted);
   padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
 }
 
 .msg-retry {
   margin-top: 4px;
-  background: none;
-  border: 1px solid var(--danger);
+  min-height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
   color: var(--danger);
-  border-radius: 8px;
-  padding: 4px 10px;
-  font-size: 0.82rem;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   align-self: flex-end;
 }
 
+.msg-retry:hover { background: color-mix(in oklab, var(--danger) 20%, transparent); }
+
 .msg-note {
   margin-top: 4px;
-  font-size: 0.82rem;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-muted);
 }
 
-/* Inline keyboards under a bot bubble. */
+/* Inline keyboards under a bot bubble: outline buttons, rows wrap. */
 .keyboard {
   display: flex;
   flex-direction: column;
@@ -725,21 +740,25 @@ button, input, textarea {
 
 .keyboard-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
 .keyboard-button {
-  flex: 1;
-  background: var(--surface);
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 10px;
-  font-size: 0.9rem;
-  cursor: pointer;
+  border-radius: var(--radius);
+  background: var(--bg);
   color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
 }
 
-.keyboard-button:hover:not(:disabled) { border-color: var(--accent); }
+.keyboard-button:hover:not(:disabled) { background: var(--muted-fill); }
+.keyboard-button:active:not(:disabled) { transform: translateY(1px); }
 
 .keyboard-button:disabled {
   opacity: 0.55;
@@ -751,7 +770,8 @@ button, input, textarea {
 #typing-indicator {
   margin: 0 16px 4px;
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* ---------- Jump-to-latest pill ---------- */
@@ -761,13 +781,19 @@ button, input, textarea {
   left: 50%;
   bottom: 92px;
   transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius-pill);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 8px 16px;
-  font-size: 0.85rem;
+  color: var(--text);
+  box-shadow: var(--hairline), var(--shadow-soft);
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   z-index: 4;
 }
 
@@ -784,15 +810,23 @@ button, input, textarea {
   align-items: center;
   pointer-events: none;
   z-index: 6;
+  width: max-content;
+  max-width: calc(100% - 32px);
 }
 
 .toast {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 14px;
-  font-size: 0.85rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  color: var(--text);
+  border-radius: var(--radius);
+  box-shadow: var(--hairline), var(--shadow-soft-lg);
+  padding: 10px 14px;
+  font-size: 14px;
+  animation: toast-in 180ms var(--ease);
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
 }
 
 /* ---------- Composer ---------- */
@@ -801,9 +835,8 @@ button, input, textarea {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  /* The composer is always the bottom-most element now (no tab bar
-     under it at any width), so it claims the home-indicator inset
-     itself. */
+  /* The composer is always the bottom-most element (no tab bar under
+     it at any width), so it claims the home-indicator inset itself. */
   padding: 8px 12px max(16px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   background: var(--bg);
@@ -813,19 +846,16 @@ button, input, textarea {
   flex: 1;
   resize: none;
   max-height: 40vh;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 10px 14px;
-  background: var(--surface);
-  line-height: 1.35;
+  min-height: 44px;
+  line-height: 1.5;
   overflow-y: auto;
 }
 
 #send-button {
   flex: none;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
   border: none;
   background: var(--accent);
   color: var(--accent-text);
@@ -834,6 +864,8 @@ button, input, textarea {
   justify-content: center;
   cursor: pointer;
 }
+
+#send-button:hover:not(:disabled) { opacity: 0.85; }
 
 #send-button:disabled {
   opacity: 0.5;
@@ -934,24 +966,73 @@ button, input, textarea {
   margin: auto 0;
   text-align: center;
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: 14px;
 }
+
+/* ---------- Cards ----------
+   A resting card is a surface with a hairline ring, never a drop
+   shadow; shadows are only for floating things (menu, dialog, toast). */
 
 .card {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 14px 16px;
+  box-shadow: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .card h2 {
   margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.375;
 }
+
+/* A footer bar at the bottom of a card: pulled out to the card's own
+   edges (the card's 16px padding), a hairline on top, a faint fill. */
+.card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px -16px -16px;
+  padding: 8px 12px 8px 16px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted-fill) 50%, transparent);
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+}
+
+.card-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Rows inside a card, split by hairlines, flush with the card's edges. */
+.card-list {
+  list-style: none;
+  margin: 0 -16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-list > .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-list > .row:last-child { border-bottom: none; }
 
 .card-row {
   display: flex;
@@ -960,9 +1041,16 @@ button, input, textarea {
   gap: 10px;
 }
 
+.field-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
 .field-value {
   margin: 0;
-  font-size: 1rem;
+  font-size: 14px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -970,25 +1058,25 @@ button, input, textarea {
 .field-hint {
   margin: 0;
   color: var(--text-muted);
-  font-size: 0.85rem;
-}
-
-.field-edit {
-  width: 100%;
-  resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--bg);
-  font-size: 0.95rem;
-  line-height: 1.35;
+  font-size: 12px;
 }
 
 .inline-error {
   margin: 0;
   color: var(--danger);
-  font-size: 0.85rem;
+  font-size: 12px;
+  font-weight: 500;
 }
+
+/* Every time, date number, count and money amount. */
+.mono,
+time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Buttons ---------- */
 
 .btn-row {
   display: flex;
@@ -997,39 +1085,162 @@ button, input, textarea {
 }
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 14px;
-  font-size: 0.88rem;
+  border-radius: var(--radius);
   color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
+  text-decoration: none;
 }
 
-.btn:hover:not(:disabled) { border-color: var(--accent); }
-
+.btn:hover:not(:disabled) { background: var(--muted-fill); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.55; cursor: default; }
 
+/* The one main action of a view. */
 .btn-primary {
   background: var(--accent);
   color: var(--accent-text);
-  border-color: var(--accent);
+  border-color: transparent;
 }
+
+.btn-primary:hover:not(:disabled) { background: var(--accent); opacity: 0.85; }
 
 .btn-ghost {
-  background: none;
+  background: transparent;
+  border-color: transparent;
 }
 
-/* Toggle switch (role="switch", screens/State.js's FocusCard/
-   PauseCard): a plain <button>, never a checkbox input -- this repo
-   renders every interactive control as a real element with no
-   `style=` string, and the on/off paint below comes entirely from the
-   `aria-checked` attribute selector, which is also what a screen
-   reader announces. */
-.switch {
+/* Destructive: tinted, never solid -- including the forget dialog's
+   confirm button (.btn-primary.btn-danger). */
+.btn-danger,
+.btn-primary.btn-danger {
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled),
+.btn-primary.btn-danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 20%, transparent);
+  opacity: 1;
+}
+
+.btn-block { width: 100%; }
+
+.link-button {
   background: none;
   border: none;
-  padding: 2px;
+  color: var(--text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+@media (pointer: coarse) {
+  .btn { height: auto; min-height: 44px; }
+}
+
+/* ---------- Focus ----------
+   One focus treatment for everything: a soft 3px ring in --focus plus
+   the element's own border taking --focus. */
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 50%, transparent);
+}
+
+.btn:focus-visible,
+.chip:focus-visible,
+.keyboard-button:focus-visible,
+.switcher-button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: var(--focus);
+}
+
+/* Cards and bubbles carry their hairline in box-shadow, so keep it
+   alongside the ring. */
+.card:focus-visible,
+.role-assistant .bubble:focus-visible {
+  box-shadow: var(--hairline), 0 0 0 3px color-mix(in oklab, var(--focus) 50%, transparent);
+}
+
+/* ---------- Inputs ---------- */
+
+input:not([type="radio"]):not([type="checkbox"]),
+textarea,
+select {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+input:not([type="radio"]):not([type="checkbox"]):focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 50%, transparent);
+}
+
+select { background: var(--bg); }
+
+/* Placeholders at full --text-muted strength, never faint. */
+::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+/* 16px on touch, so iOS does not zoom in on focus. */
+@media (pointer: coarse) {
+  input:not([type="radio"]):not([type="checkbox"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+.field-edit {
+  width: 100%;
+  resize: vertical;
+}
+
+/* ---------- Toggle switch ----------
+   role="switch" (screens/State.js): a plain <button>, never a checkbox
+   input -- this repo renders every interactive control as a real
+   element with no `style=` string, and the on/off paint below comes
+   entirely from the `aria-checked` attribute selector, which is also
+   what a screen reader announces. The 36x20 track sits inside a 44px
+   hit area. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0;
   cursor: pointer;
   flex: none;
 }
@@ -1038,12 +1249,12 @@ button, input, textarea {
 
 .switch-track {
   display: block;
-  width: 44px;
-  height: 26px;
-  border-radius: 999px;
+  width: 36px;
+  height: 20px;
+  border-radius: var(--radius-pill);
   background: var(--border);
   position: relative;
-  transition: background-color 0.15s ease;
+  transition: background-color 150ms var(--ease);
 }
 
 .switch[aria-checked="true"] .switch-track {
@@ -1052,35 +1263,36 @@ button, input, textarea {
 
 .switch-thumb {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 20px;
-  height: 20px;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--surface);
-  transition: transform 0.15s ease;
+  box-shadow: var(--shadow-soft);
+  transition: transform 150ms var(--ease);
 }
 
 .switch[aria-checked="true"] .switch-thumb {
-  transform: translateX(18px);
+  transform: translateX(16px);
 }
 
-/* Spend progress bar (screens/State.js's SpendCard): a native
-   <progress>, not a div sized via a `style=` string -- CSS alone
-   covers this one since a native element takes `value`/`max`
-   attributes instead. */
+/* ---------- Progress (State's spend) ----------
+   A native <progress>, not a div sized via a `style=` string. */
 progress {
   width: 100%;
-  height: 10px;
-  border-radius: 999px;
+  height: 6px;
+  border-radius: var(--radius-pill);
   overflow: hidden;
   border: none;
   accent-color: var(--accent);
-  background: var(--bubble-muted);
+  background: var(--muted-fill);
+  appearance: none;
 }
 
-progress::-webkit-progress-bar { background: var(--bubble-muted); }
-progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
+progress::-webkit-progress-bar { background: var(--muted-fill); border-radius: var(--radius-pill); }
+progress::-webkit-progress-value { background: var(--accent); border-radius: var(--radius-pill); }
+progress::-moz-progress-bar { background: var(--accent); border-radius: var(--radius-pill); }
 
 .category-list {
   list-style: none;
@@ -1088,64 +1300,71 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
 }
 
 .category-list li {
   display: flex;
   justify-content: space-between;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
 }
 
-.counters-row {
+.category-list li:last-child { border-bottom: none; }
+
+.counters-row,
+.meta-line {
   margin: 0;
   color: var(--text-muted);
-  font-size: 0.82rem;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
 }
 
 #tz-select {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 0.95rem;
   width: 100%;
 }
 
-/* ---------- Proposals (screens/Proposals.js) ---------- */
+/* ---------- Chips ----------
+   Pills, 20px tall. State never rides on colour alone: every chip keeps
+   its text label, and the status chips below also differ by fill vs.
+   outline vs. line-through. */
 
-.history-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.history-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.history-row:first-child {
-  padding-top: 0;
-  border-top: none;
-}
-
-.status-chip {
-  flex: none;
-  font-size: 0.75rem;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--bubble-muted);
-  color: var(--bubble-muted-text);
+.chip,
+.status-chip,
+.kind-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  background: var(--muted-fill);
+  color: var(--muted-fill-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   white-space: nowrap;
+  flex: none;
+}
+
+.chip {
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+/* A chip that is a button keeps a 44px hit area on touch. */
+@media (pointer: coarse) {
+  .chip { height: 32px; padding: 0 12px; }
+}
+
+.chip:hover:not(:disabled) { border-color: var(--border); }
+
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
 }
 
 .status-chip[data-status="accepted"] {
@@ -1154,35 +1373,54 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 }
 
 .status-chip[data-status="rejected"] {
-  background: var(--danger);
-  color: var(--surface);
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
 }
+
+.status-chip[data-status="expired"] {
+  background: var(--muted-fill);
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.rating-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Rows (Proposals history, Check-in history) ---------- */
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.history-row:last-child { border-bottom: none; }
 
 /* ---------- Memory (screens/Memory.js) ---------- */
-
-.btn-danger {
-  color: var(--danger);
-  border-color: var(--danger);
-}
-
-/* The confirm button in the forget dialog: filled red, not the accent
-   green with red text that btn-primary + btn-danger would otherwise give. */
-.btn-primary.btn-danger {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: var(--surface);
-}
-
-.btn-danger:hover:not(:disabled) {
-  border-color: var(--danger);
-  background: var(--danger);
-  color: var(--surface);
-}
 
 .memory-counter {
   margin: 0;
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Shared by the header's pinned-cap counter and every char counter
@@ -1193,7 +1431,9 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   margin: 0;
   align-self: flex-end;
   color: var(--text-muted);
-  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .char-counter-over {
@@ -1213,39 +1453,27 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   gap: 6px;
 }
 
-.chip {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 0.82rem;
-  color: var(--text);
-  cursor: pointer;
-  align-self: flex-start;
-}
-
-.chip:hover:not(:disabled) { border-color: var(--accent); }
-
-.chip[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
-  font-weight: 600;
-}
-
 .search-field {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .search-field input {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 0.9rem;
   width: 100%;
+  padding-left: 32px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 10px;
+  bottom: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
 .memory-list {
@@ -1261,43 +1489,43 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   gap: 6px;
 }
 
-.kind-chip {
-  font-size: 0.78rem;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--bubble-muted);
-  color: var(--bubble-muted-text);
-  white-space: nowrap;
-}
+.memory-card .field-value { font-size: 14px; }
 
-/* Pin toggle: a plain <button> (aria-pressed carries the state, the
-   same reasoning as .switch above) rather than a checkbox input, kept
-   dim until pinned so the row of cards is not dominated by pins. */
+/* Pin toggle: a plain icon <button> (aria-pressed carries the state,
+   the same reasoning as .switch above), kept muted until pinned so the
+   list is not dominated by pins; pinned is filled + full-strength ink,
+   not only a colour change. */
 .pin-toggle {
-  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: none;
-  padding: 4px;
-  font-size: 1.1rem;
-  line-height: 1;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  opacity: 0.35;
   flex: none;
 }
 
-.pin-toggle:hover:not(:disabled) { opacity: 0.7; }
+.pin-toggle:hover:not(:disabled) { background: var(--muted-fill); }
 
 .pin-toggle[aria-pressed="true"] {
-  opacity: 1;
+  color: var(--text);
+  background: var(--muted-fill);
 }
 
-.pin-toggle:disabled { cursor: default; }
+.pin-toggle[aria-pressed="true"] .icon { fill: currentColor; }
+
+.pin-toggle:disabled { cursor: default; opacity: 0.6; }
+
+@media (pointer: coarse) {
+  .pin-toggle { width: 44px; height: 44px; }
+}
 
 .add-form select {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 0.95rem;
   width: 100%;
 }
 
@@ -1317,8 +1545,9 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 .confirm-dialog {
   background: var(--surface);
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  border: none;
+  border-radius: var(--radius-card);
+  box-shadow: var(--hairline), var(--shadow-soft-lg);
   padding: 20px;
   max-width: 22rem;
   width: calc(100% - 32px);
@@ -1332,15 +1561,20 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .confirm-dialog h2 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 16px;
+  font-weight: 500;
 }
 
 .confirm-dialog p {
   margin: 0;
 }
 
+.confirm-dialog .btn-row {
+  justify-content: flex-end;
+}
+
 .confirm-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.45);
+  background: rgb(28 25 23 / .4);
 }
 
 /* ---------- Check-in (screens/Checkin.js) ---------- */
@@ -1348,25 +1582,29 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 .card h3.subheading,
 .subheading {
   margin: 4px 0 0;
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-muted);
 }
 
 .card h2[tabindex="-1"]:focus {
   outline: none;
+  box-shadow: none;
 }
 
 .checkin-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 
-/* Radio groups: real <input type="radio"> inside a <fieldset>/<legend>
-   (keyboard arrows, form semantics and screen-reader grouping all come
-   from the platform); the input is visually hidden but still focusable,
-   and the adjacent .radio-face paints the segmented button. */
+/* Segmented groups: real <input type="radio"> inside a
+   <fieldset>/<legend> (keyboard arrows, form semantics and
+   screen-reader grouping all come from the platform); the input is
+   visually hidden but still focusable, and the adjacent .radio-face
+   paints the segment. One bordered container, segments split by 1px
+   dividers; the selected one gets a fill, an inset accent ring and a
+   heavier weight -- never colour alone. */
 .radio-group {
   border: none;
   margin: 0;
@@ -1383,8 +1621,9 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .radio-legend {
   padding: 0;
-  font-size: 0.92rem;
-  font-weight: 600;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .radio-hint {
@@ -1392,15 +1631,25 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   overflow-wrap: anywhere;
 }
 
-.radio-row {
+.radio-row,
+.segmented {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
 }
 
 .radio-option {
   position: relative;
-  display: inline-flex;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.radio-option + .radio-option,
+.segmented > * + * {
+  border-left: 1px solid var(--border);
 }
 
 .radio-input {
@@ -1417,39 +1666,70 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   cursor: default;
 }
 
-.radio-face {
-  display: inline-flex;
+.radio-face,
+.segmented > button {
+  flex: 1;
+  display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 44px;
-  min-height: 40px;
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
-  font-size: 0.9rem;
+  font-size: 14px;
+  text-align: center;
+  cursor: pointer;
+}
+
+@media (pointer: coarse) {
+  .radio-face,
+  .segmented > button { height: 44px; }
 }
 
 .radio-group-compact .radio-face {
-  min-width: 48px;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-.radio-option:hover .radio-input:not(:disabled) + .radio-face {
-  border-color: var(--accent);
+.radio-option:hover .radio-input:not(:disabled) + .radio-face,
+.segmented > button:hover:not(:disabled) {
+  background: var(--muted-fill);
 }
 
-.radio-input:checked + .radio-face {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
+.radio-input:checked + .radio-face,
+.segmented > button[aria-pressed="true"] {
+  background: var(--muted-fill);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
   font-weight: 600;
 }
 
-.radio-input:focus-visible + .radio-face {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+.radio-input:focus-visible + .radio-face,
+.segmented > button:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--accent), inset 0 0 0 4px color-mix(in oklab, var(--focus) 50%, transparent);
+}
+
+.segmented > button:disabled { cursor: default; opacity: 0.6; }
+
+/* Rating scale: anchor words under the 1-5 segments, then a live
+   caption («4 · Хорошо»). */
+.rating-anchors {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.rating-caption {
+  margin: 2px 0 0;
+  min-height: 1.5em;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
 }
 
 .checkin-note {
@@ -1468,15 +1748,12 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .chat-link {
   align-self: flex-start;
-  display: inline-block;
-  text-decoration: none;
 }
 
 .checkin-summary {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .summary-row {
@@ -1484,8 +1761,12 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
-  font-size: 0.92rem;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
 }
+
+.summary-row:last-child { border-bottom: none; }
 
 .summary-row dt {
   color: var(--text-muted);
@@ -1514,7 +1795,8 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 /* Chart: the SVG's width/height attributes are the measured card width
    and a fixed pixel height (plot + x-axis band), so nothing here sizes
-   it -- CSS only paints. Text wears ink tokens, never the series hue. */
+   it -- CSS only paints. One neutral series; dashed grid, solid
+   baseline; ticks in mono. */
 .chart {
   position: relative;
   width: 100%;
@@ -1537,19 +1819,15 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   outline: none;
 }
 
-.chart-svg:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
 .chart-grid {
   stroke: var(--chart-grid);
   stroke-width: 1;
+  stroke-dasharray: 3 3;
   shape-rendering: crispEdges;
 }
 
 .chart-axis {
-  stroke: var(--border);
+  stroke: var(--chart-grid);
   stroke-width: 1;
   shape-rendering: crispEdges;
 }
@@ -1564,13 +1842,14 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .chart-tick {
   fill: var(--text-muted);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
 .chart-bar {
   fill: var(--chart-bar);
-  transition: fill 0.12s ease;
+  transition: fill 120ms var(--ease);
 }
 
 .chart-bar.is-active {
@@ -1593,19 +1872,21 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   align-items: baseline;
   gap: 6px;
   padding: 5px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  font-size: 0.8rem;
+  box-shadow: var(--hairline), var(--shadow-soft-lg);
+  font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
   z-index: 2;
 }
 
 .chart-tip-value {
-  font-weight: 700;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .chart-tip-label {
@@ -1624,10 +1905,6 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   overflow-wrap: anywhere;
 }
 
-.rating-chip {
-  font-variant-numeric: tabular-nums;
-}
-
 .journal {
   display: flex;
   flex-direction: column;
@@ -1637,7 +1914,6 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 .journal-day {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .journal-list {
@@ -1646,13 +1922,24 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .journal-item {
-  padding-left: 10px;
-  border-left: 2px solid var(--border);
-  font-size: 0.92rem;
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.journal-item:last-child { border-bottom: none; }
+
+.journal-time {
+  flex: none;
+  width: 36px;
+  padding-top: 2px;
+  color: var(--text-muted);
 }

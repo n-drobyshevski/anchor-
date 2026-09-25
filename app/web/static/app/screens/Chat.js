@@ -15,6 +15,7 @@ import { useEffect, useLayoutEffect, useReducer, useRef, useState } from '../../
 import { apiGet, apiPost } from '../api.js';
 import * as sse from '../sse.js';
 import { forceLogout, pushToast, reconnectBanner, registerPauseHandler, typing } from '../store.js';
+import { Icon } from '../ui/Icon.js';
 import { Toasts } from '../ui/Toasts.js';
 
 function minutesText(retryAfterSeconds) {
@@ -50,7 +51,7 @@ function ReconnectBanner() {
 }
 
 function TypingIndicator() {
-  return html`<p id="typing-indicator" hidden=${!typing.value}>печатает…</p>`;
+  return html`<p id="typing-indicator" hidden=${!typing.value}>Anchor печатает…</p>`;
 }
 
 // Module-level (not inside Chat()) so its identity is stable across
@@ -566,7 +567,8 @@ export function Chat({ hidden = false } = {}) {
       <${TypingIndicator} />
 
       <button type="button" id="jump-down" class="jump-pill" hidden=${!jumpDownVisible} onClick=${handleJumpDown}>
-        ↓ Новые
+        <${Icon} name="arrow-down" size=${14} />
+        Новые
       </button>
 
       <${Toasts} />
@@ -584,16 +586,7 @@ export function Chat({ hidden = false } = {}) {
           onKeyDown=${onComposerKeyDown}
         ></textarea>
         <button type="submit" id="send-button" aria-label="Отправить">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
-            <path
-              d="M3 11.5 20.5 4 13 21.5l-2.2-7.3L3 11.5Z"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-            />
-          </svg>
+          <${Icon} name="arrow-up" size=${18} />
         </button>
       </form>
     </div>
