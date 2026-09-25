@@ -3,7 +3,7 @@
 # Build context is vaultd/ -- the Railway service's Root Directory is
 # /vaultd (docs/vault-setup.md). Node 22 for ob, Python 3.12 via uv for
 # vaultd, both pinned by their lockfiles.
-FROM node:22-bookworm-slim
+FROM node:25-bookworm-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /bin/
 
