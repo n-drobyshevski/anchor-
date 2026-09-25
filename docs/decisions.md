@@ -1877,3 +1877,30 @@ just before `/delete` could still open a fresh session after it. The
 handler now clears it, next to Claude's pending requests
 (`tests/test_claude_access.py`).
 
+## Button menus dispatch to the existing handlers
+
+`/menu`'s buttons call the same nested handlers `/checkin`, `/quiet`,
+`/focus` and the rest already are, with a built `CommandObject` where
+one takes arguments. Every effect, audit row and `_once` replay gate
+stays in one place; a button press is its own `update_id`, so the gates
+work unchanged. `app/tg/menu.py` only decides whether a button exists
+(`action_available`, called both when drawing and when a press
+arrives), and the router asserts its dispatch table names the same
+actions.
+
+`/export`, `/delete`, `/grok` and `/planner_link` are not in the menu,
+and a forged `mn:a:export` answers stale. The web ingress blocks those
+commands by name; a menu callback would be a way around that first
+layer, leaving only the handlers' own `is_web_sink` guard. `/grok`
+opens read access to everything and stays a typed act. Commands that
+need typed text (`/due`, `/remember`, `/tz`, ...) are left out too, and
+a bare `/due` clears the main action rather than showing it.
+
+## One reply-keyboard button, not a full reply keyboard
+
+A reply-keyboard button sends plain text, indistinguishable from typing,
+so each one needs its own handler ahead of the persona turn or it
+becomes a chat line. `/start` attaches one persistent `☰ Меню` button
+(one such handler, tested for zero model calls); everything past it is
+an inline keyboard, whose presses are callbacks. A full keyboard would
+also sit under every turn of a chat that is meant to be talked to.

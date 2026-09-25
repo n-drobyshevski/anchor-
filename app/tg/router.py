@@ -50,7 +50,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, CallbackQuery, Message, Update
+from aiogram.types import BotCommand, CallbackQuery, Message, ReplyKeyboardRemove, Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -87,6 +87,7 @@ from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
 from app.tg import memory as memory_ui
+from app.tg import menu
 from app.tg import notebook as notebook_ui
 from app.tg import obligations as obligations_ui
 from app.tg import orders as orders_ui
@@ -148,6 +149,7 @@ PRIVACY_TEXT = (
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Начать"),
+    BotCommand(command="menu", description="Меню с кнопками"),
     BotCommand(command="state", description="Текущее состояние"),
     BotCommand(command="out", description="Пауза, выйти из роли"),
     BotCommand(command="in", description="Вернуться в роль"),
@@ -252,6 +254,11 @@ WEB_ONLY_REPLY = "Эта команда доступна только в Telegra
 
 # Web-chat plan track 2's /weblogout reply (design section 4).
 WEBLOGOUT_REPLY = "Все веб-сессии закрыты."
+
+# /menu's own "Убрать кнопку меню" action (app/tg/menu.py's ACTIONS table):
+# the one action with no existing slash-command handler behind it, since
+# no command ever needed to remove the persistent reply keyboard before.
+HIDE_KB_REPLY = "Кнопка меню убрана. Вернуть — /start."
 
 
 async def register_commands(bot, *, web_ui_enabled: bool = False) -> None:
@@ -544,7 +551,42 @@ def build_router(
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
-        await message.answer(START_TEXT)
+        await message.answer(START_TEXT, reply_markup=menu.reply_keyboard())
+
+    async def _send_menu(message: Message) -> None:
+        """Shared by `/menu` and the `☰ Меню` reply-keyboard button below."""
+        web = getattr(message.bot, "is_web_sink", False)
+        await send_keyboard(message.bot, message.chat.id, *menu.render(menu.MAIN_SECTION, settings, web=web))
+
+    @router.message(Command("menu"))
+    async def menu_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await _send_menu(message)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/menu]"
+        )
+
+    @router.message(F.text == menu.MENU_BUTTON_TEXT)
+    async def menu_button(message: Message, event_update: Update) -> None:
+        """The persistent reply-keyboard button. Registered ahead of the
+        plain `@router.message(F.text)` persona-turn handler below, or
+        aiogram's first-match-wins routing would hand this text straight
+        to turn.run() like any other chat line -- exactly the bug this
+        handler exists to prevent (module docstring, point 2).
+
+        Also clears a pending check-in `awaiting` step, the same as the
+        outer command middleware does for every slash command: pressing
+        the menu button is a command, not a check-in note.
+        """
+        if not await _once(event_update.update_id):
+            return
+        async with sessionmaker() as session:
+            await checkin_core.clear_awaiting(session)
+        await _send_menu(message)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/menu]"
+        )
 
     @router.message(Command("state"))
     async def state(message: Message) -> None:
@@ -1574,6 +1616,173 @@ def build_router(
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/done]"
         )
+
+    # --- /menu: dispatching its leaf actions to the handlers above ------
+    #
+    # Built here, after every command handler above already exists, so
+    # each entry just names the nested function it calls -- aiogram's
+    # decorators return the function itself, so `checkin_command` etc.
+    # are plain, directly callable coroutines. A handful of actions need
+    # a `CommandObject` the way a real command line would produce one
+    # (read each handler above to see what it does with `command.args`);
+    # the rest already take exactly (message, event_update) and are
+    # listed as-is. Kept explicit and one-to-one on purpose -- no
+    # signature introspection, so any reader can trace an action to the
+    # exact call it makes.
+
+    async def _menu_state(message: Message, event_update: Update) -> None:
+        del event_update  # state() takes no update_id -- nothing to gate here.
+        await state(message)
+
+    async def _menu_quiet(message: Message, event_update: Update, arg: str) -> None:
+        await quiet(message, event_update, CommandObject(prefix="/", command="quiet", args=arg))
+
+    async def _menu_quiet_30m(message: Message, event_update: Update) -> None:
+        await _menu_quiet(message, event_update, "30m")
+
+    async def _menu_quiet_2h(message: Message, event_update: Update) -> None:
+        await _menu_quiet(message, event_update, "2h")
+
+    async def _menu_quiet_8h(message: Message, event_update: Update) -> None:
+        await _menu_quiet(message, event_update, "8h")
+
+    async def _menu_quiet_1d(message: Message, event_update: Update) -> None:
+        await _menu_quiet(message, event_update, "1d")
+
+    async def _menu_quiet_off(message: Message, event_update: Update) -> None:
+        await _menu_quiet(message, event_update, "off")
+
+    async def _menu_focus_on(message: Message, event_update: Update) -> None:
+        await focus(message, event_update, CommandObject(prefix="/", command="focus", args="on"))
+
+    async def _menu_focus_off(message: Message, event_update: Update) -> None:
+        await focus(message, event_update, CommandObject(prefix="/", command="focus", args="off"))
+
+    async def _menu_vault(message: Message, event_update: Update) -> None:
+        del event_update  # vault() takes no event_update -- see its own signature above.
+        await vault(message, CommandObject(prefix="/", command="vault", args=None))
+
+    async def _menu_claude(message: Message, event_update: Update) -> None:
+        await claude_command(
+            message, event_update, CommandObject(prefix="/", command="claude", args=None)
+        )
+
+    async def _menu_mind(message: Message, event_update: Update) -> None:
+        # args=None takes the same "list, don't add" branch a bare
+        # "/mind" does (mind()'s own `(command.args or "").strip()`).
+        await mind(message, event_update, CommandObject(prefix="/", command="mind", args=None))
+
+    async def _menu_paid(message: Message, event_update: Update) -> None:
+        # args=None is the list branch, matching a bare "/paid".
+        await paid_command(message, event_update, CommandObject(prefix="/", command="paid", args=None))
+
+    async def _menu_interests(message: Message, event_update: Update) -> None:
+        # args=None is the list branch, matching a bare "/interests".
+        await interests_command(
+            message, event_update, CommandObject(prefix="/", command="interests", args=None)
+        )
+
+    async def _menu_digest(message: Message, event_update: Update) -> None:
+        # args=None is /digest's own default window (idle_ui.parse_digest_args(None)).
+        await digest_command(
+            message, event_update, CommandObject(prefix="/", command="digest", args=None)
+        )
+
+    async def _menu_hide_kb(message: Message, event_update: Update) -> None:
+        del event_update  # a fixed reply, nothing to gate or store.
+        await message.answer(HIDE_KB_REPLY, reply_markup=ReplyKeyboardRemove())
+
+    MENU_ACTIONS = {
+        "checkin": checkin_command,
+        "state": _menu_state,
+        "plan": plan_command,
+        "memories": memories,
+        "mind": _menu_mind,
+        "amendments": amendments_command,
+        "notes": notes_command,
+        "interests": _menu_interests,
+        "orders": orders_command,
+        "paid": _menu_paid,
+        "review": review_command,
+        "quiet_30m": _menu_quiet_30m,
+        "quiet_2h": _menu_quiet_2h,
+        "quiet_8h": _menu_quiet_8h,
+        "quiet_1d": _menu_quiet_1d,
+        "quiet_off": _menu_quiet_off,
+        "focus_on": _menu_focus_on,
+        "focus_off": _menu_focus_off,
+        "out": out,
+        "in": resume,
+        "digest": _menu_digest,
+        "privacy": privacy,
+        "vault": _menu_vault,
+        "claude": _menu_claude,
+        "revoke": revoke_command,
+        "hide_kb": _menu_hide_kb,
+    }
+    # The table above and app/tg/menu.ACTIONS must name exactly the same
+    # actions, or a button the hub renders could dispatch nowhere (or an
+    # entry here could sit dead, dispatched by nothing render() ever
+    # draws) -- see that module's own docstring for why the excluded
+    # commands (export, delete, grok, ...) are absent from both.
+    assert set(MENU_ACTIONS) == set(menu.ACTIONS), (
+        "app/tg/router.py's MENU_ACTIONS and app/tg/menu.ACTIONS have drifted apart"
+    )
+
+    @router.callback_query(F.data.startswith("mn:"))
+    async def menu_callback(callback: CallbackQuery, event_update: Update) -> None:
+        """`mn:s:<section>` / `mn:a:<action>` / `mn:x` -- the /menu hub.
+
+        Registered ahead of the catch-all `unknown_callback` below.
+        Order against every *other* callback_query handler in this
+        router does not matter: no existing prefix is a prefix of
+        "mn:", or the reverse (app/tg/menu.py's own docstring lists
+        them), so aiogram's first-match-wins routing can never confuse
+        this with one of them.
+        """
+        if not isinstance(callback.message, Message):
+            # InaccessibleMessage (or, in principle, None): Telegram
+            # gives this back for a button under a message too old to
+            # edit. Nothing to edit, nothing to dispatch.
+            await answer_callback(callback.bot, callback.id, "Меню устарело — /menu.")
+            return
+
+        chat_id = callback.message.chat.id
+        message_id = callback.message.message_id
+        web = getattr(callback.bot, "is_web_sink", False)
+
+        parsed = menu.parse_callback(callback.data)
+        if parsed is None:
+            await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+            return
+        kind, value = parsed
+
+        if kind == "close":
+            await answer_callback(callback.bot, callback.id)
+            await edit_keyboard(callback.bot, chat_id, message_id, menu.CLOSED_TEXT, None)
+            return
+
+        if kind == "section":
+            rendered = menu.render(value, settings, web=web)
+            if rendered is None:
+                await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+                return
+            await answer_callback(callback.bot, callback.id)
+            await edit_keyboard(callback.bot, chat_id, message_id, *rendered)
+            return
+
+        # kind == "action". Re-checking action_available here (render()
+        # already only ever draws a button that passes it) is what makes
+        # a forged "mn:a:export"/"mn:a:delete"/"mn:a:grok" from a
+        # tampered web client harmless: it answers stale and dispatches
+        # nothing, exactly like a section this build has never heard of.
+        if not menu.action_available(value, settings, web=web):
+            await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+            return
+        await answer_callback(callback.bot, callback.id)
+        async with sessionmaker() as session:
+            await checkin_core.clear_awaiting(session)
+        await MENU_ACTIONS[value](callback.message, event_update)
 
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
