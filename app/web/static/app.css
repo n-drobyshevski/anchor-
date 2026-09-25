@@ -109,84 +109,108 @@
 
 :root {
   color-scheme: light dark;
-  --bg: #f7f7f5;
+  /* Planner's clean palette: warm neutrals and one warm-stone accent.
+     --accent is the only accent (primary action, focus, active,
+     selection); --danger is for errors, destructive actions and the
+     offline dot only. State is never shown by colour alone. */
+  --bg: #faf8f5;
   --surface: #ffffff;
-  --text: #1c1c1a;
-  --text-muted: #6b6b66;
-  --border: #dcdcd6;
-  --accent: #2f6f4f;
+  --text: #292524;
+  --text-muted: #57514b;
+  --border: #e7e0d7;
+  --input-border: #e7e0d7;
+  --muted-fill: #f2ede7;
+  --muted-fill-text: #44403c;
+  --accent: #57534e;
   --accent-text: #ffffff;
-  --bubble-user: #2f6f4f;
-  --bubble-user-text: #ffffff;
+  --focus: #57534e;
+  --bubble-user: #ede6dd;
+  --bubble-user-text: #292524;
   --bubble-bot: #ffffff;
-  --bubble-bot-text: #1c1c1a;
-  --bubble-muted: #eeeee8;
-  --bubble-muted-text: #57574f;
-  --danger: #a3362b;
-  --focus: #2f6f4f;
-  --dot-ok: #2f6f4f;
-  --dot-warn: #b8860b;
-  --dot-bad: #a3362b;
-  /* Check-in chart (screens/Checkin.js): one series in the accent hue,
-     a recessive grid one step off the card surface. */
-  --chart-bar: #2f6f4f;
-  --chart-bar-active: #3f8a63;
-  --chart-grid: #ebebe6;
-  --chart-empty: #cfcfc8;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-          Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --bubble-bot-text: #292524;
+  --bubble-muted: #f2ede7;
+  --bubble-muted-text: #44403c;
+  --danger: #a11414;
+  --dot-ok: #57534e;
+  --dot-warn: #a8a29e;
+  --dot-bad: #a11414;
+  --chart-bar: #57534e;
+  --chart-bar-active: #292524;
+  --chart-grid: #e7e0d7;
+  --chart-empty: #e7e0d7;
+  --hairline: inset 0 0 0 1px rgb(41 37 36 / .10);
+  --shadow-soft: 0 1px 2px rgb(28 25 23 / .06), 0 4px 12px rgb(28 25 23 / .06);
+  --shadow-soft-lg: 0 2px 6px rgb(28 25 23 / .07), 0 12px 28px rgb(28 25 23 / .08);
+  --radius: 12px;
+  --radius-card: 16.8px;
+  --radius-pill: 999px;
+  --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #17181a;
-    --surface: #202225;
-    --text: #ececea;
-    --text-muted: #9a9a96;
-    --border: #34363a;
-    --accent: #5fae85;
-    --accent-text: #0c1210;
-    --bubble-user: #3f7f5c;
-    --bubble-user-text: #f4fbf6;
-    --bubble-bot: #26282b;
-    --bubble-bot-text: #ececea;
-    --bubble-muted: #201f1a;
-    --bubble-muted-text: #b8b6a8;
-    --danger: #e0796d;
-    --focus: #5fae85;
-    --dot-ok: #5fae85;
-    --dot-warn: #d3a441;
-    --dot-bad: #e0796d;
-    --chart-bar: #5fae85;
-    --chart-bar-active: #82c6a2;
-    --chart-grid: #2d2f33;
-    --chart-empty: #45484d;
+    --bg: #1c1917;
+    --surface: #292524;
+    --text: #faf8f5;
+    --text-muted: #bcb3aa;
+    --border: #3a3531;
+    --input-border: #423c37;
+    --muted-fill: #3a3531;
+    --muted-fill-text: #faf8f5;
+    --accent: #a8a29e;
+    --accent-text: #292524;
+    --focus: #a8a29e;
+    --bubble-user: #3a3531;
+    --bubble-user-text: #faf8f5;
+    --bubble-bot: #292524;
+    --bubble-bot-text: #faf8f5;
+    --bubble-muted: #3a3531;
+    --bubble-muted-text: #faf8f5;
+    --danger: #fca5a5;
+    --dot-ok: #a8a29e;
+    --dot-warn: #78716c;
+    --dot-bad: #fca5a5;
+    --chart-bar: #a8a29e;
+    --chart-bar-active: #faf8f5;
+    --chart-grid: #3a3531;
+    --chart-empty: #3a3531;
+    --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
+    --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
+    --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #17181a;
-  --surface: #202225;
-  --text: #ececea;
-  --text-muted: #9a9a96;
-  --border: #34363a;
-  --accent: #5fae85;
-  --accent-text: #0c1210;
-  --bubble-user: #3f7f5c;
-  --bubble-user-text: #f4fbf6;
-  --bubble-bot: #26282b;
-  --bubble-bot-text: #ececea;
-  --bubble-muted: #201f1a;
-  --bubble-muted-text: #b8b6a8;
-  --danger: #e0796d;
-  --focus: #5fae85;
-  --dot-ok: #5fae85;
-  --dot-warn: #d3a441;
-  --dot-bad: #e0796d;
-  --chart-bar: #5fae85;
-  --chart-bar-active: #82c6a2;
-  --chart-grid: #2d2f33;
-  --chart-empty: #45484d;
+  --bg: #1c1917;
+  --surface: #292524;
+  --text: #faf8f5;
+  --text-muted: #bcb3aa;
+  --border: #3a3531;
+  --input-border: #423c37;
+  --muted-fill: #3a3531;
+  --muted-fill-text: #faf8f5;
+  --accent: #a8a29e;
+  --accent-text: #292524;
+  --focus: #a8a29e;
+  --bubble-user: #3a3531;
+  --bubble-user-text: #faf8f5;
+  --bubble-bot: #292524;
+  --bubble-bot-text: #faf8f5;
+  --bubble-muted: #3a3531;
+  --bubble-muted-text: #faf8f5;
+  --danger: #fca5a5;
+  --dot-ok: #a8a29e;
+  --dot-warn: #78716c;
+  --dot-bad: #fca5a5;
+  --chart-bar: #a8a29e;
+  --chart-bar-active: #faf8f5;
+  --chart-grid: #3a3531;
+  --chart-empty: #3a3531;
+  --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
+  --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
 }
 
 * { box-sizing: border-box; }
@@ -212,8 +236,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 16px;
-  line-height: 1.4;
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -510,7 +534,7 @@ button, input, textarea {
 
 #reconnect-banner {
   background: var(--danger);
-  color: #fff;
+  color: var(--surface);
   text-align: center;
   padding: 6px 10px;
   font-size: 0.85rem;
@@ -765,7 +789,7 @@ button, input, textarea {
   padding: 0 4px;
   border-radius: 999px;
   background: var(--danger);
-  color: #fff;
+  color: var(--surface);
   font-size: 0.68rem;
   font-weight: 700;
   line-height: 1;
@@ -1044,7 +1068,7 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 .status-chip[data-status="rejected"] {
   background: var(--danger);
-  color: #fff;
+  color: var(--surface);
 }
 
 /* ---------- Memory (screens/Memory.js) ---------- */
@@ -1059,13 +1083,13 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 .btn-primary.btn-danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--surface);
 }
 
 .btn-danger:hover:not(:disabled) {
   border-color: var(--danger);
   background: var(--danger);
-  color: #fff;
+  color: var(--surface);
 }
 
 .memory-counter {
