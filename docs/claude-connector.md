@@ -22,7 +22,7 @@ There are two things, and you control both:
 ## Connecting (about once a month)
 
 1. In claude.ai, go to Settings → Connectors → **Add custom connector**.
-   - Name: `Anchor`.
+   - Name: `Anchor`. The name decides how the tools appear in Claude Code (`mcp__<name>__…`), and `.claude/settings.json` denies `Anchor` (and `anc`, the name used first) by name. The guard hook still catches any other name by the tools' own names, but a known name gets both layers.
    - URL: exactly `https://<PUBLIC_URL>/mcp/claude`, with no port and no trailing slash.
    - Leave the OAuth Client ID and Secret fields empty.
 2. Press **Connect**. A page from your Anchor opens and shows:
@@ -60,7 +60,7 @@ There are two things, and you control both:
 
 ## Claude Code can reach it too
 
-**Claude Code can see your claude.ai connectors.** They show up in its cloud sessions and routines, as `mcp__Anchor__…` (or `mcp__claude_ai_Anchor__…` in the command-line tool). While a window is open, any Claude on your account could read through it, including a Claude Code session. Anchor's server cannot tell a claude.ai chat from a Claude Code session. claude.ai offers no switch to keep one connector out of Claude Code (checked in the dry run).
+**Claude Code can see your claude.ai connectors.** They show up in its cloud sessions and routines, as `mcp__<connector name>__…` (or `mcp__claude_ai_<connector name>__…` in the command-line tool). This was confirmed on the first connection: a connector named `anc` appeared in a Claude Code session as `mcp__anc__get_memory` and its three siblings. While a window is open, any Claude on your account could read through it, including a Claude Code session. Anchor's server cannot tell a claude.ai chat from a Claude Code session. claude.ai offers no switch to keep one connector out of Claude Code (checked in the dry run).
 
 What keeps this small:
 - **Windows are short and single.** 1 h or 24 h, one at a time. Most of the time the connector yields nothing.

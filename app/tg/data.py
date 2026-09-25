@@ -149,6 +149,7 @@ async def handle_delete_callback(
     data: str,
     hub: WebHub | None = None,
     claude_pending=None,
+    code_store=None,
 ) -> None:
     """`d:yes:<epoch>` / `d:no`.
 
@@ -218,6 +219,10 @@ async def handle_delete_callback(
     # (app/web/oauth_store.py); the truncate took the rest.
     if claude_pending is not None:
         claude_pending.clear()
+    # And the web UI's pending login codes: one issued just before
+    # /delete must not open a fresh web session after it.
+    if code_store is not None:
+        code_store.clear()
 
     # Never claim the backups are gone when the bucket said otherwise.
     final = DELETED_BACKUPS_FAILED_TEXT if purged.failed else DELETED_TEXT
