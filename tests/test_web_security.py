@@ -84,6 +84,7 @@ async def test_headers_present_on_index():
             assert name in resp.headers, f"missing {name}"
         assert resp.headers["Cache-Control"] == "no-store"
         assert "trusted-types 'none'" in resp.headers["Content-Security-Policy"]
+        assert "font-src 'self'" in resp.headers["Content-Security-Policy"]
 
 
 async def test_headers_present_on_api():

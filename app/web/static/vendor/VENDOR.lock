@@ -1,5 +1,49 @@
 {
   "files": {
+    "fonts/geist-mono-latin-400-normal.woff2": {
+      "package": "@fontsource/geist-mono",
+      "sha256": "3f98383b122fe015a48536cd4a1cda855a201718923ffe74931a01597107b9b5"
+    },
+    "fonts/geist-mono-latin-500-normal.woff2": {
+      "package": "@fontsource/geist-mono",
+      "sha256": "72971bd4908d3984fa1b1426bb363730e4957e16a0f58bfbca76993095715488"
+    },
+    "fonts/manrope-cyrillic-400-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "5a987d1484070f1ea54de7c10ebfa4057a18e379361dbe5fd5c4fa4c2d95ef39"
+    },
+    "fonts/manrope-cyrillic-500-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "ab67a6d3a3fc134b74e966f10de67b1ae07c1c29fd7ebb6cb0705488f1128e22"
+    },
+    "fonts/manrope-cyrillic-600-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "80b86efbef1c9fb66557cc4cc7b6db42db2fd631f1a9b8735f3bbefbb5128799"
+    },
+    "fonts/manrope-latin-400-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "849290ef12a2eeb9af5c11924120d11aa4ae8b435ed3347d7fc8bc240c293ca3"
+    },
+    "fonts/manrope-latin-500-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "19874318747181a650eda439c37955220b849d9c4797c9e0718ee67d4bf929bc"
+    },
+    "fonts/manrope-latin-600-normal.woff2": {
+      "package": "@fontsource/manrope",
+      "sha256": "f7ac6258da20ab7541939b59851155753d1d24f1b30cbcb949077a3faa3d1593"
+    },
+    "fonts/plus-jakarta-sans-latin-400-normal.woff2": {
+      "package": "@fontsource/plus-jakarta-sans",
+      "sha256": "221a4135d06a4b33abbd535e9a0da4e565d19545ddd9267c4e678a916d54d9b6"
+    },
+    "fonts/plus-jakarta-sans-latin-500-normal.woff2": {
+      "package": "@fontsource/plus-jakarta-sans",
+      "sha256": "bad081c8dbc15aed6c5e4cde5461914f7b3bdc295b7a7aed177e4beddb79bffa"
+    },
+    "fonts/plus-jakarta-sans-latin-600-normal.woff2": {
+      "package": "@fontsource/plus-jakarta-sans",
+      "sha256": "8872bb5c9111df9bd3162c2394aee6354d782b13408a4dd5bbf65c48207206e6"
+    },
     "hooks.module.js": {
       "package": "preact",
       "sha256": "9e7eff58e0ae604583461eba1344da69a6894eab575eb591c635cc0d3f9ec57d"
@@ -22,6 +66,18 @@
     }
   },
   "packages": {
+    "@fontsource/geist-mono": {
+      "integrity": "sha512-UtJ1BBBCVpMYdIcW7nEB45UAoAw5M53ZXs2t0ciPW+IokuAAIc56M8+kW5tXbRJCTpDw4XTtU7proT6NdQAHTg==",
+      "version": "5.3.0"
+    },
+    "@fontsource/manrope": {
+      "integrity": "sha512-obJ1Dv3+uCA6HlHgW8u4BGYxJR9In2HW7gjJhlflEvkrj1X1iSEwu0fToL+JYGC/FEKFfIz1sBuPduvcL2gIAA==",
+      "version": "5.3.0"
+    },
+    "@fontsource/plus-jakarta-sans": {
+      "integrity": "sha512-9WRw3G74Ve4cyPApAZSXLPY5DiLOZXDn7Q7dIBjFBpA0Pj56ljDItEdy2UUajjJxRuTg2HkMLO5C3K2nAQORWg==",
+      "version": "5.3.0"
+    },
     "@preact/signals": {
       "integrity": "sha512-rVTRTt/T0HIRgbugwS5FigbfF/kfdEFYFtiqxa+lbpqTajepqnR0firuAS2iNdHyejWB7Yc9p9QePkVNBtTAwg==",
       "version": "2.11.2"

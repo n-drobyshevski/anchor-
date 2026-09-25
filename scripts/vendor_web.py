@@ -46,6 +46,11 @@ below is the *complete* list this script promises to handle, so an
 upstream release that adds a new bare import must fail loudly here
 rather than ship a module the browser cannot load.
 
+**Fonts.** `_FONT_PACKAGES` adds the self-hosted `.woff2` files
+(`@fontsource/*`) under `vendor/fonts/`. They go through the exact same
+pinned-integrity tarball checks, and are then copied byte for byte:
+the rewriting and source-map steps below are for the JS modules only.
+
 **Source maps.** Every file also strips a trailing `//# sourceMappingURL=
 ...` comment: three of the five files carry it appended to the very
 last line of minified code (not on its own line), so the strip looks
@@ -118,7 +123,49 @@ _PINNED_INTEGRITY: dict[tuple[str, str], str] = {
     ("@preact/signals", "2.11.2"): (
         "sha512-rVTRTt/T0HIRgbugwS5FigbfF/kfdEFYFtiqxa+lbpqTajepqnR0firuAS2iNdHyejWB7Yc9p9QePkVNBtTAwg=="
     ),
+    # The three font packages below: read off registry.npmjs.org and
+    # checked against registry.npmmirror.com's metadata for the same
+    # versions (they agreed) before being committed here.
+    ("@fontsource/plus-jakarta-sans", "5.3.0"): (
+        "sha512-9WRw3G74Ve4cyPApAZSXLPY5DiLOZXDn7Q7dIBjFBpA0Pj56ljDItEdy2UUajjJxRuTg2HkMLO5C3K2nAQORWg=="
+    ),
+    ("@fontsource/manrope", "5.3.0"): (
+        "sha512-obJ1Dv3+uCA6HlHgW8u4BGYxJR9In2HW7gjJhlflEvkrj1X1iSEwu0fToL+JYGC/FEKFfIz1sBuPduvcL2gIAA=="
+    ),
+    ("@fontsource/geist-mono", "5.3.0"): (
+        "sha512-UtJ1BBBCVpMYdIcW7nEB45UAoAw5M53ZXs2t0ciPW+IokuAAIc56M8+kW5tXbRJCTpDw4XTtU7proT6NdQAHTg=="
+    ),
 }
+
+
+def _font_files(package: str, version: str, subsets: tuple[str, ...], weights: tuple[int, ...]):
+    family = package.rsplit("/", 1)[1]
+    return tuple(
+        (
+            package,
+            version,
+            f"package/files/{family}-{subset}-{weight}-normal.woff2",
+            f"fonts/{family}-{subset}-{weight}-normal.woff2",
+        )
+        for subset in subsets
+        for weight in weights
+    )
+
+
+# Self-hosted web fonts (the web redesign's R0), same shape as
+# _PACKAGES. Unlike the JS modules these are copied byte for byte into
+# app/web/static/vendor/fonts/: no decoding, no specifier rewriting,
+# no source-map strip -- all of that is JS-only. Only `.woff2`, and
+# only the subsets and weights app.css's @font-face rules name:
+# Jakarta has no Cyrillic (the browser falls back to Manrope per
+# glyph), and Geist Mono ships latin only for the same reason.
+_FONT_PACKAGES = (
+    *_font_files("@fontsource/plus-jakarta-sans", "5.3.0", ("latin",), (400, 500, 600)),
+    *_font_files("@fontsource/manrope", "5.3.0", ("latin", "cyrillic"), (400, 500, 600)),
+    *_font_files("@fontsource/geist-mono", "5.3.0", ("latin",), (400, 500)),
+)
+
+FONTS_SUBDIR = "fonts"
 
 # The complete set of bare specifiers any of the five files is allowed
 # to import -- see the module docstring's "Rewriting bare specifiers".
@@ -219,7 +266,7 @@ def _assert_registry_tarball_url(url: str, *, package: str) -> None:
         )
 
 
-def _extract_member(data: bytes, member_path: str, *, package: str) -> str:
+def _extract_member_bytes(data: bytes, member_path: str, *, package: str) -> bytes:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         try:
             member = tar.getmember(member_path)
@@ -228,7 +275,11 @@ def _extract_member(data: bytes, member_path: str, *, package: str) -> str:
         extracted = tar.extractfile(member)
         if extracted is None:
             raise VendorError(f"{package}: {member_path!r} is not a regular file")
-        return extracted.read().decode("utf-8")
+        return extracted.read()
+
+
+def _extract_member(data: bytes, member_path: str, *, package: str) -> str:
+    return _extract_member_bytes(data, member_path, package=package).decode("utf-8")
 
 
 def _strip_source_map_comment(source: str) -> str:
@@ -268,6 +319,46 @@ def _assert_no_bare_specifiers(source: str, *, dest_name: str) -> None:
             )
 
 
+def _verified_tarball(
+    package: str,
+    version: str,
+    tarball_cache: dict[tuple[str, str], bytes],
+    lock_packages: dict[str, dict],
+) -> bytes:
+    """Fetch and verify each distinct (package, version) tarball once,
+    even though preact contributes two destination files from the one
+    tarball and each font package contributes several."""
+    cache_key = (package, version)
+    if cache_key not in tarball_cache:
+        pinned_integrity = _pinned_integrity(package, version)
+
+        metadata = _package_metadata(package, version)
+        dist = metadata["dist"]
+        _assert_registry_tarball_url(dist["tarball"], package=package)
+
+        # Two independent checks against two different trust roots,
+        # not one (medium-severity finding): the registry's *own*
+        # advertised `dist.integrity` must itself equal what this
+        # script has pinned -- a registry, mirror or intercepting
+        # proxy that serves a modified tarball would have to also
+        # forge this match, which is no longer enough on its own,
+        # because the downloaded *bytes* are then checked against
+        # the very same pin again below, never against whatever
+        # `dist.integrity` said.
+        if dist["integrity"] != pinned_integrity:
+            raise VendorError(
+                f"{package}@{version}: registry dist.integrity {dist['integrity']!r} "
+                f"does not match the pinned {pinned_integrity!r} in _PINNED_INTEGRITY "
+                "(refusing to trust a metadata response that disagrees with the pin)"
+            )
+
+        tarball_bytes = _fetch(dist["tarball"])
+        _verify_tarball(tarball_bytes, pinned_integrity, package=package)
+        tarball_cache[cache_key] = tarball_bytes
+        lock_packages[package] = {"version": version, "integrity": pinned_integrity}
+    return tarball_cache[cache_key]
+
+
 def main() -> None:
     """Fetch, verify and rewrite every package entirely into memory
     first; only once *every* one of them has succeeded does this touch
@@ -288,46 +379,27 @@ def main() -> None:
     lock_packages: dict[str, dict] = {}
     lock_files: dict[str, dict] = {}
 
-    # Fetch each distinct package's tarball once, even though preact
-    # contributes two destination files from the one tarball.
+    # Fetch each distinct package's tarball once (_verified_tarball).
     tarball_cache: dict[tuple[str, str], bytes] = {}
 
     for package, version, member_path, dest_name in _PACKAGES:
-        cache_key = (package, version)
-        if cache_key not in tarball_cache:
-            pinned_integrity = _pinned_integrity(package, version)
+        tarball = _verified_tarball(package, version, tarball_cache, lock_packages)
 
-            metadata = _package_metadata(package, version)
-            dist = metadata["dist"]
-            _assert_registry_tarball_url(dist["tarball"], package=package)
-
-            # Two independent checks against two different trust roots,
-            # not one (medium-severity finding): the registry's *own*
-            # advertised `dist.integrity` must itself equal what this
-            # script has pinned -- a registry, mirror or intercepting
-            # proxy that serves a modified tarball would have to also
-            # forge this match, which is no longer enough on its own,
-            # because the downloaded *bytes* are then checked against
-            # the very same pin again below, never against whatever
-            # `dist.integrity` said.
-            if dist["integrity"] != pinned_integrity:
-                raise VendorError(
-                    f"{package}@{version}: registry dist.integrity {dist['integrity']!r} "
-                    f"does not match the pinned {pinned_integrity!r} in _PINNED_INTEGRITY "
-                    "(refusing to trust a metadata response that disagrees with the pin)"
-                )
-
-            tarball_bytes = _fetch(dist["tarball"])
-            _verify_tarball(tarball_bytes, pinned_integrity, package=package)
-            tarball_cache[cache_key] = tarball_bytes
-            lock_packages[package] = {"version": version, "integrity": pinned_integrity}
-
-        source = _extract_member(tarball_cache[cache_key], member_path, package=package)
+        source = _extract_member(tarball, member_path, package=package)
         source = _rewrite_bare_specifiers(source, dest_name=dest_name)
         _assert_no_bare_specifiers(source, dest_name=dest_name)
         source = _strip_source_map_comment(source)
 
         dest_bytes = source.encode("utf-8")
+        staged[dest_name] = dest_bytes
+        lock_files[dest_name] = {
+            "package": package,
+            "sha256": hashlib.sha256(dest_bytes).hexdigest(),
+        }
+
+    for package, version, member_path, dest_name in _FONT_PACKAGES:
+        tarball = _verified_tarball(package, version, tarball_cache, lock_packages)
+        dest_bytes = _extract_member_bytes(tarball, member_path, package=package)
         staged[dest_name] = dest_bytes
         lock_files[dest_name] = {
             "package": package,
@@ -342,8 +414,8 @@ def main() -> None:
     # touched yet. From here on, every write is to bytes already fully
     # verified, so this pass cannot itself fail partway through in a
     # way that leaves a mismatched file behind.
-    VENDOR_DIR.mkdir(parents=True, exist_ok=True)
-    for old in VENDOR_DIR.glob("*"):
+    (VENDOR_DIR / FONTS_SUBDIR).mkdir(parents=True, exist_ok=True)
+    for old in (*VENDOR_DIR.glob("*"), *(VENDOR_DIR / FONTS_SUBDIR).glob("*")):
         if old.is_file():
             old.unlink()
     for dest_name, dest_bytes in staged.items():

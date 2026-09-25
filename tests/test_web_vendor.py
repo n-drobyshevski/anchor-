@@ -1,11 +1,12 @@
 """app/web/static/vendor/ hygiene (W1 plan step 1, scripts/vendor_web.py).
 
 - every vendored file's sha256 matches VENDOR.lock
-- the set of files in vendor/ (besides VENDOR.lock itself) equals the
-  set VENDOR.lock records
+- the set of files in vendor/ and vendor/fonts/ (besides VENDOR.lock
+  itself) equals the set VENDOR.lock records
 - no bare `from"pkg"`/`from "pkg"`/`import"pkg"`/`import "pkg"`
-  specifier remains in any vendored file
-- no `eval(` or `new Function` in any vendored file
+  specifier remains in any vendored JS module
+- no `eval(` or `new Function` in any vendored JS module
+- every vendored font is a real WOFF2 under the static size cap
 - VENDOR.lock's own integrity values match scripts/vendor_web.py's
   committed pins -- not merely internally self-consistent
 
@@ -27,7 +28,7 @@ import json
 import re
 from pathlib import Path
 
-from scripts.vendor_web import _PACKAGES, _PINNED_INTEGRITY
+from scripts.vendor_web import _FONT_PACKAGES, _PACKAGES, _PINNED_INTEGRITY
 
 VENDOR_DIR = Path(__file__).resolve().parent.parent / "app" / "web" / "static" / "vendor"
 LOCK_PATH = VENDOR_DIR / "VENDOR.lock"
@@ -42,6 +43,17 @@ _FORBIDDEN_SNIPPETS = ("eval(", "new Function")
 _IMPORT_RE = re.compile(r'\b(?:from|import)\s*\(?\s*(["\'])([^"\']+)\1')
 
 
+_FONT_NAME_RE = re.compile(r"fonts/[a-z0-9-]+\.woff2")
+
+
+def _module_names(lock: dict) -> list[str]:
+    """The locked JS modules only. The self-hosted fonts under
+    `fonts/` are binary: they get the sha256 and pin checks like every
+    other file, but the text checks (bare specifiers, eval, source
+    maps) only make sense for JS."""
+    return [name for name in lock["files"] if name.endswith(".module.js")]
+
+
 def _require_lock() -> dict:
     assert LOCK_PATH.is_file(), f"{LOCK_PATH} does not exist -- run scripts/vendor_web.py"
     return json.loads(LOCK_PATH.read_text(encoding="utf-8"))
@@ -52,7 +64,10 @@ def test_vendor_lock_is_valid_json_with_the_expected_shape():
     assert set(lock.keys()) == {"packages", "files"}
     assert lock["files"], "VENDOR.lock lists no files"
     for name, entry in lock["files"].items():
-        assert isinstance(name, str) and name.endswith(".module.js")
+        assert isinstance(name, str)
+        assert name.endswith(".module.js") or _FONT_NAME_RE.fullmatch(name), name
+        if name.endswith(".module.js"):
+            assert "/" not in name, name
         assert set(entry.keys()) == {"package", "sha256"}
         assert entry["package"] in lock["packages"]
     for name, entry in lock["packages"].items():
@@ -71,7 +86,11 @@ def test_every_locked_file_matches_its_recorded_sha256():
 
 def test_vendor_directory_contains_exactly_the_locked_files():
     lock = _require_lock()
-    on_disk = {p.name for p in VENDOR_DIR.iterdir() if p.is_file() and p.name != "VENDOR.lock"}
+    on_disk = {
+        p.relative_to(VENDOR_DIR).as_posix()
+        for p in VENDOR_DIR.rglob("*")
+        if p.is_file() and p != LOCK_PATH
+    }
     assert on_disk == set(lock["files"])
 
 
@@ -89,7 +108,7 @@ def test_no_bare_specifiers_remain_in_any_vendored_file():
     combinations plus a dynamic `import("pkg")`.
     """
     lock = _require_lock()
-    for name in lock["files"]:
+    for name in _module_names(lock):
         source = (VENDOR_DIR / name).read_text(encoding="utf-8")
         for match in _IMPORT_RE.finditer(source):
             specifier = match.group(2)
@@ -107,7 +126,9 @@ def test_vendor_lock_integrity_matches_the_pins_committed_in_vendor_web_py():
     fetch, i.e. `_PINNED_INTEGRITY`."""
     lock = _require_lock()
     for package, entry in lock["packages"].items():
-        pinned_versions = {version for pkg, version, *_ in _PACKAGES if pkg == package}
+        pinned_versions = {
+            version for pkg, version, *_ in (*_PACKAGES, *_FONT_PACKAGES) if pkg == package
+        }
         assert entry["version"] in pinned_versions, f"{package}: version not in _PACKAGES"
         pin = _PINNED_INTEGRITY[(package, entry["version"])]
         assert entry["integrity"] == pin, (
@@ -118,7 +139,7 @@ def test_vendor_lock_integrity_matches_the_pins_committed_in_vendor_web_py():
 
 def test_no_forbidden_dynamic_eval_in_any_vendored_file():
     lock = _require_lock()
-    for name in lock["files"]:
+    for name in _module_names(lock):
         source = (VENDOR_DIR / name).read_text(encoding="utf-8")
         violations = [snippet for snippet in _FORBIDDEN_SNIPPETS if snippet in source]
         assert not violations, f"{name} contains forbidden snippet(s): {violations}"
@@ -126,6 +147,21 @@ def test_no_forbidden_dynamic_eval_in_any_vendored_file():
 
 def test_no_source_map_comment_remains_in_any_vendored_file():
     lock = _require_lock()
-    for name in lock["files"]:
+    for name in _module_names(lock):
         source = (VENDOR_DIR / name).read_text(encoding="utf-8")
         assert "sourceMappingURL" not in source, f"{name} still carries a source map comment"
+
+
+def test_every_locked_font_is_a_real_woff2_under_the_static_size_cap():
+    """The fonts skip the text checks above, so check what they are
+    instead: a WOFF2 signature, and small enough for routes.py's static
+    manifest to serve (it silently drops anything larger)."""
+    from app.web.routes import MAX_STATIC_FILE_BYTES
+
+    lock = _require_lock()
+    fonts = [name for name in lock["files"] if not name.endswith(".module.js")]
+    assert fonts, "VENDOR.lock lists no fonts"
+    for name in fonts:
+        data = (VENDOR_DIR / name).read_bytes()
+        assert data[:4] == b"wOF2", f"{name} is not a WOFF2 file"
+        assert len(data) <= MAX_STATIC_FILE_BYTES, f"{name} is over MAX_STATIC_FILE_BYTES"

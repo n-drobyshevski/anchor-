@@ -57,7 +57,7 @@ from app.config import Settings
 # opt-in, not a relaxation of a permissive baseline.
 CONTENT_SECURITY_POLICY = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
-    "connect-src 'self'; img-src 'self'; manifest-src 'self'; "
+    "connect-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
     "require-trusted-types-for 'script'; trusted-types 'none'"
 )
