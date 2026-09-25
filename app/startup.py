@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.core.prompt import PERSONA_PATH, load_persona
+from app.core.prompt import PERSONA_PATH, load_persona, persona_path_for
 from app.core.state import STATE_ID
 from app.db.models import PersonaVersion, UserState
 
@@ -64,8 +64,12 @@ async def sync_persona_version(
 
 
 async def run_startup_tasks(
-    session: AsyncSession, settings: Settings, persona_path: Path = DEFAULT_PERSONA_PATH
+    session: AsyncSession, settings: Settings, persona_path: Path | None = None
 ) -> None:
-    """Run both startup tasks in the order plan section 5 specifies."""
+    """Run both startup tasks in the order plan section 5 specifies.
+
+    `persona_path` defaults to the file `settings.PERSONA_FILE` names, so
+    the hash recorded here is the hash of the persona actually served.
+    """
     await upsert_user_state(session, settings.ALLOWED_CHAT_ID, settings.TZ_DEFAULT)
-    await sync_persona_version(session, persona_path)
+    await sync_persona_version(session, persona_path or persona_path_for(settings))

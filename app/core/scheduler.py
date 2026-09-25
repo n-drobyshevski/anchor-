@@ -92,6 +92,7 @@ from app.core.outbound_gate import (
     gate,
 )
 from app.core.notebook import NOTEBOOK_EXPIRY
+from app.core.obligations import OBLIGATION_SWEEP
 from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
 from app.core.review import REVIEW_EXPIRY
@@ -470,6 +471,30 @@ async def maybe_enqueue_orders_expiry(session: AsyncSession, clock: Clock, timez
     )
     if enqueued:
         logger.info("orders expiry queued", extra={"event": ORDERS_EXPIRY})
+    return enqueued
+
+
+def obligation_sweep_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `orders_expiry_dedup_key`."""
+    return f"obligation_sweep:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_obligation_sweep(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's missed-check-in debt sweep, at most once per local day.
+
+    Phase 5 (spec 2026-09-25). Same shape and same "not called from
+    `heartbeat()`" split as `maybe_enqueue_orders_expiry` above. The
+    first heartbeat after local midnight queues it, so yesterday's
+    evening is already over when it looks.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, OBLIGATION_SWEEP, {}, dedup_key=obligation_sweep_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("obligation sweep queued", extra={"event": OBLIGATION_SWEEP})
     return enqueued
 
 

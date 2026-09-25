@@ -22,6 +22,7 @@ from sqlalchemy import func, select, update as sql_update
 from app.config import Settings
 from app.core import purge
 from app.db.models import (
+    Obligation,
     AccessGrant,
     BackupLog,
     Base,
@@ -314,6 +315,8 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 expires_at=now + datetime.timedelta(hours=1),
             )
         )
+        # Phase 5: an open debt.
+        session.add(Obligation(text="прислать отчёт", kind="promised", source="user"))
         await session.commit()
 
 

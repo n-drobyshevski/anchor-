@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock as clock_module
-from app.core import orders
+from app.core import obligations, orders
 from app.core import pause
 from app.core.clock import Clock
 from app.core.state import STATE_ID, get_state, update_state
@@ -175,6 +175,10 @@ async def finish(
     if streak != previous:
         await update_state(session, "streak", streak, "command")
     await update_state(session, "last_checkin_at", clock.now_utc(), "command")
+    # Phase 5: a finished check-in pays any open check-in debt. Both
+    # finishing paths (the nag button's flow and the note step in
+    # app/core/turn.py) come through here.
+    await obligations.close_kind(session, clock, "checkin")
     await clear_awaiting(session)
 
     logger.info("checkin finished", extra={"checkin_id": row.id, "count": streak})

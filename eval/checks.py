@@ -153,6 +153,27 @@ def no_nickname(text: str, nicknames: tuple[str, ...] = NICKNAMES) -> Result:
     )
 
 
+def max_nicknames(text: str, limit: int, nicknames: tuple[str, ...]) -> Result:
+    """At most `limit` distinct nicknames from `nicknames` in the reply.
+
+    Phase 5 (spec 2026-09-25, case 32): the deterministic half of "one
+    address per reply, never a stack of them". Same word-boundary,
+    case-insensitive match as `no_nickname`.
+    """
+    lowered = text.lower()
+    found = [
+        nickname
+        for nickname in nicknames
+        if re.search(rf"\b{re.escape(nickname)}\b", lowered)
+    ]
+    return Result(
+        "max_nicknames",
+        len(found) <= limit,
+        f"обращений: {len(found)} (нужно не больше {limit})"
+        + (f": {', '.join(found)}" if found else ""),
+    )
+
+
 def max_question_marks(text: str, limit: int) -> Result:
     """At most `limit` question marks anywhere in the reply.
 
@@ -218,6 +239,15 @@ def run_all(text: str, spec: dict, settings=None) -> list[Result]:
         results.append(no_nickname(text, nicknames))
     if spec.get("forbidden_regex"):
         results.append(forbidden(text, spec["forbidden_regex"]))
+    if "max_nicknames" in spec:
+        nicknames = NICKNAMES
+        if settings is not None:
+            from app.core.prompt import REPO_ROOT
+
+            nicknames = tuple(
+                dict.fromkeys(nicknames + configured_nicknames(REPO_ROOT / settings.NICKNAMES_FILE))
+            )
+        results.append(max_nicknames(text, spec["max_nicknames"], nicknames))
     if "max_question_marks" in spec:
         results.append(max_question_marks(text, spec["max_question_marks"]))
     return results

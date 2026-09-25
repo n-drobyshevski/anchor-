@@ -76,6 +76,15 @@ from app.llm.provider import LLMMessage
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PERSONA_PATH = REPO_ROOT / "persona" / "persona.md"
 
+
+def persona_path_for(settings) -> Path:
+    """The persona file `settings.PERSONA_FILE` names, relative to the repo root.
+
+    The default setting resolves to PERSONA_PATH itself. An absolute
+    PERSONA_FILE is used as is (Path's `/` keeps the right side).
+    """
+    return REPO_ROOT / settings.PERSONA_FILE
+
 # Plan section 7, verbatim. Deliberately minimal -- no persona, no
 # "## Сейчас" block -- unlike build_messages()'s byte-stable prefix,
 # there is nothing here that needs to be cache-friendly, since neutral
@@ -114,6 +123,9 @@ RETRIEVED_HEADER = "## Может быть важно"
 # but part of the "## Сейчас" block's fixed shape from here on so 5e
 # only has to start passing `callback=`, not reorder anything.
 CALLBACK_HEADER = "## Можно вспомнить (только если к месту)"
+# Phase 5 (spec 2026-09-25): the oldest open debts, right after the flat
+# "## Сейчас" lines. persona.md's "## Долг" rule refers to this header.
+DEBT_HEADER = "## Долг"
 
 # 5b's labels for the three notebook kinds, in the fixed order plan
 # section 6 renders them. Kept here (not in a later milestone's module)
@@ -226,6 +238,7 @@ def build_now_block(
     orders_yesterday: str | None = None,
     callback: str | None = None,
     planner: list[str] | None = None,
+    debts: list[str] | None = None,
 ) -> str:
     """The "## Сейчас" system message (plan section 7), rebuilt every turn.
 
@@ -289,6 +302,10 @@ def build_now_block(
         lines.append(f"Договорённости вчера: {orders_yesterday}")
     if nickname_directive:
         lines.append(nickname_directive)
+    # Phase 5: after every flat line (a header in between would put
+    # "Последний чек-ин" under "## Долг"), before the planner. None or
+    # [] renders nothing, so older callers are byte-identical.
+    lines.extend(_bullets(DEBT_HEADER, debts or []))
     lines.extend(_bullets(PLAN_HEADER, planner or []))
     lines.extend(_bullets(RETRIEVED_HEADER, retrieved or []))
     # After the retrieved memories and before the flags: a technique is
@@ -403,6 +420,7 @@ async def build_messages(
     nickname_directive: str | None = None,
     orders_yesterday: str | None = None,
     callback: str | None = None,
+    debts: list[str] | None = None,
 ) -> list[LLMMessage]:
     """Assemble the full message list for one turn, plan section 10's order.
 
@@ -480,6 +498,7 @@ async def build_messages(
                 orders_yesterday=orders_yesterday,
                 callback=callback,
                 planner=planner,
+                debts=debts,
             ),
         )
     )

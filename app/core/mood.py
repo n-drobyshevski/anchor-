@@ -1,6 +1,6 @@
 """Mood: a pure, code-computed tone color, never a punishment (phase-5 plan section 4).
 
-`mood()` is a five-rule pure function -- no session, no clock read of
+`mood()` is a small rule-ordered pure function -- no session, no clock read of
 its own, nothing but arithmetic over values the caller hands it. It is
 never stored: app/core/persona_context.py recomputes it every persona
 turn, and app/tg/router.py's `/state` recomputes it again the same way,
@@ -14,15 +14,20 @@ any outbound gate; §12 states that as an invariant and
 tests/test_autonomy_isolation.py enforces it by AST, the same way
 tests/test_research_isolation.py already does for app/research/.
 
-**There is no punitive mood.** `MOODS` names exactly the plan's four
-values, and none of them is "angry", "disappointed" or "strict" -- the
+**There is no punitive mood.** None of the values in `MOODS` is "angry", "disappointed" or "strict" -- the
 closest this gets is настороже ("собранно, без упрёков"), which its own
 gloss tells the model not to use as license to scold. Rule 1 exists
 specifically to *force* a calm mood down over anything sharper: a
 welfare trigger or intensity <= 2 always wins, regardless of what the
 check-in history would otherwise say.
 
-**Rule order is precedence, not a menu.** The five rules are checked in
+Phase 5 (spec 2026-09-25) adds three rules right after rule 1, in this
+order: занята (attention is short), собирает (an overdue debt),
+холоднее (outbound messages left unanswered). Rule 1 still wins over
+all three, so a welfare trigger, a low intensity or «жёлтый» this turn
+never meets a collecting tone.
+
+**Rule order is precedence, not a menu.** The rules are checked in
 order and the first match wins -- a user who just tripped the welfare
 check but also has a 3-day streak of done actions still gets ровный,
 never доволен, because rule 1 is checked first. `mood()` is exhaustive:
@@ -49,16 +54,28 @@ import dataclasses
 import datetime
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.db.models import Checkin, Message, UserState
+from app.db.models import Checkin, Message, Obligation, UserState
 
-Mood = Literal["доволен", "ровный", "настороже", "ждёт"]
+Mood = Literal["доволен", "ровный", "настороже", "ждёт", "собирает", "холоднее", "занята"]
 
-MOODS: tuple[Mood, ...] = ("доволен", "ровный", "настороже", "ждёт")
+# The first four are 5a's. The last three are phase 5's (spec
+# 2026-09-25): собирает (an overdue debt), холоднее (outbound messages
+# left unanswered), занята (attention is 'short', app/core/attention.py).
+# None of them is punitive either; their glosses say so to the model.
+MOODS: tuple[Mood, ...] = (
+    "доволен",
+    "ровный",
+    "настороже",
+    "ждёт",
+    "собирает",
+    "холоднее",
+    "занята",
+)
 
 # Plan section 4, verbatim. Tone color only -- see the module docstring.
 GLOSS: dict[Mood, str] = {
@@ -66,6 +83,9 @@ GLOSS: dict[Mood, str] = {
     "ровный": "спокойно",
     "настороже": "собранно, без упрёков",
     "ждёт": "спокойно, без давления",
+    "собирает": "по делу: верни к долгу, без упрёков",
+    "холоднее": "суше и короче, без обиды",
+    "занята": "коротко, новых тем не открывать",
 }
 
 # Rule thresholds, named rather than inlined so the precedence reads as
@@ -102,10 +122,20 @@ class MoodFacts:
     due_results: tuple[str, ...] = ()
     missed_evening_yesterday: bool = False
     last_user_msg_before_now: datetime.datetime | None = None
+    # Phase 5 (spec 2026-09-25). All default to "nothing to say", so a
+    # caller that predates them gets exactly the 5a rules.
+    overdue_debt: bool = False
+    # Outbound messages Anchor sent since the user last wrote. Counted
+    # from `message`, not read off `user_state.ignored_in_row`: that
+    # counter is reset by record_inbound() before a chat turn runs, so
+    # it is always 0 by the time a chat prompt is built.
+    ignored_outbound_since_user: int = 0
+    # The user said the soft pause word this turn («жёлтый»).
+    soft_now: bool = False
 
 
 def mood(state: UserState, facts: MoodFacts, now: datetime.datetime) -> Mood:
-    """The five rules, in order. Pure: no I/O, no clock of its own.
+    """The rules, in order. Pure: no I/O, no clock of its own.
 
     `state` needs only `.welfare_at`, `.intensity` and `.streak` --
     tests may pass anything with those three attributes, not
@@ -120,8 +150,27 @@ def mood(state: UserState, facts: MoodFacts, now: datetime.datetime) -> Mood:
         state.welfare_at is not None
         and now - state.welfare_at < datetime.timedelta(hours=_WELFARE_FORCE_HOURS)
     )
-    if welfare_recent or state.intensity <= _CALM_INTENSITY_CEILING:
+    if welfare_recent or state.intensity <= _CALM_INTENSITY_CEILING or facts.soft_now:
         return "ровный"
+
+    # Phase 5: busy beats everything below it. Read with getattr so a
+    # light test double without the attention columns stays valid.
+    attention_until = getattr(state, "attention_until", None)
+    if (
+        getattr(state, "attention", "present") == "short"
+        and attention_until is not None
+        and attention_until > now
+    ):
+        return "занята"
+
+    # Phase 5: an overdue debt. "Collecting" is about the debt, never
+    # about the user -- its gloss forbids reproach.
+    if facts.overdue_debt:
+        return "собирает"
+
+    # Phase 5: Anchor wrote first and got no answer.
+    if facts.ignored_outbound_since_user >= 1:
+        return "холоднее"
 
     # Rule 2: a real streak, capped off by yesterday's due action
     # actually being done.
@@ -160,6 +209,7 @@ async def load_mood_facts(
     clock: Clock,
     *,
     exclude_update_id: int | None = None,
+    soft_now: bool = False,
 ) -> MoodFacts:
     """Read-only. Never writes `checkin`, `message`, or anything else.
 
@@ -206,8 +256,30 @@ async def load_mood_facts(
     last_msg_row = await session.execute(last_msg_stmt)
     last_user_msg_before_now = last_msg_row.scalar_one_or_none()
 
+    # Phase 5: an open debt whose due date has passed. Read through the
+    # model only; app/core/obligations.py (a writer) stays out of reach.
+    overdue_row = await session.execute(
+        select(Obligation.id)
+        .where(Obligation.status == "open")
+        .where(Obligation.due_local_date < today_local)
+        .limit(1)
+    )
+    overdue_debt = overdue_row.scalar_one_or_none() is not None
+
+    outbound_stmt = (
+        select(func.count())
+        .select_from(Message)
+        .where(Message.role == "assistant", Message.kind == "outbound")
+    )
+    if last_user_msg_before_now is not None:
+        outbound_stmt = outbound_stmt.where(Message.created_at > last_user_msg_before_now)
+    ignored = int((await session.execute(outbound_stmt)).scalar_one())
+
     return MoodFacts(
         due_results=due_results,
         missed_evening_yesterday=missed_evening_yesterday,
         last_user_msg_before_now=last_user_msg_before_now,
+        overdue_debt=overdue_debt,
+        ignored_outbound_since_user=ignored,
+        soft_now=soft_now,
     )

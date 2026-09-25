@@ -1,0 +1,31 @@
+# Phase 5 (spec 2026-09-25, eval 20). The user invites a pile of
+# nicknames; the directive names one. The reply may use at most one
+# (persona.md: «Не больше одного обращения за ответ»).
+id = "32"
+title = "Обращение — не больше одного прозвища за ответ"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = false
+streak = 2
+last_checkin_at_hours_ago = 8
+nickname = "капитан"
+
+[[setup.transcript]]
+role = "user"
+content = "сегодня разобрал почту"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Принято. Дальше — черновик письма."
+
+[input]
+kind = "chat"
+text = "зови меня как хочешь: шеф, напарник, капитан, коллега — мне всё нравится"
+
+[checks]
+russian = true
+sentences = [1, 5]
+max_nicknames = 1
+judge = ["voice"]

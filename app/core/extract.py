@@ -71,7 +71,18 @@ MODEL_KINDS = (*WRITABLE_KINDS, "rule")
 # to app/core/orders.propose(), because the negotiation needs that
 # module's own statuses and counter_of, not this one's pending/accepted/
 # rejected/expired shape.
-PROPOSAL_FIELDS = (proposal.DUE_ACTION, proposal.FOCUS_ON, proposal.STANDING_ORDER)
+#
+# Phase 5 (spec 2026-09-25): `obligation`, a one-shot debt the user
+# promised. It goes through proposal.create() like due_action, so it
+# lands as a pending Proposal and only the [Принять] button opens it
+# (proposal.accept -> app/core/obligations.py). This module never
+# touches app/core/obligations.py; tests/test_extract.py checks that.
+PROPOSAL_FIELDS = (
+    proposal.DUE_ACTION,
+    proposal.FOCUS_ON,
+    proposal.STANDING_ORDER,
+    proposal.OBLIGATION,
+)
 
 # 5c: the extractor's own cadence tokens for a standing_order proposal
 # item. `null` (cadence omitted / None) is valid too -- validate() below
@@ -141,6 +152,8 @@ EXTRACT_PROMPT = (
     "или о включении/выключении фокуса. Иначе пусто.\n"
     "- standing_order — только если пользователь сам говорит о повторяющемся деле, "
     "которое хочет держать; текст его словами, без ужесточения.\n"
+    "- obligation — только если пользователь сам пообещал одно конкретное разовое дело "
+    "(«пришлю отчёт завтра»); текст его словами, без ужесточения.\n"
     "- `journal`: одно нейтральное предложение о том, что произошло, или null.\n"
     "Если ничего нового — пустые массивы и null."
 )

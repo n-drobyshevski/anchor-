@@ -40,9 +40,11 @@ import random
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core import attention as attention_module
 from app.core import callbacks as callbacks_module
 from app.core import mood as mood_module
 from app.core import notebook as notebook_module
+from app.core import obligations as obligations_module
 from app.core import orders as orders_module
 from app.core import voice as voice_module
 from app.core.clock import Clock
@@ -81,6 +83,17 @@ class PersonaContext:
     # app/core/callbacks.py's mark_delivered().
     callback: str | None = None
     callback_memory_id: int | None = None
+    # Phase 5 (spec 2026-09-25): the oldest open debts for "## Долг",
+    # whether any open debt is overdue, and the flags this context adds
+    # to the end of "## Сейчас" (short mode, "close a debt first").
+    debts: tuple[str, ...] = ()
+    debt_overdue: bool = False
+    flags: tuple[str, ...] = ()
+
+
+# Phase 5 flags. SHORT_FLAG is the spec's line verbatim.
+SHORT_FLAG = "режим: коротко. два предложения. один отложенный приказ. не начинай новую тему."
+DEBT_FLAG = "Есть просроченный долг: сначала закрой долг, новое задание не выдумывай."
 
 
 async def gather(
@@ -94,6 +107,7 @@ async def gather(
     rng: random.Random,
     user_text: str = "",
     enable_callback: bool = False,
+    soft_pause: bool = False,
 ) -> PersonaContext:
     """Compute one turn's mood, voice anchors, nickname -- and, from 5e, callback.
 
@@ -119,9 +133,13 @@ async def gather(
     never a check-in's synthetic line, never neutral mode (which never
     calls `gather()` at all), never a welfare turn (same). When it is
     False, `user_text` is never even read.
+
+    Phase 5: `soft_pause` is True when the user said «жёлтый» this
+    turn. It forces mood ровный and suppresses DEBT_FLAG, so a yellow
+    turn never meets collecting pressure; the debts stay listed.
     """
     facts = await mood_module.load_mood_facts(
-        session, state, clock, exclude_update_id=exclude_update_id
+        session, state, clock, exclude_update_id=exclude_update_id, soft_now=soft_pause
     )
     computed_mood = mood_module.mood(state, facts, clock.now_utc())
 
@@ -196,6 +214,20 @@ async def gather(
         if picked is not None:
             callback_memory_id, callback = picked
 
+    # Phase 5: the debt queue and the flags. Flags come in a fixed
+    # order (short, then debt) so the prompt tail is stable.
+    open_debts = await obligations_module.open_list(session)
+    debts, debt_overdue = obligations_module.prompt_lines(
+        open_debts,
+        clock_module.local_date(clock, state.timezone),
+        settings.DEBT_IN_PROMPT,
+    )
+    flags: list[str] = []
+    if attention_module.is_short(state, clock.now_utc()):
+        flags.append(SHORT_FLAG)
+    if debt_overdue and not soft_pause:
+        flags.append(DEBT_FLAG)
+
     return PersonaContext(
         mood=computed_mood,
         voice_lines=anchors,
@@ -207,4 +239,7 @@ async def gather(
         amendments=amendments,
         callback=callback,
         callback_memory_id=callback_memory_id,
+        debts=tuple(debts),
+        debt_overdue=debt_overdue,
+        flags=tuple(flags),
     )

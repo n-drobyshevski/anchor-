@@ -38,6 +38,7 @@ from app.db.models import (
     InterestTopic,
     Journal,
     NotebookEntry,
+    Obligation,
     Outbound,
     Memory,
     Message,
@@ -105,6 +106,9 @@ EXPORTED_MODELS = (
     # their own daily answers about them.
     StandingOrder,
     CheckinOrderResult,
+    # Phase 5 (spec 2026-09-25): the debt queue. User data: what the
+    # user owes, in their own or /due's words.
+    Obligation,
     # 5d: the weekly review and persona amendments (phase-5 plan
     # sections 3, 8 and 9). weekly_review.analysis is the validated
     # summary of the user's own week; review_proposal is what it

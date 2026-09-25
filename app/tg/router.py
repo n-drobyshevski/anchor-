@@ -61,7 +61,9 @@ from app.core import checkin as checkin_core
 from app.core import commands as commands_core
 from app.core import memory as memory_core
 from app.core import mood as mood_core
+from app.core import obligations as obligations_core
 from app.core import safety_events
+from app.core.prompt import persona_path_for
 from app.core import proposal as proposal_core
 from app.core.outbound import load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
@@ -85,6 +87,7 @@ from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
 from app.tg import memory as memory_ui
 from app.tg import notebook as notebook_ui
+from app.tg import obligations as obligations_ui
 from app.tg import orders as orders_ui
 from app.tg import planner as planner_ui
 from app.tg import proposals as proposals_ui
@@ -169,6 +172,9 @@ BOT_COMMANDS = [
     # 5c (phase-5 plan section 7).
     BotCommand(command="order", description="Новая договорённость"),
     BotCommand(command="orders", description="Список договорённостей"),
+    # Phase 5 (spec 2026-09-25): the debt queue. Not /done, which is the
+    # planner's.
+    BotCommand(command="paid", description="Долги: список и закрытие"),
     # 5d (phase-5 plan sections 8 and 9).
     BotCommand(command="review", description="Итоги недели"),
     BotCommand(command="amendments", description="Поправки к стилю"),
@@ -296,8 +302,14 @@ def _format_state(
     idle=None,
     canary=None,
     backup=None,
+    debts=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
+
+    Phase 5 (spec 2026-09-25): `debts` is `(open, overdue)`. The debt
+    line appears only when a debt is open, and the attention line only
+    while Anchor is in a short stretch, so /state is unchanged for a
+    user who has neither.
 
     Spend is broken down by ledger category so a day where the
     background jobs cost more than the conversation is visible at a
@@ -401,12 +413,25 @@ def _format_state(
         else:
             backup_line = f"Бэкап: {local_started.strftime('%Y-%m-%d %H:%M')} ок\n"
 
+    debt_line = ""
+    if debts is not None and debts[0]:
+        overdue = f" (просрочено {debts[1]})" if debts[1] else ""
+        debt_line = f"Долг: {debts[0]}{overdue} · /paid\n"
+    attention_line = ""
+    attention_until = getattr(user_state, "attention_until", None)
+    if getattr(user_state, "attention", "present") == "short" and attention_until is not None:
+        if attention_until > clock.now_utc():
+            until_local = attention_until.astimezone(tz).strftime("%H:%M")
+            attention_line = f"Внимание: коротко до {until_local}\n"
+
     return (
         "Персона: {persona}\n"
         "Интенсивность: {intensity}/5 · Фокус: {focus}\n"
         "Серия: {streak} дн. · Последний чек-ин: {last_checkin}\n"
         "Настроение: {mood}\n"
         "Главное действие: {due}\n"
+        "{debt}"
+        "{attention}"
         "{outbound}"
         "{welfare}"
         "{research}"
@@ -425,6 +450,8 @@ def _format_state(
         last_checkin=last_checkin,
         mood=mood,
         due=due,
+        debt=debt_line,
+        attention=attention_line,
         outbound="".join(
             line + "\n" for line in _format_outbound(outbound, tz, clock.now_utc())
         ),
@@ -528,6 +555,17 @@ def build_router(
                 session, user_state, clock, exclude_update_id=None
             )
             current_mood = mood_core.mood(user_state, mood_facts, clock.now_utc())
+            # Phase 5: the same debt queue the prompt's "## Долг" reads.
+            open_debts = await obligations_core.open_list(session)
+            today_local = clock_module.local_date(clock, user_state.timezone)
+            debt_counts = (
+                len(open_debts),
+                sum(
+                    1
+                    for row in open_debts
+                    if row.due_local_date is not None and row.due_local_date < today_local
+                ),
+            )
             # 6a.
             idle_spend = await today_idle_usd(session, clock, user_state.timezone)
             idle_jobs = await idle_jobs_today(session, clock, user_state.timezone)
@@ -550,6 +588,7 @@ def build_router(
                 welfare_counts=welfare_counts,
                 research_counts=research_counts,
                 mood=current_mood,
+                debts=debt_counts,
             )
         )
 
@@ -1000,6 +1039,23 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/orders]"
         )
 
+    @router.message(Command("paid"))
+    async def paid_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """Phase 5: `/paid` lists the open debts; `/paid N` closes the Nth."""
+        if not await _once(event_update.update_id):
+            return
+        arg = (command.args or "").strip()
+        if arg:
+            reply = await obligations_ui.run_paid_number(sessionmaker, clock, arg=arg)
+            await _reply_once(message, event_update.update_id, reply)
+            return
+        await obligations_ui.run_paid_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/paid]"
+        )
+
     # --- 5d: weekly review and persona amendments (plan sections 8, 9) ---
 
     @router.message(Command("review"))
@@ -1023,7 +1079,12 @@ def build_router(
     async def amendments_command(message: Message, event_update: Update) -> None:
         if not await _once(event_update.update_id):
             return
-        await amendments_ui.run_amendments_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await amendments_ui.run_amendments_list(
+            sessionmaker,
+            message.bot,
+            chat_id=message.chat.id,
+            persona_path=persona_path_for(settings),
+        )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/amendments]"
         )
@@ -1567,6 +1628,19 @@ def build_router(
             data=callback.data,
         )
 
+    @router.callback_query(F.data.startswith("ob:"))
+    async def obligation_decision(callback: CallbackQuery) -> None:
+        """Phase 5: `ob:d:<id>` / `ob:x:<id>` -- close or drop a debt."""
+        await obligations_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
     @router.callback_query(F.data.startswith("am:x:"))
     async def amendment_revoke(callback: CallbackQuery) -> None:
         """`am:x:<id>` -- `/amendments`' own [Отозвать]. Registered ahead
@@ -1580,6 +1654,7 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+            persona_path=persona_path_for(settings),
         )
 
     @router.callback_query(F.data.startswith("am:"))

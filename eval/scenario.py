@@ -36,13 +36,14 @@ from app.core import persona_context as persona_context_module
 from app.core import voice as voice_module
 from app.core.clock import Clock
 from app.core.outbound_send import build_outbound_messages, hidden_flag
-from app.core.prompt import build_messages, build_neutral_messages
+from app.core.prompt import build_messages, build_neutral_messages, persona_path_for
 from app.db.models import (
     Base,
     Checkin,
     Memory,
     Message,
     NotebookEntry,
+    Obligation,
     PersonaAmendment,
     Scene,
     StandingOrder,
@@ -109,6 +110,15 @@ async def seed(
         # produce.
         welfare_at=_ago(clock, setup.get("welfare_at_hours_ago")),
     )
+    # Phase 5 (spec 2026-09-25): `attention = {state, minutes}` seeds a
+    # short stretch that is still running, the way app/core/attention.py
+    # would have left it.
+    attention = setup.get("attention")
+    if attention:
+        state.attention = attention.get("state", "short")
+        state.attention_until = clock.now_utc() + datetime.timedelta(
+            minutes=attention.get("minutes", 30)
+        )
     session.add(state)
     await session.commit()
 
@@ -184,6 +194,28 @@ async def seed(
     # negotiation that got it there. `persona_sha="eval"` is a
     # placeholder -- these rows never outlive the throwaway database, so
     # there is no real persona.md hash for them to be compared against.
+    # Phase 5: `obligations = [{text, kind?, days_ago, due_days_ago?}, ...]`,
+    # inserted directly as open Obligation rows -- the world already
+    # owes these. `due_days_ago` > 0 makes the debt overdue.
+    today = clock_module.local_date(clock, timezone)
+    for entry in setup.get("obligations", []):
+        due_days_ago = entry.get("due_days_ago")
+        session.add(
+            Obligation(
+                text=entry["text"],
+                kind=entry.get("kind", "promised"),
+                source=entry.get("source", "user"),
+                opened_at=clock.now_utc() - datetime.timedelta(days=entry.get("days_ago", 1)),
+                due_local_date=(
+                    today - datetime.timedelta(days=due_days_ago)
+                    if due_days_ago is not None
+                    else None
+                ),
+            )
+        )
+    if setup.get("obligations"):
+        await session.commit()
+
     amendment_texts = amendments if amendments is not None else setup.get("amendments") or []
     for text in amendment_texts:
         session.add(PersonaAmendment(text=text, status="active", persona_sha="eval"))
@@ -259,6 +291,8 @@ async def build(
         flags.append(turn.CHECKIN_FLAG)
 
     persona_ctx = await _persona_context(session, case, state, settings, clock, kind=kind)
+    # Phase 5: the context's own flags first, as app/core/turn.py does.
+    flags = [*persona_ctx.flags, *flags]
 
     # 5e: only the plain-string entries of `memories` still override
     # "## Что ты знаешь (закреплено)" -- a dict entry was already
@@ -304,6 +338,8 @@ async def build(
         orders_yesterday=persona_ctx.orders_yesterday,
         amendments=list(persona_ctx.amendments),
         callback=persona_ctx.callback,
+        debts=list(persona_ctx.debts),
+        persona_path=persona_path_for(settings),
     )
 
 
@@ -352,6 +388,8 @@ async def _persona_context(
         rng=rng,
         user_text=case.input["text"],
         enable_callback=(kind == CHAT),
+        # Phase 5: a "yellow" case is a soft-pause turn, as in turn.py.
+        soft_pause="yellow" in case.input.get("flags", []),
     )
 
     nickname = setup.get("nickname")

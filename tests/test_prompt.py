@@ -465,3 +465,49 @@ def test_build_now_block_planner_precedes_retrieved_memories(clock):
         retrieved=["любит утренний кофе"],
     )
     assert block.index(PLAN_HEADER) < block.index("Может быть важно")
+
+
+# --- Phase 5 (spec 2026-09-25): "## Долг" and PERSONA_FILE -----------------
+
+
+def test_build_now_block_debts_none_is_byte_identical(clock):
+    without_param = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3)
+    assert build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, debts=None) == without_param
+    assert build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, debts=[]) == without_param
+
+
+def test_build_now_block_debts_follow_the_flat_lines_and_precede_the_planner(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        nickname_directive="Обращение в этом ответе: капитан",
+        debts=["«прислать отчёт» (с 20.09, просрочено)"],
+        planner=["09:00 созвон"],
+        flags=["ФЛАГ"],
+    )
+    lines = block.splitlines()
+    debt_at = lines.index(prompt.DEBT_HEADER)
+    assert lines[debt_at + 1] == "- «прислать отчёт» (с 20.09, просрочено)"
+    assert lines.index("Обращение в этом ответе: капитан") < debt_at
+    assert next(i for i, line in enumerate(lines) if line.startswith("Последний чек-ин")) < debt_at
+    assert debt_at < lines.index(prompt.PLAN_HEADER)
+    assert lines[-1] == "ФЛАГ"
+
+
+def test_persona_file_setting_resolves_against_the_repo_root(tmp_path):
+    from app.config import Settings
+
+    assert prompt.persona_path_for(Settings()) == prompt.PERSONA_PATH
+    private = tmp_path / "private.md"
+    private.write_text("# Private\n", encoding="utf-8")
+    # An absolute path is used as is.
+    assert prompt.persona_path_for(Settings(PERSONA_FILE=str(private))) == private
+
+
+def test_persona_carries_the_debt_and_short_mode_rules():
+    body, _ = prompt.load_persona()
+    assert "## Долг" in body
+    assert "следующий приказ закрывает один из них" in body
+    assert "режим: коротко" in body
+    assert "Никогда не называй его вслух" in body

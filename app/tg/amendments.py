@@ -13,6 +13,7 @@ module's list.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,6 +21,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.core import amendments as amendments_module
 from app.core.amendments import DisplayRow
 from app.core.clock import Clock
+from app.core.prompt import PERSONA_PATH
 from app.db.models import PersonaAmendment
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard, send_reply
 
@@ -54,9 +56,11 @@ def render_amendments_list(rows: list[DisplayRow]) -> tuple[str, InlineKeyboardM
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-async def run_amendments_list(sessionmaker, bot: Bot, *, chat_id: int) -> None:
+async def run_amendments_list(
+    sessionmaker, bot: Bot, *, chat_id: int, persona_path: Path = PERSONA_PATH
+) -> None:
     async with sessionmaker() as session:
-        rows = await amendments_module.list_for_display(session)
+        rows = await amendments_module.list_for_display(session, persona_path)
     text, markup = render_amendments_list(rows)
     await send_keyboard(bot, chat_id, text, markup)
 
@@ -70,6 +74,7 @@ async def handle_revoke_callback(
     chat_id: int,
     message_id: int,
     data: str,
+    persona_path: Path = PERSONA_PATH,
 ) -> None:
     """`am:x:<id>` -- `/amendments`' own [Отозвать], re-rendering the list."""
     await answer_callback(bot, callback_id)
@@ -89,7 +94,7 @@ async def handle_revoke_callback(
         return
 
     async with sessionmaker() as session:
-        rows = await amendments_module.list_for_display(session)
+        rows = await amendments_module.list_for_display(session, persona_path)
     text, markup = render_amendments_list(rows)
     await edit_keyboard(bot, chat_id, message_id, text, markup)
 

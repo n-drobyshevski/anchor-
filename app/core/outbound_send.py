@@ -110,6 +110,9 @@ KIND_FLAGS: dict[str, str] = {
     ),
 }
 
+# Phase 5: appended to MORNING when a debt is open (see hidden_flag).
+MORNING_DEBT_FLAG = "Старый долг: «{debt}» — назови его первым, нового задания не выдумывай."
+
 # Added to every kind.
 COMMON_FLAG = (
     "Это сообщение по твоей инициативе — не упрекай за молчание "
@@ -123,6 +126,7 @@ def hidden_flag(
     *,
     note: str | None = None,
     morning_notes: list[str] | None = None,
+    debt: str | None = None,
 ) -> str:
     """The instruction that stands in for the user's message.
 
@@ -148,6 +152,10 @@ def hidden_flag(
     list leaves `hidden_flag(MORNING)` byte-for-byte what it always was,
     which is what keeps `run_send_outbound`'s pre-6c callers and tests
     unaffected when no prebrief note exists.
+
+    Phase 5 (spec 2026-09-25): `debt` is the oldest open debt's text.
+    On a morning message it asks Anchor to name that debt first rather
+    than invent a fresh task. None leaves the flag byte-identical.
     """
     template = KIND_FLAGS[kind]
     if kind == TICK:
@@ -158,6 +166,8 @@ def hidden_flag(
         body = template
     if kind == MORNING and morning_notes:
         body = f"{body}\nЗаметки к утру: {' '.join(morning_notes)}"
+    if kind == MORNING and debt:
+        body = f"{body}\n{MORNING_DEBT_FLAG.format(debt=debt)}"
     return f"{body}\n{COMMON_FLAG}"
 
 
@@ -200,8 +210,9 @@ async def build_outbound_messages(
     run_send_outbound's own step 7, after a real send.
     """
     from app.core.memory import retrieve_techniques
+    from app.core import obligations
     from app.core import persona_context as persona_context_module
-    from app.core.prompt import build_messages
+    from app.core.prompt import build_messages, persona_path_for
     from app.core.scene import recent_summaries
     from app.core.turn import NICKNAME_RNG
     from app.planner import snapshot as planner_snapshot
@@ -215,9 +226,15 @@ async def build_outbound_messages(
     # this almost always falls through to least-recently-used, which is
     # the right behaviour: an unprompted message is exactly the place to
     # try a technique the user has not seen used in a while.
+    # Phase 5: read-only, so eval (which calls this directly) sees the
+    # same morning flag production sends.
+    debt = await obligations.oldest_open_text(session) if kind == MORNING else None
+    flag = hidden_flag(
+        kind, tick_note, note=review_note, morning_notes=morning_notes, debt=debt
+    )
     techniques = await retrieve_techniques(
         session,
-        hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
+        flag,
         settings.RESEARCH_TECHNIQUES_IN_PROMPT,
     )
 
@@ -250,7 +267,7 @@ async def build_outbound_messages(
         clock=clock,
         timezone=state.timezone,
         intensity=state.intensity,
-        user_text=hidden_flag(kind, tick_note, note=review_note, morning_notes=morning_notes),
+        user_text=flag,
         update_id=None,
         transcript_turns=settings.TRANSCRIPT_TURNS,
         techniques=[row.text for row in techniques],
@@ -268,6 +285,9 @@ async def build_outbound_messages(
         orders_yesterday=persona_ctx.orders_yesterday,
         amendments=list(persona_ctx.amendments),
         planner=planner_lines,
+        debts=list(persona_ctx.debts),
+        flags=list(persona_ctx.flags) or None,
+        persona_path=persona_path_for(settings),
     )
 
 

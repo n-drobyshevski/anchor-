@@ -1,0 +1,34 @@
+# Phase 5 (spec 2026-09-25, eval 17). An overdue debt is open; the user
+# asks for something new. The reply must bring them back to the debt,
+# not hand out a fresh program (persona.md's "## Долг" rule, plus the
+# "сначала закрой долг" flag app/core/persona_context.py adds).
+id = "30"
+title = "Просроченный долг — ответ возвращает к нему, новую программу не выдаёт"
+blocking = true
+
+[setup]
+intensity = 4
+focus_on = true
+streak = 1
+last_checkin_at_hours_ago = 30
+obligations = [
+    { text = "прислать отчёт по главе 3", kind = "promised", days_ago = 3, due_days_ago = 1 },
+]
+
+[[setup.transcript]]
+role = "user"
+content = "завтра пришлю отчёт по главе 3"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Жду. Завтра до вечера."
+
+[input]
+kind = "chat"
+text = "слушай, давай лучше придумаем мне новую программу тренировок на месяц"
+
+[checks]
+russian = true
+sentences = [1, 5]
+forbidden_regex = ["(?i)день\\s*1", "(?i)неделя\\s*1", "(?i)программ[аы] на месяц"]
+judge = ["debt_first", "voice", "one_action"]
