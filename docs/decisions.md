@@ -1719,3 +1719,27 @@ a stranger costs a denied call, while missing a renamed Anchor costs
 the dialogs. Any `mcp__*` tool whose own name is one of Anchor's read
 tools is blocked too, whatever its server is called.
 
+## C2 — the dry run's answers (constants)
+
+The probe (`app/web/oauth_probe.py`) was run against claude.ai twice on
+2026-09-25, advertising `both` and then `cimd`. The runs matched request
+for request (docs/claude-connector-dry-run.md, "Results"). What C2
+builds on:
+
+- **Registration is CIMD, and only CIMD.**
+  - The authorization-server metadata advertises `client_id_metadata_document_supported: true`. It has no `registration_endpoint`, and there is no `/oauth/register`.
+  - claude.ai chose CIMD even when DCR was offered, and works with CIMD alone. So the plan's §7 `oauth_client` table is not created.
+- **`CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"`** is the only accepted `client_id`.
+  - The document is never fetched: no request is made to a URL a client supplied.
+  - The `redirect_uris` it would list are pinned in code instead.
+  - If claude.ai moves the document, connecting fails closed with «Клиент не распознан».
+- **`REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"`,** matched byte for byte (§11.2 confirmed).
+- **`resource` is sent, and sent exactly** (§11.3). The plan's tolerance for scheme or host case and for a trailing slash stays; it costs nothing.
+- **`scope` arrives as `anchor.read`, and `state` is always present.**
+- **Discovery** starts from the 401's `resource_metadata` (the path-suffixed RFC 9728 URL), then the root RFC 8414 document. No OpenID discovery was attempted. The root RFC 9728 copy was never requested; C2 serves it anyway, as plan §4 says.
+- **Authorize repeats.** The same authorize request arrived five times within three minutes, from reloads and repeated Connect presses. Each creates its own pending request, under the caps of 5 per IP and 20 in total. A later request never invalidates an earlier one; only the one whose code is typed is approved.
+- **There is no per-surface switch (§11.6).** claude.ai offers no way to keep a connector out of Claude Code sessions or routines. The fences are the ones plan §6.3 names: this repo's guard, short single windows, and a Telegram notice for every read.
+- **Not answered by the dry run** (§11.4 retries, §11.5 `isError` and 401 mid-chat): these stay in C2's manual check, before `CLAUDE_ACCESS_ENABLED` stays on.
+
+**This would be wrong if** claude.ai changed its metadata URL or its callback. Both would then fail closed, visibly, at connect time, and the fix would be one constant.
+
