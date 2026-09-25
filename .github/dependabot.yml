@@ -13,3 +13,19 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # Phase 8: the vault service (vaultd/) has its own locks and image.
+  - package-ecosystem: "pip"
+    directory: "/vaultd"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/vaultd"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/vaultd"
+    schedule:
+      interval: "weekly"
