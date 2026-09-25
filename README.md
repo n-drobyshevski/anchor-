@@ -1,6 +1,59 @@
-# Anchor — Phase 4 complete (the gated research loop)
+# Anchor
 
-A private, single-user Telegram bot.
+A private, single-user Telegram companion.
+
+## Status
+
+Phases 1–6 are in the code on `main`. Some of it is on by default; the
+rest is switched on by env var and stays dark until then (no command,
+no model call, no outbound).
+
+| Area | Default | Switch |
+|---|---|---|
+| Chat, memory, proposals, check-in, welfare, outbound gate (phases 1–3) | on | — |
+| Personality: mood, voice/nicknames, notebook, standing orders, weekly review, amendments, callbacks, debt queue, attention (phase 5) | on | — |
+| Idle work: backfill, consolidate, reflect, prebrief, critique, canary (phase 6) | on | `IDLE_ENABLED` |
+| Nightly encrypted backup (phase 6) | on, but records `not_configured` until set up | `BACKUP_ENABLED` + `BACKUP_AGE_RECIPIENT` + `BACKUP_S3_*`; needs `pg_dump` 18 in the image |
+| Research loop: `/study`, `/read`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED` |
+| Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
+| Web UI | **off** | `WEB_UI_ENABLED` |
+| Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
+
+Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
+`google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
+(all via OpenRouter). Why things are the way they are is in
+[docs/decisions.md](docs/decisions.md); the phase plans
+(`anchor-phase*-plan.md`) are the specifications.
+
+## Commands
+
+| Command | What it does | Gate |
+|---|---|---|
+| `/start` | Start | — |
+| `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup | — |
+| `/out`, `/in` | Pause the persona / come back | — |
+| `/remember`, `/memories`, `/forget`, `/pin`, `/unpin` | Memory | — |
+| `/checkin` | The day's check-in | — |
+| `/due` | Main action (also the open focus debt) | — |
+| `/paid` | Debts: list, `/paid N` closes one | — |
+| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone | — |
+| `/mind` | Anchor's notebook | — |
+| `/order`, `/orders` | Standing orders: add, list | — |
+| `/review` | Weekly review | — |
+| `/amendments` | Adopted persona amendments | — |
+| `/digest` | What idle work did; undo | idle work itself: `IDLE_ENABLED` |
+| `/interests` | Topics for background research | the research itself: `RESEARCH_ENABLED` |
+| `/privacy` | What is stored and for how long | — |
+| `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
+| `/grok`, `/revoke` | Open read-only access for grok.com / close it | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
+| `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
+| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
+| `/weblogout` | End every web session | `WEB_UI_ENABLED` |
+
+The rest of this file is the build history, milestone by milestone,
+followed by setup, tests and deploy.
+
+## History
 
 Phase 1 proved the intake path is safe and exactly-once: a
 secret-verified webhook that accepts updates only from

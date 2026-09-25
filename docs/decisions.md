@@ -12,9 +12,9 @@ are that text, moved verbatim; H1, H3 and H5 were never written up as
 sections and are summarised at the top of the hardening group for
 completeness.
 
-`anchor-phase1-plan.md` through `anchor-phase4-plan.md` remain the
-specifications. This file records what was decided while implementing
-them.
+`anchor-phase1-plan.md` through `anchor-phase6-plan.md` (plus
+`anchor-web-panels-plan.md`) remain the specifications. This file
+records what was decided while implementing them.
 
 ---
 
