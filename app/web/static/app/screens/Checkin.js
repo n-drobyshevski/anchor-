@@ -142,7 +142,7 @@ const CONTROL_RE = /[\x00-\x08\x0b-\x1f\x7f]/;
 
 // ---------- «Сегодня» ----------
 
-function RadioGroup({ name, legend, legendHint, options, value, onChange, disabled, compact }) {
+function RadioGroup({ name, legend, legendHint, options, value, onChange, disabled, compact, children }) {
   // The hint carries what the group is about (the order's or the due
   // action's own text), so it is the group's accessible description --
   // otherwise several «Договорённость» groups would all sound the same.
@@ -165,6 +165,7 @@ function RadioGroup({ name, legend, legendHint, options, value, onChange, disabl
                 name=${name}
                 value=${String(opt.value)}
                 checked=${value === opt.value}
+                aria-label=${opt.ariaLabel}
                 onChange=${() => onChange(opt.value)}
               />
               <span class="radio-face">${opt.label}</span>
@@ -172,7 +173,36 @@ function RadioGroup({ name, legend, legendHint, options, value, onChange, disabl
           `,
         )}
       </div>
+      ${children}
     </fieldset>
+  `;
+}
+
+// Planner-style rating scale: the 1-5 segments, anchor words under the
+// ends and the middle, then a live caption («4 · Хорошо»). Each radio's
+// accessible name carries its word too, not only the digit.
+const RATING_WORDS = { 1: 'Плохо', 2: 'Так себе', 3: 'Нормально', 4: 'Хорошо', 5: 'Отлично' };
+
+function RatingScale({ value, onChange, disabled }) {
+  return html`
+    <${RadioGroup}
+      name="checkin-rating"
+      legend="Как прошёл день?"
+      options=${RATINGS.map((r) => ({ value: r, label: String(r), ariaLabel: `${r} — ${RATING_WORDS[r]}` }))}
+      value=${value}
+      onChange=${onChange}
+      disabled=${disabled}
+      compact=${true}
+    >
+      <div class="rating-anchors" aria-hidden="true">
+        <span>${RATING_WORDS[1]}</span>
+        <span>${RATING_WORDS[3]}</span>
+        <span>${RATING_WORDS[5]}</span>
+      </div>
+      <p class="rating-caption" aria-live="polite">
+        ${value ? html`<span class="mono">${value}</span> · ${RATING_WORDS[value]}` : null}
+      </p>
+    <//>
   `;
 }
 
@@ -223,16 +253,7 @@ function CheckinForm({ form, today, onSubmit, onCancel }) {
 
   return html`
     <form class="checkin-form" onSubmit=${submit} noValidate>
-      <${RadioGroup}
-        name="checkin-rating"
-        legend="Как прошёл день?"
-        legendHint="1 — плохо, 5 — отлично"
-        options=${RATINGS.map((r) => ({ value: r, label: String(r) }))}
-        value=${rating}
-        onChange=${setRating}
-        disabled=${busy}
-        compact=${true}
-      />
+      <${RatingScale} value=${rating} onChange=${setRating} disabled=${busy} />
       ${dueAction
         ? html`
             <${RadioGroup}
@@ -276,15 +297,18 @@ function CheckinForm({ form, today, onSubmit, onCancel }) {
           ${trimmed.length}/${noteMax}
         </p>
       </div>
-      <div class="btn-row">
-        <button type="submit" class="btn btn-primary" disabled=${busy} aria-busy=${busy ? 'true' : 'false'}>
-          ${busy ? 'Отправляю…' : 'Отправить'}
-        </button>
-        ${onCancel
-          ? html`<button type="button" class="btn btn-ghost" disabled=${busy} onClick=${onCancel}>Отмена</button>`
-          : null}
-      </div>
       <p class="inline-error" role="alert">${error}</p>
+      <div class="card-footer">
+        <span class="field-hint">Anchor ответит в чате</span>
+        <div class="card-footer-actions">
+          ${onCancel
+            ? html`<button type="button" class="btn btn-ghost" disabled=${busy} onClick=${onCancel}>Отмена</button>`
+            : null}
+          <button type="submit" class="btn btn-primary" disabled=${busy} aria-busy=${busy ? 'true' : 'false'}>
+            ${busy ? 'Отправляю…' : 'Отправить'}
+          </button>
+        </div>
+      </div>
     </form>
   `;
 }
@@ -295,7 +319,7 @@ function CheckinSummary({ checkin }) {
     <dl class="checkin-summary">
       <div class="summary-row">
         <dt>Оценка</dt>
-        <dd>${checkin.rating ? `${checkin.rating} из 5` : '—'}</dd>
+        <dd>${checkin.rating ? html`<span class="mono">${checkin.rating}</span> из 5` : '—'}</dd>
       </div>
       ${checkin.due_result && checkin.due_result !== 'none'
         ? html`
@@ -355,7 +379,7 @@ function TodaySection({ data, onSubmit }) {
   const restarted = data.done_today && data.today && data.today.rating == null;
   const doneToday = data.done_today && !restarted;
 
-  const streakText = `Стрик: ${data.streak} ${pluralRu(data.streak, ['день', 'дня', 'дней'])}`;
+  const streakText = html`Стрик: <span class="mono">${data.streak}</span> ${pluralRu(data.streak, ['день', 'дня', 'дней'])}`;
 
   let body;
   let statusText = '';
@@ -756,8 +780,15 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
   return html`
     <section class="card" aria-labelledby="checkin-journal-heading">
       <div class="card-row">
-        <h2 id="checkin-journal-heading">Журнал</h2>
-        ${loaded ? html`<span class="field-hint">${total} ${pluralRu(total, ['запись', 'записи', 'записей'])}</span>` : null}
+        <h2 id="checkin-journal-heading" class="heading-with-badge">
+          Журнал
+          ${loaded
+            ? html`
+                <span class="nav-badge" aria-hidden="true">${total}</span>
+                <span class="sr-only">, ${total} ${pluralRu(total, ['запись', 'записи', 'записей'])}</span>
+              `
+            : null}
+        </h2>
       </div>
       ${failed && !loaded
         ? html`
@@ -795,7 +826,10 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
             : html`<p class="field-hint">Журнал пока пуст — Anchor добавляет сюда заметки из разговоров.</p>`}
       ${hasMore
         ? html`
-            <div class="btn-row">
+            <div class="card-footer">
+              <span class="field-hint">
+                <span class="mono">${items.length}</span> из <span class="mono">${total}</span>
+              </span>
               <button type="button" class="btn" disabled=${loadingMore} onClick=${onMore}>Показать ещё</button>
             </div>
           `

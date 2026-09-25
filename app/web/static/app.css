@@ -279,72 +279,48 @@ button, input, textarea {
   align-items: center;
   justify-content: center;
   padding: 16px;
+  background: var(--bg);
 }
 
 .login-card {
   width: 100%;
   max-width: 22rem;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 28px 24px;
+  box-shadow: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 24px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
 .login-card h1 {
-  margin: 0 0 4px;
-  font-size: 1.25rem;
-  font-weight: 600;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.375;
 }
 
 .login-hint {
-  margin: 0 0 4px;
+  margin: -8px 0 4px;
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .login-card input {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px 14px;
-  font-size: 1rem;
   width: 100%;
 }
 
-.login-card button[type="submit"] {
-  background: var(--accent);
-  color: var(--accent-text);
-  border: none;
-  border-radius: 10px;
-  padding: 12px 14px;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.login-card button[type="submit"]:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.link-button {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  text-decoration: underline;
-  cursor: pointer;
-  padding: 4px 0;
+.login-card .link-button {
   align-self: flex-start;
-  font-size: 0.9rem;
 }
 
 .login-error {
   margin: 0;
   color: var(--danger);
-  font-size: 0.9rem;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* ---------- Shell + toolbar ----------
@@ -676,14 +652,22 @@ button, input, textarea {
 }
 
 /* System and check-in rows (canned replies, welfare notes, system
-   notes, check-in cards): a centred muted pill, not a speech bubble. */
-.msg-row[data-kind] {
+   notes, check-in cards): a centred muted pill, not a speech bubble.
+   Listed by kind: every history row carries a `kind` (plain dialogue
+   included), so a bare [data-kind] would match them all. */
+.msg-row[data-kind="canned"],
+.msg-row[data-kind="welfare"],
+.msg-row[data-kind="system"],
+.msg-row[data-kind="checkin"] {
   align-self: center;
   align-items: center;
   max-width: 92%;
 }
 
-.msg-row[data-kind] .bubble {
+.msg-row[data-kind="canned"] .bubble,
+.msg-row[data-kind="welfare"] .bubble,
+.msg-row[data-kind="system"] .bubble,
+.msg-row[data-kind="checkin"] .bubble {
   min-height: 24px;
   padding: 3px 12px;
   border-radius: 12px;
@@ -1034,6 +1018,60 @@ button, input, textarea {
 
 .card-list > .row:last-child { border-bottom: none; }
 
+.card-list > .row.row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+.row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.row-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.row-title {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.card h2.field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.due-value,
+.value-strong {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.375;
+}
+
+.spend-total { color: var(--text); }
+
+.heading-with-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .card-row {
   display: flex;
   align-items: center;
@@ -1314,7 +1352,6 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 
 .category-list li:last-child { border-bottom: none; }
 
-.counters-row,
 .meta-line {
   margin: 0;
   color: var(--text-muted);
@@ -1460,18 +1497,21 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   gap: 2px;
 }
 
-.search-field input {
+.search-field .search-input-wrap input {
   width: 100%;
   padding-left: 32px;
+}
+
+.search-input-wrap {
+  position: relative;
 }
 
 .search-icon {
   position: absolute;
   left: 10px;
-  bottom: 0;
-  height: 40px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
-  align-items: center;
   color: var(--text-muted);
   pointer-events: none;
 }

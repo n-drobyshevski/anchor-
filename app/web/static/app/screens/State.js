@@ -1,7 +1,8 @@
 // The state screen (#/state, nav label "Состояние"): read/write the
 // StateDTO the W2 HTTP contract defines (GET /api/state, POST
-// /api/state/{due,focus,quiet,timezone,pause}). One card per field,
-// each owning its own edit/busy/error state; the screen component
+// /api/state/{due,focus,quiet,timezone,pause}). Three cards (Действие,
+// Режим's rows, Траты) and a quiet metadata line; each field's card or
+// row owns its own edit/busy/error state; the screen component
 // itself only owns the fetched StateDTO and the plumbing every card's
 // mutation goes through.
 //
@@ -20,6 +21,7 @@ import { apiGet, apiPost } from '../api.js';
 import { forceLogout, pushToast, screenSubtitle } from '../store.js';
 import { useAutoRefetch } from '../hooks.js';
 import { Toasts } from '../ui/Toasts.js';
+import { pluralRu } from './Checkin.js';
 
 // 422 `detail` -> inline Russian text, shared by every field that can
 // return one (due, quiet, timezone all key into the same table; a
@@ -229,41 +231,31 @@ function timezoneOptions(tz) {
   return extra.length ? [...extra, ...zones] : zones;
 }
 
-function FocusCard({ focus, timezone, onToggle }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  async function toggle() {
-    setBusy(true);
-    setError('');
-    const result = await onToggle(!focus.on);
-    setBusy(false);
-    if (result !== true) setError(result);
+// «сегодня» / «вчера» / a date, for the instant `iso` as seen in `tz`.
+function dayWordInTz(iso, tz) {
+  try {
+    const key = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: tz });
+    const that = key(Date.parse(iso));
+    if (that === key(Date.now())) return 'сегодня';
+    if (that === key(Date.now() - 86400000)) return 'вчера';
+  } catch {
+    // fall through to the plain date
   }
-
-  return html`
-    <section class="card">
-      <div class="card-row">
-        <h2 id="focus-heading">Фокус</h2>
-        <button
-          type="button"
-          role="switch"
-          aria-checked=${focus.on ? 'true' : 'false'}
-          aria-labelledby="focus-heading"
-          class="switch"
-          disabled=${busy}
-          onClick=${toggle}
-        >
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-        </button>
-      </div>
-      ${focus.on && focus.since ? html`<p class="field-hint">с ${formatDateInTz(focus.since, timezone)}</p>` : null}
-      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
-    </section>
-  `;
+  return formatDateInTz(iso, tz);
 }
 
-function DueCard({ due, dueMaxLen, onSave }) {
+// «HH:MM» when `iso` is today in `tz`, otherwise «вчера, HH:MM» / a
+// date and time: a bare time for an instant days ago would read as
+// today's.
+function sinceText(iso, tz) {
+  const day = dayWordInTz(iso, tz);
+  const hm = formatHmInTz(iso, tz);
+  return day === 'сегодня' ? hm : `${day}, ${hm}`;
+}
+
+// ---------- Действие на сегодня ----------
+
+function DueCard({ due, dueMaxLen, timezone, onSave }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(due.action || '');
   const [error, setError] = useState('');
@@ -321,8 +313,8 @@ function DueCard({ due, dueMaxLen, onSave }) {
   }
 
   return html`
-    <section class="card">
-      <h2 id="due-heading">Действие на сегодня</h2>
+    <section class="card" aria-labelledby="due-heading">
+      <h2 id="due-heading" class="field-label">Действие на сегодня</h2>
       ${editing
         ? html`
             <textarea
@@ -336,47 +328,81 @@ function DueCard({ due, dueMaxLen, onSave }) {
               onInput=${(e) => setDraft(e.target.value)}
               onKeyDown=${onKeyDown}
             ></textarea>
-            <div class="btn-row">
-              <button type="button" class="btn btn-primary" disabled=${busy} onClick=${save}>Сохранить</button>
-              <button type="button" class="btn btn-ghost" disabled=${busy} onClick=${cancelEdit}>Отмена</button>
-            </div>
             ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
+            <div class="card-footer">
+              <span></span>
+              <div class="card-footer-actions">
+                <button type="button" class="btn btn-ghost" disabled=${busy} onClick=${cancelEdit}>Отмена</button>
+                <button type="button" class="btn btn-primary" disabled=${busy} onClick=${save}>Сохранить</button>
+              </div>
+            </div>
           `
         : html`
-            <p class="field-value">${due.action || 'Не задано'}</p>
-            <button
-              type="button"
-              ref=${editButtonRef}
-              class="btn btn-ghost"
-              onClick=${startEdit}
-              aria-label="Изменить действие на сегодня"
-            >
-              Изменить
-            </button>
+            <p class="field-value due-value">${due.action || 'Не задано'}</p>
+            <div class="card-footer">
+              ${due.action && due.set_at
+                ? html`<span class="field-hint">задано в <span class="mono">${formatHmInTz(due.set_at, timezone)}</span></span>`
+                : html`<span></span>`}
+              <button
+                type="button"
+                ref=${editButtonRef}
+                class="btn"
+                onClick=${startEdit}
+                aria-label="Изменить действие на сегодня"
+              >
+                Изменить
+              </button>
+            </div>
           `}
     </section>
   `;
 }
 
-function StreakCard({ streak, lastCheckinAt }) {
+// ---------- Режим: Фокус / Тишина / Пауза / Часовой пояс ----------
+
+function FocusRow({ focus, timezone, onToggle }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function toggle() {
+    setBusy(true);
+    setError('');
+    const result = await onToggle(!focus.on);
+    setBusy(false);
+    if (result !== true) setError(result);
+  }
+
   return html`
-    <section class="card">
-      <h2>Стрик</h2>
-      <p class="field-value">${streak}</p>
-      <p class="field-hint">
-        ${lastCheckinAt ? `Последний чек-ин: ${formatDate(lastCheckinAt)}` : 'Чек-инов ещё не было'}
-      </p>
-    </section>
+    <li class="row">
+      <div class="row-main">
+        <span id="focus-heading" class="row-title">Фокус</span>
+        ${focus.on && focus.since
+          ? html`<span class="field-hint">с <span class="mono">${sinceText(focus.since, timezone)}</span></span>`
+          : null}
+        ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked=${focus.on ? 'true' : 'false'}
+        aria-labelledby="focus-heading"
+        class="switch"
+        disabled=${busy}
+        onClick=${toggle}
+      >
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </button>
+    </li>
   `;
 }
 
-function QuietCard({ quietUntil, timezone, onSet }) {
+function QuietRow({ quietUntil, timezone, onSet }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // The backend never clears `quiet_until` once it passes -- only the
   // worker/gate compare it with "now" when deciding whether to send --
   // so StateDTO can (and routinely does) return an already-expired
-  // value; the card must not show that as still active.
+  // value; the row must not show that as still active.
   const active = !!quietUntil && Date.parse(quietUntil) > Date.now();
 
   async function apply(iso) {
@@ -388,16 +414,29 @@ function QuietCard({ quietUntil, timezone, onSet }) {
   }
 
   return html`
-    <section class="card">
-      <h2 id="quiet-heading">Тишина</h2>
-      <p class="field-value">${active ? `до ${formatQuietUntil(quietUntil, timezone)}` : 'выкл'}</p>
-      <div class="btn-row" role="group" aria-labelledby="quiet-heading">
-        <button type="button" class="btn" disabled=${busy} onClick=${() => apply(isoPlusHours(1))}>1 ч</button>
-        <button type="button" class="btn" disabled=${busy} onClick=${() => apply(isoPlusHours(2))}>2 ч</button>
-        <button type="button" class="btn" disabled=${busy} onClick=${() => apply(isoPlusHours(4))}>4 ч</button>
+    <li class="row row-stacked">
+      <div class="row-head">
+        <span id="quiet-heading" class="row-title">Тишина</span>
+        <span class="row-value">
+          ${active
+            ? html`<span class="field-hint">до <span class="mono">${formatQuietUntil(quietUntil, timezone)}</span></span>`
+            : html`<span class="field-hint">выкл</span>`}
+          <button
+            type="button"
+            class="btn btn-ghost"
+            disabled=${busy || !active}
+            onClick=${() => apply(null)}
+          >
+            Выключить
+          </button>
+        </span>
+      </div>
+      <div class="segmented" role="group" aria-labelledby="quiet-heading">
+        <button type="button" disabled=${busy} onClick=${() => apply(isoPlusHours(1))}>1 ч</button>
+        <button type="button" disabled=${busy} onClick=${() => apply(isoPlusHours(2))}>2 ч</button>
+        <button type="button" disabled=${busy} onClick=${() => apply(isoPlusHours(4))}>4 ч</button>
         <button
           type="button"
-          class="btn"
           disabled=${busy}
           onClick=${async () => {
             try {
@@ -409,47 +448,9 @@ function QuietCard({ quietUntil, timezone, onSet }) {
         >
           До утра
         </button>
-        <button
-          type="button"
-          class="btn btn-ghost"
-          disabled=${busy || !active}
-          onClick=${() => apply(null)}
-        >
-          Выключить
-        </button>
       </div>
       ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
-    </section>
-  `;
-}
-
-function TimezoneCard({ tz, onChange }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  // Recomputed whenever `tz` itself changes (not built once and cached
-  // in a ref for the component's whole lifetime) -- a zone set from
-  // Telegram between page loads, or one this screen's own successful
-  // change just returned, must also be present in the list it is about
-  // to be selected from.
-  const zones = useMemo(() => timezoneOptions(tz), [tz]);
-
-  async function handleChange(e) {
-    const value = e.target.value;
-    setBusy(true);
-    setError('');
-    const result = await onChange(value);
-    setBusy(false);
-    if (result !== true) setError(result);
-  }
-
-  return html`
-    <section class="card">
-      <h2><label for="tz-select">Часовой пояс</label></h2>
-      <select id="tz-select" disabled=${busy} value=${tz} onChange=${handleChange}>
-        ${zones.map((z) => html`<option key=${z} value=${z}>${z}</option>`)}
-      </select>
-      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
-    </section>
+    </li>
   `;
 }
 
@@ -463,7 +464,7 @@ function TimezoneCard({ tz, onChange }) {
 // /out or /in a second time (a duplicate canned reply in chat).
 const PENDING_CLEAR_MS = 15000;
 
-function PauseCard({ paused, onToggle }) {
+function PauseRow({ paused, onToggle }) {
   const [busy, setBusy] = useState(false);
   // The target value a just-accepted (202) toggle is waiting to see
   // reflected in `paused`; null when nothing is in flight.
@@ -506,44 +507,93 @@ function PauseCard({ paused, onToggle }) {
   const applying = pendingTarget !== null;
 
   return html`
-    <section class="card">
-      <div class="card-row">
-        <h2 id="pause-heading">Пауза</h2>
-        <button
-          type="button"
-          role="switch"
-          aria-checked=${paused ? 'true' : 'false'}
-          aria-busy=${applying ? 'true' : 'false'}
-          aria-labelledby="pause-heading"
-          class="switch"
-          disabled=${busy || applying}
-          onClick=${toggle}
-        >
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-        </button>
+    <li class="row">
+      <div class="row-main">
+        <span id="pause-heading" class="row-title">Пауза</span>
+        <span class="field-hint">${applying ? 'Применяется…' : 'Anchor ответит в чате'}</span>
       </div>
-      <p class="field-hint">${applying ? 'Применяется…' : 'Anchor ответит в чате.'}</p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked=${paused ? 'true' : 'false'}
+        aria-busy=${applying ? 'true' : 'false'}
+        aria-labelledby="pause-heading"
+        class="switch"
+        disabled=${busy || applying}
+        onClick=${toggle}
+      >
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </button>
+    </li>
+  `;
+}
+
+function TimezoneRow({ tz, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  // Recomputed whenever `tz` itself changes (not built once and cached
+  // in a ref for the component's whole lifetime) -- a zone set from
+  // Telegram between page loads, or one this screen's own successful
+  // change just returned, must also be present in the list it is about
+  // to be selected from.
+  const zones = useMemo(() => timezoneOptions(tz), [tz]);
+
+  async function handleChange(e) {
+    const value = e.target.value;
+    setBusy(true);
+    setError('');
+    const result = await onChange(value);
+    setBusy(false);
+    if (result !== true) setError(result);
+  }
+
+  return html`
+    <li class="row row-stacked">
+      <label for="tz-select" class="row-title">Часовой пояс</label>
+      <select id="tz-select" disabled=${busy} value=${tz} onChange=${handleChange}>
+        ${zones.map((z) => html`<option key=${z} value=${z}>${z}</option>`)}
+      </select>
+      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
+    </li>
+  `;
+}
+
+function ModeCard({ state, onFocus, onQuiet, onPause, onTimezone }) {
+  return html`
+    <section class="card" aria-labelledby="mode-heading">
+      <h2 id="mode-heading">Режим</h2>
+      <ul class="card-list">
+        <${FocusRow} focus=${state.focus} timezone=${state.timezone} onToggle=${onFocus} />
+        <${QuietRow} quietUntil=${state.quiet_until} timezone=${state.timezone} onSet=${onQuiet} />
+        <${PauseRow} paused=${state.paused} onToggle=${onPause} />
+        <${TimezoneRow} tz=${state.timezone} onChange=${onTimezone} />
+      </ul>
     </section>
   `;
 }
 
+// ---------- Траты сегодня ----------
+
 function SpendCard({ spend }) {
   const categories = Object.entries(spend.by_category || {}).sort((a, b) => b[1] - a[1]);
   return html`
-    <section class="card">
-      <h2 id="spend-heading">Траты сегодня</h2>
+    <section class="card" aria-labelledby="spend-heading">
+      <div class="card-row">
+        <h2 id="spend-heading">Траты сегодня</h2>
+        <span class="mono spend-total">${usd(spend.today_usd)} / ${usd(spend.cap_usd)}</span>
+      </div>
       <progress
         aria-labelledby="spend-heading"
+        aria-valuetext=${`${usd(spend.today_usd)} из ${usd(spend.cap_usd)}`}
         value=${spend.today_usd}
         max=${Math.max(spend.cap_usd, spend.today_usd, 0.01)}
       ></progress>
-      <p class="field-hint">${usd(spend.today_usd)} из ${usd(spend.cap_usd)}</p>
       ${categories.length
         ? html`
             <ul class="category-list">
               ${categories.map(
                 ([name, amount]) => html`
-                  <li key=${name}><span>${name}</span><span>${usd(amount)}</span></li>
+                  <li key=${name}><span>${name}</span><span class="mono">${usd(amount)}</span></li>
                 `,
               )}
             </ul>
@@ -553,11 +603,24 @@ function SpendCard({ spend }) {
   `;
 }
 
-function CountersRow({ counts }) {
+// ---------- metadata line ----------
+// The streak and the counters, quietly: Planner's DESIGN.md forbids
+// gamification, so no big numbers -- one muted line each.
+function MetaLine({ state }) {
+  const { streak, counts } = state;
+  const last = state.last_checkin_at
+    ? `последний ${dayWordInTz(state.last_checkin_at, state.timezone)} в ${formatHmInTz(state.last_checkin_at, state.timezone)}`
+    : 'чек-инов ещё не было';
   return html`
-    <p class="counters-row">
-      Воспоминаний: ${counts.memories} · Забота: ${counts.welfare_today} · Дистилляция: ${counts.distill_today}
-      · Поиск: ${counts.search_today}
+    <p class="meta-line">
+      Чек-ины <span class="mono">${streak}</span> ${pluralRu(streak, ['день', 'дня', 'дней'])} подряд · ${last}
+      ${state.ignored_in_row > 0
+        ? html` · проигнорировано подряд <span class="mono">${state.ignored_in_row}</span>`
+        : null}
+      <br />
+      Воспоминаний <span class="mono">${counts.memories}</span> · забота
+      <span class="mono">${counts.welfare_today}</span> · дистилляция
+      <span class="mono">${counts.distill_today}</span> · поиск <span class="mono">${counts.search_today}</span>
     </p>
   `;
 }
@@ -679,17 +742,21 @@ export function State() {
   return html`
     <div class="screen-wrap">
       <div class="screen screen-state">
-        ${state.ignored_in_row > 0
-          ? html`<p class="field-hint">Проигнорировано подряд: ${state.ignored_in_row}</p>`
-          : null}
-        <${FocusCard} focus=${state.focus} timezone=${state.timezone} onToggle=${toggleFocus} />
-        <${DueCard} due=${state.due} dueMaxLen=${state.limits.due_max_len} onSave=${saveDue} />
-        <${StreakCard} streak=${state.streak} lastCheckinAt=${state.last_checkin_at} />
-        <${QuietCard} quietUntil=${state.quiet_until} timezone=${state.timezone} onSet=${setQuiet} />
-        <${TimezoneCard} tz=${state.timezone} onChange=${changeTz} />
-        <${PauseCard} paused=${state.paused} onToggle=${togglePause} />
+        <${DueCard}
+          due=${state.due}
+          dueMaxLen=${state.limits.due_max_len}
+          timezone=${state.timezone}
+          onSave=${saveDue}
+        />
+        <${ModeCard}
+          state=${state}
+          onFocus=${toggleFocus}
+          onQuiet=${setQuiet}
+          onPause=${togglePause}
+          onTimezone=${changeTz}
+        />
         <${SpendCard} spend=${state.spend} />
-        <${CountersRow} counts=${state.counts} />
+        <${MetaLine} state=${state} />
       </div>
       <${Toasts} />
     </div>
