@@ -444,3 +444,29 @@ async def test_state_shows_the_latest_canary_regression(sessionmaker):
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
     assert "Канарейка: 2026-09-23 ⚠️" in fake.sent[0].text
+
+
+async def test_state_shows_persona_version_idle_and_backup(sessionmaker):
+    """Package A: after a deploy, /state is how the user checks parity --
+    the persona file's version, the idle line and the backup line."""
+    from app.core.prompt import load_persona, persona_path_for
+    from app.db.models import BackupLog
+
+    await _seed(sessionmaker, 1, streak=2)
+    async with sessionmaker() as session:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        session.add(
+            BackupLog(started_at=now, finished_at=now, status="failed", error_code="not_configured")
+        )
+        await session.commit()
+
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    text = fake.sent[0].text
+
+    sha = load_persona(persona_path_for(Settings()))[1][:8]
+    assert f"Персона: вкл · v{sha}" in text
+    assert "Серия: 2 дн." in text
+    assert "Потрачено сегодня:" in text
+    assert "Фон: 0.00 /" in text
+    assert "Бэкап: ⚠️ ошибка" in text

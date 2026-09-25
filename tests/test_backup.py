@@ -451,3 +451,77 @@ async def test_worker_dispatches_the_backup_job(sessionmaker):
         row = (await session.execute(select(BackupLog))).scalars().one()
     assert row.status == "failed"
     assert row.error_code == "not_configured"
+
+
+# --- Package A: a half-set or malformed config never raises ---------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # Partial: the recipient alone.
+        dict(BACKUP_AGE_RECIPIENT="age1whatever"),
+        # Partial: S3 without a recipient.
+        dict(
+            BACKUP_S3_ENDPOINT="https://fake.example",
+            BACKUP_S3_BUCKET="b",
+            BACKUP_S3_ACCESS_KEY_ID="k",
+            BACKUP_S3_SECRET_ACCESS_KEY="s",
+        ),
+    ],
+)
+async def test_run_backup_partial_config_records_not_configured(sessionmaker, overrides):
+    async with sessionmaker() as session:
+        await backup_module.run_backup(session, Settings(**overrides), FrozenClock(NOW))
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(BackupLog))).scalars().one()
+    assert (row.status, row.error_code) == ("failed", "not_configured")
+
+
+async def test_run_backup_schemeless_endpoint_records_not_configured(sessionmaker):
+    """boto3 raises ValueError('Invalid endpoint') for an endpoint with no
+    scheme; that used to escape run_backup and fail the job."""
+    settings = _configured_settings(BACKUP_S3_ENDPOINT="r2.example.com")
+    async with sessionmaker() as session:
+        await backup_module.run_backup(session, settings, FrozenClock(NOW))
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(BackupLog))).scalars().one()
+    assert (row.status, row.error_code) == ("failed", "not_configured")
+
+
+async def test_run_backup_malformed_recipient_records_not_configured(
+    sessionmaker, monkeypatch, test_database_url
+):
+    settings = _configured_settings(
+        DATABASE_URL=test_database_url, BACKUP_AGE_RECIPIENT="not-an-age-key"
+    )
+    monkeypatch.setattr(backup_module, "build_s3_client", lambda s: _FakeS3Client())
+    async with sessionmaker() as session:
+        await backup_module.run_backup(session, settings, FrozenClock(NOW))
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(BackupLog))).scalars().one()
+    assert row.status == "failed"
+    assert row.error_code in ("not_configured", "pg_dump_failed")
+
+
+def test_startup_warns_on_partial_backup_config_by_name_only(monkeypatch):
+    import app.startup as startup
+
+    calls = []
+    monkeypatch.setattr(
+        startup.logger, "warning", lambda msg, *a, **kw: calls.append((msg, kw.get("extra", {})))
+    )
+
+    assert len(startup.warn_partial_backup_config(Settings())) == 5  # all empty: no warning
+    assert calls == []
+
+    missing = startup.warn_partial_backup_config(Settings(BACKUP_S3_BUCKET="secret-bucket"))
+    assert "BACKUP_AGE_RECIPIENT" in missing and "BACKUP_S3_BUCKET" not in missing
+    [(msg, extra)] = calls
+    assert msg == "backup partially configured"
+    assert "BACKUP_AGE_RECIPIENT" in extra["fields"]
+    # Names only: the one value that *is* set never reaches the log.
+    assert "secret-bucket" not in str(extra)

@@ -132,6 +132,25 @@ def is_configured(settings: Settings) -> bool:
     )
 
 
+_CONFIG_FIELDS = (
+    "BACKUP_AGE_RECIPIENT",
+    "BACKUP_S3_ENDPOINT",
+    "BACKUP_S3_BUCKET",
+    "BACKUP_S3_ACCESS_KEY_ID",
+    "BACKUP_S3_SECRET_ACCESS_KEY",
+)
+
+
+def missing_config(settings: Settings) -> list[str]:
+    """Names (never values) of the backup settings that are empty.
+
+    All five set, or all five empty, are the two supported states. A
+    partial set behaves exactly like none (`is_configured` is False) and
+    app/startup.py warns about it once, by name, at boot.
+    """
+    return [name for name in _CONFIG_FIELDS if not getattr(settings, name)]
+
+
 def build_s3_client(settings: Settings):
     return boto3.client(
         "s3",
@@ -368,8 +387,14 @@ async def run_backup(session: AsyncSession, settings: Settings, clock: Clock) ->
         return
 
     key = object_key(started_at)
-    s3_client = build_s3_client(settings)
     try:
+        # Inside the try: a malformed endpoint (no scheme, say) makes
+        # boto3 raise ValueError here, and that is a configuration
+        # problem, not a crash -- it gets the same not_configured row.
+        try:
+            s3_client = build_s3_client(settings)
+        except Exception as exc:  # noqa: BLE001 - boto3 raises several types
+            raise BackupError(NOT_CONFIGURED) from exc
         bytes_written, sha256_hex = await _run_pipeline_in_thread(settings, s3_client, key)
     except BackupError as exc:
         session.add(
@@ -397,7 +422,13 @@ async def run_backup(session: AsyncSession, settings: Settings, clock: Clock) ->
     await session.commit()
     logger.info("backup done", extra={"event": BACKUP, "bytes": bytes_written})
 
-    await prune_backups(session, settings, clock, s3_client)
+    try:
+        await prune_backups(session, settings, clock, s3_client)
+    except Exception as exc:  # noqa: BLE001 - the backup itself succeeded
+        await session.rollback()
+        logger.warning(
+            "backup prune failed", extra={"event": BACKUP, "error_code": type(exc).__name__}
+        )
 
 
 async def _run_pipeline_in_thread(settings: Settings, s3_client, key: str) -> tuple[int, str]:

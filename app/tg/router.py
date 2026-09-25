@@ -63,7 +63,7 @@ from app.core import memory as memory_core
 from app.core import mood as mood_core
 from app.core import obligations as obligations_core
 from app.core import safety_events
-from app.core.prompt import persona_path_for
+from app.core.prompt import load_persona, persona_path_for
 from app.core import proposal as proposal_core
 from app.core.outbound import load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
@@ -303,6 +303,7 @@ def _format_state(
     canary=None,
     backup=None,
     debts=None,
+    persona_version=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -443,7 +444,8 @@ def _format_state(
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
         "Модель: {model}"
     ).format(
-        persona="вкл" if user_state.persona_active else "выкл",
+        persona=("вкл" if user_state.persona_active else "выкл")
+        + (f" · v{persona_version}" if persona_version else ""),
         intensity=user_state.intensity,
         focus="вкл" if user_state.focus_on else "выкл",
         streak=user_state.streak,
@@ -589,6 +591,9 @@ def build_router(
                 research_counts=research_counts,
                 mood=current_mood,
                 debts=debt_counts,
+                # The short hash of the persona file actually served
+                # (PERSONA_FILE), the same sha persona_version rows use.
+                persona_version=load_persona(persona_path_for(settings))[1][:8],
             )
         )
 

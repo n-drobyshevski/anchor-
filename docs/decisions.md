@@ -875,3 +875,29 @@ existing six values, and `migrations/env.py`'s `lock_timeout` guard is
 exactly what would make a blocked `ALTER TABLE ... ADD CONSTRAINT`
 fail fast rather than hang a deploy, the same backstop already in
 place for `telegram_update`.
+
+## Parity pass A — an unconfigured backup stays `status='failed', error_code='not_configured'`
+
+The parity checklist asks for "backup_log status not_configured" when
+`BACKUP_AGE_RECIPIENT` and the `BACKUP_S3_*` vars are empty.
+`ck_backup_log_status` allows `ok | failed | pruned | purged`, and the
+job has always written the pair `status='failed',
+error_code='not_configured'` (app/ops/backup.py). `/state` already
+reads that as «Бэкап: ⚠️ ошибка», which is what a user with no backups
+should see.
+
+**Decision: keep the pair, no migration.** Renaming a status would need
+an `ALTER TABLE ... DROP/ADD CONSTRAINT` on `backup_log` for no change
+in behaviour. What the pass did change is the part that mattered: a
+*partial* or malformed config now lands in the same row instead of
+raising. A scheme-less `BACKUP_S3_ENDPOINT` made boto3 raise
+`ValueError` before the try block, failing the job with no row. Boot
+also logs one `backup partially configured` warning naming the empty
+settings (names only, never values) and never refuses to start
+(`app/startup.py`'s `warn_partial_backup_config`). Tests:
+`tests/test_backup.py`'s partial-config, scheme-less-endpoint and
+malformed-recipient cases.
+
+**This would be wrong if** something downstream needs to tell
+"never configured" from "configured and failing" by `status` alone.
+Today `/state` and the digest read `error_code` for that.
