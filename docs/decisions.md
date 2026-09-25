@@ -1616,3 +1616,48 @@ The English privacy note had no line for the planner, which
 notes line, and `tests/test_privacy.py` now checks that the two have the
 same number of lines and that both mention Obsidian. `PRIVACY_TEXT` is
 at 10 lines, the ceiling its own test allows.
+
+## C1 — one column, not two
+
+The connector plan's C1 adds `access_grant.client` and `connection_id`.
+`connection_id` references `oauth_connection`, which C2 creates, so C1
+adds only `client` (default `grok`, CHECK `in ('grok','claude')`) and
+the pairing CHECK `(client = 'grok') = (token_sha256 is not null)`.
+`token_sha256` stays NOT NULL, so the two checks together refuse any
+`claude` row. C2 makes the token nullable in the same migration that
+adds `connection_id` and its check. Until then the database, not the
+code, keeps a Claude grant from existing. `debug.access_grant` gains
+`client`.
+
+**This would be wrong if** C2 needed Claude rows before its own
+migration, which it cannot: a window needs a connection.
+
+## C1 — the grant lookup reads only Grok's rows
+
+`grants.find_active_grant` now also filters `client = 'grok'`. No other
+row can exist yet, so it changes nothing today. From C2 it means a token
+hash can never open a Claude window, whatever ends up in
+`token_sha256`.
+
+## C1 — an unknown tool stays a protocol error
+
+The shared core takes the refusal as a parameter: Grok's JSON-RPC
+`-32602`, or Claude's tool result with `isError: true` and «Доступ
+закрыт. Открой его в Telegram: /claude». The parameter covers only a
+**known** tool that the reader may not use now (no window, or a scope
+outside it). An unknown tool name or malformed arguments are a `-32602`
+for both clients, because that is what MCP specifies for them and there
+is no window a user could open to fix it. `tools/list` follows
+`Reader.listed` and `tools/call` follows `Reader.grant`, so a
+connection's cached tool list and its current window may differ, as
+plan section 6.2 requires.
+
+## C1 — `access_grant` stays out of `/export`
+
+Plan section 7 says `access_grant` "stays exported, now with `client`
+and `connection_id`". It never was: `tests/test_export.py` has listed
+it in `NOT_EXPORTED` ("token hashes and grant bookkeeping, not user
+data") since Grok shipped. C1 keeps it out, which keeps less, and
+changes nothing in the export. C2 adds the `oauth_*` tables to the same
+list.
+

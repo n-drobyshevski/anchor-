@@ -50,10 +50,11 @@ ALLOWED_SITES: tuple[tuple[str, str], ...] = (
 # built in exactly one module -- the provider that owns the wire format.
 TOOL_KEYS = ("plugins", "tools", "tool_choice", "functions")
 TOOL_KEY_OWNER = pathlib.Path("app/llm/openrouter.py")
-# The MCP endpoint *serves* a `tools` list to an outside client (its
+# The MCP server core *serves* a `tools` list to an outside client (its
 # protocol's own word for it); it never builds a request to a model.
-# Only that one key is exempt there.
-MCP_SERVER = pathlib.Path("app/web/mcp.py")
+# Only that one key is exempt there. C1 moved it out of app/web/mcp.py,
+# which now holds Grok's authentication only.
+MCP_SERVER = pathlib.Path("app/web/mcp_core.py")
 
 
 # --- structural: who passes web_search=True -----------------------------
