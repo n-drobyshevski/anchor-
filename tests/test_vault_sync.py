@@ -124,6 +124,12 @@ async def test_an_unchanged_database_writes_nothing(sessionmaker, vault, clock):
 async def test_a_correction_updates_the_same_file_with_history(sessionmaker, vault, clock):
     await _seed(sessionmaker)
     old = await _fact(sessionmaker, "Любит работать по вечерам.")
+    # Pin the old fact's date to the frozen clock: created_at defaults
+    # to the database's now(), and the history line prints its local
+    # date, so the test otherwise failed after midnight in Paris.
+    async with sessionmaker() as session:
+        await session.execute(update(Memory).where(Memory.id == old).values(created_at=NOW))
+        await session.commit()
     await _pass(sessionmaker, vault, clock)
     new = await _fact(sessionmaker, "Любит работать по утрам, до 11.", supersedes_id=old)
     result = await _pass(sessionmaker, vault, clock)
