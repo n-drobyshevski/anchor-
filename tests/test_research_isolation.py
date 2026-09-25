@@ -275,20 +275,10 @@ def test_the_allowlist_holds_no_key_that_could_carry_free_text():
     a caller passes, only what the allowlist invites."""
     forbidden_substrings = ("text", "content", "body", "url", "path", "query", "topic",
                             "quote", "title", "message", "payload", "prompt")
-    # Named exceptions, each with its reason. Adding one is a decision,
-    # recorded in docs/decisions.md, not a way to quiet this test.
-    exempt = {
-        # The Claude connector dry run (app/web/oauth_probe.py): the path
-        # of claude.ai's own public client-metadata document, logged only
-        # when the host is claude.ai or claude.com and only in a
-        # [A-Za-z0-9._~/-] shape. C2 must pin it; C2 also deletes the
-        # probe, and this entry with it.
-        "client_id_path",
-    }
     offenders = [
         key
         for key in log_module.SAFE_EXTRA_KEYS
-        if key not in exempt and any(part in key for part in forbidden_substrings)
+        if any(part in key for part in forbidden_substrings)
     ]
     assert not offenders, f"allowlist invites free text under: {offenders}"
 

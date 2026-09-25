@@ -400,8 +400,9 @@ async def test_main_builds_a_dispatcher_with_the_safety_provider(sessionmaker):
     # actually pins -- the first five positional arguments, in this
     # order, are what matters for H2 (a wrong-order `hub` would still be
     # a bug, but not this one).
+    # The connector's C2 appended `claude_pending` by keyword after them.
     assert (
-        "build_dispatcher(sessionmaker, settings, provider, safety_provider, clock, hub, code_store)"
+        "build_dispatcher(\n        sessionmaker, settings, provider, safety_provider, clock, hub, code_store,"
         in source
     )
     assert (

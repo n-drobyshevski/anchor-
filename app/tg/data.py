@@ -148,6 +148,7 @@ async def handle_delete_callback(
     message_id: int,
     data: str,
     hub: WebHub | None = None,
+    claude_pending=None,
 ) -> None:
     """`d:yes:<epoch>` / `d:no`.
 
@@ -213,6 +214,10 @@ async def handle_delete_callback(
 
     if hub is not None:
         hub.close_all()
+    # The Claude connector's pending authorize requests live in memory
+    # (app/web/oauth_store.py); the truncate took the rest.
+    if claude_pending is not None:
+        claude_pending.clear()
 
     # Never claim the backups are gone when the bucket said otherwise.
     final = DELETED_BACKUPS_FAILED_TEXT if purged.failed else DELETED_TEXT

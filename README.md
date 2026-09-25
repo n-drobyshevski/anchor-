@@ -18,7 +18,7 @@ no model call, no outbound).
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
-| Read-only access for claude.ai (connector plan; C1 and the [dry run](docs/claude-connector-dry-run.md) done, C2 next) | **not built** | `CLAUDE_OAUTH_PROBE` for the dry run only; `CLAUDE_ACCESS_ENABLED` from C2 |
+| Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https) |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8; `status` and `mirror` so far) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e; nothing is indexed or used until 8d) | **off** | `/vault notes on`; later `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` (8d) |
 
@@ -48,7 +48,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/interests` | Topics for background research | the research itself: `RESEARCH_ENABLED` |
 | `/privacy` | What is stored and for how long | — |
 | `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
-| `/grok`, `/revoke` | Open read-only access for grok.com / close it | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
+| `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
+| `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class | `VAULT_MODE` |
@@ -1405,21 +1406,20 @@ MCP connector, read-only and for 1 h – 7 d. Every read is reported in
 Telegram and `/revoke` closes access at once. What Grok has already read
 stays with xAI. See [docs/grok-access.md](docs/grok-access.md).
 
-### Claude (planned: C1 and the dry run done)
+### Claude (opt-in)
 
-`anchor-claude-connector-plan.md` adds the same read access for
-claude.ai, through an OAuth connector you approve by typing a code into
-Telegram, and reads only inside a `/claude` window. C1 is the
-groundwork and changes nothing you can see: the MCP server now lives in
-`app/web/mcp_core.py`, shared by both clients, with `app/web/mcp.py`
-keeping only Grok's capability-URL check, and `access_grant` has a
-`client` column that is `grok` on every row. The database refuses a
-Claude grant until C2 builds the connection it would belong to.
+With `CLAUDE_ACCESS_ENABLED=true`, claude.ai can read Anchor through a
+custom connector (`https://<PUBLIC_URL>/mcp/claude`). Connecting is
+OAuth, but the approval is yours alone: the claude.ai page shows a
+six-character code, and you type `/claude connect <code>` into
+Telegram. Nothing on the web side ever messages you, so a stranger's
+request can never be approved by a careless tap. One connection at a
+time, 30 days at most.
 
-Before C2's OAuth server is written, a probe (`CLAUDE_OAUTH_PROBE`,
-off by default) answers claude.ai's discovery and records only the
-shape of what it sends. It grants nothing. The checklist is
-[docs/claude-connector-dry-run.md](docs/claude-connector-dry-run.md).
-Claude Code is fenced off from the connector: the guard hook refuses
-Anchor's tools under any server name, and Railway's `http` log stream,
-whose paths carry Grok's capability token.
+A connection alone reads nothing. `/claude` opens a window of 1 h or
+24 h for the scopes you pick (the same four as Grok's), every read is
+reported in Telegram, and `/revoke` closes windows and Grok grants
+together. What Claude has already read stays with Anthropic. Claude
+Code sessions can see your claude.ai connectors too; this repo's guard
+hook refuses Anchor's tools, and the rest is short windows and the
+read notices. See [docs/claude-connector.md](docs/claude-connector.md).

@@ -23,9 +23,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core.clock import SystemClock
 from app.core.prompt import PERSONA_PATH, load_persona, persona_path_for
 from app.core.state import STATE_ID
 from app.db.models import PersonaVersion, UserState
+from app.web import oauth_store
 
 logger = logging.getLogger(__name__)
 
@@ -96,3 +98,7 @@ async def run_startup_tasks(
     await upsert_user_state(session, settings.ALLOWED_CHAT_ID, settings.TZ_DEFAULT)
     warn_partial_backup_config(settings)
     await sync_persona_version(session, persona_path or persona_path_for(settings))
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        # Connector plan section 3: turning the flag off revokes every
+        # connection, so turning it back on cannot revive an old token.
+        await oauth_store.revoke_everything(session, SystemClock())

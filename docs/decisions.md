@@ -1743,3 +1743,91 @@ builds on:
 
 **This would be wrong if** claude.ai changed its metadata URL or its callback. Both would then fail closed, visibly, at connect time, and the fix would be one constant.
 
+## C2 — the probe is gone, and what replaced its choices
+
+C2 deletes `app/web/oauth_probe.py`, `CLAUDE_OAUTH_PROBE`, the probe's
+log keys and the `client_id_path` exemption in
+`tests/test_research_isolation.py`. The real server keeps one shape
+from the probe: it logs a route and an outcome, never a value.
+
+## C2 — no `oauth_client` table, and `oauth_token.request_id` is SET NULL
+
+Registration is CIMD only, and the one accepted client id is a
+constant, so the plan's DCR table is not created. The plan made
+`oauth_token.request_id` cascade on delete, but requests are swept after
+a day and tokens live 30. With CASCADE, the retention sweep would have
+deleted live tokens. It is `ON DELETE SET NULL`: replay revocation only
+needs the request during the minutes after its code is used.
+
+## C2 — the token endpoint accepts an absent `resource` or `client_id`
+
+At the token endpoint, `resource` may be absent: the code, or the
+refresh token, is already bound to it. If present, it must name
+`/mcp/claude`. On refresh, `client_id` may likewise be absent, and
+must match if present. The code exchange always requires it. Refusing
+the absent case would gain nothing, since the binding is already
+stored, and could break claude.ai's refresh, which the dry run could
+not observe. A *mismatch* is refused everywhere.
+
+## C2 — the reply to `/claude connect` says «Подтверждено», not «Подключено»
+
+The plan's reply was «Подключено. Старое подключение (если было)
+закрыто.» But approving a code does not yet create the connection:
+claude.ai must still collect the code and exchange it, within 60
+seconds. The old connection closes at that exchange. The reply
+therefore says «Подтверждено. Вернись в браузер: claude.ai завершит
+подключение сам, а старое подключение (если было) закроется».
+
+## C2 — one browser, one binding cookie
+
+The dry run saw the same authorize request arrive five times in three
+minutes, from reloads and repeated Connect presses. If each request set
+a fresh `__Host-anchor_oauth` cookie, the older waiting pages in that
+browser would lose theirs and stop working. A request that arrives with
+a well-formed cookie reuses it: the pending entry stores its hash, and
+the cookie is not reset. A different browser still gets its own cookie
+and cannot poll another browser's request.
+
+## C2 — the per-address cap uses the last `X-Forwarded-For` entry
+
+Railway's edge appends the real peer to `X-Forwarded-For`. Earlier
+entries are whatever the client sent. The per-address cap of 5 pending
+requests therefore counts the last entry; a spoofed leading entry
+changes nothing (tested). The total cap of 20 holds regardless.
+Someone who fills it can only delay a connection by 10 minutes.
+
+## C2 — the `/claude connect` lockout lives in memory
+
+Five wrong codes in an hour lock `/claude connect` for an hour. The
+counter lives in the pending store's memory. A restart resets it, which
+is the web passphrase limiter's trade-off (app/web/ratelimit.py). A
+guesser cannot trigger a restart, and after one there are no pending
+requests left to guess anyway.
+
+## C2 — `/revoke` keeps Grok's text when only Grok was open
+
+`/revoke` now closes Claude windows too. When it closed Grok grants
+only, it answers with Grok's existing text, which also says the link is
+dead. Otherwise it answers «Доступ закрыт: Grok (n), Claude (m).».
+This keeps `tests/test_grok_access.py` unedited, and each reply says
+what actually happened. The Grok picker's «Сейчас открыто» now lists
+Grok grants only.
+
+## C2 — the flag off revokes at startup
+
+"Turning the flag off revokes every connection" is implemented in
+`run_startup_tasks`: when `CLAUDE_ACCESS_ENABLED` is false, it revokes
+every connection and token and closes every Claude window. A flag
+change needs a redeploy anyway, so the revocation happens before any
+request is served. Turning the flag back on then finds nothing to
+revive (tested).
+
+## C2 — one PendingStore, shared
+
+As with the web UI's `CodeStore`, `main()` builds one `PendingStore`
+and hands it to `build_router` (for `/claude connect` and `/delete`)
+and to `build_webhook_app` (for `/oauth/authorize`). `/delete` now
+clears it, alongside the WebHub. Before, the web `CodeStore` was
+cleared only by `/weblogout`; that is noted here and left as it was,
+outside C2's scope.
+

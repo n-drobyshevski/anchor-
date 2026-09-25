@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core.clock import Clock
 from app.db.models import Job, Message, Outbound, Scene, TelegramUpdate, WeeklyReview
+from app.web import oauth_store
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ RETENTION_SWEEP = "retention_sweep"
 FORGET_UPDATE_PAYLOAD = "forget_update_payload"
 FORGET_TERMINAL_JOBS = "forget_terminal_jobs"
 FORGET_OLD_MESSAGES = "forget_old_messages"
+FORGET_OAUTH = "forget_oauth"
 
 # Mirrors app/db/queue.py's own terminal statuses for the job table
 # (app/db/jobs.py reuses the same _complete/_fail as telegram_update):
@@ -140,12 +142,16 @@ async def forget_old_messages(session: AsyncSession, settings: Settings, clock: 
 
 
 async def run_retention_sweep(session: AsyncSession, settings: Settings, clock: Clock) -> None:
-    """The one job (`RETENTION_SWEEP`) app/worker.py dispatches all three
-    rules through -- same "one job, several unrelated cheap SQL
+    """The one job (`RETENTION_SWEEP`) app/worker.py dispatches every
+    rule through -- same "one job, several unrelated cheap SQL
     statements" shape as app/research/sweeps.py's `run_daily_sweep`."""
     await forget_update_payloads(session, settings, clock)
     await forget_terminal_jobs(session, settings, clock)
     await forget_old_messages(session, settings, clock)
+    # The Claude connector's credential plumbing (connector plan section
+    # 7): the rules are oauth_store's own, the only writer of oauth_*.
+    count = await oauth_store.sweep(session, clock)
+    logger.info("oauth rows forgotten", extra={"event": FORGET_OAUTH, "count": count})
 
 
 def retention_sweep_dedup_key(local_date: datetime.date) -> str:

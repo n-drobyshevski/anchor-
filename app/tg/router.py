@@ -81,6 +81,7 @@ from app.planner import snapshot as planner_snapshot
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
+from app.tg import claude as claude_ui
 from app.tg import data as data_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
@@ -96,6 +97,7 @@ from app.tg import vault as vault_ui
 from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
 from app.web import auth as web_auth
+from app.web import oauth_store
 from app.web.hub import WebHub
 from app.vault import consent as vault_consent
 from app.vault import status as vault_status
@@ -128,7 +130,9 @@ PRIVACY_TEXT = (
     "правилам.\n"
     "Если подключён планер: агенда (включая общие события партнёра) и, при "
     "PLANNER_HEALTH, метрики сна/пульса попадают в запрос к модели; токены "
-    "планера хранятся в базе и не выгружаются в /export.\n"
+    "планера хранятся в базе и не выгружаются в /export. Если открыт доступ "
+    "(/grok, /claude), прочитанное уходит в xAI или Anthropic; закрыть можно "
+    "дальнейшее чтение, но не уже прочитанное.\n"
     "Переписка в Telegram не имеет сквозного шифрования — сообщения "
     "проходят через серверы Telegram и этого бота.\n"
     "Резервные копии базы зашифрованы (age) и хранятся: 14 ежедневных + 8 "
@@ -160,7 +164,8 @@ BOT_COMMANDS = [
     BotCommand(command="export", description="Выгрузить все данные"),
     BotCommand(command="delete", description="Удалить все данные"),
     BotCommand(command="grok", description="Открыть данные для Grok"),
-    BotCommand(command="revoke", description="Закрыть доступ для Grok"),
+    BotCommand(command="claude", description="Подключение и окно для Claude"),
+    BotCommand(command="revoke", description="Закрыть доступ для Grok и Claude"),
     # 4b (phase-4 plan section 9): read/notes/card/adopt/reject, /read's
     # loop end to end. 4c adds /study alongside them -- see the module
     # docstring on why all six are worth a menu entry (mirrors /forget,
@@ -493,6 +498,7 @@ def build_router(
     clock: Clock | None = None,
     hub: WebHub | None = None,
     code_store: web_auth.CodeStore | None = None,
+    claude_pending: oauth_store.PendingStore | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
 
@@ -907,6 +913,34 @@ def build_router(
         )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/grok]", scene_id=scene_id
+        )
+
+    @router.message(Command("claude"))
+    async def claude_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """Claude access (docs/claude-connector.md): status and the window
+        picker, `connect <code>`, `disconnect`.
+
+        Telegram only: approval happens here and nowhere else, so a web
+        chat must never be able to type `/claude connect`.
+        """
+        reason = claude_ui.available(settings)
+        if reason is not None:
+            await _reply_once(message, event_update.update_id, reason)
+            return
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        text, keyboard = await claude_ui.command(
+            sessionmaker, settings, clock, claude_pending, command.args
+        )
+        await send_keyboard(message.bot, message.chat.id, text, keyboard)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/claude]", scene_id=scene_id
         )
 
     @router.message(Command("revoke"))
@@ -1637,6 +1671,7 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             hub=hub,
+            claude_pending=claude_pending,
         )
 
     @router.callback_query(F.data.startswith("w:"))
@@ -1851,6 +1886,27 @@ def build_router(
             await callback.answer(WEB_ONLY_REPLY)
             return
         await grok_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("cl:"))
+    async def claude_decision(callback: CallbackQuery) -> None:
+        """`cl:<action>:<mask>:<period>:<ttl>:<epoch>` -- the /claude picker.
+
+        Telegram only, like /grok's: a window is opened from here or not
+        at all.
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.answer(WEB_ONLY_REPLY)
+            return
+        await claude_ui.handle_callback(
             sessionmaker,
             callback.bot,
             settings,

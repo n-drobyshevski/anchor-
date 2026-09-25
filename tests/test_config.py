@@ -568,3 +568,42 @@ def test_vault_url_refused_without_echoing_it(url):
 
 def test_a_bad_vault_url_is_ignored_while_the_vault_is_off_and_tokenless():
     check_runtime_settings(_settings(VAULT_URL="https://evil.example"))
+
+
+# --- Claude access (docs/claude-connector.md) ---
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"MODE": "polling"},
+        {"PUBLIC_URL": "http://anchor.example"},
+    ],
+)
+def test_claude_access_requires_webhook_and_https(overrides):
+    values = {
+        "CLAUDE_ACCESS_ENABLED": True,
+        "MODE": "webhook",
+        "TELEGRAM_SECRET_TOKEN": "a" * 32,
+        "PUBLIC_URL": "https://anchor.example",
+    }
+    values.update(overrides)
+    with pytest.raises(SystemExit, match="CLAUDE_ACCESS_ENABLED"):
+        check_runtime_settings(_settings(**values))
+
+
+@pytest.mark.parametrize("hours", [0, 25, 168])
+def test_a_claude_window_is_at_most_a_day(hours):
+    with pytest.raises(SystemExit, match="CLAUDE_WINDOW_MAX_HOURS"):
+        check_runtime_settings(_settings(CLAUDE_WINDOW_MAX_HOURS=hours))
+
+
+def test_claude_access_on_with_webhook_and_https_starts():
+    check_runtime_settings(
+        _settings(
+            CLAUDE_ACCESS_ENABLED=True,
+            MODE="webhook",
+            TELEGRAM_SECRET_TOKEN="a" * 32,
+            PUBLIC_URL="https://anchor.example",
+        )
+    )

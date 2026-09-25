@@ -42,6 +42,10 @@ CONTENT_COLUMNS = {
     "study_clip": {"text", "url", "title", "text_sha256"},
     "study_card": {"text", "quote", "source_url"},
     "access_grant": {"token_sha256"},
+    # Claude access. The client id is a URL, the redirect and resource
+    # too; the challenge and the hashes are credential material.
+    "oauth_connection": {"client_id"},
+    "oauth_request": {"client_id", "redirect_uri", "resource", "scope", "code_challenge", "code_sha256"},
     # 8a. A path is a file name the user chose, a note's title is
     # content, and a hash of a short fact confirms a guess at its text.
     "vault_file": {"path", "disk_sha256", "render_digest"},

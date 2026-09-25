@@ -445,6 +445,10 @@ NOT_EXPORTED = {
     "heartbeat_state": "operational liveness marker, not user data",
     "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
     "access_grant": "token hashes and grant bookkeeping, not user data",
+    # Claude access (connector plan section 7).
+    "oauth_connection": "credentials and approval plumbing; hashes only, no content",
+    "oauth_request": "credentials and approval plumbing; hashes only, no content",
+    "oauth_token": "credentials and approval plumbing; hashes only, no content",
     # 8a (phase-8 plan section 6).
     # 8e (8e plan section 5): vault_chunk split by class, same reason.
     "note_chunk_personal": "a derived copy of the user's own personal notes, rebuildable from the vault",

@@ -10,8 +10,9 @@ refactor. This file pins what C1 adds for C2 to build on:
 - the tool-result refusal (`isError: true`), which neither reads nor
   counts nor notifies, next to Grok's unchanged `-32602`;
 - one limiter per endpoint, keyed per caller;
-- the column: every grant is Grok's, and the database refuses a Claude
-  grant until C2 gives it somewhere to belong.
+- the column: a grant defaults to Grok's, and the database keeps the
+  two shapes apart -- Grok's has a token and no connection, Claude's a
+  connection and no token (C2 added the connection).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import Settings
 from app.core import grants
 from app.core.clock import SystemClock
-from app.db.models import AccessGrant, Memory, UserState
+from app.db.models import AccessGrant, Memory, OauthConnection, UserState
 from app.web import mcp, mcp_core
 from conftest import FakeSession
 
@@ -249,25 +250,35 @@ async def test_every_grant_is_grok_s(sessionmaker):
 
 
 @pytest.mark.parametrize(
-    "client, token, constraint",
+    "client, token, connection, constraint",
     [
-        ("claude", "'x'", "ck_access_grant_client_token"),
-        ("claude", "null", "token_sha256"),
-        ("grok", "null", "token_sha256"),
-        ("gemini", "'x'", "ck_access_grant_client"),
+        ("claude", "'x'", "c", "ck_access_grant_client_token"),
+        ("claude", "null", "null", "ck_access_grant_client_connection"),
+        ("grok", "null", "null", "ck_access_grant_client_token"),
+        ("grok", "'x'", "c", "ck_access_grant_client_connection"),
+        ("gemini", "'x'", "null", "ck_access_grant_client"),
     ],
 )
-async def test_the_database_refuses_a_grant_c1_cannot_serve(
-    sessionmaker, client, token, constraint
+async def test_the_database_keeps_the_two_shapes_apart(
+    sessionmaker, client, token, connection, constraint
 ):
-    """No Claude grant can exist before C2 builds what it belongs to."""
-    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    """A Grok grant has a token and no connection; a Claude window the reverse."""
+    now = datetime.datetime.now(datetime.timezone.utc)
     async with sessionmaker() as session:
+        connection_id = "null"
+        if connection == "c":
+            row = OauthConnection(
+                client_id="x", created_at=now, expires_at=now + datetime.timedelta(days=1)
+            )
+            session.add(row)
+            await session.commit()
+            connection_id = str(row.id)
         with pytest.raises(IntegrityError, match=constraint):
             await session.execute(
                 text(
-                    "insert into access_grant (client, token_sha256, scopes, expires_at) "
-                    f"values (:client, {token}, array['memory'], :expires)"
+                    "insert into access_grant (client, token_sha256, connection_id, scopes, "
+                    f"expires_at) values (:client, {token}, {connection_id}, array['memory'], "
+                    ":expires)"
                 ),
-                {"client": client, "expires": expires},
+                {"client": client, "expires": now + datetime.timedelta(hours=1)},
             )
