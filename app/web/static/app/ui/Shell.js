@@ -1,5 +1,6 @@
-// The authenticated app frame: Nav plus whichever screen `route`
-// (store.js, kept in sync by router.js) points at.
+// The authenticated app frame: the top toolbar (ui/Toolbar.js, with the
+// section switcher, the screen title, Пауза and Выйти) above whichever
+// screen `route` (store.js, kept in sync by router.js) points at.
 //
 // Chat is the one exception to "render whichever screen `route`
 // points at": it is always mounted, `hidden` (Chat.js's own prop) on
@@ -21,12 +22,12 @@ import { Memory } from '../screens/Memory.js';
 import { Checkin } from '../screens/Checkin.js';
 import { Proposals } from '../screens/Proposals.js';
 import { route } from '../store.js';
-import { Nav } from './Nav.js';
+import { Toolbar } from './Toolbar.js';
 
 // A later screen that should behave like State/Memory/Proposals (mount
-// only while active) adds its hash here and to ui/Nav.js's NAV_ITEMS --
-// nowhere else, since router.js already normalizes any hash outside
-// KNOWN_ROUTES back to '#/chat'.
+// only while active) adds its hash here, to ui/SurfaceSwitcher.js's
+// NAV_ITEMS and to router.js's KNOWN_ROUTES (router.js normalizes any
+// other hash back to '#/chat').
 const OTHER_SCREENS = {
   '#/state': State,
   '#/memory': Memory,
@@ -41,7 +42,7 @@ export function Shell() {
   const isChat = !OtherScreen;
   return html`
     <div id="shell" class="shell">
-      <${Nav} />
+      <${Toolbar} />
       <div class="shell-screen">
         <${Chat} hidden=${!isChat} />
         ${OtherScreen ? html`<${OtherScreen} />` : null}

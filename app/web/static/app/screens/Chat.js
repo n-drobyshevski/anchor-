@@ -14,10 +14,8 @@ import { html } from '../html.js';
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiGet, apiPost } from '../api.js';
 import * as sse from '../sse.js';
-import { conn, forceLogout, pushToast, reconnectBanner, typing } from '../store.js';
+import { forceLogout, pushToast, reconnectBanner, registerPauseHandler, typing } from '../store.js';
 import { Toasts } from '../ui/Toasts.js';
-
-const CONN_LABELS = { ok: 'на связи', reconnecting: 'переподключение', down: 'нет связи' };
 
 function minutesText(retryAfterSeconds) {
   const m = Math.max(1, Math.ceil((retryAfterSeconds || 60) / 60));
@@ -31,7 +29,7 @@ function formatTime(ts) {
   return { short: `${hh}:${mm}`, full: d.toLocaleString('ru-RU') };
 }
 
-// These three read their own signal and nothing else -- module-level,
+// These two read their own signal and nothing else -- module-level,
 // same reasoning as Keyboard below, plus a reactivity reason of its
 // own: a Preact/Signals component that reads a signal's `.value` in
 // its render body subscribes *that component* to it, so it alone
@@ -41,19 +39,8 @@ function formatTime(ts) {
 // blip re-ran the whole screen -- remapping every loaded message row
 // (up to 1000+ after paging) into fresh MessageRow elements and
 // re-running formatTime for each just to re-diff a status dot. Moving
-// the read down here confines that re-render to one <span>/<div>/<p>.
-function ConnDot() {
-  return html`
-    <span
-      id="conn-dot"
-      class="conn-dot"
-      role="img"
-      aria-label=${CONN_LABELS[conn.value]}
-      data-state=${conn.value}
-    ></span>
-  `;
-}
-
+// the read down here confines that re-render to one <div>/<p>. (The
+// connection dot, the third of these, now lives in ui/Toolbar.js.)
 function ReconnectBanner() {
   return html`
     <div id="reconnect-banner" role="alert" hidden=${!reconnectBanner.value}>
@@ -463,10 +450,13 @@ export function Chat({ hidden = false } = {}) {
     setJumpDownVisible(false);
   }
 
-  async function handleLogout() {
-    await apiPost('/api/auth/logout', {});
-    forceLogout();
-  }
+  // The toolbar's #pause-button (ui/Toolbar.js) sends `/out` through
+  // this screen's own sendMessage, exactly as #chat-header's button
+  // did: store.js's requestPause() calls whatever is registered here.
+  // Through a ref, so the handler is always this render's sendMessage.
+  const sendMessageRef = useRef(sendMessage);
+  sendMessageRef.current = sendMessage;
+  useEffect(() => registerPauseHandler(() => sendMessageRef.current('/out')), []);
 
   // enterChat(): resets every per-session piece of state and starts
   // loading history. Runs once per mount, i.e. once per login (Shell
@@ -563,18 +553,6 @@ export function Chat({ hidden = false } = {}) {
 
   return html`
     <div id="chat" hidden=${hidden}>
-      <header id="chat-header">
-        <span class="brand">Anchor</span>
-        <${ConnDot} />
-        <div class="header-spacer"></div>
-        <button type="button" id="pause-button" class="header-button" onClick=${() => sendMessage('/out')}>
-          Пауза
-        </button>
-        <button type="button" id="logout-button" class="header-button" onClick=${handleLogout}>
-          Выйти
-        </button>
-      </header>
-
       <${ReconnectBanner} />
 
       <main id="log" role="log" aria-live="polite" aria-relevant="additions" ref=${logRef} aria-busy=${historyBusy ? 'true' : 'false'}>

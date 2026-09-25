@@ -150,7 +150,6 @@ export function Proposals() {
   return html`
     <div class="screen-wrap">
       <div class="screen screen-proposals">
-        <h1 class="screen-title">Предложения</h1>
         ${data.pending
           ? html`<${PendingCard} proposal=${data.pending} onDecide=${decide} />`
           : html`<p class="empty-hint">Сейчас предложений нет</p>`}

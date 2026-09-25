@@ -948,21 +948,24 @@ export function Checkin() {
   }
 
   return html`
-    <div class="screen-wrap">
+    <div class="screen-wrap screen-wrap-wide">
       <div class="screen screen-checkin">
-        <h1 class="screen-title">Чек-ин</h1>
-        <${TodaySection} data=${data} onSubmit=${submit} />
-        <${MonthSection} range=${range} failed=${rangeFailed} onRetry=${loadRange} />
-        <${JournalSection}
-          items=${journal}
-          total=${journalTotal}
-          loaded=${journalLoaded}
-          failed=${journalFailed}
-          loadingMore=${loadingMore}
-          todayKey=${data.local_date}
-          onMore=${loadMoreJournal}
-          onRetry=${loadJournal}
-        />
+        <div class="checkin-main">
+          <${TodaySection} data=${data} onSubmit=${submit} />
+        </div>
+        <div class="checkin-side">
+          <${MonthSection} range=${range} failed=${rangeFailed} onRetry=${loadRange} />
+          <${JournalSection}
+            items=${journal}
+            total=${journalTotal}
+            loaded=${journalLoaded}
+            failed=${journalFailed}
+            loadingMore=${loadingMore}
+            todayKey=${data.local_date}
+            onMore=${loadMoreJournal}
+            onRetry=${loadJournal}
+          />
+        </div>
       </div>
       <${Toasts} />
     </div>

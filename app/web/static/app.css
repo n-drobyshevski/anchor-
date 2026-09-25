@@ -347,12 +347,12 @@ button, input, textarea {
   font-size: 0.9rem;
 }
 
-/* ---------- Shell + Nav ----------
-   The authenticated app frame around every screen (ui/Shell.js,
-   ui/Nav.js): a bottom tab bar under 900px, a left sidebar at/above
-   it. W1 has exactly one screen (#chat, below) and exactly one nav
-   item, but the layout already supports more -- Nav.js's item array
-   is what grows, not this CSS. */
+/* ---------- Shell + toolbar ----------
+   The authenticated app frame (ui/Shell.js): one sticky toolbar on top
+   at every width (ui/Toolbar.js, after Planner's SurfaceChrome), then
+   the current screen filling the rest. There is no bottom tab bar and
+   no sidebar any more: every screen is reached from the section
+   switcher's menu (ui/SurfaceSwitcher.js). */
 
 .shell {
   height: 100dvh;
@@ -367,117 +367,234 @@ button, input, textarea {
   flex-direction: column;
 }
 
-.nav {
-  order: 2;
+.icon {
+  flex: none;
+  display: block;
+}
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   flex: none;
   display: flex;
-  border-top: 1px solid var(--border);
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 6px 12px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
   background: var(--bg);
-  padding-bottom: env(safe-area-inset-bottom);
+  border-bottom: 1px solid var(--border);
 }
 
-.nav-item {
+.toolbar-title {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.toolbar-title h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.375;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-subtitle {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Connected: a filled dot; reconnecting: a hollow ring; offline: a
+   filled red dot. Always next to its text label (ui/Toolbar.js). */
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dot-bad);
+}
+
+.conn-dot[data-state="ok"] { background: var(--dot-ok); }
+.conn-dot[data-state="reconnecting"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--dot-warn);
+}
+.conn-dot[data-state="down"] { background: var(--dot-bad); }
+
+.toolbar-trailing {
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 10px 4px;
-  color: var(--text-muted);
-  text-decoration: none;
-  font-size: 0.78rem;
-  text-align: center;
+  gap: 2px;
 }
 
-.nav-item[aria-current="page"] {
-  color: var(--accent);
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) { background: var(--muted-fill); }
+
+@media (pointer: coarse) {
+  .icon-button {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* ---------- Section switcher (ui/SurfaceSwitcher.js) ---------- */
+
+.switcher {
+  position: relative;
+  flex: none;
+}
+
+.switcher-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 6px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.switcher-button:hover { background: var(--muted-fill); }
+
+.switcher-tile {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* A pending proposal while you are on another screen: a small pip on
+   the tile's corner. The count itself is in the button's aria-label and
+   on the menu item, so the pip is never the only signal. */
+.switcher-pip {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.switcher-chevron {
+  color: var(--text-muted);
+  transition: transform 180ms var(--ease);
+}
+
+.switcher-button[aria-expanded="true"] .switcher-chevron {
+  transform: rotate(180deg);
+}
+
+@media (pointer: coarse) {
+  .switcher-button {
+    height: 40px;
+    padding: 0 8px 0 5px;
+  }
+
+  .switcher-tile {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+.switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 232px;
+  max-width: calc(100vw - 24px);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--hairline), var(--shadow-soft-lg);
+  animation: menu-in 160ms var(--ease);
+}
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.switcher-item:hover { background: var(--muted-fill); }
+
+.switcher-item[aria-current="page"] {
+  background: var(--muted-fill);
   font-weight: 600;
 }
 
-.nav-label {
-  line-height: 1.1;
+.switcher-item-label {
+  flex: 1;
+  min-width: 0;
 }
 
-/* Bottom bar only (the sidebar query below restores all of this): five
-   tabs share one phone-width bar, and «Предложения» alone needs ~74px
-   at this size (~78px bold, as the current tab) -- more than an equal
-   fifth of a 360-390px screen. So each item starts from its own label's
-   width (`flex: 1 1 auto`) and shares only the space left over: the
-   five labels together need ~270px, so every label fits whole down to
-   a 320px screen, current tab included. Items may still shrink below
-   their label (min-width: 0, ellipsis as a last resort), and the
-   proposals badge sits in the item's top-right corner, out of the text
-   flow, instead of widening the tab by its own 20px. */
-@media (max-width: 899.98px) {
-  .nav-item {
-    position: relative;
-    flex: 1 1 auto;
-    min-width: 0;
-    padding: 16px 2px 9px;
-    font-size: 0.72rem;
-  }
-
-  .nav-label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .nav-item .nav-badge {
-    position: absolute;
-    top: 2px;
-    right: 4px;
-    min-width: 14px;
-    height: 14px;
-    font-size: 0.62rem;
-  }
-}
-
-@media (max-width: 340px) {
-  .nav-item {
-    font-size: 0.66rem;
-  }
-}
-
-@media (min-width: 900px) {
-  .shell {
-    flex-direction: row;
-  }
-
-  .nav {
-    order: 0;
-    flex-direction: column;
-    align-items: stretch;
-    width: 220px;
-    border-top: none;
-    border-right: 1px solid var(--border);
-    padding: 16px 8px;
-    padding-bottom: max(16px, env(safe-area-inset-bottom));
-    gap: 4px;
-  }
-
-  .nav-item {
-    /* The bar's `flex: 1` shares the width between tabs; in a column
-       it would stretch one item over the sidebar's full height. */
-    flex: none;
-    justify-content: flex-start;
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 0.92rem;
-  }
-
-  .nav-item[aria-current="page"] {
-    background: var(--bubble-muted);
-  }
+.switcher-check {
+  color: var(--text);
 }
 
 /* ---------- Chat shell ---------- */
 
 #chat {
-  /* Fills .shell-screen (see "Shell + Nav" above) instead of its own
-     100dvh -- the shell as a whole is 100dvh; #chat only owns what is
-     left over once the nav bar/sidebar takes its share. */
+  /* Fills .shell-screen (see "Shell + toolbar" above) instead of its
+     own 100dvh -- the shell as a whole is 100dvh; #chat only owns what
+     is left over below the toolbar. */
   height: 100%;
   min-height: 0;
   display: flex;
@@ -487,50 +604,6 @@ button, input, textarea {
   width: 100%;
   position: relative;
 }
-
-#chat-header {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
-  padding-top: max(12px, env(safe-area-inset-top));
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-}
-
-.brand {
-  font-weight: 700;
-  font-size: 1.05rem;
-}
-
-.conn-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--dot-bad);
-  flex: none;
-}
-
-.conn-dot[data-state="ok"] { background: var(--dot-ok); }
-.conn-dot[data-state="reconnecting"] { background: var(--dot-warn); }
-.conn-dot[data-state="down"] { background: var(--dot-bad); }
-
-.header-spacer { flex: 1; }
-
-.header-button {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 0.9rem;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.header-button:hover { border-color: var(--text-muted); }
 
 #reconnect-banner {
   background: var(--danger);
@@ -728,23 +801,12 @@ button, input, textarea {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 10px 12px;
-  /* Below 900px the composer sits above the .nav tab bar (see "Shell +
-     Nav" above), which already pads itself by this same inset -- doing
-     it here too would double it, leaving an empty ~34px band between
-     the composer and the tab bar on a notched phone. Only at/above
-     900px, where .nav moves to the side and the composer really is the
-     bottom-most element, does #composer need to claim the inset
+  /* The composer is always the bottom-most element now (no tab bar
+     under it at any width), so it claims the home-indicator inset
      itself. */
-  padding-bottom: 10px;
+  padding: 8px 12px max(16px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   background: var(--bg);
-}
-
-@media (min-width: 900px) {
-  #composer {
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
-  }
 }
 
 #composer-input {
@@ -778,20 +840,22 @@ button, input, textarea {
   cursor: default;
 }
 
-/* ---------- Nav badge (ui/Nav.js) ---------- */
+/* ---------- Count badge (the switcher's «Предложения» item) ---------- */
 
 .nav-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--danger);
-  color: var(--surface);
-  font-size: 0.68rem;
-  font-weight: 700;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--muted-fill);
+  color: var(--muted-fill-text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
@@ -837,10 +901,33 @@ button, input, textarea {
   gap: 14px;
 }
 
-.screen-title {
-  margin: 0;
-  font-size: 1.15rem;
-  font-weight: 700;
+/* Check-in only: from 900px up, two columns (the form | the chart and
+   the journal) in a wider frame; every other panel stays one 42rem
+   column. */
+.screen-wrap-wide {
+  max-width: 72rem;
+}
+
+.screen-wrap-wide .screen {
+  max-width: none;
+}
+
+.checkin-main,
+.checkin-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+@media (min-width: 900px) {
+  .screen-checkin {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 16px;
+    padding: 24px 32px;
+  }
 }
 
 .empty-hint {
@@ -1216,7 +1303,7 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 999
 
 /* Native <dialog> (Memory.js's ForgetDialog): showModal() puts it in
    the top layer, so it centers itself over everything (including the
-   nav bar) regardless of where it sits in the document -- this only
+   toolbar) regardless of where it sits in the document -- this only
    styles its box and ::backdrop, not its position.
 
    Box styles (background/border/padding/width) stay on the bare

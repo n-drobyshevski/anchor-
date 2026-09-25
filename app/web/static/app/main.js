@@ -26,10 +26,10 @@ effect(() => {
   else closeSSE();
 });
 
-// store.js's proposalsBadge (ui/Nav.js's "Предложения" badge) has to
-// stay right even while #/proposals itself is never opened -- a
-// proposal raised while the user reads #/chat still needs to show up
-// on the tab. This effect is that path: refetch right after login,
+// store.js's proposalsBadge (ui/SurfaceSwitcher.js's pip and the
+// «Предложения» count) has to stay right even while #/proposals itself
+// is never opened -- a proposal raised while the user reads #/chat
+// still needs to show up in the switcher. This effect is that path: refetch right after login,
 // and again on every invalidate("proposals"), independent of which
 // screen (if any) is mounted. screens/Proposals.js keeps its own copy
 // of this same call so the badge does not wait on this effect's own

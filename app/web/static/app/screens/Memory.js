@@ -752,7 +752,9 @@ export function Memory() {
     <div class="screen-wrap">
       <div class="screen screen-memory">
         <div class="card-row">
-          <h1 class="screen-title">Память</h1>
+          <p class="memory-counter${overCap ? ' char-counter-over' : ''}" aria-live="polite">
+            ${total} записей · закреплено ${pinnedCount}/${pinnedMax}
+          </p>
           <button
             type="button"
             id="memory-add-toggle"
@@ -762,9 +764,6 @@ export function Memory() {
             ${showAddForm ? 'Закрыть' : '+ Добавить'}
           </button>
         </div>
-        <p class="memory-counter${overCap ? ' char-counter-over' : ''}" aria-live="polite">
-          ${total} записей · закреплено ${pinnedCount}/${pinnedMax}
-        </p>
         <${AddForm} open=${showAddForm} onClose=${() => setShowAddForm(false)} onAdd=${addMemory} />
         <div class="filters">
           <div class="chip-row" role="group" aria-label="Вид">

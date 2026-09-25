@@ -17,7 +17,7 @@
 import { html } from '../html.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiGet, apiPost } from '../api.js';
-import { forceLogout, pushToast } from '../store.js';
+import { forceLogout, pushToast, screenSubtitle } from '../store.js';
 import { useAutoRefetch } from '../hooks.js';
 import { Toasts } from '../ui/Toasts.js';
 
@@ -585,6 +585,20 @@ export function State() {
   // this screen needs more than its own topic.
   useAutoRefetch(['state', 'checkin', 'memory'], reload);
 
+  // «следующее сообщение ~HH:MM» sits under the toolbar's title
+  // (ui/Toolbar.js), not in this screen's body; cleared on unmount so
+  // it never leaks onto another screen.
+  const subtitle =
+    state && state.next_planned_for
+      ? `следующее сообщение ~${formatHmInTz(state.next_planned_for, state.timezone)}`
+      : '';
+  useEffect(() => {
+    screenSubtitle.value = subtitle;
+  }, [subtitle]);
+  useEffect(() => () => {
+    screenSubtitle.value = '';
+  }, []);
+
   // Shared by every field mutation except pause (see the module
   // comment above for why pause is different): POST, and on 200
   // replace `state` wholesale with the response's own StateDTO --
@@ -665,10 +679,6 @@ export function State() {
   return html`
     <div class="screen-wrap">
       <div class="screen screen-state">
-        <h1 class="screen-title">Состояние</h1>
-        ${state.next_planned_for
-          ? html`<p class="field-hint">Следующее сообщение ~${formatHmInTz(state.next_planned_for, state.timezone)}</p>`
-          : null}
         ${state.ignored_in_row > 0
           ? html`<p class="field-hint">Проигнорировано подряд: ${state.ignored_in_row}</p>`
           : null}
