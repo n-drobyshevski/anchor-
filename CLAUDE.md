@@ -12,3 +12,8 @@
 - Tests and eval run against a throwaway local database (see README →
   Tests); synthetic data there is fine to read.
 - Logs must never carry message text (app/log.py); keep it that way.
+- Never read the Obsidian vault, and never connect Obsidian tools to it
+  (MCP servers, the Local REST API, `ob`). It holds the same data as the
+  database. vaultd's tests use a temp directory and a fake `ob`; the
+  vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_*`) are secrets like
+  the others above.

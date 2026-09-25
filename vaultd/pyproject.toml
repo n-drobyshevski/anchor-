@@ -1,0 +1,28 @@
+[project]
+name = "vaultd"
+version = "0.1.0"
+description = "Anchor's vault service: supervises obsidian-headless and serves a small private API (phase 5)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiohttp>=3.14.3,<4",
+    "pyyaml>=6.0.2,<7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=1.4.0,<2",
+    "pytest-aiohttp>=1.1.0,<2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vaultd"]

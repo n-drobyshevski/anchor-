@@ -7,7 +7,8 @@ data landed in; 4d adds the cancel step -- see `cancel_research_jobs`.
 **Why TRUNCATE without CASCADE.** Nothing outside PURGED_TABLES points
 into it: every foreign key in the schema either stays inside that list
 (message -> telegram_update, message -> scene, memory -> memory,
-study_card -> study_clip -> study_job, study_card -> memory) or belongs
+study_card -> study_clip -> study_job, study_card -> memory,
+vault_chunk -> vault_file -> memory, vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
 not itself listed here, the statement fails loudly instead of silently
@@ -36,6 +37,7 @@ from app.core.clock import Clock
 from app.config import Settings
 from app.core.state import STATE_ID, record_change
 from app.db.models import Job, StudyJob, UserState
+from app.vault.epoch import new_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,17 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # 5a: the vault's four tables (phase-5 plan section 6), child-first.
+    # vault_chunk is a derived copy of the user's own opted-in notes,
+    # vault_file names their files, vault_hold carries fact text waiting
+    # for a yes, and vault_status is only timestamps -- but it records
+    # when this user's vault was reachable, which is theirs too. The
+    # files in the vault itself are 5b's vault_purge job; this empties
+    # the database's record of them.
+    "vault_chunk",
+    "vault_file",
+    "vault_hold",
+    "vault_status",
 )
 
 # user_state is reset in place, never dropped. persona_version is a
@@ -138,6 +151,11 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         "last_outbound_at": None,
         "ignored_in_row": 0,
         "welfare_at": None,
+        # 5a (phase-5 plan section 4): a fresh epoch, so a file
+        # re-uploaded from before this delete can never share a path
+        # with a file rendered after it, and is deleted as an orphan
+        # rather than imported (5b).
+        "vault_epoch": new_epoch(),
         "updated_at": clock.now_utc(),
     }
 

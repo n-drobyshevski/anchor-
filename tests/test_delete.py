@@ -40,6 +40,10 @@ from app.db.models import (
     StudyJob,
     TelegramUpdate,
     UserState,
+    VaultChunk,
+    VaultFile,
+    VaultHold,
+    VaultStatus,
 )
 from app.tg import data as data_ui
 from app.tg.router import build_router
@@ -181,6 +185,29 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 risk_final="low",
             )
         )
+        await session.commit()
+
+        # 5a: the vault's four tables (phase-5 plan section 6). A held
+        # fact file with its hold, an opted-in note with one chunk of
+        # the user's own text, and the status singleton.
+        memory_id = (await session.execute(select(Memory.id))).scalar_one()
+        hold = VaultHold(
+            kind="rule",
+            payload={"file_id": 1, "kind": "rule", "text": "не звонить после десяти", "supersedes_id": None},
+        )
+        session.add(hold)
+        await session.flush()
+        session.add(
+            VaultFile(
+                path="Anchor/Memory/0001-abcdef.md", role="fact", memory_id=memory_id,
+                state="held", hold_id=hold.id,
+            )
+        )
+        note = VaultFile(path="Бег.md", role="note")
+        session.add(note)
+        await session.flush()
+        session.add(VaultChunk(file_id=note.id, ord=0, heading="Бег", text="Бегаю по утрам в парке."))
+        session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 
 

@@ -25,6 +25,16 @@ Still allowed: Railway `get-logs`, deployments, status, metrics,
 traces (logs never carry message text, see `app/log.py`), local tests
 and eval against a throwaway local database, and the `debug.*` views.
 
+**Phase 5: the Obsidian vault is off limits too.** It holds the same
+data as the database, as files. Claude never reads it and never
+connects Obsidian tools to it: no Obsidian MCP server, no Local REST
+API, no `ob` against the real vault. The vault service's logs, like the
+bot's, carry no path, file name or note text, and they are fine to
+read. vaultd's tests run on a temp directory and a fake `ob`. The
+vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_AUTH_TOKEN`,
+`OBSIDIAN_E2EE_PASSWORD`) are blocked by the guard hook like the
+others.
+
 ## One-time setup
 
 1. Deploy, so the migration runs (`alembic upgrade head` is part of the
@@ -59,11 +69,18 @@ To revoke: `ALTER ROLE anchor_debug NOLOGIN;`.
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select status, count(*) from debug.job group by 1"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select update_id, status, attempts, error from debug.telegram_update where status <> 'done' order by created_at desc limit 20"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select local_date, category, sum(usd_cost) from debug.spend_ledger group by 1, 2 order by 1 desc limit 14"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.vault_status"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select role, state, reason, count(*) from debug.vault_file group by 1, 2, 3"
 ```
+
+The vault views (5a, migration `b8d24f6e0a17`) carry no path, no hash,
+no hold payload and no chunk text. They have their own grant, because
+`9e4b2c7a1f05`'s `GRANT ... ON ALL TABLES` covered only the views that
+existed when it ran.
 
 ## Adding a table
 
 A new table gets no view by default. If it should be debuggable, add a
 view in a new migration with an **explicit** column list (never `*`)
-and a grant to `anchor_debug`, and classify its text columns in
+and its own `GRANT SELECT ON debug.<view> TO anchor_debug`, and classify its text columns in
 `CONTENT_COLUMNS` in `tests/test_debug_views.py`.

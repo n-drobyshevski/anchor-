@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import urllib.parse
 
 from typing import Annotated
 
@@ -38,6 +39,9 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_JUDGE",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
+    "VAULT_MODE",
+    "VAULT_URL",
+    "VAULT_API_TOKEN",
 )
 
 
@@ -352,6 +356,24 @@ class Settings(BaseSettings):
         "AnchorBot/1.0 (personal, single-user; contact via repo owner)"
     )
 
+    # --- 5a: the vault (phase-5 plan section 3) ---
+    #
+    # The kill switch, staged per milestone: off -> status -> mirror ->
+    # sync. `off` means nothing reads or writes the vault. 5a implements
+    # `status` only; `mirror` and `sync` are accepted so a config set
+    # ahead of a deploy cannot take chat down, and until 5b/5c they do
+    # exactly what `status` does (docs/decisions.md). The plan's other
+    # VAULT_* settings arrive with the milestones that read them.
+    VAULT_MODE: str = "off"
+    # The vault service on Railway's private network. Validated in
+    # check_runtime_settings, never echoed: a public URL here would send
+    # the token across the internet.
+    VAULT_URL: str = "http://vault.railway.internal:8080"
+    # At least 32 random characters, the same value on the vault
+    # service. The only vault credential the bot ever holds; the
+    # Obsidian ones live on the vault service alone.
+    VAULT_API_TOKEN: str = ""
+
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
     def _parse_packet(cls, value):
@@ -473,6 +495,49 @@ REQUIRED_ALWAYS = ("TELEGRAM_BOT_TOKEN", "DATABASE_URL", "OPENROUTER_API_KEY")
 REQUIRED_WEBHOOK = ("TELEGRAM_SECRET_TOKEN", "PUBLIC_URL")
 
 
+VALID_VAULT_MODES = ("off", "status", "mirror", "sync")
+# The same floor vaultd enforces on its side (vaultd/vaultd/boot.py).
+VAULT_TOKEN_MIN_CHARS = 32
+_VAULT_PRIVATE_SUFFIX = ".railway.internal"
+_VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
+_HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
+
+
+def vault_url_problem(url: str) -> str | None:
+    """Why VAULT_URL is unacceptable, or None. Never includes the value.
+
+    Strict on purpose (phase-5 plan section 3): scheme `http`, a host on
+    Railway's private network (or exactly 127.0.0.1/localhost for local
+    dev), no userinfo, no path, no query. The bearer token rides on
+    every request to this URL, so anything that could point it at the
+    public internet -- a typo'd suffix, `https://` to a public proxy, an
+    `@` that moves the real host after it -- is refused rather than
+    guessed at.
+    """
+    if not url or any(ch.isspace() or ord(ch) < 32 for ch in url):
+        return "is empty or contains whitespace"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return "does not parse as a URL"
+    if parts.scheme != "http":
+        return "must use http:// (traffic on the private network is already encrypted)"
+    if "@" in parts.netloc:
+        return "must not carry a username or password"
+    if parts.path not in ("", "/") or parts.query or parts.fragment or "?" in url or "#" in url:
+        return "must have no path, query or fragment"
+    host = (parts.hostname or "").lower()
+    if not _HOSTNAME_RE.match(host):
+        return "has an invalid host"
+    private = host.endswith(_VAULT_PRIVATE_SUFFIX) and len(host) > len(_VAULT_PRIVATE_SUFFIX)
+    if not (private or host in _VAULT_LOCAL_HOSTS):
+        return "must point at a *.railway.internal host (or 127.0.0.1/localhost locally)"
+    if port is not None and not 0 < port < 65536:
+        return "has an invalid port"
+    return None
+
+
 def missing_required(settings: Settings) -> list[str]:
     """Names of settings that must be set before the app can run.
 
@@ -536,3 +601,32 @@ def check_runtime_settings(settings: Settings) -> None:
             "the value itself contains a character outside that set -- most "
             "often a line break from a multi-line paste."
         )
+
+    check_vault_settings(settings)
+
+
+def check_vault_settings(settings: Settings) -> None:
+    """The vault's part of the boot check (phase-5 plan section 3).
+
+    The mode is echoed (it is not a secret); the token and the URL
+    never are. The token and URL are checked whenever the mode is not
+    `off` *or* a token is set, because from 5b on a set token alone
+    makes /delete reach the vault service, in any mode.
+    """
+    mode = settings.VAULT_MODE
+    if mode not in VALID_VAULT_MODES:
+        raise SystemExit(
+            f"VAULT_MODE must be one of {', '.join(VALID_VAULT_MODES)}, got {mode!r}."
+        )
+    token = settings.VAULT_API_TOKEN
+    if mode == "off" and not token:
+        return
+    if len(token) < VAULT_TOKEN_MIN_CHARS:
+        raise SystemExit(
+            f"VAULT_API_TOKEN must be at least {VAULT_TOKEN_MIN_CHARS} characters when "
+            "VAULT_MODE is not off (the value is deliberately not shown). Use the same "
+            "value as on the vault service."
+        )
+    problem = vault_url_problem(settings.VAULT_URL)
+    if problem is not None:
+        raise SystemExit(f"VAULT_URL {problem} (the value is deliberately not shown).")

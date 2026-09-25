@@ -74,7 +74,9 @@ from app.tg import data as data_ui
 from app.tg import memory as memory_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
+from app.tg import vault as vault_ui
 from app.tg import welfare as welfare_ui
+from app.vault import status as vault_status
 
 NON_TEXT_REPLY = "Пока только текст."
 
@@ -111,6 +113,8 @@ BOT_COMMANDS = [
     BotCommand(command="card", description="Карточка по id"),
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
+    # 5a (phase-5 plan section 8): the Obsidian vault's status.
+    BotCommand(command="vault", description="Хранилище Obsidian"),
 ]
 
 QUIET_SET = "Тихо до {until}."
@@ -185,6 +189,7 @@ def _format_state(
     outbound=None,
     welfare_counts=None,
     research_counts=None,
+    vault_line=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -257,6 +262,7 @@ def _format_state(
         "{outbound}"
         "{welfare}"
         "{research}"
+        "{vault}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -273,6 +279,10 @@ def _format_state(
         ),
         welfare=welfare_line,
         research=research_line,
+        # 5a (phase-5 plan section 8). Always shown, «выключено» included:
+        # whether the vault is connected is a fact about the bot's state
+        # worth one line even when the answer is no.
+        vault=(vault_line + "\n") if vault_line else "",
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -342,6 +352,7 @@ def build_router(
                     session, clock, user_state.timezone, kind=safety_events.SEARCH
                 ),
             )
+            vault_health = await vault_status.probe(session, settings, clock)
         await message.answer(
             _format_state(
                 user_state,
@@ -353,7 +364,18 @@ def build_router(
                 outbound=outbound,
                 welfare_counts=welfare_counts,
                 research_counts=research_counts,
+                vault_line=vault_ui.format_state_line(vault_health, clock, user_state.timezone),
             )
+        )
+
+    @router.message(Command("vault"))
+    async def vault(message: Message) -> None:
+        """Status only in 5a (phase-5 plan section 8). Off makes no request."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            health = await vault_status.probe(session, settings, clock)
+        await message.answer(
+            vault_ui.format_vault(health, settings, clock, user_state.timezone)
         )
 
     @router.message(Command("out"))
