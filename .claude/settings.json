@@ -24,6 +24,8 @@
       "mcp__Railway__get-function-source-code",
       "mcp__Railway__update-function-source-code",
       "mcp__Railway__deploy-template",
+      "mcp__Anchor",
+      "mcp__claude_ai_Anchor",
       "Read(./.env)",
       "Read(./.env.local)",
       "Read(./.env.production)",
@@ -40,7 +42,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|WebFetch|Read|Grep|Edit|Write|mcp__Railway__.*",
+        "matcher": "Bash|WebFetch|Read|Grep|Edit|Write|mcp__.*",
         "hooks": [
           {
             "type": "command",

@@ -11,6 +11,21 @@ This is a guardrail, not a sandbox: the hard boundary is that the
 `anchor_debug` role cannot select from any public table. See
 docs/claude-access.md.
 
+Two more doors, both about reads that leave through a side channel:
+
+- **Anchor's own connector** (anchor-claude-connector-plan.md section
+  6.3). claude.ai connectors reach Claude Code sessions too, as
+  `mcp__Anchor__...` in cloud sessions and `mcp__claude_ai_Anchor__...`
+  in the CLI. Any tool of a server named like Anchor is blocked, and so
+  is any `mcp__*` tool whose own name is one of Anchor's read tools, so
+  a connector renamed to something else is still caught.
+- **Railway's edge HTTP log** (`get-logs` with the `http` stream)
+  carries request paths, and Grok's capability token is a path
+  (`/mcp/<token>`). The deploy stream stays allowed.
+
+A malformed event for an `mcp__*` tool is blocked rather than let
+through: this hook cannot tell what such a call would read.
+
 Protocol: the tool call arrives as JSON on stdin; exit code 2 blocks it
 and stderr is shown to Claude as the reason.
 """
@@ -60,6 +75,16 @@ BLOCKED_TOOLS = {
     "mcp__Railway__deploy-template": "not needed for debugging",
 }
 
+# claude.ai names a connector's tools mcp__<Name>__<tool>, spaces as
+# underscores; the local CLI adds claude_ai_. "Anchor", "anchor 2" and
+# "Anchor (old)" all match.
+ANCHOR_SERVER = re.compile(r"(?i)^mcp__(?:claude_ai_)?anchor\w*?__")
+# Anchor's read tools (app/web/mcp_core.py), plus the planned C3 one.
+ANCHOR_TOOLS = frozenset(
+    {"get_memory", "get_journal", "get_dialogs", "get_state", "search_library"}
+)
+RAILWAY_LOGS = "mcp__Railway__get-logs"
+
 HINT = (
     " Debug with Railway get-logs / deployment status, or query the content-free"
     ' views: psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select ... from debug.<table>".'
@@ -86,10 +111,35 @@ def check_command(command: str) -> str | None:
     return None
 
 
+def check_mcp(tool_name: str, tool_input: object) -> str | None:
+    """Return why an MCP tool call is blocked, or None if it may run."""
+    if not isinstance(tool_input, dict):
+        return f"{tool_name} blocked: malformed input for an MCP tool"
+    if ANCHOR_SERVER.match(tool_name) or tool_name.rsplit("__", 1)[-1] in ANCHOR_TOOLS:
+        return (
+            f"{tool_name} blocked: Anchor's connector returns the user's conversations, "
+            "memory and journal, which Claude Code never reads"
+        )
+    if tool_name == RAILWAY_LOGS:
+        types = tool_input.get("types")
+        if types is not None and not isinstance(types, list):
+            return f"{tool_name} blocked: malformed log types"
+        if any(str(kind).strip().lower() == "http" for kind in types or ()):
+            return (
+                f"{tool_name} blocked: the http stream logs request paths, and Grok's "
+                "capability token is a path; read the deploy stream instead"
+            )
+    return None
+
+
 def check(tool_name: str, tool_input: dict) -> str | None:
     """Return why a tool call is blocked, or None if it may run."""
     if tool_name in BLOCKED_TOOLS:
         return f"{tool_name} is blocked: {BLOCKED_TOOLS[tool_name]}"
+    if tool_name.startswith("mcp__"):
+        return check_mcp(tool_name, tool_input)
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     if tool_name == "Bash":
         reason = check_command(str(tool_input.get("command", "")))
         return f"command blocked: {reason}" if reason else None
@@ -104,11 +154,21 @@ def check(tool_name: str, tool_input: dict) -> str | None:
 
 
 def main() -> int:
+    raw = sys.stdin.read()
     try:
-        event = json.load(sys.stdin)
+        event = json.loads(raw)
     except json.JSONDecodeError:
+        event = None
+    if not isinstance(event, dict) or not isinstance(event.get("tool_name", ""), str):
+        if "mcp__" in raw:
+            print("MCP tool call blocked: the hook could not read its input.", file=sys.stderr)
+            return 2
         return 0
-    reason = check(event.get("tool_name", ""), event.get("tool_input") or {})
+    tool_name = event.get("tool_name", "")
+    tool_input = event.get("tool_input")
+    if tool_input is None:
+        tool_input = {}
+    reason = check(tool_name, tool_input)
     if reason is None:
         return 0
     print(reason + "." + HINT, file=sys.stderr)

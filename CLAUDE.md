@@ -17,3 +17,10 @@
   database. vaultd's tests use a temp directory and a fake `ob`; the
   vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_*`) are secrets like
   the others above.
+- Never call Anchor's own connector, even if its tools appear in your
+  session (`mcp__Anchor__...`, `mcp__claude_ai_Anchor__...`, or any
+  tool named `get_memory`, `get_journal`, `get_dialogs`, `get_state`,
+  `search_library`): it returns the same conversations as the database.
+  Never read Railway's `http` log stream either: request paths carry
+  Grok's capability token. The guard hook blocks both; do not work
+  around it.

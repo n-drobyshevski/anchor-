@@ -101,3 +101,78 @@ def test_hook_protocol_exit_code():
 
     allowed = run({"tool_name": "Bash", "tool_input": {"command": "uv run pytest"}})
     assert allowed.returncode == 0
+
+
+# --- Anchor's connector and Railway's edge log (connector plan 6.3, 11.7) ---
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "mcp__Anchor__get_journal",
+        "mcp__claude_ai_Anchor__get_journal",
+        "mcp__anchor_2__get_memory",
+        "mcp__Anchor__initialize_anything",
+        "mcp__ANCHOR__get_state",
+        # A connector renamed to something else is caught by its tools.
+        "mcp__Renamed__get_dialogs",
+        "mcp__claude_ai_My_Notes__search_library",
+        # Any server whose name starts with "anchor": over-blocking an
+        # unrelated one costs little, missing a renamed Anchor costs all.
+        "mcp__anchorage__list",
+    ],
+)
+def test_blocks_anchor_connector_tools(tool):
+    assert guard.check(tool, {}) is not None
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"serviceId": "x", "types": ["http"]},
+        {"serviceId": "x", "types": ["deploy", "http"]},
+        {"serviceId": "x", "types": ["HTTP"]},
+        {"serviceId": "x", "types": "http"},
+    ],
+)
+def test_blocks_the_http_log_stream(tool_input):
+    assert guard.check("mcp__Railway__get-logs", tool_input) is not None
+
+
+@pytest.mark.parametrize(
+    "tool, tool_input",
+    [
+        ("mcp__Railway__get-logs", {"serviceId": "x"}),
+        ("mcp__Railway__get-logs", {"serviceId": "x", "types": ["deploy", "build"]}),
+        ("mcp__Railway__get-logs", {"serviceId": "x", "types": ["network-flow", "dns"]}),
+        ("mcp__Railway__http-requests", {"serviceId": "x"}),
+        ("mcp__github__get_me", {}),
+        ("mcp__Supabase__list_tables", {}),
+    ],
+)
+def test_allows_other_mcp_tools(tool, tool_input):
+    assert guard.check(tool, tool_input) is None
+
+
+def test_malformed_mcp_input_is_blocked():
+    assert guard.check("mcp__Railway__get-logs", ["types", "http"]) is not None
+    assert guard.check("mcp__github__get_me", "x") is not None
+
+    def run(raw: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(HOOK)], input=raw, capture_output=True, text=True)
+
+    assert run('{"tool_name": "mcp__Anchor__get_journal", "tool_input": ').returncode == 2
+    assert run('["mcp__Railway__get-logs"]').returncode == 2
+    assert run('{"tool_name": "mcp__Anchor__get_memory", "tool_input": []}').returncode == 2
+    assert run('{"tool_name": "mcp__github__get_me"}').returncode == 0
+    # Malformed input that is not an MCP call keeps the old behaviour.
+    assert run("not json").returncode == 0
+    assert run('{"tool_name": "Bash", "tool_input": []}').returncode == 0
+
+
+def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook():
+    settings = json.loads((HOOK.parent.parent / "settings.json").read_text())
+    deny = settings["permissions"]["deny"]
+    assert "mcp__Anchor" in deny and "mcp__claude_ai_Anchor" in deny
+    matchers = [entry["matcher"] for entry in settings["hooks"]["PreToolUse"]]
+    assert any("mcp__.*" in matcher.split("|") for matcher in matchers)
