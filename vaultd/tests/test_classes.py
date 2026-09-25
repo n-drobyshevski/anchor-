@@ -300,3 +300,12 @@ async def test_the_manifest_summary_never_carries_a_path(client, vault: Path) ->
         if secret != ".md":
             assert secret not in serialised
             assert json.dumps(secret)[1:-1] not in raw
+
+
+def test_the_shipped_template_is_a_valid_settings_file() -> None:
+    """docs/vault/settings.md is what the user copies in. Its Russian
+    comments must keep it inside the 4 KB frontmatter cap."""
+    template = Path(__file__).resolve().parents[2] / "docs" / "vault" / "settings.md"
+    rules = classes.parse_settings(template.read_bytes())
+    assert rules.state == "ok"
+    assert rules.never == (("life", "diary"),)
