@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
-from app.db.models import Message
+from app.db.models import Message, VaultChunk, VaultFile, VaultHold, VaultStatus
 
 # Free-text columns: what a user wrote, what the model wrote, or what was
 # derived from either. None may appear as a column of any debug view.
@@ -35,6 +35,13 @@ CONTENT_COLUMNS = {
     "study_clip": {"text", "url", "title", "text_sha256"},
     "study_card": {"text", "quote", "source_url"},
     "access_grant": {"token_sha256"},
+    # 8a. A path is a file name the user chose, a note's title is
+    # content, and a hash of a short fact confirms a guess at its text.
+    "vault_file": {"path", "disk_sha256", "render_digest"},
+    "vault_hold": {"payload"},
+    "vault_chunk": {"heading", "text", "tsv"},
+    # Timestamps only; forgets_window is a JSON array of them.
+    "vault_status": set(),
 }
 
 
@@ -84,6 +91,45 @@ async def test_debug_role_reads_views_but_not_tables(sessionmaker):
         assert row == ("user", len("очень личное"))
 
     for table in ("message", "telegram_update", "memory", "journal", "scene"):
+        async with sessionmaker() as session:
+            await session.execute(text("set local role anchor_debug"))
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                await session.execute(text(f"select * from public.{table}"))
+
+
+VAULT_VIEWS = ("vault_file", "vault_hold", "vault_chunk", "vault_status")
+
+
+async def test_debug_role_reads_the_vault_views_granted_by_their_own_migration(sessionmaker):
+    """9e4b2c7a1f05's GRANT ON ALL TABLES only covered the views that
+    existed then; b8d24f6e0a17 must grant its own, or these fail."""
+    async with sessionmaker() as session:
+        hold = VaultHold(kind="mass_delete", payload={"file_ids": [1, 2, 3]})
+        session.add(hold)
+        await session.flush()
+        note = VaultFile(path="Секретная заметка.md", role="note", disk_sha256="a" * 64)
+        session.add(note)
+        await session.flush()
+        session.add(VaultChunk(file_id=note.id, ord=0, heading="Секрет", text="очень личное"))
+        session.add(VaultStatus(id=1))
+        await session.commit()
+
+    for view in VAULT_VIEWS:
+        async with sessionmaker() as session:
+            await session.execute(text("set local role anchor_debug"))
+            rows = (await session.execute(text(f"select * from debug.{view}"))).all()
+            assert len(rows) == 1
+            assert "Секрет" not in repr(rows)
+            assert "a" * 64 not in repr(rows)
+
+    async with sessionmaker() as session:
+        await session.execute(text("set local role anchor_debug"))
+        hold_row = (await session.execute(text("select file_count from debug.vault_hold"))).one()
+        assert hold_row == (3,)
+        seen = (await session.execute(text("select seen from debug.vault_file"))).one()
+        assert seen == (True,)
+
+    for table in VAULT_VIEWS:
         async with sessionmaker() as session:
             await session.execute(text("set local role anchor_debug"))
             with pytest.raises(ProgrammingError, match="permission denied"):

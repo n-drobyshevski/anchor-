@@ -27,6 +27,11 @@ SECRET_NAMES = (
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_SECRET_TOKEN",
     "OPENROUTER_API_KEY",
+    # Phase 8 (plan section 11): the bot's one vault credential, and the
+    # two Obsidian ones that live only on the vault service.
+    "VAULT_API_TOKEN",
+    "OBSIDIAN_AUTH_TOKEN",
+    "OBSIDIAN_E2EE_PASSWORD",
 )
 _SECRET = "|".join(SECRET_NAMES)
 # A secret read out of the environment: $NAME, ${NAME}, os.environ["NAME"],

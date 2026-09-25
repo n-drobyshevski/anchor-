@@ -82,7 +82,8 @@ async def enqueue_job(
     (see app/planner/actions.py's accept(), which must flip the action
     to `accepted` and enqueue its write job atomically -- a crash
     between two separate commits would otherwise leave an `accepted`
-    action with no job ever enqueued for it).
+    action with no job ever enqueued for it). /delete uses it too (8b):
+    `vault_purge` is queued inside its single wipe transaction.
     """
     values: dict = {"kind": kind, "payload": payload, "dedup_key": dedup_key}
     if run_after is not None:

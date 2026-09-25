@@ -62,8 +62,10 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy import text as sa_text
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.vault.epoch import new_epoch
 
 
 class Base(DeclarativeBase):
@@ -419,11 +421,20 @@ class UserState(Base):
     )
     attention_until: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # 8a (phase-8 plan section 4). Six base32 characters that every
+    # file Anchor creates in the vault carries; /delete replaces it, so
+    # a file re-uploaded from before a delete is recognisably an orphan
+    # (app/vault/epoch.py). A Python default rather than a server one:
+    # Postgres cannot draw it from a CSPRNG without an extension, and
+    # every insert of this row goes through SQLAlchemy.
+    vault_epoch: Mapped[str] = mapped_column(String, nullable=False, default=new_epoch)
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("attention in ('present', 'short')", name="ck_user_state_attention"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
         CheckConstraint("ignored_in_row >= 0", name="ck_user_state_ignored_non_negative"),
+        CheckConstraint("vault_epoch ~ '^[a-z2-7]{6}$'", name="ck_user_state_vault_epoch"),
     )
 
 
@@ -1761,4 +1772,164 @@ class PersonaAmendment(Base):
         ),
         CheckConstraint('char_length("text") <= 200', name="ck_persona_amendment_text_length"),
         Index("ix_persona_amendment_status", "status"),
+    )
+
+
+# --- 8a: the vault (phase-8 plan section 6) --------------------------------
+#
+# Four tables, all empty until 8b. Every invariant the plan states in a
+# comment is a CHECK here, for the same reason as study_card's: a bug in
+# app/vault/ must not be able to store a row the plan says cannot exist.
+
+
+class VaultHold(Base):
+    """A vault change that waits for a yes in Telegram (plan section 8)."""
+
+    __tablename__ = "vault_hold"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=sa.text("'pending'")
+    )
+    # {"file_ids": [...]} for mass_delete, or {"file_id", "kind", "text",
+    # "supersedes_id"} for a rule. The only column here with content.
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("kind in ('mass_delete', 'rule')", name="ck_vault_hold_kind"),
+        CheckConstraint(
+            "status in ('pending', 'confirmed', 'reverted', 'expired', 'stale')",
+            name="ck_vault_hold_status",
+        ),
+        CheckConstraint("jsonb_typeof(payload) = 'object'", name="ck_vault_hold_payload_object"),
+        CheckConstraint(
+            "kind <> 'mass_delete' or coalesce(jsonb_typeof(payload -> 'file_ids'), '') = 'array'",
+            name="ck_vault_hold_mass_delete_payload",
+        ),
+        CheckConstraint(
+            "kind <> 'rule' or coalesce(payload ?& array['file_id', 'kind', 'text', 'supersedes_id'], false)",
+            name="ck_vault_hold_rule_payload",
+        ),
+    )
+
+
+class VaultFile(Base):
+    """One file Anchor tracks in the vault: a fact, a journal day or a note."""
+
+    __tablename__ = "vault_file"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Vault-relative, exactly as vaultd reports it. Content: a file name
+    # the user chose is theirs, so no debug view carries it.
+    path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    # For a fact, always the lineage's current head (8b keeps it there).
+    memory_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("memory.id", ondelete="SET NULL")
+    )
+    local_date: Mapped[datetime.date | None] = mapped_column(Date)
+    state: Mapped[str] = mapped_column(
+        String, nullable=False, default="ok", server_default=sa.text("'ok'")
+    )
+    # A code from app/vault/errors.py, never free text.
+    reason: Mapped[str | None] = mapped_column(String)
+    hold_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("vault_hold.id", ondelete="SET NULL")
+    )
+    disk_sha256: Mapped[str | None] = mapped_column(String)
+    render_digest: Mapped[str | None] = mapped_column(String)
+    missing_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("role in ('fact', 'journal', 'note')", name="ck_vault_file_role"),
+        CheckConstraint(
+            "state in ('ok', 'quarantined', 'held', 'restore', 'diverged', 'dismissed')",
+            name="ck_vault_file_state",
+        ),
+        CheckConstraint(
+            "(role = 'fact' and local_date is null)"
+            " or (role = 'journal' and memory_id is null and local_date is not null)"
+            " or (role = 'note' and memory_id is null and local_date is null)",
+            name="ck_vault_file_role_columns",
+        ),
+        CheckConstraint(
+            "(state = 'held') = (hold_id is not null)", name="ck_vault_file_held_has_hold"
+        ),
+        CheckConstraint(
+            "reason is null or reason ~ '^[a-z][a-z_]{0,39}$'", name="ck_vault_file_reason_code"
+        ),
+        CheckConstraint(
+            "path <> '' and left(path, 1) <> '/' and position(chr(92) in path) = 0",
+            name="ck_vault_file_path_relative",
+        ),
+        Index("ix_vault_file_memory_id", "memory_id"),
+    )
+
+
+class VaultChunk(Base):
+    """A searchable piece of an opted-in note (plan section 9, milestone 8d).
+
+    A derived copy of the user's own notes, rebuildable from the vault:
+    purged by /delete, omitted from /export.
+    """
+
+    __tablename__ = "vault_chunk"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    file_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("vault_file.id", ondelete="CASCADE"), nullable=False
+    )
+    ord: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading: Mapped[str | None] = mapped_column(String)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        sa.Computed(
+            "to_tsvector('russian', coalesce(heading, '') || ' ' || \"text\")", persisted=True
+        ),
+    )
+
+    __table_args__ = (
+        CheckConstraint("char_length(heading) <= 200", name="ck_vault_chunk_heading_length"),
+        CheckConstraint('char_length("text") <= 1200', name="ck_vault_chunk_text_length"),
+        UniqueConstraint("file_id", "ord", name="uq_vault_chunk_file_ord"),
+        Index("ix_vault_chunk_tsv", "tsv", postgresql_using="gin"),
+    )
+
+
+class VaultStatus(Base):
+    """Singleton, id = 1. Operational timestamps only, no content."""
+
+    __tablename__ = "vault_status"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=sa.text("1")
+    )
+    last_ok_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_unavailable_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    ob_running_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Timestamps of vault-driven forgets, for 8c's rolling-hour cap.
+    forgets_window: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_vault_status_singleton"),
+        CheckConstraint(
+            "jsonb_typeof(forgets_window) = 'array'", name="ck_vault_status_forgets_array"
+        ),
     )

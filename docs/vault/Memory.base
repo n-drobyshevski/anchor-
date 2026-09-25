@@ -1,0 +1,31 @@
+# Anchor's facts as a table (phase-8 plan section 4.5).
+# Copy this file anywhere in your vault. Anchor never writes it.
+# From 8c you can edit `fact`, `kind` and `pinned` right in the table;
+# in `mirror` mode (8b) edits here are not applied yet.
+filters:
+  and:
+    - file.inFolder("Anchor/Memory")
+    - 'note.anchor == "fact"'
+properties:
+  note.fact:
+    displayName: Факт
+  note.kind:
+    displayName: Вид
+  note.pinned:
+    displayName: Закреплён
+  note.source:
+    displayName: Источник
+  note.created:
+    displayName: Создан
+views:
+  - type: table
+    name: Факты
+    groupBy:
+      property: note.kind
+      direction: ASC
+    order:
+      - note.fact
+      - note.kind
+      - note.pinned
+      - note.source
+      - note.created

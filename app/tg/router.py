@@ -92,10 +92,12 @@ from app.tg import orders as orders_ui
 from app.tg import planner as planner_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
+from app.tg import vault as vault_ui
 from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
 from app.web import auth as web_auth
 from app.web.hub import WebHub
+from app.vault import status as vault_status
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +195,8 @@ BOT_COMMANDS = [
     BotCommand(command="task", description="Добавить задачу в планер"),
     BotCommand(command="event", description="Добавить событие в планер"),
     BotCommand(command="done", description="Отметить задачу сделанной"),
+    # 8a (phase-8 plan section 8): the Obsidian vault's status.
+    BotCommand(command="vault", description="Хранилище Obsidian"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -304,6 +308,7 @@ def _format_state(
     backup=None,
     debts=None,
     persona_version=None,
+    vault_line=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -439,6 +444,7 @@ def _format_state(
         "{idle}"
         "{canary}"
         "{backup}"
+        "{vault}"
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
@@ -462,6 +468,10 @@ def _format_state(
         idle=idle_line,
         canary=canary_line,
         backup=backup_line,
+        # 8a (phase-8 plan section 8). Always shown, «выключено» included:
+        # whether the vault is connected is a fact about the bot's state
+        # worth one line even when the answer is no.
+        vault=(vault_line + "\n") if vault_line else "",
         memories=memories,
         time=now_local,
         tz=user_state.timezone,
@@ -575,6 +585,8 @@ def build_router(
             canary_status = await latest_canary_status(session)
             # 6e.
             backup_status = await latest_backup_status(session)
+            vault_health = await vault_status.probe(session, settings, clock)
+            vault_purge_pending = await vault_status.purge_pending(session)
         await message.answer(
             _format_state(
                 user_state,
@@ -594,7 +606,21 @@ def build_router(
                 # The short hash of the persona file actually served
                 # (PERSONA_FILE), the same sha persona_version rows use.
                 persona_version=load_persona(persona_path_for(settings))[1][:8],
+                vault_line=vault_ui.format_state_line(
+                    vault_health, clock, user_state.timezone, purge_pending=vault_purge_pending
+                ),
             )
+        )
+
+    @router.message(Command("vault"))
+    async def vault(message: Message) -> None:
+        """Status only in 8a (phase-8 plan section 8). Off makes no request."""
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            health = await vault_status.probe(session, settings, clock)
+            facts = await vault_status.count_fact_files(session)
+        await message.answer(
+            vault_ui.format_vault(health, settings, clock, user_state.timezone, facts=facts)
         )
 
     @router.message(Command("out"))
@@ -822,7 +848,7 @@ def build_router(
             return
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
-            message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
+            message.bot, message.chat.id, data_ui.confirm_text(settings), data_ui.confirm_keyboard()
         )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id

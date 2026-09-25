@@ -466,3 +466,88 @@ def test_liveness_stale_min_default_and_validation():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, LIVENESS_STALE_MIN=0)
     assert Settings(_env_file=None, LIVENESS_STALE_MIN=1).LIVENESS_STALE_MIN == 1
+# --- 8a: the vault (phase-8 plan section 3) ------------------------------
+
+# Low-entropy on purpose, like the secrets above.
+_VAULT_TOKEN = "vault-token-" + "v" * 32
+
+
+def test_the_vault_is_off_by_default_and_needs_nothing():
+    settings = Settings(_env_file=None, **_COMPLETE)
+    assert settings.VAULT_MODE == "off"
+    check_runtime_settings(settings)
+
+
+@pytest.mark.parametrize("mode", ["status", "mirror", "sync"])
+def test_every_vault_mode_passes_with_a_token_and_the_default_url(mode):
+    check_runtime_settings(_settings(VAULT_MODE=mode, VAULT_API_TOKEN=_VAULT_TOKEN))
+
+
+def test_an_unknown_vault_mode_is_refused():
+    with pytest.raises(SystemExit, match="VAULT_MODE must be one of"):
+        check_runtime_settings(_settings(VAULT_MODE="on"))
+
+
+@pytest.mark.parametrize("token", ["", "short-vault-token"])
+def test_a_vault_mode_needs_a_long_token_and_never_echoes_it(token):
+    with pytest.raises(SystemExit, match="VAULT_API_TOKEN") as excinfo:
+        check_runtime_settings(_settings(VAULT_MODE="status", VAULT_API_TOKEN=token))
+    if token:
+        assert token not in str(excinfo.value)
+
+
+def test_a_short_token_is_refused_even_when_off():
+    """From 8b a set token alone makes /delete call the vault service."""
+    with pytest.raises(SystemExit, match="VAULT_API_TOKEN"):
+        check_runtime_settings(_settings(VAULT_API_TOKEN="short-vault-token"))
+
+
+ACCEPTED_VAULT_URLS = [
+    "http://vault.railway.internal:8080",
+    "http://vault.railway.internal:8080/",
+    "http://anchor-vault.railway.internal",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "  http://vault.railway.internal:8080\n",
+]
+
+REFUSED_VAULT_URLS = [
+    "https://vault.railway.internal:8080",
+    "http://vault.up.railway.app",
+    "http://vault.railway.internal.evil.example",
+    "http://railway.internal",
+    "http://evil.example/.railway.internal",
+    "http://user:secret-pass@vault.railway.internal:8080",
+    "http://vault.railway.internal@evil.example",
+    "http://vault.railway.internal:8080/v1",
+    "http://vault.railway.internal:8080?x=1",
+    "http://vault.railway.internal:8080#frag",
+    "http://vault.railway.internal:99999",
+    "http://10.0.0.5:8080",
+    "http://[::1]:8080",
+    "http://127.0.0.2:8080",
+    "ftp://vault.railway.internal",
+    "vault.railway.internal:8080",
+    "http://vault .railway.internal",
+    "",
+]
+
+
+@pytest.mark.parametrize("url", ACCEPTED_VAULT_URLS)
+def test_vault_url_accepted(url):
+    check_runtime_settings(_settings(VAULT_MODE="status", VAULT_API_TOKEN=_VAULT_TOKEN, VAULT_URL=url))
+
+
+@pytest.mark.parametrize("url", REFUSED_VAULT_URLS)
+def test_vault_url_refused_without_echoing_it(url):
+    with pytest.raises(SystemExit, match="VAULT_URL") as excinfo:
+        check_runtime_settings(_settings(VAULT_MODE="status", VAULT_API_TOKEN=_VAULT_TOKEN, VAULT_URL=url))
+    message = str(excinfo.value)
+    if url.strip():
+        assert url.strip() not in message
+    assert "secret-pass" not in message
+    assert "evil.example" not in message
+
+
+def test_a_bad_vault_url_is_ignored_while_the_vault_is_off_and_tokenless():
+    check_runtime_settings(_settings(VAULT_URL="https://evil.example"))

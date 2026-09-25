@@ -57,6 +57,12 @@ Like every other job kind above except `SEND_OUTBOUND`, it needs
 neither `provider` nor a bot; unlike all of them, it needs neither
 `safety_provider` either -- it is two SQL UPDATEs and a pair of log
 lines, no model call at all.
+
+8b adds `VAULT_SYNC` (queued every minute by `_heartbeat_loop` in mirror
+and sync modes, pruned after an hour) and `VAULT_PURGE` (queued by
+/delete inside its own transaction). Neither calls a model or needs the
+bot; a purge that cannot reach the vault service is deferred, never
+failed.
 """
 
 from __future__ import annotations
@@ -91,6 +97,7 @@ from app.core.obligations import OBLIGATION_SWEEP, sweep_missed_checkin
 from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
+from app.core.report import may_report_now
 from app.core import review as review_module
 from app.core.review import REVIEW_EXPIRY
 from app.core.scheduler import (
@@ -135,8 +142,13 @@ from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
+from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
+from app.vault.sync import maybe_enqueue_vault_sync, run_vault_purge, run_vault_sync
 
 logger = logging.getLogger(__name__)
+
+# How long a failed vault purge waits before the next try (plan 10).
+VAULT_PURGE_RETRY = datetime.timedelta(minutes=5)
 
 IDLE_SLEEP_SECONDS = 0.5
 RECOVER_INTERVAL_SECONDS = 60
@@ -492,6 +504,21 @@ async def _run_job(
         )
         return ExtractOutcome()
 
+    if kind == VAULT_SYNC:
+        # 8b: one sync pass (phase-8 plan section 7). No model call, no
+        # bot: an unreachable vault completes the job normally, and the
+        # next minute's pass tries again.
+        await run_vault_sync(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == VAULT_PURGE:
+        # 8b: /delete's reach into the vault (phase-8 plan section 10).
+        # Any failure defers by five minutes -- Deferred keeps attempts
+        # at 0, so "/delete must really delete" never gives up.
+        if not await run_vault_purge(settings):
+            raise Deferred(clock.now_utc() + VAULT_PURGE_RETRY)
+        return ExtractOutcome()
+
     raise ValueError(f"unknown job kind: {kind}")
 
 
@@ -586,33 +613,6 @@ async def process_one_job(
     return True
 
 
-def _may_report_now(settings: Settings, clock: Clock, user_state) -> bool:
-    """May the job-finished line be sent right now (plan section 9)?
-
-    Three checks, and deliberately not the outbound gate: a research
-    job's "done" line is a reply to a command the user typed, not an
-    unsolicited message. It does not touch the outbound counters, is
-    not counted by the gate, and is not subject to OUTBOUND_ENABLED or
-    the daily cap -- plan section 9 says so in as many words.
-
-    What it does respect is the three states that mean "not now" in the
-    user's own voice: a pause (/out, a pause word, a welfare trigger),
-    an explicit /quiet, and quiet hours. Same three the gate checks
-    second, third and fourth, for the same reasons, read the same way.
-
-    When the answer is no, nothing is sent and nothing is queued for
-    later: the cards are already in /notes, which is where the line
-    would have pointed.
-    """
-    if not user_state.persona_active:
-        return False
-    now = clock.now_utc()
-    if user_state.quiet_until is not None and user_state.quiet_until > now:
-        return False
-    local_now = to_local(now, user_state.timezone)
-    return not within_window(local_now.time(), settings.QUIET_START, settings.QUIET_END)
-
-
 async def _send_research_done(
     bot: Bot, settings: Settings, clock: Clock, user_state, outcome
 ) -> None:
@@ -621,7 +621,7 @@ async def _send_research_done(
     Out of character on purpose, like every other system reply: the
     bot reporting on a task, not Anchor talking.
     """
-    if not _may_report_now(settings, clock, user_state):
+    if not may_report_now(settings, clock, user_state):
         logger.info(
             "research completion not sent", extra={"job_id": outcome.job_id, "event": "quiet"}
         )
@@ -818,6 +818,10 @@ async def _heartbeat_loop(
                     .values(heartbeat_at=clock.now_utc())
                 )
                 await session.commit()
+            # 8b: this minute's vault pass, in mirror/sync only -- a
+            # sibling step for the same reason as the research sweep.
+            async with sessionmaker() as session:
+                await maybe_enqueue_vault_sync(session, settings, clock)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

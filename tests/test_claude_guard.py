@@ -43,6 +43,12 @@ _spec.loader.exec_module(guard)
         "cat .env",
         "grep TOKEN ./.env",
         "source .env && python -m app.main",
+        # Phase 8: the vault's three credentials.
+        "echo $VAULT_API_TOKEN",
+        'curl -H "Authorization: Bearer ${VAULT_API_TOKEN}" http://127.0.0.1:8080/v1/status',
+        "printenv OBSIDIAN_AUTH_TOKEN",
+        "python -c 'import os; print(os.environ[\"OBSIDIAN_E2EE_PASSWORD\"])'",
+        "python -c 'import os; print(os.getenv(\"OBSIDIAN_AUTH_TOKEN\"))'",
     ],
 )
 def test_blocks(command):
@@ -61,6 +67,8 @@ def test_blocks(command):
         "grep -rn DATABASE_URL app/config.py",
         "set -euo pipefail; echo ok",
         "env FOO=1 python -V",
+        "grep -rn VAULT_API_TOKEN app/config.py",
+        "uv run --directory vaultd pytest",
     ],
 )
 def test_allows(command):

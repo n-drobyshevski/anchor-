@@ -42,6 +42,7 @@ pytestmark = pytest.mark.asyncio
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
 SECRET_TEXT = "пользователь живёт в Лилле"
+NOTE_CHUNK_TEXT = "Бегаю по утрам в парке."
 
 
 def _command_update(update_id: int, text: str) -> dict:
@@ -217,6 +218,27 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(models.PlannerAction(kind="create_task", payload={"title": "x"}))
         await session.commit()
 
+    # 8a: the two exported vault tables, plus the two omitted ones so the
+    # omission is tested against rows that exist.
+    async with sessionmaker() as session:
+        hold = models.VaultHold(
+            kind="rule",
+            payload={"file_id": 1, "kind": "rule", "text": "не звонить после десяти", "supersedes_id": None},
+        )
+        session.add(hold)
+        await session.flush()
+        session.add(
+            models.VaultFile(
+                path="Anchor/Memory/0001-abcdef.md", role="fact", state="held", hold_id=hold.id
+            )
+        )
+        note = models.VaultFile(path="Бег.md", role="note")
+        session.add(note)
+        await session.flush()
+        session.add(models.VaultChunk(file_id=note.id, ord=0, heading="Бег", text=NOTE_CHUNK_TEXT))
+        session.add(models.VaultStatus(id=1, last_ok_at=now))
+        await session.commit()
+
 
 # --- contents ---
 
@@ -234,13 +256,18 @@ async def test_export_contains_every_exported_table_with_rows(sessionmaker, cloc
 
 async def test_export_omits_the_plumbing_tables(sessionmaker, clock):
     """telegram_update, job and pending_memory are transport and queue;
-    their only real content is message text `messages` already carries."""
+    their only real content is message text `messages` already carries.
+    8a adds vault_chunk (a copy of the user's own notes, which live in
+    their vault) and vault_status (timestamps)."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
         payload = await export.build_export(session, clock)
 
-    for name in ("telegram_update", "job", "pending_memory", "persona_version"):
+    for name in (
+        "telegram_update", "job", "pending_memory", "persona_version", "vault_chunk", "vault_status"
+    ):
         assert name not in payload["tables"]
+    assert NOTE_CHUNK_TEXT not in json.dumps(payload, default=str, ensure_ascii=False)
 
 
 async def test_the_bytes_are_valid_json_and_round_trip(sessionmaker, clock):
@@ -406,6 +433,9 @@ NOT_EXPORTED = {
     "heartbeat_state": "operational liveness marker, not user data",
     "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
     "access_grant": "token hashes and grant bookkeeping, not user data",
+    # 8a (phase-8 plan section 6).
+    "vault_chunk": "a derived copy of the user's own opted-in notes, rebuildable from the vault",
+    "vault_status": "operational timestamps, no content",
 }
 
 

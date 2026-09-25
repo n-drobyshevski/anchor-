@@ -13,8 +13,10 @@ sections and are summarised at the top of the hardening group for
 completeness.
 
 `anchor-phase1-plan.md` through `anchor-phase6-plan.md` (plus
-`anchor-web-panels-plan.md`) remain the specifications. This file
-records what was decided while implementing them.
+`anchor-web-panels-plan.md`), and `anchor-phase8-plan.md` for the vault
+(Phase 7 is reserved for tracker and device integrations), remain the
+specifications. This file records what was decided while implementing
+them.
 
 ---
 
@@ -981,3 +983,455 @@ so the whole suite stayed green. Three things were broken this way:
 
 **This would be wrong if** a provider construction ever started doing
 I/O. The new test would then need a stubbed client, not a skip.
+
+## 8a — the plan's facts, checked against the live sources
+
+Phase-8 plan section 2 lists the facts the design rests on, and asks
+that they be re-verified before any code. They were checked against
+`obsidian-headless` 0.0.14 (its README and the published `cli.js`,
+fetched with `npm pack`) and Railway's docs, on 2026-09-25:
+
+| Fact | Result |
+|---|---|
+| 0.0.14, Node ≥ 22, UNLICENSED | Confirmed. Still the latest release. Its dependencies are `better-sqlite3` 12.11.1 (native; loads on bookworm glibc) and `commander`. |
+| `OBSIDIAN_AUTH_TOKEN`, else `$XDG_CONFIG_HOME/obsidian-headless/auth_token` | Confirmed. The environment wins; the file is read untrimmed. On macOS and Windows the file lives at `~/.obsidian-headless/`. |
+| Per-vault state in `…/sync/<vaultId>` | Confirmed: `config.json` and `state.db` there, and a `sync.log`, which is new (below). |
+| `--json` disables prompts | Confirmed for `sync-setup`, which then requires `--password`. |
+| `--configs ""` disables settings sync | Confirmed: it deletes `allowSpecialFiles`, and the filter treats a missing list as empty. |
+| `--file-types` cannot turn attachments off | Confirmed, with a nuance. `""` deletes `allowTypes`, which falls back to `image,audio,pdf,video`. A non-empty list such as `pdf` narrows the set, but there is no way to sync zero types. We never pass the flag. |
+| Shared vaults are accepted by `sync-setup` | Confirmed: it searches `vaults` and `shared` alike, by id first and then by name. |
+| How `sync-list-remote --json` marks a shared vault | `{"vaults": [{id, name, region}], "shared": [{id, name, region}]}`. Which array an entry is in is the only mark. |
+| One volume per service, no replicas with a volume, downtime on redeploy | Confirmed. |
+| `<service>.railway.internal`, IPv6-only in legacy environments | Confirmed. Environments created after 2025-10-16 resolve to both families. Binding `::` covers both. |
+| `RAILWAY_PUBLIC_DOMAIN` set whenever there is a public domain | Confirmed. There is also a second public endpoint the plan did not name (below). |
+| A config-file path for a monorepo service | **Changed**: Config as Code is deprecated (below). |
+
+Four findings changed the plan, and each is its own entry below. The
+plan file carries them as rev. 3, each marked *8a*.
+
+## 8a — no `railway.json`: Config as Code is deprecated
+
+The plan had the vault service read `vaultd/railway.json` through a
+custom config-file path. Railway's docs now say Config as Code is
+deprecated. **New services cannot opt into it**, and existing
+`railway.json` files stop being read on 2026-12-01. The replacement,
+Infrastructure as Code (`.railway/railway.ts`), is one file for the
+whole project. A resource it omits is deleted on apply, so it would
+also have to describe the bot and Postgres. It needs the npm `railway`
+package, and it is applied with the `railway` CLI, which Claude Code's
+guard hook blocks.
+
+**Decision:** the vault service is configured in the dashboard, the way
+the bot already is (README → Deploy). `docs/vault-setup.md` lists every
+setting: Root Directory `/vaultd`, healthcheck `/healthz`, watch paths,
+restart policy, and no domain. Root Directory makes `vaultd/` the
+Docker build context, so `vaultd/Dockerfile` is found without a
+`RAILWAY_DOCKERFILE_PATH`.
+
+**This would be wrong if** the project moves to Infrastructure as Code
+for every service. At that point the vault service belongs in that
+file with the rest.
+
+## 8a — vaultd also refuses a TCP proxy
+
+The plan refuses to boot when `RAILWAY_PUBLIC_DOMAIN` is set, because a
+public URL would put the API on the internet. A Railway **TCP proxy**
+does the same over raw TCP, and sets `RAILWAY_TCP_PROXY_DOMAIN`, not
+`RAILWAY_PUBLIC_DOMAIN`. The debug database role is reached exactly
+that way (docs/claude-access.md), so this is not hypothetical. vaultd
+refuses either variable.
+
+**This would be wrong if** Railway grew a third kind of public endpoint
+that sets neither. The bearer token is then the only remaining line.
+It is at least 32 characters and compared in constant time.
+
+## 8a — `ob sync` writes its own log, and vaultd truncates it unread
+
+`cli.js` tees everything `ob sync` prints into
+`$XDG_CONFIG_HOME/obsidian-headless/sync/<vault id>/sync.log`,
+append-only and never rotated. The plan discards `ob`'s stdout and
+stderr so that file names never reach Railway's logs. This file is on
+the volume, so it is not a log leak. But it holds the same file names,
+and it grows forever on a volume sized for the vault.
+
+**Decision:** the supervisor truncates every `sync.log` under that
+directory before each start of the child, without reading it, and
+skips anything that is not a regular file. `ob sync`'s stdout and
+stderr go straight to `/dev/null`, never through a pipe. That is the
+stronger form of the plan's "drained and discarded": nothing in vaultd
+ever holds those bytes.
+
+**This would be wrong if** `sync.log` turned out to be the only record
+of a sync failure worth debugging. It would then need a size cap rather
+than truncation, and it would still never be read by anything that
+logs.
+
+## 8a — `ob` children get an allowlisted environment
+
+vaultd's own environment holds `VAULT_API_TOKEN`, the Obsidian token
+and the end-to-end password. None of that needs to reach `ob` except
+the Obsidian token. Every `ob` process gets exactly `PATH`, `HOME`,
+`XDG_CONFIG_HOME` and `OBSIDIAN_AUTH_TOKEN`. `sync-setup` takes the
+password as an argument (next entry). `ob sync` needs no password at
+all, because setup stored the derived key in `config.json`.
+
+**This would be wrong if** a future `ob` needed another variable. It
+would then fail loudly at boot, which is the direction we want.
+
+## 8a — the end-to-end password is on `sync-setup`'s argv
+
+`ob` accepts the vault's end-to-end password only as `--password` on
+the command line, or at an interactive prompt that `--json` disables.
+While `sync-setup` runs, the password is visible in
+`/proc/<pid>/cmdline` to any process in the same container. Every
+command is started as an argv list, never through a shell. vaultd runs
+`sync-setup` only when `VAULT_PATH` is not yet linked, which is the
+first boot, so the window is one command's lifetime, once.
+
+The exposure is real but narrow. The container runs only vaultd and
+`ob`, both of which hold the password anyway, and nothing in it logs
+argv. It is recorded rather than worked around because the
+alternatives are worse: feeding a TTY to an interactive prompt, or
+patching `cli.js`, which is UNLICENSED and must not be vendored.
+
+**This would be wrong if** anything else ever ran in the vault
+service's container, or if `ob` grew a `--password-file` or an
+environment variable, which we would then use.
+
+## 8a — refuse a vault path linked to a different vault
+
+`sync-list-local` reports which remote vault each local path is linked
+to. If `VAULT_PATH` is already linked, and not to the vault
+`OBSIDIAN_VAULT` names, vaultd refuses to start instead of syncing the
+old one. Changing `OBSIDIAN_VAULT` is then a deliberate act, done by
+clearing the sync state on the volume (docs/vault-setup.md), and never
+a silent merge of two vaults' files.
+
+`OBSIDIAN_VAULT` is resolved to an id before `sync-setup` runs, and the
+id is what is passed. `ob`'s own lookup also searches shared vaults by
+name, and it never gets the chance. A name that matches both your own
+vault and a shared one is refused rather than guessed at.
+
+**This would be wrong if** two vaults ever legitimately shared one
+path. They cannot: ob keeps one link per path.
+
+## 8a — PyYAML, which 3e avoided
+
+Phase 3e kept PyYAML out: the eval cases were the only YAML in sight,
+and `tomllib` served them from the standard library (README, "Two
+deviations from section 9"). Phase 8 is different in kind, not degree.
+Obsidian properties *are* YAML, written by Obsidian, by Bases and by
+Sync's merge. A hand-written parser for them would be a security
+boundary built on a subset guessed from examples.
+
+**Decision:** PyYAML goes into both projects, and is used only through
+one loader: `SafeLoader` subclassed to raise on anchors, aliases and
+duplicate keys, fed at most 4 KB. vaultd has it from 8a for the opt-in
+check. The bot declares it in 8a (approved for this milestone) and first
+imports it in 8b. No `python-frontmatter`: splitting a fence is a dozen
+lines (`vaultd/vaultd/frontmatter.py`). The two projects each keep
+their own loader, by the independence rule.
+
+**This would be wrong if** PyYAML's `SafeLoader` ever constructed
+arbitrary objects. It does not, and a `!!python/…` tag is one of
+vaultd's refusal tests.
+
+## 8a — vaultd's residual write race
+
+Every write and delete is compare-and-swap, serialised through one
+`asyncio.Lock`, and the lock only orders vaultd's own requests. `ob` is
+another process. An update writes and fsyncs a temp file, re-checks
+the hash of the bytes on disk, then `os.replace`s. If `ob` writes the
+file in the microseconds between the re-check and the replace, `ob`'s
+write is lost to ours.
+
+This is not papered over with a file lock `ob` would never take. It is
+closed by the next pass instead: the manifest then shows the hash of
+what is on disk, which is ours, and Sync still holds your version in
+its history. The window is microseconds; a human edit arriving through
+Sync lands seconds apart from anything the bot does. Create-only
+writes have no such window, because `os.link` fails atomically if the
+target exists (a test injects exactly that race).
+
+**This would be wrong if** `ob` ever held a lock that another process
+could take. We would then take it.
+
+## 8a — what vaultd's status codes promise
+
+- **400:** the request is malformed (the path or the body). It says
+  nothing about the vault.
+- **403:** a write, delete or purge on a path outside the writable set,
+  or one that crosses a symlink. The bot never produces one on purpose.
+- **404:** every read refusal. A missing note, a note without
+  `anchor: read`, a dot-folder, a symlink and a folder all get the same
+  status and the same body, so a caller cannot probe for what it may
+  not see.
+- **412:** compare-and-swap lost.
+- **422:** a file in `Anchor/Memory/` or `Anchor/Journal/` that is not
+  UTF-8. It is in Anchor's scope, so it is listed and it exists, but it
+  cannot be returned as text. 8c quarantines it. A note that is not
+  UTF-8 is never opted in, and so is simply absent.
+
+Symlinks are refused by walking each path one component at a time with
+`O_NOFOLLOW`, relative to the parent's descriptor, rather than by an
+`lstat` check followed by an `open`. `ob` cannot swap a folder for a
+link between the two.
+
+**This would be wrong if** the bot needed to tell "missing" from "not
+opted in". It must not, which is why they are the same.
+
+## 8a — limits that are constants, not settings
+
+vaultd's note size cap (`NOTE_MAX_BYTES`, 200 000), the 4 KB
+frontmatter cap, the 64 KB body cap, the restart backoff, and the bot's
+client timeout (5 s) and response cap (8 MB) are all code constants.
+Each of them protects the boundary, and a deploy must not be able to
+widen it by pasting a variable. The plan's `VAULT_NOTE_MAX_BYTES` (8d)
+is a bot setting, and it can only narrow what vaultd already lists.
+
+The bot gets only the settings 8a reads: `VAULT_MODE`, `VAULT_URL` and
+`VAULT_API_TOKEN`. The plan's grace, warmup, caps and notes settings
+arrive with the milestones that read them, so no setting exists that
+does nothing.
+
+**This would be wrong if** a real vault had notes larger than 200 KB
+that should be searchable. Split them; the chunker would cut them up
+anyway.
+
+## 8a — `mirror` and `sync` are accepted, and act as `status`
+
+`check_runtime_settings` accepts all four modes, so a `VAULT_MODE=sync`
+set ahead of a deploy does not take chat down. Plan section 2's failure
+isolation says the vault never takes the bot down. Until 8b and 8c
+ship, `mirror` and `sync` do exactly what `status` does, and `/vault`
+says the mode is not in this build yet. `tests/test_vault_commands.py`
+pins, for every mode, that nothing beyond `GET /v1/status` is ever
+requested, and that the heartbeat queues no vault job.
+
+The token and URL are checked whenever the mode is not `off` *or* a
+token is set. From 8b, a set token alone lets `/delete` reach the vault
+service in any mode.
+
+**This would be wrong if** accepting an unimplemented mode ever hid a
+misconfiguration. `/vault` names it, which is the place you would look.
+
+## 8a — `/vault` and `/state` probe the service and remember the answer
+
+In `status` mode no sync pass runs, so nothing else would notice the
+vault service going away. Both commands make one `GET /v1/status` and
+record the answer in `vault_status`: `last_ok_at` and
+`ob_running_since` on success, `last_unavailable_at` on failure. That
+is what lets `/state` say «нет связи с 14:05». In `off` they make no
+request and write nothing.
+
+`/state` gained one state the plan's list lacks, «синхронизация
+остановлена». vaultd answers but `ob` is not running, which is neither
+«ок» nor «нет связи». «удаление файлов ожидает» arrives with 8b's
+`vault_purge`.
+
+**This would be wrong if** `/state`'s latency mattered more than the
+line. A hung vault service costs it up to the client's 5 s timeout. A
+refused connection costs nothing.
+
+## 8a — the CHECKs the schema states
+
+Every invariant plan section 6 writes as a comment is a constraint:
+
+- `ck_vault_file_role_columns`: a fact has no date; a journal day has
+  a date and no memory; a note has neither.
+- `ck_vault_file_held_has_hold`: `held` if and only if there is a hold.
+- `ck_vault_file_reason_code`: a reason is a snake_case code of at most
+  40 characters, never text. The plan says "a code from errors.py,
+  never free text". The list itself is 8c's, so the shape is what 8a
+  can pin.
+- `ck_vault_file_path_relative`: non-empty, no leading `/`, no
+  backslash. The same rule vaultd enforces, stated again where the
+  paths are stored.
+- `ck_vault_hold_payload_object`, plus one per kind:
+  `{"file_ids": [...]}` for `mass_delete`, and all four keys for
+  `rule`. Both are wrapped in `coalesce`, because a CHECK that
+  evaluates to NULL passes, and a missing key makes these NULL. A test
+  caught exactly that.
+- `ck_vault_status_singleton` and `ck_vault_status_forgets_array`.
+- `ck_user_state_vault_epoch`: six base32 characters.
+
+The epoch has a Python default (`secrets`) rather than a server one.
+Postgres cannot draw from a CSPRNG without an extension, and every
+insert of that row goes through SQLAlchemy. The migration draws its
+own epoch for the existing row, so it does not import app code.
+
+**This would be wrong if** 8c's reason codes needed digits or more than
+40 characters. Widening a CHECK is one migration.
+
+## 8b — mirror records edits and applies none
+
+Plan section 7 has mirror's ingest update `disk_sha256` and nothing
+else. 8b implements exactly that, and no more. It resolves no
+identities, creates no fact from a file, runs no deletions (section 7.2
+is skipped in mirror) and holds nothing. So a fact file you delete or
+rename is not recreated: its compare-and-swap update fails and is
+skipped, until 8c decides what the deletion means. `sync` mode behaves
+exactly like `mirror` until 8c ships. An AST test pins that nothing in
+`app/vault/` so much as names a function that changes memory.
+
+The fact file's callout tells the truth for the mode it is written in.
+In mirror it says edits are not applied, not plan 4.1's «Меняй `fact`…».
+8c changes the text back, and that rewrite of every fact file is paced
+by the write cap like any other.
+
+**This would be wrong if** someone ran mirror for weeks expecting edits
+to stick. `/vault` says in plain words that they do not.
+
+## 8b — your properties are carried over verbatim
+
+Plan 4.4 says a re-render writes Anchor's keys first, then "your keys
+in their original order and form". "Form" is taken literally: the
+composer's line marks cut each non-Anchor top-level key out of the
+source text, comments and flow style included, and the lines are
+appended unchanged. Re-dumping them through PyYAML would re-quote and
+re-flow them. The file would then look as if Anchor had edited your
+properties, which it must not.
+
+A file whose frontmatter fails the strict loader (duplicate keys from a
+Sync merge, an alias, a syntax error) is **not rewritten**. It is
+quarantined `bad_yaml`, and the quarantine lifts the next time the
+file's hash changes. Rewriting it would silently drop whatever the
+loader could not read.
+
+**This would be wrong if** users routinely left broken YAML in fact
+files. Such a file then stays frozen until fixed. The problem list
+that shows it arrives in 8c; until then `debug.vault_file` shows the
+reason code.
+
+## 8b — crashes on either side of the PUT converge
+
+A new fact's row is committed before the create-only PUT (plan 7.3).
+Two crash points follow:
+
+- **Before the PUT:** a row with no hash and no file. The next pass
+  creates the file.
+- **After the PUT, before the hash is recorded:** a row with no hash and
+  a file. The next pass records the manifest's hash first. The render
+  then finds its own content already on disk and adopts it, with no
+  write and no `name_taken`.
+
+Both are tests.
+
+`name_taken` is reserved for a create-only PUT that finds a file Anchor
+has no record of. With the epoch in every name, that is practically
+impossible.
+
+## 8b — a welfare day keeps its check-in note out of the vault
+
+A check-in note is stored before the welfare check runs on it. If it
+trips the check, the message is retagged `welfare`, but `checkin.note`
+keeps the text. Rendering «Заметка: …» would put welfare text in the
+vault, which plan section 10 forbids.
+
+**Decision (yours):** the day file omits the note whenever a
+`message.kind='welfare'` row falls on the check-in's local date or the
+day after, since a check-in can be answered past midnight. There is no
+schema change and no change to Phase 2. A test renders a welfare day
+and asserts that the text appears in no file.
+
+**This would be wrong if** an unrelated note on a welfare day mattered
+in the vault. It is still in the database and in `/export`.
+
+## 8b — `/delete`'s vault line appears only with a vault
+
+«Файлы Anchor в хранилище тоже удалятся. Obsidian Sync хранит их в
+истории версий ещё до месяца, зашифрованными.» is added to the
+confirmation only when `VAULT_API_TOKEN` is set. A vault line with no
+vault configured would itself be a false statement. The retention
+figure is Standard's month (plan §18.3, your answer). On Plus it would
+read «до года».
+
+## 8b — `/forget` of a corrected fact, pending §18.1
+
+8b keeps today's `/forget`: deleting a corrected fact's head
+reactivates its predecessor (`test_forget_the_head_of_a_chain_clears_the_pointer`).
+In the vault, the head's file is deleted and the predecessor gets a
+file of its own on the next pass. Whether `/forget` should forget the
+whole lineage, as deleting a file will in 8c, is plan §18.1, to be
+settled before 8c.
+
+## 8b — technique sources, and the lowest card id
+
+A technique's file quotes the card it came from, and names the domain
+from the card's clip. The card still points at the row originally
+adopted, so every id in the lineage is searched. When several cards
+match (adoption falls back to a near-duplicate memory, so two cards can
+land on one fact), the lowest card id wins, so the file is
+deterministic.
+
+The whole memory table and the linked cards are read in two queries
+per pass, and lineages are walked in Python. That avoids 2 × N queries
+a minute for N facts; a personal memory is hundreds of rows, not
+millions.
+
+## 8b on main — the vault lands on `main` as Phase 8
+
+The vault was written as "Phase 5" on a branch that stopped at Phase 4,
+while `main` went on to ship its own Phase 5 (personality) and Phase 6
+(idle learning), and reserved Phase 7 for trackers and devices. Merging
+it therefore renumbered it: the plan is `anchor-phase8-plan.md`, the
+milestones are 8a–8d, and every reference in code, docs and tests
+followed. Only text the vault itself added was renumbered; `main`'s own
+"5a"–"5e" labels are its Phase 5 and stay as they are.
+
+Three things on `main` changed what the vault had assumed. Each has an
+entry below.
+
+## 8b on main — `/forget` keeps `main`'s protection, not a `forgotten` card
+
+The vault plan fixed a phase-4 bug (a `/forget` of an adopted technique
+raised on `study_card`'s foreign key) by adding a card status
+`forgotten`. `main` had already fixed the same bug another way:
+`hard_delete` refuses to delete a lineage head that an adopted card
+points at (`FORGET_PROTECTED`), and relinks cards to the successor
+otherwise.
+
+**Decision (yours): `main`'s protection stays.** The `forgotten` status,
+its migration and its `hard_delete` change were dropped in the merge. A
+protected fact keeps its memory, so it keeps its vault file, which a
+test pins. Plan §17's "`/forget` works on an adopted technique" is
+superseded by that protection, and 8c's `forget_lineage` must honour it
+rather than bypass it.
+
+## 8b on main — idle consolidation moves memory behind the vault's back
+
+`write_memory` moves `vault_file.memory_id` to a lineage's new head in
+the same transaction. Phase 6's idle consolidation
+(`app/core/idle/consolidate.py`) does not call it. It inserts the merged
+fact and sets `superseded_by` on the originals directly, and can merge
+two originals into one. Its undo (`app/core/idle/undo.py`) deletes the
+merged row and reactivates the originals, also directly. Left alone,
+that would leave a file stuck on a superseded row and create a second
+file for the head.
+
+**Decision:** the sync pass repairs this itself before rendering.
+`_follow_heads` walks each fact row's memory to the head of its chain.
+The oldest row to reach a head keeps it, and any later row landing on
+the same head is treated as forgotten, so its file is deleted by
+compare-and-swap. After an undo, the merged row's deletion nulls its
+file row (`ON DELETE SET NULL`), which deletes that file, and the
+reactivated originals get files of their own. A test runs the merge and
+the undo end to end.
+
+The fix lives in `app/vault/`, not in `consolidate.py`, on purpose: the
+vault must stay correct whoever writes memory, and Phase 6's isolation
+rules keep idle modules from importing `app.core.memory`.
+
+**This would be wrong if** a merge should keep *both* originals'
+histories in one file's `## Раньше`. Today it shows the chain through
+the lowest-id original only.
+
+## 8b on main — the vault service's config and main's root `railway.json`
+
+`main` deploys the bot through a root `railway.json` (Config as Code),
+which Railway has deprecated. The vault service does not use it: its
+Root Directory is `/vaultd`, so Railway reads neither that file nor
+any other config file for it. Its settings are in the dashboard, as
+`docs/vault-setup.md` describes (8a's decision). The bot's own
+`railway.json` stops being read on 2026-12-01, and moving the bot off
+it is outside the vault's scope.
