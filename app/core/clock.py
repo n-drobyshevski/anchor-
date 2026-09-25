@@ -173,6 +173,20 @@ def combine_local(
     return naive.replace(tzinfo=tz).astimezone(UTC)
 
 
+def floating_utc_midnight(day: datetime.date) -> datetime.datetime:
+    """UTC midnight of `day`, ignoring the user's timezone entirely.
+
+    For an all-day date, not combine_local(): the planner stores
+    all-day events as a floating date at UTC midnight (see the
+    planner's lib/datetime/local.ts `dateInputToUtcMs`), not as the
+    user's local midnight converted to an instant. combine_local()
+    here would shift the date by a day east or west of UTC -- e.g.
+    Europe/Moscow local midnight on the 25th is 2026-09-24T21:00Z,
+    a different calendar date.
+    """
+    return datetime.datetime.combine(day, datetime.time(0, 0), tzinfo=UTC)
+
+
 def local_target(
     clock: Clock, timezone: str, time_of_day: datetime.time
 ) -> datetime.datetime:

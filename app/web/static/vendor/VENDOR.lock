@@ -1,0 +1,42 @@
+{
+  "files": {
+    "hooks.module.js": {
+      "package": "preact",
+      "sha256": "9e7eff58e0ae604583461eba1344da69a6894eab575eb591c635cc0d3f9ec57d"
+    },
+    "htm.module.js": {
+      "package": "htm",
+      "sha256": "ab33dd3f38059b9be4d5f5350128eefb2356639c4e0bbe9d9e8b3ba75847e9e4"
+    },
+    "preact.module.js": {
+      "package": "preact",
+      "sha256": "25a5df7e9f628a587743c4641a368737a3b218f28ef738ba0376a2d5bdfc948c"
+    },
+    "signals-core.module.js": {
+      "package": "@preact/signals-core",
+      "sha256": "09550c9fea0ab36b1c12e9ff0bdc2a26ed310dd5a386197371f3677f44dae63a"
+    },
+    "signals.module.js": {
+      "package": "@preact/signals",
+      "sha256": "7f268c475c184e6718c965ec2aa6464c36b937e30093356c2f914bd8eb9c1846"
+    }
+  },
+  "packages": {
+    "@preact/signals": {
+      "integrity": "sha512-rVTRTt/T0HIRgbugwS5FigbfF/kfdEFYFtiqxa+lbpqTajepqnR0firuAS2iNdHyejWB7Yc9p9QePkVNBtTAwg==",
+      "version": "2.11.2"
+    },
+    "@preact/signals-core": {
+      "integrity": "sha512-HNB6HYeYKhQbJ1aKl+YRjrS4+QWHLKX6qKoUsfS/m0vqzsVaEBiZiaKbG/e+NKk2ch5ALQr/ihWaMHxiCuuWHA==",
+      "version": "1.14.4"
+    },
+    "htm": {
+      "integrity": "sha512-983Vyg8NwUE7JkZ6NmOqpCZ+sh1bKv2iYTlUkzlWmA5JD2acKoxd4KVxbMmxX/85mtfdnDmTFoNKcg5DGAvxNQ==",
+      "version": "3.1.1"
+    },
+    "preact": {
+      "integrity": "sha512-ej2aVZ+vZ8WO7tvlQWRM9N63A0KzF9q4mWJfDUHgYaIofWY9hu74QdnQrjoPMmZi2/nZ5gN0bJCQF49xQqx09Q==",
+      "version": "10.29.8"
+    }
+  }
+}

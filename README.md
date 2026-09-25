@@ -273,14 +273,15 @@ Milestone 3e closes Phase 3 with the thing that catches a regression
 before it reaches someone who did not ask to be written to.
 
 ```
-python -m eval.run              # all 13 cases, ~$0.10
+python -m eval.run              # all 26 cases, ~$0.18
 python -m eval.run --case 04    # one case
 python -m eval.run --dry-run    # build every prompt, call nothing
 ```
 
 **Manual only, never in CI**, because it costs money. Section 9's rule:
 run it before any `persona.md` edit or model change ships. A failure in
-a blocking case — 04, 05, 06, 09, 12, 13 — stops the change. Exit codes
+a blocking case — 04, 05, 06, 09, 12, 13, 15, 16, 18, 20, 21, 22, 26 —
+stops the change. Exit codes
 say which: `0` clean, `1` a blocking failure, `2` only non-blocking
 ones. That split matters, because Cydonia drifting a sentence over on
 case 3 is worth seeing and is not worth halting a deploy for.
@@ -338,8 +339,12 @@ Only the parts that run without a network: the four checks, the
 judge's response *validation*, and the case files — which are validated
 eagerly, so a typo in case 13 fails in a second rather than after $0.09
 of model calls. The case tests double as a guard on the plan's
-contract: 13 cases exist, and the six section 9 marks blocking are the
-six flagged blocking.
+contract: 26 cases exist (phase-5 5a adds 17, 18 and 24 to phase-3's
+13 and phase-4's 14-16; milestone 5b adds 19 and 20; milestone 5c adds
+21; milestone 5d adds 22, 23 and 26; milestone 5e adds 25, the
+callback case), and every id section 9, section 11 (phase-4) and
+phase-5 plan section 11 mark blocking — 04, 05, 06, 09, 12, 13, 15, 16,
+18, 20, 21, 22, 26 — is exactly the set flagged blocking.
 
 Everything else needs a real model to mean anything, and a test against
 a mocked judge would test the mock.
@@ -826,6 +831,56 @@ OpenRouter's reported `usage.cost` — and tells you whether annotations
 arrive at all. Then `python -m eval.run`, which must pass cases 15 and
 16 or exit non-zero.
 
+## Web UI
+
+A minimal Russian-language web chat for this same single-user bot,
+served by the same aiohttp process. Off by default (`WEB_UI_ENABLED=false`);
+turning it on requires `MODE=webhook` and an `https://` `PUBLIC_URL`
+(`http://localhost`/`127.0.0.1` only for local dev) — `check_runtime_settings`
+refuses to boot otherwise.
+
+**Enable it:**
+
+```bash
+uv run python scripts/web_passphrase.py   # prints WEB_PASSPHRASE_HASH=...
+```
+
+Set `WEB_UI_ENABLED=true` and the printed `WEB_PASSPHRASE_HASH` in the
+deployment environment, then open `PUBLIC_URL` in a browser.
+
+**Security model.** Every web message becomes a synthetic Telegram
+`Update` (negative `update_id`, `source='web'` in `telegram_update`)
+that the same single-concurrency worker feeds through the exact same
+`Dispatcher` as a real Telegram message — pause words, `/out`/`/in`,
+the daily spend cap, the welfare check, scenes and extraction all apply
+unchanged, because none of `app/core/` had to change at all. Replies to
+a web-origin message go to the web only (Telegram-origin and proactive
+messages are mirrored into the web view too, so it shows the whole
+conversation). Login is two factors: a passphrase (stdlib `hashlib.
+scrypt`, `N=2**17`), then an 8-character one-time code the *real* bot
+sends to `ALLOWED_CHAT_ID` — a stolen passphrase alone is not enough.
+Sessions are an opaque cookie whose sha256 alone is stored in Postgres;
+`/weblogout` (Telegram-only, obviously) revokes every session and
+closes every live connection at once. The page ships a strict CSP
+(`script-src 'self'`, `require-trusted-types-for 'script'`), renders
+all bot/user text with `textContent` only (no markdown, no
+auto-linking — model output is untrusted), and every `/api/*` request
+is checked against `Sec-Fetch-Site`/`Origin` before anything else runs,
+failing closed when either is missing or wrong.
+
+**Limitations.** `/delete` and `/export` are refused on the web, in two
+independent layers (an ingress-side command match, and an
+`is_web_sink` guard inside the handlers themselves) — a stolen web
+session must not be able to wipe the data or produce a bulk export;
+both stay Telegram-only. Proposal confirmations (due-action/focus/rule
+prompts) and the outbound nag's buttons are Telegram-only too — they
+are issued by the background job path, which always uses the real bot,
+not the per-row bot the update path picks; the web view shows their
+text but their buttons do not appear there, and the confirmation is
+Telegram-side. Rate limits and the in-memory login-code/session state
+are per-process, so this assumes the single Railway replica the rest of
+this README already assumes (see "Deploy" above).
+
 ## Decisions
 
 The `## Hardening H*` sections that used to live here have moved to
@@ -905,12 +960,24 @@ the extractor and welfare classifier depend on it.
    Disable).
 2. Railway: new project from this repo, add the Postgres plugin, set the
    env vars from `.env.example` (`MODE=webhook`).
-3. Start command: `alembic upgrade head && python -m app.main`.
+3. Start command: set by `railway.json` (Railpack build): `uv run python scripts/migrate.py && uv run python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit`. `deploy/Dockerfile` is parked, see its header.
    Healthcheck path: `/healthz`.
 4. Generate a public domain, set `PUBLIC_URL` to it, redeploy. The app
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
+
+**6e (hardening).** The service builds with Railpack (`railway.json`).
+A Dockerfile build was tried so that `pg_dump` 18 (matching production
+Postgres 18) would be in the image, but that deploy never got past the
+migration step; `deploy/Dockerfile` is parked with notes. Until
+`pg_dump` 18 is available in the runtime image, the nightly backup
+records `pg_dump_failed` (or `not_configured` without an age key) and
+`/state` shows the warning; nothing else depends on it. To enable nightly backups: generate an age keypair offline
+(`age-keygen -o key.txt`), set `BACKUP_AGE_RECIPIENT` to its public
+key, keep `key.txt` off this server, and set the `BACKUP_S3_*`
+variables from the Railway bucket's credentials (`docs/secrets.md`,
+`docs/restore.md`).
 
 ## Privacy
 
@@ -924,6 +991,42 @@ status, an error code, a count and a cost, and never a URL path or
 query, page text, card text, a quote or a topic. A path can carry
 personal information as easily as a message can.
 
+**P2 (the planner link).** With `PLANNER_ENABLED=true`, Anchor reads
+your agenda from the planner and can show it in chat. By your own
+decision recorded in the design review, the partner's *shared* (non-
+private) event titles are included in that agenda (`partner="shared"`)
+-- and because that agenda can be quoted back to you by the persona,
+**the partner's shared event titles do go to OpenRouter** as part of
+the prompt, same as anything else in the now-block. `LLM_DATA_COLLECTION
+=deny` still applies to that call. Sleep and heart-rate data is never
+included by `get_agenda` itself -- only `PLANNER_HEALTH` (below) adds
+it, and only your own. The partner's private events, and their
+id/description/location, are never
+emitted by the planner's `get_agenda` tool in the first place. `/delete`
+purges the planner link, the cached agenda and any pending planner
+action; `/export` includes the cached agenda but never the OAuth
+tokens themselves (see `app/core/export.py`'s `NOT_EXPORTED`-equivalent
+comment on `PlannerCredential`).
+
+**Anchor (sleep/recovery).** With `PLANNER_HEALTH=true`, each
+`PLANNER_SYNC` also calls the planner's `get_health` tool for your own
+data only, and the now-block gets up to one extra line built from it
+(e.g. "Сон: 6ч10м (глубокий 14%), HRV ниже твоей нормы, пульс покоя
+58"). **Your sleep and heart-rate metrics do go to OpenRouter** as part
+of that line, same as the rest of the now-block, whenever the flag is
+on. Off by default. The persona is instructed to use it for tone only
+-- never a diagnosis or medical advice (`persona/persona.md`).
+
+**P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
+a regex prefilter on your own message (never the partner's, and never
+run at all outside persona mode or during a hard pause) can trigger one
+extra safety-model call, run alongside the welfare check rather than
+before or after it, so it costs an ordinary turn no extra latency. That
+call never writes anything by itself: the result is the same
+`pa:y:<id>` / `pa:n:<id>` confirm card `/task` and `/event` already
+produce, and nothing reaches the planner until you tap it. If welfare
+finds real distress on the same turn, the proposal is dropped along
+with everything else that turn would have said.
 ### Claude Code
 
 Claude Code debugs this project without seeing the conversation. The

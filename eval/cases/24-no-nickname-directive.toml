@@ -1,0 +1,32 @@
+id = "24"
+title = "«Без обращения» в блоке «Сейчас» — прозвище не используется"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 10
+streak = 2
+last_checkin_at_hours_ago = 6
+# Forces the "Без обращения в этом ответе." directive regardless of the
+# normal coin flip -- see eval/scenario.py's _persona_context().
+nickname = "none"
+
+[[setup.transcript]]
+role = "user"
+content = "план на сегодня такой же"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Принято. Двигай дальше."
+
+[input]
+kind = "chat"
+text = "сделал половину, продолжаю после обеда"
+
+[checks]
+russian = true
+sentences = [1, 4]
+no_nickname = true
+judge = ["voice", "one_action"]

@@ -15,6 +15,7 @@ import logging
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
+from sqlalchemy import select
 
 from app.config import Settings
 from app.core import export
@@ -24,6 +25,7 @@ from app.db.models import (
     Journal,
     Memory,
     Message,
+    NotebookEntry,
     Proposal,
     Scene,
     SpendLedger,
@@ -93,6 +95,8 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                     usd_cost=decimal.Decimal("0.000108"),
                 ),
                 Memory(kind="identity", text=SECRET_TEXT, source="user"),
+                # 5b.
+                NotebookEntry(kind="observation", text=SECRET_TEXT, source="anchor"),
                 Checkin(local_date=today, day_rating=4, due_result="partial", note="устал"),
                 Proposal(field="due_action", value="сдать отчёт", reason="договорились"),
                 Journal(local_date=today, text="Поговорили про отчёт."),
@@ -147,6 +151,68 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 risk_final="low",
             )
         )
+        await session.commit()
+
+    # 5c. A second flush for the same reason as study_card above --
+    # checkin_order_result needs both a checkin and a standing_order id.
+    async with sessionmaker() as session:
+        checkin_row = (await session.execute(select(Checkin))).scalars().one()
+        order = models.StandingOrder(
+            text="пить воду по утрам", cadence="daily", status="active", source="user"
+        )
+        session.add(order)
+        await session.flush()
+        session.add(
+            models.CheckinOrderResult(checkin_id=checkin_row.id, order_id=order.id, result="no")
+        )
+        await session.commit()
+
+    # 5d. A third flush -- weekly_review needs its id before
+    # review_proposal, which needs its own before persona_amendment.
+    async with sessionmaker() as session:
+        review = models.WeeklyReview(
+            week_start=today,
+            analysis={"wins": [], "misses": [], "patterns": [], "intentions": [], "proposals": []},
+        )
+        session.add(review)
+        await session.flush()
+        proposal = models.ReviewProposal(
+            review_id=review.id, kind="persona_note", text="меньше вопросов утром"
+        )
+        session.add(proposal)
+        await session.flush()
+        session.add(
+            models.PersonaAmendment(
+                text="меньше вопросов утром",
+                status="trial",
+                proposal_id=proposal.id,
+                persona_sha="deadbeef",
+            )
+        )
+        await session.commit()
+
+    # 6a. A fourth flush -- idle_change needs idle_run's id.
+    async with sessionmaker() as session:
+        run = models.IdleRun(kind="backfill", local_date=today, status="done", reversible=True)
+        session.add(run)
+        await session.flush()
+        session.add(
+            models.IdleChange(
+                run_id=run.id, table_name="memory", row_id=1, op="insert", after={"id": 1}
+            )
+        )
+        session.add(models.BriefNote(local_date=today, notes=["сон"]))
+        session.add(models.InterestTopic(text="сон", packet="ref"))
+        await session.commit()
+
+    # P2. planner_credential is deliberately not seeded here -- it is
+    # not in EXPORTED_MODELS (see NOT_EXPORTED below) and this function
+    # exists to cover exported tables only.
+    async with sessionmaker() as session:
+        session.add(
+            models.PlannerSnapshot(id=1, fetched_at=now, payload={"events": [], "tasks": []})
+        )
+        session.add(models.PlannerAction(kind="create_task", payload={"title": "x"}))
         await session.commit()
 
 
@@ -319,6 +385,24 @@ NOT_EXPORTED = {
     "job": "queue plumbing; payloads reference rows that are exported",
     "pending_memory": "unclassified /remember text, exported once it becomes a memory",
     "persona_version": "a hash of a file in this repo, not user data",
+    # Web-chat plan track 1 (app/db/models.py's WebSession). Holds only
+    # sha256(token) and timestamps -- a login credential's fingerprint,
+    # not conversation content -- and /export handing back a still-valid
+    # session's hash would be a second way to leak the very credential
+    # the design goes out of its way never to store in plaintext
+    # (app/web/auth.py, track 2). purge.py still wipes it: "delete all
+    # my data" and "give me all my data" are not the same promise.
+    "web_session": "a session credential's hash, not conversation content",
+    # Web-chat plan track 2 (app/db/models.py's WebUpdate, added when the
+    # migration was reworked to avoid an ALTER on telegram_update). No
+    # content: only the client_key idempotency marker for a browser-
+    # originated update. purge.py still wipes it, same reasoning as
+    # web_session above.
+    "web_update": "an idempotency marker for a browser update, not conversation content",
+    # 6a.
+    "backup_log": "ciphertext object keys and sizes, not user data (plan section 3)",
+    "heartbeat_state": "operational liveness marker, not user data",
+    "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
     "access_grant": "token hashes and grant bookkeeping, not user data",
 }
 

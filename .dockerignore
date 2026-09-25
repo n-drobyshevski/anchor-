@@ -1,0 +1,25 @@
+# Milestone 6e. eval/, persona/, migrations/ and alembic.ini are kept
+# deliberately -- eval/ is imported at runtime by app/core/amendments.py
+# (amendment_trial) and the idle canary job, and persona/ and
+# migrations/ are read by the running app, not just by tests.
+
+.venv/
+.git/
+.gitignore
+
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+
+.env
+.env.*
+!.env.example
+
+# Generated at runtime, not part of the image.
+eval/reports/*
+!eval/reports/README.md
+
+# NOTE: *.md is deliberately NOT excluded here -- persona/persona.md
+# and persona/voice.md are read by the running app (app/core/prompt.py,
+# app/core/voice.py), not just documentation.

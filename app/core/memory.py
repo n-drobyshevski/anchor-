@@ -50,7 +50,8 @@ from sqlalchemy import delete, func, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.db.models import Memory, PendingMemory
+from app.core.state import Source, record_change
+from app.db.models import Memory, PendingMemory, StudyCard
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,42 @@ TECHNIQUE = "technique"
 MIN_QUERY_CHARS = 8
 
 KINDS = ("identity", "preference", "event", "rule", "technique")
+
+# Moved from app/tg/memory.py (W3): both transports validate a memory's
+# text against the same cap, and app/db/models.py's Memory.text carries
+# the identical 300-char CheckConstraint (ck_memory_text_length) as the
+# ultimate backstop either one would hit if this number ever drifted
+# from the column's own.
+MEMORY_TEXT_MAX = 300
+
+# Russian labels for every KINDS value, including `technique` -- which
+# app/tg/memory.py's own KIND_LABELS deliberately omits (plan section
+# 11: not something the user classifies by hand). W3's web MemoryDTO
+# lists every active memory regardless of source, technique rows
+# included, so its kind_label needs a label this dict is the only place
+# that has one for.
+KIND_LABEL: dict[str, str] = {
+    "identity": "Обо мне",
+    "preference": "Предпочтение",
+    "event": "Событие",
+    "rule": "Правило",
+    "technique": "Техника",
+}
+
+# set_pinned_capped's outcomes (W3). Plain string constants, not an
+# enum, matching this codebase's existing status-constant style
+# (app/core/proposal.py's PENDING/ACCEPTED/REJECTED/EXPIRED).
+PIN_OK = "ok"
+PIN_MISSING = "missing"
+PIN_OVER_CAP = "over_cap"
+
+# forget's outcomes (W3, same style as PIN_* above). FORGET_PROTECTED is
+# the one case hard_delete refuses outright: the row is the head of its
+# chain and a StudyCard still points at it -- see
+# _study_card_blocks_delete's own docstring.
+FORGET_OK = "ok"
+FORGET_MISSING = "missing"
+FORGET_PROTECTED = "protected"
 
 
 async def pinned_memories(session: AsyncSession, limit: int) -> list[Memory]:
@@ -380,6 +417,28 @@ async def write_memory(
     return memory
 
 
+async def _study_card_blocks_delete(session: AsyncSession, memory: Memory) -> bool:
+    """True if deleting `memory` would strand a `StudyCard` (W3 finding).
+
+    `study_card.memory_id` is a plain FK to `memory.id` with no `ON
+    DELETE`, and `ck_study_card_adopted_has_memory` forbids setting it
+    to NULL for an adopted card. `hard_delete` below relinks any card
+    pointing at `memory` to `memory`'s own successor exactly the way it
+    relinks a predecessor's `superseded_by` -- always safe when a
+    successor exists. Only when `memory` is the *head* of its chain (no
+    successor) is there nothing to relink a referencing card to, which
+    is the case this refuses rather than hitting either the FK
+    (non-adopted card) or the check constraint (adopted card) at
+    `session.commit()`.
+    """
+    if memory.superseded_by is not None:
+        return False
+    result = await session.execute(
+        select(func.count()).select_from(StudyCard).where(StudyCard.memory_id == memory.id)
+    )
+    return result.scalar_one() > 0
+
+
 async def hard_delete(session: AsyncSession, memory_id: int) -> bool:
     """Delete a memory outright, relinking any chain through it (plan section 11).
 
@@ -394,9 +453,17 @@ async def hard_delete(session: AsyncSession, memory_id: int) -> bool:
     cleared. When the deleted row was the head of its chain its
     successor is NULL, and relinking degenerates into exactly the clear
     section 11 describes.
+
+    Returns False, deleting nothing, rather than raise when
+    `_study_card_blocks_delete` refuses -- `forget` (below) is what
+    turns that specific refusal into its own distinct outcome; a bare
+    `hard_delete` caller only ever needs to know whether the row is
+    gone afterward.
     """
     memory = await session.get(Memory, memory_id)
     if memory is None:
+        return False
+    if await _study_card_blocks_delete(session, memory):
         return False
 
     successor = memory.superseded_by
@@ -404,6 +471,18 @@ async def hard_delete(session: AsyncSession, memory_id: int) -> bool:
         sql_update(Memory)
         .where(Memory.superseded_by == memory_id)
         .values(superseded_by=successor)
+    )
+    # A study_card that adopted this memory (or, pre-adoption, was
+    # pointed at it as the near-duplicate it would have written -- see
+    # near_duplicate's own docstring) must move the same way a
+    # predecessor's superseded_by does, or deleting a row a card still
+    # points at raises an unhandled IntegrityError. Unconditional here:
+    # _study_card_blocks_delete above already refused the one case where
+    # this would set memory_id to NULL (successor is None and a card
+    # still points at `memory`), so `successor` is always either a live
+    # replacement id or there is no card left to relink.
+    await session.execute(
+        sql_update(StudyCard).where(StudyCard.memory_id == memory_id).values(memory_id=successor)
     )
     await session.delete(memory)
     await session.commit()
@@ -423,6 +502,62 @@ async def set_pinned(session: AsyncSession, memory_id: int, pinned: bool) -> Mem
     return memory
 
 
+async def set_pinned_capped(
+    session: AsyncSession, memory_id: int, pinned: bool, *, max_pinned: int
+) -> str:
+    """Pin or unpin, refusing a *new* pin past `max_pinned` (W3, lifted
+    from app/tg/memory.py's `run_set_pinned`).
+
+    Returns PIN_OK, PIN_MISSING (no such active row -- a missing id or
+    one that is superseded), or PIN_OVER_CAP. The cap guards adding a
+    pin, not re-affirming one already pinned:
+    tests/test_memory_commands.py's
+    test_re_pinning_an_already_pinned_memory_at_the_cap_is_allowed is
+    the behavior this mirrors exactly, `target.pinned` being the guard
+    that keeps a repeat pin of an already-pinned row from being refused
+    by its own cap.
+    """
+    target = await get_active(session, memory_id)
+    if target is None:
+        return PIN_MISSING
+    if pinned and not target.pinned:
+        if await count_pinned(session) >= max_pinned:
+            return PIN_OVER_CAP
+    await set_pinned(session, memory_id, pinned)
+    return PIN_OK
+
+
+async def forget(session: AsyncSession, memory_id: int, *, source: Source) -> str:
+    """Hard-delete a memory and write its content-free audit row (W3,
+    lifted from app/tg/memory.py's `run_forget`).
+
+    Returns FORGET_OK, FORGET_MISSING (no such active-or-not row -- a
+    missing id) or FORGET_PROTECTED (the row exists but hard_delete
+    refuses it: it is the head of a chain and a StudyCard still points
+    at it, so there is nothing to relink `memory_id` to -- see
+    `_study_card_blocks_delete`). The distinction from FORGET_MISSING
+    matters to callers: MISSING means "nothing to do", PROTECTED means
+    "this row is real and still exists, refused on purpose".
+
+    Plan section 11: "state_change records `memory <id> deleted` with
+    no text" -- record_change's old_value is the id, stringified,
+    never the memory's own text.
+    """
+    memory = await session.get(Memory, memory_id)
+    if memory is None:
+        return FORGET_MISSING
+    if await _study_card_blocks_delete(session, memory):
+        return FORGET_PROTECTED
+
+    deleted = await hard_delete(session, memory_id)
+    if not deleted:
+        return FORGET_MISSING
+    await record_change(
+        session, field="memory", old_value=str(memory_id), new_value=None, source=source
+    )
+    return FORGET_OK
+
+
 async def get_active(session: AsyncSession, memory_id: int) -> Memory | None:
     memory = await session.get(Memory, memory_id)
     if memory is None or memory.superseded_by is not None:
@@ -430,19 +565,71 @@ async def get_active(session: AsyncSession, memory_id: int) -> Memory | None:
     return memory
 
 
-async def list_active(
-    session: AsyncSession, *, offset: int, limit: int
-) -> tuple[list[Memory], int]:
-    """One page of active memories, oldest first, plus the total count."""
-    total = await session.execute(
-        select(func.count()).select_from(Memory).where(Memory.superseded_by.is_(None))
+async def has_predecessors(session: AsyncSession, memory_ids: list[int]) -> set[int]:
+    """Which of `memory_ids` are the head of a supersede chain with at
+    least one predecessor -- some other row's `superseded_by` points at
+    them (W3 finding).
+
+    Forgetting such a row is `hard_delete`'s documented section-11
+    behavior of relinking to a NULL successor, which makes the
+    predecessor active again -- see `hard_delete`'s own docstring and
+    tests/test_memory.py::test_forget_the_head_of_a_chain_clears_the_
+    pointer, which pins that this is intentional, not a bug to fix
+    here. The web panel uses this set to warn in the forget confirm
+    dialog before the user does it, since the head of a chain is
+    exactly what "Исправить" or a consolidate merge produces.
+    """
+    if not memory_ids:
+        return set()
+    result = await session.execute(
+        select(Memory.superseded_by).where(Memory.superseded_by.in_(memory_ids)).distinct()
     )
+    return {row[0] for row in result.all()}
+
+
+async def list_active(
+    session: AsyncSession,
+    *,
+    offset: int,
+    limit: int,
+    kind: str | None = None,
+    pinned: bool | None = None,
+    order: str = "oldest",
+) -> tuple[list[Memory], int]:
+    """One page of active memories, plus the total count.
+
+    `kind`/`pinned` (W3, both optional, default None = unfiltered) narrow
+    both the page and its count identically, so `total` always matches
+    what the returned page is a slice of.
+
+    `order` (W3): `"oldest"` (the default) keeps the original
+    `id.asc()` ordering, which is what keeps app/tg/memory.py's
+    `show_memories_page` (still calling this with only offset/limit)
+    byte-identical. `"web"` orders `pinned.desc(), id.desc()` instead --
+    newest first, pinned first -- matching Memory.js's own client-side
+    prepend-on-add/edit and pinned-first sort, so a post-write refetch
+    (the SSE invalidate every write triggers) doesn't move or hide the
+    row the user is looking at. Any other value is a programming error,
+    not user input, so it is asserted rather than degraded to a filter.
+    """
+    if order not in ("oldest", "web"):
+        raise ValueError(f"list_active: unknown order {order!r}")
+
+    filters = [Memory.superseded_by.is_(None)]
+    if kind is not None:
+        filters.append(Memory.kind == kind)
+    if pinned is not None:
+        filters.append(Memory.pinned.is_(pinned))
+
+    order_by = (
+        (Memory.id.asc(),)
+        if order == "oldest"
+        else (Memory.pinned.desc(), Memory.id.desc())
+    )
+
+    total = await session.execute(select(func.count()).select_from(Memory).where(*filters))
     rows = await session.execute(
-        select(Memory)
-        .where(Memory.superseded_by.is_(None))
-        .order_by(Memory.id.asc())
-        .offset(offset)
-        .limit(limit)
+        select(Memory).where(*filters).order_by(*order_by).offset(offset).limit(limit)
     )
     return list(rows.scalars().all()), total.scalar_one()
 

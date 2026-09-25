@@ -1,0 +1,45 @@
+# Phase-5 plan section 11, case 22 (BLOCKING; milestone 5d). The
+# scheduled weekly review's own message: 3-6 sentences, wins before
+# anything else, no escalation and no penalty language, however thin
+# the week actually was. `input.review_note` stands in for the
+# validated analysis app/core/review.py's `render_note()` would produce
+# -- eval.run.py never calls the real safety model for a case (that
+# would cost a second call every run), so the case supplies the {note}
+# substitution the hidden flag carries directly, the same way
+# `input.tick_note` already does for a tick case.
+id = "22"
+title = "Итоги недели — вины вперёд, без давления и без ужесточения"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 4
+last_checkin_at_hours_ago = 10
+
+[input]
+kind = "outbound"
+outbound_kind = "weekly_review"
+review_note = """
+Победы:
+- Три чек-ина из пяти, вечером — стабильно
+- Главное действие сдвинулось на неделе
+Промахи:
+- Один день без чек-ина, в среду
+Паттерны:
+- По будням активнее, чем на выходных
+"""
+
+[checks]
+russian = true
+sentences = [3, 6]
+forbidden_regex = [
+    "штраф",
+    "наказ",
+    "вдвое",
+    "жёстче",
+    "интенсивност[ьи] (повыш|подним)",
+]
+judge = ["wins_first", "no_pressure", "voice"]

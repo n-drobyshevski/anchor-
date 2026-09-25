@@ -40,13 +40,14 @@ from app.core.clock import Clock
 from app.core.outbound_gate import (
     SILENCE,
     TICK,
+    WEEKLY_REVIEW,
     GateCounts,
     GateFacts,
     GateState,
 )
 from app.core.spend import today_usd
 from app.core.state import set_counters
-from app.db.models import Outbound, UserState
+from app.db.models import Outbound, UserState, WeeklyReview
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,23 @@ async def checkin_done_today(
     )
 
 
+def week_start_for(local_date: datetime.date) -> datetime.date:
+    """The local Monday of the week `local_date` falls in (plan section 8:
+    "The week: from the local Monday to now. week_start is that
+    Monday."). `date.isoweekday()` is 1 for Monday, so subtracting
+    `isoweekday() - 1` days always lands on it, for any day of the week.
+    """
+    return local_date - datetime.timedelta(days=local_date.isoweekday() - 1)
+
+
+async def review_exists_for_week(session: AsyncSession, week_start: datetime.date) -> bool:
+    """Has a weekly_review row already been written for this local week?"""
+    result = await session.execute(
+        select(WeeklyReview.id).where(WeeklyReview.week_start == week_start).limit(1)
+    )
+    return result.first() is not None
+
+
 def gate_state_from(state: UserState) -> GateState:
     """Snapshot the user_state fields the gate reads."""
     return GateState(
@@ -230,7 +248,15 @@ async def load_gate_inputs(
             await last_sent_at(session, SILENCE) if kind in (None, SILENCE) else None
         ),
     )
-    facts = GateFacts(checkin_today=await checkin_done_today(session, state, clock))
+    review_exists = False
+    if kind in (None, WEEKLY_REVIEW):
+        week_start = week_start_for(today)
+        review_exists = await review_exists_for_week(session, week_start)
+
+    facts = GateFacts(
+        checkin_today=await checkin_done_today(session, state, clock),
+        review_exists_this_week=review_exists,
+    )
     return gate_state_from(state), counts, facts
 
 

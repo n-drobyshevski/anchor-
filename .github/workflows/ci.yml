@@ -1,0 +1,90 @@
+name: CI
+
+# Milestone 6e (Phase 6 plan section 9.6). Three independent jobs:
+# the test suite against the production Postgres major (18), pip-audit
+# for known vulnerabilities with an available fix, and gitleaks for
+# committed secrets -- all against every push and pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Matches production (Railway's postgres-ssl:18) and
+        # tests/conftest.py's own PRODUCTION_PG_MAJOR.
+        image: postgres:18
+        env:
+          POSTGRES_USER: anchor
+          POSTGRES_PASSWORD: anchor
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ANCHOR_ADMIN_DATABASE_URL: postgresql://anchor:anchor@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: eval dry run
+        run: uv run python -m eval.run --dry-run
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9"
+
+      - name: Export requirements
+        run: uv export --frozen --no-dev --no-hashes -o requirements.txt
+
+      - name: pip-audit (fails only when a fix is available)
+        # pip-audit 2.x has no flag for "ignore vulns with no fix yet" --
+        # scripts/pip_audit_gate.py runs it with JSON output and applies
+        # that filter itself. See the script's own docstring.
+        run: uv run python scripts/pip_audit_gate.py requirements.txt
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    # gitleaks-action v2 refuses to scan a pull_request event without a
+    # GITHUB_TOKEN (it reads the PR's commit range through the API).
+    # Read-only is enough: a finding fails the job either way.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

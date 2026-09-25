@@ -17,7 +17,10 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import memory, proposal, safety_events
+from app.core.clock import SystemClock
+from app.core.clock import local_date as clock_local_date
 from app.db.models import (
+    IdleRun,
     Proposal,
     SafetyEvent,
     SpendLedger,
@@ -231,20 +234,23 @@ async def test_state_shows_every_phase_two_field(sessionmaker):
         last_checkin_at=now - datetime.timedelta(days=1),
         due_action="сдать отчёт", due_set_at=now - datetime.timedelta(days=2),
     )
+    # /state sums spend for the user's local day; seeding the UTC date put
+    # these rows on "yesterday" from 22:00 UTC (Paris is UTC+2).
+    today = clock_local_date(SystemClock(), TIMEZONE)
     async with sessionmaker() as session:
         await memory.write_memory(
             session, kind="identity", text="пользователь живёт в Лилле", source="user"
         )
         session.add(
             SpendLedger(
-                local_date=datetime.datetime.now(datetime.timezone.utc).date(),
+                local_date=today,
                 category="chat",
                 usd_cost=decimal.Decimal("0.020000"),
             )
         )
         session.add(
             SpendLedger(
-                local_date=datetime.datetime.now(datetime.timezone.utc).date(),
+                local_date=today,
                 category="extractor",
                 usd_cost=decimal.Decimal("0.010000"),
             )
@@ -398,3 +404,43 @@ async def test_the_research_line_does_not_disturb_the_welfare_line(sessionmaker,
         if row.startswith("Проверка благополучия")
     )
     assert "ok 0 · сбои 0" in welfare
+
+
+# --- 6c: /state's canary line -------------------------------------------
+
+
+async def test_state_shows_no_canary_line_before_any_canary_ran(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    assert "Канарейка" not in fake.sent[0].text
+
+
+async def test_state_shows_the_latest_canary_ok(sessionmaker):
+    await _seed(sessionmaker, 1)
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="canary", local_date=datetime.date(2026, 9, 23), status="done",
+                summary={"cases": {"01": True}, "passed": True},
+            )
+        )
+        await session.commit()
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    assert "Канарейка: 2026-09-23 ок" in fake.sent[0].text
+
+
+async def test_state_shows_the_latest_canary_regression(sessionmaker):
+    await _seed(sessionmaker, 1)
+    async with sessionmaker() as session:
+        session.add(
+            IdleRun(
+                kind="canary", local_date=datetime.date(2026, 9, 23), status="done",
+                summary={"cases": {"01": False}, "passed": False},
+            )
+        )
+        await session.commit()
+    dp, bot, fake = _build_dp(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/state"))
+    assert "Канарейка: 2026-09-23 ⚠️" in fake.sent[0].text

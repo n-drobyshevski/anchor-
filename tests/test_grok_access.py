@@ -379,3 +379,14 @@ async def test_revoke_closes_everything(sessionmaker):
     assert fake.sent[-1].text == grok_ui.REVOKED_TEXT.format(count=1)
     async with sessionmaker() as session:
         assert await grants.find_active_grant(session, SystemClock(), token) is None
+
+
+def test_web_chat_cannot_open_a_grant():
+    """The capability URL is Telegram-only: web ingress refuses /grok and
+    the picker's `g:` presses before they are ever queued."""
+    from app.web import ingress
+
+    assert ingress.is_blocked_command("/grok")
+    assert ingress.is_blocked_command("/GROK@anchor_bot")
+    assert not ingress.is_blocked_command("/revoke")
+    assert "g:ok:1:0:0:0".startswith(ingress.BLOCKED_CALLBACK_PREFIX)

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -69,12 +70,37 @@ class Base(DeclarativeBase):
 
 
 class TelegramUpdate(Base):
+    """The inbound queue (plan section 2 / 6.3), plus the web-chat transport.
+
+    Origin is derived from the *sign* of `update_id`, not a stored
+    column: Telegram's own ids are always non-negative, and every
+    web-origin row gets a negative id from `web_update_seq`
+    (app/db/queue.py's `enqueue_web`), so `update_id < 0` is exactly
+    "this came from the browser" with no column that could ever drift
+    out of sync with it. This replaces an earlier design (web-chat plan
+    track 1) that added `source`/`client_key` columns and two CHECK
+    constraints directly on this table via an ALTER; that ALTER takes an
+    ACCESS EXCLUSIVE lock and hung a Railway deploy exactly the way
+    migration f7da7c8741fd did (see that migration's docstring and
+    commits 2cd24c2/068e7e3), so the web-chat plan's own schema was
+    reworked the same way: no ALTER on this hot table. The idempotency
+    key for a web-origin row lives on `WebUpdate.client_key` instead, in
+    a table this one has no foreign key into (an FK would itself take a
+    SHARE ROW EXCLUSIVE lock here) -- see `app/db/queue.py`'s
+    `enqueue_web` for how the two rows are written together.
+    """
+
     __tablename__ = "telegram_update"
 
     # Telegram's own update_id, provided explicitly on insert — not a
-    # generated identity column.
+    # generated identity column. Web rows get a negative id from
+    # web_update_seq instead (app/db/queue.py's enqueue_web).
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # 6e (migration f7da7c8741fd, already applied in production): the
+    # column is nullable in the schema, but the retention sweep (app/core/
+    # retention.py's forget_update_payloads) blanks old payloads to {}
+    # rather than NULL, so nothing ever writes a NULL here.
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     locked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -83,7 +109,86 @@ class TelegramUpdate(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("ix_telegram_update_status_update_id", "status", "update_id"),)
+    __table_args__ = (
+        Index("ix_telegram_update_status_update_id", "status", "update_id"),
+    )
+
+
+class WebUpdate(Base):
+    """The web-chat transport's own idempotency marker (web-chat plan
+    track 2, reworked to avoid an ALTER on `telegram_update` -- see that
+    model's docstring for why).
+
+    One row per web-origin update, `update_id`-keyed to the matching
+    `telegram_update` row but with **no foreign key** to it: an FK
+    constraint takes a SHARE ROW EXCLUSIVE lock on the referenced table
+    at creation time, which is exactly the kind of lock this rework
+    exists to avoid taking on `telegram_update`. The two rows are
+    written together, in one transaction, by `app/db/queue.py`'s
+    `enqueue_web` -- application code keeps them in sync since the
+    database no longer does.
+
+    `client_key` is POST /api/send's idempotency key, nullable because a
+    retried request may not always carry one, with a partial unique
+    index (see the migration) rather than a plain one, so NULL rows are
+    never compared against each other for uniqueness. `enqueue_web`
+    conflicts on this index (`ON CONFLICT (client_key) WHERE client_key
+    IS NOT NULL DO NOTHING`), then re-selects on a conflict, so a
+    retried POST with the same key returns the same `update_id`.
+
+    Holds no conversation content -- see app/core/purge.py's
+    PURGED_TABLES (it is purged like `web_session`) and
+    tests/test_export.py's NOT_EXPORTED (it is not exported, for the
+    same reason).
+    """
+
+    __tablename__ = "web_update"
+
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    client_key: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_web_update_client_key",
+            "client_key",
+            unique=True,
+            postgresql_where=text("client_key IS NOT NULL"),
+        ),
+    )
+
+
+class WebSession(Base):
+    """A logged-in web-chat session (web-chat plan section 4, track 1).
+
+    `token_hash` is the primary key rather than a surrogate id: the only
+    read this table ever serves is "does this cookie's hashed token name
+    a live session" (app/web/auth.py, track 2), so a surrogate id would
+    be a second key nothing looks up by. Only sha256(token) is ever
+    stored -- never the token itself -- the same shape as
+    TELEGRAM_SECRET_TOKEN's hmac.compare_digest check in
+    app/tg/webhook.py: a leaked row cannot be replayed as a cookie.
+
+    `expires_at` is the absolute session ceiling (WEB_SESSION_MAX_DAYS);
+    `last_seen_at` is the idle timeout's clock (WEB_SESSION_IDLE_HOURS),
+    both enforced by track 2's session validation, not by a database
+    constraint -- there is no CHECK here for the same reason
+    `user_state.quiet_until` has none: "is this still valid" depends on
+    the current time, which a CHECK constraint cannot read.
+    """
+
+    __tablename__ = "web_session"
+
+    token_hash: Mapped[bytes] = mapped_column(sa.LargeBinary, primary_key=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Job(Base):
@@ -273,6 +378,38 @@ class UserState(Base):
     )
     welfare_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # 5a (phase-5 plan sections 2 and 5). The one piece of nickname
+    # state that survives between turns: which nickname app/core/
+    # voice.py used last, so choose_nickname() never repeats it back to
+    # back. Written only by voice.remember_nickname()'s targeted
+    # UPDATE -- never through update_state(), so a nickname rotation
+    # leaves no state_change row (it is not a decision worth auditing,
+    # the same reasoning set_counters() already applies to the traffic
+    # counters above).
+    nickname_last: Mapped[str | None] = mapped_column(String)
+
+    # 5e (phase-5 plan sections 2, 3 and 11a). The last scene that got a
+    # callback ("## Можно вспомнить"), so app/core/callbacks.py can tell
+    # "this scene already had its one callback" from "this is a new
+    # scene, check again" without a second table. Written only by
+    # app/core/callbacks.py's own targeted UPDATE (`mark_delivered`) --
+    # never through update_state(), the same narrow-writer pattern
+    # app/core/voice.py's `nickname_last` already established.
+    #
+    # **No foreign key**, deliberately, though the plan allows one: this
+    # column lives on `user_state`, a KEPT table (app/core/purge.py),
+    # while `scene` is PURGED. purge.py's own TRUNCATE is intentionally
+    # CASCADE-free (see that module's docstring -- "if a future table
+    # ever references a purged one and is not itself listed here, the
+    # statement fails loudly"), and Postgres enforces that at the
+    # statement level regardless of the FK's ON DELETE action: TRUNCATE
+    # refuses outright when a table outside the statement references one
+    # inside it. A bare bigint avoids reintroducing exactly the failure
+    # mode that invariant exists to catch -- `reset_values` below already
+    # nulls this column on every `/delete`, which is what an ON DELETE
+    # SET NULL would have bought anyway.
+    callback_scene: Mapped[int | None] = mapped_column(BigInteger)
+
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
@@ -393,7 +530,7 @@ class SafetyEvent(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search')",
+            "kind in ('welfare', 'extractor', 'tick', 'distill', 'search', 'notebook', 'review')",
             name="ck_safety_event_kind",
         ),
         CheckConstraint(
@@ -434,7 +571,7 @@ class Memory(Base):
     pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
-    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt
+    source: Mapped[str] = mapped_column(String, nullable=False)  # user|extractor|adopt|consolidate
     confidence: Mapped[float | None] = mapped_column(Float)
     superseded_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -550,8 +687,20 @@ class Proposal(Base):
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
+        # 5c widens this with 'standing_order' -- the extractor's own
+        # proposal item (app/core/extract.py) can carry that field, even
+        # though a proposal row with it is never actually inserted:
+        # _apply() routes a standing_order proposal to app/core/
+        # orders.propose() instead, which writes its own `standing_order`
+        # row with the negotiation statuses that field needs (§"Where
+        # proposals live"). The widening keeps proposal.FIELDS -- the
+        # enum this constraint mirrors -- and the schema in step, so a
+        # future caller cannot construct a Proposal this constraint
+        # would then reject for a reason unrelated to the one enforced
+        # in code.
         CheckConstraint(
-            "field in ('due_action', 'focus_on', 'rule')", name="ck_proposal_field"
+            "field in ('due_action', 'focus_on', 'rule', 'standing_order')",
+            name="ck_proposal_field",
         ),
         CheckConstraint(
             "status in ('pending', 'accepted', 'rejected', 'expired')",
@@ -662,7 +811,8 @@ class Outbound(Base):
     __table_args__ = (
         UniqueConstraint("kind", "local_date", "bucket", name="uq_outbound_kind_date_bucket"),
         CheckConstraint(
-            "kind in ('morning', 'evening_nag', 'silence', 'tick')", name="ck_outbound_kind"
+            "kind in ('morning', 'evening_nag', 'silence', 'tick', 'weekly_review')",
+            name="ck_outbound_kind",
         ),
         CheckConstraint(
             "status in ('planned', 'sent', 'skipped', 'cancelled', 'failed')",
@@ -673,6 +823,121 @@ class Outbound(Base):
         # cancel_outbound sweeps them, /state shows the next one.
         Index("ix_outbound_status_planned_for", "status", "planned_for"),
         Index("ix_outbound_local_date", "local_date"),
+    )
+
+
+class PlannerCredential(Base):
+    """Anchor's OAuth grant on the planner -- one singleton row (P2).
+
+    `id` is pinned to 1 exactly like `UserState`: there is one planner
+    account linked, ever, so there is never an ambiguous row to update.
+    The refresh token rotates on every use (app/planner/auth.py), so an
+    env var can only ever seed it once -- this row is the durable copy.
+
+    `notified` is the once-only gate for the "reconnect the planner"
+    message: flips True the first time a revoked credential is noticed,
+    so a retried PLANNER_SYNC job against a still-revoked grant does not
+    resend it. See app/planner/auth.py's mark_notice_sent().
+    """
+
+    __tablename__ = "planner_credential"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    access_token: Mapped[str] = mapped_column(String, nullable=False)
+    refresh_token: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    client_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="active", server_default=text("'active'")
+    )
+    # /planner on|off (app/tg/planner.py) -- a user-facing pause distinct
+    # from `status`, which is the OAuth grant's own health. Turning this
+    # off stops app/core/scheduler.py's maybe_enqueue_planner_sync from
+    # queueing further syncs; PLANNER_ENABLED (the deploy-level switch in
+    # Settings) still gates everything above that.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    notified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_planner_credential_id_singleton"),
+        CheckConstraint("status in ('active', 'revoked')", name="ck_planner_credential_status"),
+    )
+
+
+class PlannerSnapshot(Base):
+    """The local cache of `get_agenda`'s output -- one singleton row (P2).
+
+    Written only by app/planner/jobs.py's PLANNER_SYNC job. Read by the
+    chat-turn path (app/core/turn.py) and never fetched from there live,
+    which is what keeps a slow or unreachable planner from adding
+    latency to a reply -- see app/planner/snapshot.py's module docstring.
+    """
+
+    __tablename__ = "planner_snapshot"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    fetched_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_planner_snapshot_id_singleton"),)
+
+
+class PlannerAction(Base):
+    """A planner write awaiting the user's confirmation (schema for P3).
+
+    Created now, alongside planner_credential/planner_snapshot, because
+    all three ship in one migration -- P2 itself never writes a row
+    here. Deliberately its own table rather than a reuse of `proposal`:
+    `proposal.create()` expires any other outstanding proposal, and a
+    planner action must not silently expire (or be expired by) an
+    unrelated extractor proposal (design review, table 1, "reusing
+    proposal for planner writes is harmless" -- it is not).
+    """
+
+    __tablename__ = "planner_action"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=text("'pending'")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Independent of `id`, which a /delete purge can reuse (purge.py
+    # TRUNCATEs with RESTART IDENTITY) -- app/planner/jobs.py derives
+    # the MCP clientRequestId from this instead, so a write made after a
+    # purge never collides with the planner's own idempotency index on
+    # a pre-purge row's id.
+    request_key: Mapped[str] = mapped_column(
+        String, nullable=False, default=lambda: uuid.uuid4().hex
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('create_task', 'create_event', 'complete_task')",
+            name="ck_planner_action_kind",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'accepted', 'rejected', 'expired', 'written', 'failed')",
+            name="ck_planner_action_status",
+        ),
+        Index("ix_planner_action_status", "status"),
+        Index("ix_planner_action_request_key", "request_key", unique=True),
     )
 
 
@@ -906,4 +1171,527 @@ class AccessGrant(Base):
             "dialog_days is null or dialog_days between 1 and 365",
             name="ck_access_grant_dialog_days",
         ),
+    )
+
+
+class NotebookEntry(Base):
+    """One of Anchor's own working notes (phase-5 plan sections 3 and 6).
+
+    `kind` is one of `intention` (written only by the user or, from 5d,
+    the weekly review -- never by `notebook_reflect`), `observation` or
+    `open_thread` (both written by `notebook_reflect`, never by the
+    user directly). `source` says who actually wrote this row --
+    `anchor`, `user` or `review` -- and app/core/notebook.py's own
+    validation, not this table, is what enforces that Anchor can never
+    close or edit a `user`- or `review`-sourced row (`ck_notebook_entry_
+    closed_consistent` only keeps `closed_by`/`closed_at` in step with
+    `active`, it says nothing about who may set them).
+
+    `active=false` is the only closed state; `closed_by` records who
+    closed it (`anchor`, `user` or `expiry`) and is required exactly
+    when `active` is false, never when it is true -- a closed row with
+    no author, or an active one that already carries a closer, are both
+    the kind of bug this constraint turns into a failed insert instead
+    of a silent data quality problem months later.
+
+    `scene_id` is the reflection job's own scene, kept for the
+    idempotency check (`run_notebook_reflect` looks for an existing row
+    with this `scene_id` before calling the model again) and for
+    nothing else -- ON DELETE SET NULL because purging that scene must
+    never fail the notebook wipe or leave a dangling reference.
+    """
+
+    __tablename__ = "notebook_entry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    # `sa.text(...)`, not the bare `text(...)` every other model in this
+    # file uses: this class also has a `text` *column*, and by the time
+    # this line runs, that name is already bound in the class body to
+    # the mapped_column() above -- the exact trap `Memory`'s own
+    # docstring warns about.
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.text("true")
+    )
+    closed_by: Mapped[str | None] = mapped_column(String)
+    scene_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("scene.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('intention', 'observation', 'open_thread')",
+            name="ck_notebook_entry_kind",
+        ),
+        CheckConstraint('char_length("text") <= 240', name="ck_notebook_entry_text_length"),
+        CheckConstraint(
+            "source in ('anchor', 'user', 'review')", name="ck_notebook_entry_source"
+        ),
+        CheckConstraint(
+            "closed_by is null or closed_by in ('anchor', 'user', 'expiry')",
+            name="ck_notebook_entry_closed_by",
+        ),
+        # Plan (implementation plan §"Design decisions"): active rows
+        # carry no closer, closed rows always do.
+        CheckConstraint(
+            "(active and closed_by is null and closed_at is null) or "
+            "(not active and closed_by is not null and closed_at is not null)",
+            name="ck_notebook_entry_closed_consistent",
+        ),
+        # The one query shape every reader needs: active rows of one
+        # kind (`/mind`'s grouping, the reflection job's per-kind cap,
+        # the prompt's three lines).
+        Index("ix_notebook_entry_active_kind", "active", "kind"),
+    )
+
+
+class StandingOrder(Base):
+    """A negotiated recurring commitment (phase-5 plan sections 3 and 7;
+    milestone 5c).
+
+    The row **is** the negotiation's state machine, the same shape
+    `Checkin` and `Proposal` already use for theirs:
+    `proposed` -> (`awaiting_counter` -> `countered`) -> `active` |
+    `declined`, or `expired` off the two waiting states after
+    `PROPOSAL_TTL_DAYS` (app/core/orders.py). `retired` is the terminal
+    state for an order the user had accepted and later removed with
+    `/orders`' [Снять].
+
+    `counter_of` is what makes "one round only" checkable in the
+    database, not just in code: a row with `counter_of` set is itself a
+    counter and can never be countered again (`ck_standing_order_not_
+    self_counter` only rules out the degenerate self-reference; the "a
+    counter can't be countered" rule is enforced in app/core/orders.py,
+    because it depends on the *original* row's own `counter_of` being
+    null, which a single-row CHECK cannot see).
+
+    `weekday` is required exactly when `cadence='weekly'` and forbidden
+    otherwise -- `ck_standing_order_weekly_needs_weekday` -- because a
+    `weekly` order with no weekday would have nothing for
+    `app/core/orders.py`'s `due_today()` to compare against, and a
+    `daily`/`weekdays`/`once` order with one would silently carry a
+    number nothing ever reads.
+
+    `tg_message_id` mirrors `Checkin.tg_message_id` and `Proposal.
+    tg_message_id`: the proposal card's message, so its buttons can be
+    edited away once the row is decided.
+    """
+
+    __tablename__ = "standing_order"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    cadence: Mapped[str] = mapped_column(String, nullable=False)
+    weekday: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    counter_of: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("standing_order.id")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 5d (phase-5 plan section 3): links a review-proposed order back to
+    # its review_proposal row, so app/tg/orders.py's so:a/so:r callbacks
+    # can call review.mark_proposal() on it -- see that migration's own
+    # docstring for why ON DELETE SET NULL. Written only by
+    # app/core/orders.py's own targeted UPDATE (link_review_proposal),
+    # never by app/core/review.py directly.
+    review_proposal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("review_proposal.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 200', name="ck_standing_order_text_length"),
+        CheckConstraint(
+            "cadence in ('daily', 'weekdays', 'weekly', 'once')",
+            name="ck_standing_order_cadence",
+        ),
+        CheckConstraint(
+            "status in ('proposed', 'awaiting_counter', 'countered', 'active', "
+            "'declined', 'retired', 'expired')",
+            name="ck_standing_order_status",
+        ),
+        CheckConstraint(
+            "source in ('anchor', 'user', 'review')", name="ck_standing_order_source"
+        ),
+        CheckConstraint(
+            "(cadence = 'weekly') = (weekday is not null)",
+            name="ck_standing_order_weekly_needs_weekday",
+        ),
+        CheckConstraint(
+            "weekday is null or weekday between 1 and 7", name="ck_standing_order_weekday_range"
+        ),
+        CheckConstraint("counter_of is null or counter_of <> id", name="ck_standing_order_not_self_counter"),
+        Index("ix_standing_order_status", "status"),
+    )
+
+
+class CheckinOrderResult(Base):
+    """One order's answer within one day's check-in (phase-5 plan
+    sections 3 and 7; milestone 5c).
+
+    `(checkin_id, order_id)` is the primary key, not a surrogate id:
+    exactly one answer per order per check-in, and `app/core/orders.py`'s
+    `record_result` upserts against it -- a replayed `c:o:<id>:<d|n>`
+    callback overwrites its own answer rather than adding a second row,
+    the same idempotency shape `Checkin`'s own upsert gives the day's
+    three fields.
+
+    Both foreign keys cascade: purging a check-in or an order (this
+    table is truncated ahead of both in app/core/purge.py, so the
+    cascade never actually fires there) must not leave an orphaned
+    result behind.
+    """
+
+    __tablename__ = "checkin_order_result"
+
+    checkin_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("checkin.id", ondelete="CASCADE"), primary_key=True
+    )
+    order_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("standing_order.id", ondelete="CASCADE"), primary_key=True
+    )
+    result: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("result in ('done', 'no')", name="ck_checkin_order_result_result"),
+    )
+
+
+class WeeklyReview(Base):
+    """One local week's safety-model analysis (phase-5 plan sections 3
+    and 8; milestone 5d).
+
+    `week_start` is the local Monday, unique -- the scheduled review
+    skips any week that already has a row (enforced by the outbound
+    gate's own `weekly_review` kind rule), and `/review` upserts against
+    it to regenerate. `analysis` is the validated JSON
+    (wins/misses/patterns/intentions/proposals), never the raw model
+    output. `message_id` points at the persona message that carried the
+    summary -- nullable because the row is written by
+    app/core/review.py before that message exists yet (the send path
+    generates the message after the analysis, then calls
+    `review.set_message_id`).
+    """
+
+    __tablename__ = "weekly_review"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    week_start: Mapped[datetime.date] = mapped_column(Date, nullable=False, unique=True)
+    analysis: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("message.id"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ReviewProposal(Base):
+    """One suggestion from a weekly review, sent as its own card (phase-5
+    plan sections 3 and 8; milestone 5d).
+
+    `kind='standing_order'` also gets its own `standing_order` row (via
+    `app/core/orders.py`'s `propose(..., source='review')`, linked back
+    by `standing_order.review_proposal_id`); `kind='persona_note'`
+    becomes a `persona_amendment` on adoption. `status` mirrors
+    `Proposal`'s own vocabulary (pending/adopted/rejected/expired) --
+    the same shape, a different table, because a review proposal is not
+    the extractor's pending-change-to-user_state kind of thing.
+    """
+
+    __tablename__ = "review_proposal"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    review_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("weekly_review.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    # `sa.text(...)`, not the bare `text(...)` every other model in this
+    # file uses: this class has a `text` *column* (Memory's and
+    # NotebookEntry's own docstrings warn about exactly this trap), so
+    # by the time `status`'s server_default below runs, `text` already
+    # names the mapped_column() above, not sqlalchemy's `text()`.
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default=sa.text("'pending'")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('standing_order', 'persona_note')", name="ck_review_proposal_kind"
+        ),
+        CheckConstraint(
+            "status in ('pending', 'adopted', 'rejected', 'expired')",
+            name="ck_review_proposal_status",
+        ),
+        CheckConstraint('char_length("text") <= 200', name="ck_review_proposal_text_length"),
+        CheckConstraint(
+            'reason is null or char_length(reason) <= 160', name="ck_review_proposal_reason_length"
+        ),
+        Index("ix_review_proposal_status", "status"),
+    )
+
+
+class IdleRun(Base):
+    """One idle-work attempt: planned, run, and its outcome (Phase 6 plan
+    section 3; milestone 6a).
+
+    `status` is the run's own lifecycle -- `queued` (planned by
+    app/core/idle/planner.py) -> `running` (claimed by app/core/idle/
+    runner.py) -> `done` | `failed` | `skipped`, and `done` rows with
+    `reversible=true` may additionally move to `undone` via /digest's
+    undo button (app/core/idle/undo.py). `skip_reason` doubles as the
+    failure code on a `failed` row -- there is deliberately no separate
+    error_code column, since the two never both apply to one row and the
+    plan's data model gives this table only one.
+
+    `summary` is counts, codes and cost only, never text -- app/core/
+    idle/'s whole privacy property (plan section 8's "Logs and idle_run.
+    summary contain only IDs, counts, codes, cost -- never text").
+    """
+
+    __tablename__ = "idle_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="queued", server_default=text("'queued'")
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String)
+    usd_cost: Mapped[decimal.Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=decimal.Decimal("0"), server_default=text("0")
+    )
+    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'"))
+    reversible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('backfill', 'consolidate', 'reflect', 'prebrief', 'critique', "
+            "'research', 'canary')",
+            name="ck_idle_run_kind",
+        ),
+        CheckConstraint(
+            "status in ('queued', 'running', 'done', 'failed', 'skipped', 'undone')",
+            name="ck_idle_run_status",
+        ),
+        # /digest's two live queries: "runs in the last N hours/days" and
+        # per-day per-kind counts for the planner's max-per-day checks.
+        Index("ix_idle_run_local_date_kind", "local_date", "kind"),
+    )
+
+
+class IdleChange(Base):
+    """The undo log for one idle_run's writes (Phase 6 plan section 3;
+    milestone 6a; `after` is 6a's own addition to the plan's SQL).
+
+    Reversed in app/core/idle/undo.py by replaying rows in reverse `id`
+    order: `insert` -> delete, `supersede` -> clear the pointer,
+    `close` -> reactivate, `update` -> restore `before`. `after` is the
+    row's state right after the change (including on `insert`, where
+    there is no `before`) -- undo.py compares it against the row's
+    *current* state before touching it, and skips (reports) that row on
+    a mismatch, which is what makes undo safe against something else
+    having changed the row since.
+
+    Only `memory` and `notebook_entry` in 6a: nothing else is
+    idle-reversible yet (the plan's consolidate/reflect kinds, 6b).
+    """
+
+    __tablename__ = "idle_change"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("idle_run.id", ondelete="CASCADE"), nullable=False
+    )
+    table_name: Mapped[str] = mapped_column(String, nullable=False)
+    row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    op: Mapped[str] = mapped_column(String, nullable=False)
+    before: Mapped[dict | None] = mapped_column(JSONB)
+    after: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "table_name in ('memory', 'notebook_entry')", name="ck_idle_change_table_name"
+        ),
+        CheckConstraint(
+            "op in ('insert', 'supersede', 'close', 'update')", name="ck_idle_change_op"
+        ),
+        Index("ix_idle_change_run_id", "run_id"),
+    )
+
+
+class BriefNote(Base):
+    """Tomorrow's pre-drafted morning notes (Phase 6 plan section 3;
+    milestone 6a's table, milestone 6c's writer and reader).
+
+    Keyed on the morning it is *for*, not on when it was written -- the
+    prebrief kind writes tonight for tomorrow's `local_date`, and the
+    morning outbound (6c) reads today's row and stamps `used_at`. A row
+    never used by its own date is simply stale and ignored, not deleted
+    -- the daily retention sweep (6e) is what actually clears it.
+    """
+
+    __tablename__ = "brief_note"
+
+    local_date: Mapped[datetime.date] = mapped_column(Date, primary_key=True)
+    notes: Mapped[list] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InterestTopic(Base):
+    """A user-picked research topic for idle `research` (Phase 6 plan
+    sections 3 and 6.5; milestone 6a's table, milestone 6d's writer and
+    reader -- `/interests add <packet> <тема>`).
+
+    Topics come only from the user, never chosen by the model (plan
+    section 1's "Out of scope": "Autonomous topic choice for research").
+    `active=false` is how `/interests`' [✖] retires one without losing
+    its history.
+
+    **The `text` column shadows sqlalchemy's `text()`** for the rest of
+    this class body, exactly the trap `Memory`'s own docstring warns
+    about -- `sa.text(...)` is used below rather than the bare
+    `text(...)` every other model in this file uses.
+    """
+
+    __tablename__ = "interest_topic"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    packet: Mapped[str] = mapped_column(String, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.text("true")
+    )
+    last_run_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 100', name="ck_interest_topic_text_length"),
+        CheckConstraint(
+            "packet in ('forums', 'guides', 'ref')", name="ck_interest_topic_packet"
+        ),
+    )
+
+
+class BackupLog(Base):
+    """One encrypted-backup attempt (Phase 6 plan section 9.1; milestone
+    6a's table only -- 6e writes and reads it).
+
+    No content ever: `object_key`, `bytes` and `sha256` describe the
+    ciphertext object on the bucket, never what is inside it.
+    """
+
+    __tablename__ = "backup_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    object_key: Mapped[str | None] = mapped_column(String)
+    bytes: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('ok', 'failed', 'pruned', 'purged')", name="ck_backup_log_status"
+        ),
+    )
+
+
+class HeartbeatState(Base):
+    """A single-row marker of when the heartbeat last ran (Phase 6 plan
+    section 2; milestone 6a; 6e's `/readyz` reads it).
+
+    Its own tiny table rather than a `user_state` column, by decision
+    (approved plan §7): `user_state`'s columns are audited or narrowly-
+    written traffic counters, and a liveness timestamp bumped every 60s
+    by the heartbeat loop is neither. Singleton shape copied from
+    `UserState.id` -- pinned to 1 by a default and a check constraint, so
+    there is always exactly one row and it is never ambiguous which one
+    to read or write.
+    """
+
+    __tablename__ = "heartbeat_state"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    heartbeat_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_heartbeat_state_id_singleton"),)
+
+
+class PersonaAmendment(Base):
+    """A `persona_note` proposal the user adopted (phase-5 plan sections
+    3 and 9; milestone 5d).
+
+    `status` is `trial` (the `amendment_trial` job is running or
+    queued) -> `active` | `failed`, or `active` -> `revoked` via
+    `/amendments`' own button. `persona_sha` is `persona.md`'s hash at
+    adoption -- **persona.md is never written by this codebase**; an
+    amendment only ever changes what the live prompt carries under
+    `## Поправки (одобрены тобой)` (app/core/prompt.py), never the file
+    itself. If a later manual edit changes the hash, the amendment stays
+    active but `/amendments` flags it "(персона изменилась — проверь)".
+
+    `eval_report` holds pass/fail per blocking case only -- no model
+    text, per the implementation plan's non-negotiable on that point.
+    """
+
+    __tablename__ = "persona_amendment"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    proposal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_proposal.id"))
+    eval_report: Mapped[dict | None] = mapped_column(JSONB)
+    persona_sha: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    activated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('trial', 'active', 'failed', 'revoked')",
+            name="ck_persona_amendment_status",
+        ),
+        CheckConstraint('char_length("text") <= 200', name="ck_persona_amendment_text_length"),
+        Index("ix_persona_amendment_status", "status"),
     )

@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # uv reads pyproject.toml/uv.lock; Dependabot's "pip" ecosystem
+  # understands both (pyproject.toml dependency blocks and a uv.lock
+  # lockfile), so no separate "uv" ecosystem entry is needed.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

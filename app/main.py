@@ -35,9 +35,23 @@ closes the client directly rather than through either one.
 
 from __future__ import annotations
 
+# ruff: noqa: E402 -- the diagnostics below must run before the imports.
+
+import faulthandler
+import sys
+
+# 6e deploy diagnostics: the process never logged anything in the
+# Docker image, so start the stack-dump timer before any heavy import.
+# If startup (imports included) has not finished within
+# STARTUP_TRACE_AFTER_S, every thread's stack goes to stderr, repeating.
+if __name__ == "__main__":  # `python -m app.main` only, never on import in tests
+    print("app.main: importing", file=sys.stderr, flush=True)
+    faulthandler.dump_traceback_later(90, repeat=True, file=sys.stderr)
+
 import asyncio
 import logging
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiohttp import web
 
@@ -47,11 +61,19 @@ from app.db.session import create_engine_and_sessionmaker, dispose_engine
 from app.llm.openrouter import OpenRouterProvider, build_client
 from app.llm.provider import LLMProvider
 from app.log import setup_logging
+from app.planner import auth as planner_auth
+from app.planner.client import PlannerClient, build_planner_client
 from app.startup import run_startup_tasks
+from app.tg.planner import LINK_FAILED, LINKED_OK
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
 from app.web import mcp
+from app.web import auth as web_auth
+from app.web.hub import WebHub
+from app.web.routes import setup_web
+from app.web.sink import make_web_bot
+from app.web.tail import start_tail, stop_tail
 from app.worker import run_worker, stop_worker
 
 logger = logging.getLogger(__name__)
@@ -114,12 +136,78 @@ def build_dispatcher(
     provider: LLMProvider,
     safety_provider: LLMProvider | None = None,
     clock: Clock | None = None,
+    hub: WebHub | None = None,
+    code_store: web_auth.CodeStore | None = None,
 ) -> Dispatcher:
+    """`hub` and `code_store` (web-chat plan track 2) default to None so
+    every caller and test predating the web UI keeps its shorter call;
+    both are only passed when WEB_UI_ENABLED, and both thread through to
+    build_router()'s `/weblogout` handler -- the one command that needs
+    to reach them from inside the ordinary Telegram-side dispatcher.
+    """
     dp = Dispatcher()
     dp.include_router(
-        build_router(sessionmaker, settings, provider, safety_provider, clock or SystemClock())
+        build_router(
+            sessionmaker,
+            settings,
+            provider,
+            safety_provider,
+            clock or SystemClock(),
+            hub,
+            code_store,
+        )
     )
     return dp
+
+
+def build_planner(settings: Settings) -> tuple[PlannerClient, aiohttp.ClientSession] | tuple[None, None]:
+    """The PlannerClient and the aiohttp session it borrows requests from.
+
+    (None, None) when PLANNER_ENABLED is off -- nothing under
+    app/planner/ is ever reached in that case (app/core/scheduler.py's
+    maybe_enqueue_planner_sync never enqueues, and app/worker.py's
+    dispatch for PLANNER_SYNC is unreachable with no job to claim), so
+    there is nothing worth holding an idle connection pool open for.
+
+    The caller owns the aiohttp.ClientSession and must close it on
+    shutdown, exactly as it owns and closes the LLM client (see
+    build_providers above) -- PlannerClient.close() is a no-op by the
+    same design.
+    """
+    if not settings.PLANNER_ENABLED:
+        return None, None
+    http = aiohttp.ClientSession()
+    return build_planner_client(settings, http), http
+
+
+async def handle_planner_oauth_callback(request: web.Request) -> web.Response:
+    """`GET /planner/oauth/callback` -- the browser lands here after consent.
+
+    Plain text, never JSON or HTML: this is a one-shot page a human
+    reads once in a browser tab and then closes, not an API response.
+    """
+    settings: Settings = request.app["settings"]
+    if not settings.PLANNER_ENABLED:
+        return web.Response(status=404, text="not found")
+
+    error = request.query.get("error")
+    if error:
+        return web.Response(status=400, text=f"planner denied: {error}")
+
+    code = request.query.get("code")
+    state = request.query.get("state")
+    if not code or not state:
+        return web.Response(status=400, text="missing code or state")
+
+    sessionmaker = request.app["sessionmaker"]
+    clock: Clock = request.app["clock"]
+    async with sessionmaker() as session:
+        try:
+            await planner_auth.complete_link(session, settings, clock, code=code, state=state)
+        except planner_auth.PlannerAuthError as exc:
+            return web.Response(status=400, text=LINK_FAILED.format(reason=str(exc)))
+
+    return web.Response(status=200, text=LINKED_OK)
 
 
 async def _on_startup(app: web.Application) -> None:
@@ -131,15 +219,37 @@ async def _on_startup(app: web.Application) -> None:
     # `alembic upgrade head && python -m app.main`); this is the
     # "then upsert user_state... then persona_version" step that
     # follows, per plan section 5's last line.
+    logger.info("startup step", extra={"event": "startup_tasks"})
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    # build_planner() must run inside a running event loop: aiohttp
+    # 3.14's ClientSession() calls asyncio.get_running_loop() in its
+    # constructor. main() is synchronous, so the session is built here
+    # instead, once on_startup is actually running on the loop.
+    planner_client, planner_http = build_planner(settings)
+    app["planner_client"] = planner_client
+    app["planner_http"] = planner_http
+
+    logger.info("startup step", extra={"event": "set_webhook"})
     await bot.set_webhook(
         url=settings.PUBLIC_URL.rstrip("/") + WEBHOOK_PATH,
         secret_token=settings.TELEGRAM_SECRET_TOKEN,
         allowed_updates=["message", "callback_query"],
     )
-    await register_commands(bot)
+    logger.info("startup step", extra={"event": "register_commands"})
+    await register_commands(bot, web_ui_enabled=settings.WEB_UI_ENABLED)
+
+    # Web-chat plan track 2: started only when WEB_UI_ENABLED, after the
+    # worker knows about web_bot but before anything can race it -- the
+    # tail task's cursor is read at start_tail() time (app/web/tail.py),
+    # so it must not start before build_webhook_app has already wired
+    # everything else into `app`.
+    web_bot = app.get("web_bot")
+    if web_bot is not None:
+        app["web_tail_task"] = await start_tail(sessionmaker, app["web_hub"])
+
+    logger.info("startup step", extra={"event": "run_worker"})
     app["worker_tasks"] = await run_worker(
         sessionmaker,
         app["dp"],
@@ -149,13 +259,29 @@ async def _on_startup(app: web.Application) -> None:
         app["clock"],
         app["provider"],
         app["safety_provider"],
+        web_bot,
+        app["planner_client"],
     )
+    faulthandler.cancel_dump_traceback_later()
     logger.info("startup complete", extra={"event": "startup"})
 
 
 async def _on_cleanup(app: web.Application) -> None:
     await stop_worker(app["worker_tasks"])
+    web_tail_task = app.get("web_tail_task")
+    if web_tail_task is not None:
+        await stop_tail(web_tail_task)
+    web_bot = app.get("web_bot")
+    if web_bot is not None:
+        # WebSinkSession.close() is a no-op (it never opens a real HTTP
+        # connection), but this Bot is a resource app/main.py created
+        # and owns, exactly like the real one two lines below -- an
+        # unclosed session is an unclosed session regardless of what its
+        # close() actually does.
+        await web_bot.session.close()
     await app["llm_client"].close()
+    if app["planner_http"] is not None:
+        await app["planner_http"].close()
     await dispose_engine(app["engine"])
     await app["bot"].session.close()
     logger.info("cleanup complete", extra={"event": "cleanup"})
@@ -172,7 +298,23 @@ def build_webhook_app(
     safety_provider: LLMProvider,
     llm_client,
     clock: Clock,
+    hub: WebHub | None = None,
+    code_store: web_auth.CodeStore | None = None,
+    planner_client: PlannerClient | None = None,
+    planner_http: aiohttp.ClientSession | None = None,
 ) -> web.Application:
+    """`hub` (web-chat plan track 2) is passed in, not built here, so the
+    same WebHub instance `main()` handed to `build_dispatcher()` (for
+    `/weblogout`) is the one `setup_web()` wires SSE subscribers into --
+    two hubs would mean `/weblogout` could close streams `GET /api/events`
+    never subscribed to. Non-None here is exactly the WEB_UI_ENABLED
+    signal: main() only ever constructs and passes one when it is set,
+    so this function needs no separate settings check of its own to
+    decide whether to call setup_web(). `code_store` gets the same
+    share-one-instance treatment for the same reason: /weblogout's
+    kill switch (app/tg/router.py) must invalidate the very CodeStore
+    POST /api/auth/passphrase issues codes into, not a second, empty one.
+    """
     app = web.Application()
     app["settings"] = settings
     app["bot"] = bot
@@ -184,6 +326,8 @@ def build_webhook_app(
     app["safety_provider"] = safety_provider
     app["llm_client"] = llm_client
     app["clock"] = clock
+    app["planner_client"] = planner_client
+    app["planner_http"] = planner_http
 
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
@@ -191,9 +335,33 @@ def build_webhook_app(
     if settings.GROK_ACCESS_ENABLED:
         mcp.register(app, settings)
 
+    # P2: registered unconditionally, like the planner's own /api/mcp
+    # route mirrors -- the handler itself 404s when PLANNER_ENABLED is
+    # off, rather than the route's existence leaking the setting.
+    app.router.add_get("/planner/oauth/callback", handle_planner_oauth_callback)
+
+    if hub is not None:
+        web_bot = make_web_bot(settings.TELEGRAM_BOT_TOKEN, hub)
+        app["web_hub"] = hub
+        app["web_bot"] = web_bot
+        setup_web(app, hub=hub, web_bot=web_bot, code_store=code_store)
+        # A live SSE stream (GET /api/events) otherwise holds up
+        # AppRunner.cleanup's server.shutdown(...) for the full 60s
+        # shutdown_timeout on every deploy: hub.close_all() sends every
+        # open stream its poison pill up front, so routes.events' own
+        # loop ends on its next iteration instead of needing to be
+        # force-cancelled (a low-severity finding: "No on_shutdown hook
+        # closes the hub"). on_shutdown runs before on_cleanup, so this
+        # fires well before _on_cleanup below tears down the worker/bots.
+        app.on_shutdown.append(_on_web_shutdown)
+
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
     return app
+
+
+async def _on_web_shutdown(app: web.Application) -> None:
+    app["web_hub"].close_all()
 
 
 async def _run_polling_mode(
@@ -211,21 +379,42 @@ async def _run_polling_mode(
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
 
+    # See _on_startup: built here, inside the running loop, not in
+    # main() before asyncio.run() starts it.
+    planner_client, planner_http = build_planner(settings)
+
     await bot.delete_webhook(drop_pending_updates=False)
     await register_commands(bot)
     worker_tasks = await run_worker(
-        sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider
+        sessionmaker, dp, bot, settings, cheap_provider, clock, provider, safety_provider,
+        planner_client=planner_client,
     )
+    faulthandler.cancel_dump_traceback_later()
     try:
+        # Polling mode serves no HTTP (plan/AGENTS: dev only), so
+        # /planner_link's callback has nowhere to land here -- linking
+        # is a webhook-mode-only flow, same as PUBLIC_URL itself.
         await run_polling(bot, sessionmaker, settings)
     finally:
         await stop_worker(worker_tasks)
+        if planner_http is not None:
+            await planner_http.close()
         await llm_client.close()
         await dispose_engine(engine)
         await bot.session.close()
 
 
+# If startup has not finished by then, dump every thread's stack to
+# stderr (and keep dumping) so a hang is visible in the deploy log
+# instead of a silent healthcheck timeout. Cancelled in _on_startup.
+STARTUP_TRACE_AFTER_S = 90
+
+
 def main() -> None:
+    # stderr, unbuffered, before anything that could hang: proves the
+    # process got past `alembic upgrade head &&` in the start command.
+    print("app.main: imports done, starting", file=sys.stderr, flush=True)
+    faulthandler.enable(file=sys.stderr)
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
     # Before anything is constructed: Bot() and the LLM client both
@@ -236,7 +425,21 @@ def main() -> None:
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
     provider, cheap_provider, safety_provider, llm_client = build_providers(settings)
     clock = SystemClock()
-    dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock)
+    # Web-chat plan track 2: one WebHub per process, built here (never
+    # inside build_webhook_app) so build_dispatcher()'s /weblogout
+    # handler and build_webhook_app()'s setup_web() share the exact same
+    # instance -- see build_webhook_app's docstring. None when disabled,
+    # which is the single signal both functions key off of.
+    hub = WebHub() if settings.WEB_UI_ENABLED else None
+    # Built alongside `hub`, for the same reason: build_dispatcher()'s
+    # /weblogout handler and build_webhook_app()'s setup_web() must
+    # share this exact CodeStore instance, not one each (see
+    # build_webhook_app's docstring).
+    code_store = web_auth.CodeStore() if settings.WEB_UI_ENABLED else None
+    dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock, hub, code_store)
+    # planner_client/planner_http are NOT built here: see _on_startup
+    # and _run_polling_mode, which build them once the event loop is
+    # actually running.
 
     if settings.MODE == "webhook":
         app = build_webhook_app(
@@ -250,6 +453,8 @@ def main() -> None:
             safety_provider,
             llm_client,
             clock,
+            hub,
+            code_store,
         )
         # access_log=None: the default access log prints the request
         # path, and /mcp/{token} carries a credential in its path.
