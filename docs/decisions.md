@@ -901,3 +901,83 @@ malformed-recipient cases.
 **This would be wrong if** something downstream needs to tell
 "never configured" from "configured and failing" by `status` alone.
 Today `/state` and the digest read `error_code` for that.
+
+## Phase-6 pass D — a preempted backfill or research run keeps what it already finished
+
+Plan §12 says a preempted idle job ends `skipped:preempted` with "no
+partial writes". Five of the seven kinds do exactly that:
+- consolidate, reflect and prebrief each write in a single transaction
+  opened after the model call and after the in-job preemption
+  re-check;
+- critique writes nothing but ledger rows and the run summary;
+- canary writes nothing but ledger rows and the run summary.
+
+`tests/test_idle_preemption.py` covers all five, mid-run included.
+
+Two kinds keep work on purpose:
+- **Backfill** commits one scene per unit. A user message between units
+  stops the loop, but the units already done stay done, and the run
+  ends `done` with `summary.preempted=true` rather than `skipped`
+  (app/core/idle/runner.py). Rolling those back would throw away paid,
+  correct summaries of scenes that are over; nothing about the user's
+  new message makes them wrong.
+- **Research** runs the unchanged /study pipeline. A preemption noticed
+  only after it finished keeps its cards, which sit unadopted and need
+  /adopt like any other.
+
+A third gap is also left as is. The in-job check and the commit are
+two statements, not one locked step, so an update landing between
+them is not seen by that run. Closing it would mean holding a lock on
+`telegram_update` across the apply, on the table every inbound message
+writes to. The window is a few milliseconds, and the worst case is one
+idle write that the next turn simply reads.
+
+**This would be wrong if** an idle write could ever change what the
+user sees in the turn that preempted it. Today none can: idle writes
+summaries, memories marked as idle's own, notebook rows, brief notes
+and unadopted cards, and none of them is read mid-turn.
+
+## Phase-6 pass D — restore_check proves the dump is usable, not that it matches production
+
+Plan §9.2 says `scripts/restore_check.py` "asserts the row counts of
+the key tables". The script runs from outside production, and this
+project's rule is that no tool reads the live database (CLAUDE.md,
+docs/claude-access.md), so there is nothing live to compare against.
+
+**Decision:** it asserts what can be checked from the dump alone:
+- pg_restore succeeded;
+- `user_state` has exactly its one row;
+- `alembic_version` is a revision this repo knows.
+
+It prints every table's count for a human to eyeball against `/state`
+(`Помню: N записей`).
+
+**This would be wrong if** a content-free count view existed that the
+operator could read from the same machine. The `debug` schema could
+grow one (`debug.table_counts`) and the script could then compare.
+
+## Phase-6 pass D — the canary never ran: eval built its providers with a removed setting
+
+Production logged `idle run failed event=AttributeError` for the first
+canary (2026-09-23). The cause was in `eval/trial.py` and `eval/run.py`:
+both built their `OpenRouterProvider`s with
+`web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS`, and
+milestone 4a had removed both that setting and that argument. Every
+test injects `FakeLLMProvider`s, which skips the construction branch,
+so the whole suite stayed green. Three things were broken this way:
+- the weekly canary;
+- every amendment trial;
+- every non-dry `python -m eval.run`, which exited 1 before its first
+  call. It could never have exited 3: that refusal is only for a
+  judge equal to the chat model.
+
+**Fix:**
+- Drop the stale argument.
+- `tests/test_eval_providers.py` now builds both provider pairs for real
+  (construction makes no network call). It is red without the fix.
+- Idle failures now log `where=<module>:<function>:<line>`, the
+  innermost frame of this repo's code, next to the exception type.
+  They never log the exception message.
+
+**This would be wrong if** a provider construction ever started doing
+I/O. The new test would then need a stubbed client, not a skip.

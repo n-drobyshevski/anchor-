@@ -349,7 +349,9 @@ async def test_real_pg_dump_backup_round_trip(sessionmaker, test_database_url, m
 
 
 @pytest.mark.skipif(not os.path.exists(PG18_DUMP), reason=f"{PG18_DUMP} not present on this machine")
-async def test_plaintext_never_written_to_disk(sessionmaker, test_database_url, monkeypatch):
+async def test_plaintext_never_written_to_disk(
+    sessionmaker, test_database_url, monkeypatch, tmp_path
+):
     """Plan section 12: "plaintext never written to disk" -- monkeypatch
     tempfile so the real backup pipeline fails loudly if it ever tries
     to create one, and separately confirm no file anywhere under a
@@ -361,6 +363,17 @@ async def test_plaintext_never_written_to_disk(sessionmaker, test_database_url, 
     monkeypatch.setattr(tempfile, "NamedTemporaryFile", _forbidden)
     monkeypatch.setattr(tempfile, "mkstemp", _forbidden)
     monkeypatch.setattr(tempfile, "TemporaryFile", _forbidden)
+    # Anything pg_dump or a library writes to "the temp dir" lands here,
+    # where it is scanned below; the working directory is scanned too.
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    import pathlib
+    import time
+
+    cwd = pathlib.Path.cwd()
+    started = time.time()
 
     identity = pyrage.x25519.Identity.generate()
     settings = _configured_settings(
@@ -378,6 +391,18 @@ async def test_plaintext_never_written_to_disk(sessionmaker, test_database_url, 
     async with sessionmaker() as session:
         row = (await session.execute(select(BackupLog))).scalars().one()
     assert row.status == "ok", row.error_code
+
+    # The header scan the docstring promises: no file written during the
+    # run, in the temp dir or the working directory, holds a dump.
+    written = [path for path in scratch.rglob("*") if path.is_file()]
+    written += [
+        path
+        for path in cwd.rglob("*")
+        if path.is_file() and ".git" not in path.parts and path.stat().st_mtime >= started
+    ]
+    for path in written:
+        with path.open("rb") as handle:
+            assert b"PGDMP" not in handle.read(), f"plaintext dump header in {path}"
 
 
 def test_backup_module_never_imports_tempfile():

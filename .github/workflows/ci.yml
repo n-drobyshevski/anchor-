@@ -45,6 +45,20 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # The backup and restore tests need pg_dump/pg_restore 18 (the
+      # production major) and skip without them -- which, on the stock
+      # runner, meant they never ran. PGDG's apt repo carries 18.
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+
       - name: Run tests
         run: uv run pytest -q
 

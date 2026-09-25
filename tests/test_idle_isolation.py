@@ -83,13 +83,43 @@ def _code_without_docstrings(path: pathlib.Path) -> str:
 
 
 def _imported_names(tree: ast.AST) -> list[str]:
+    """Every module path an import can reach, in both spellings.
+
+    `from app.core.state import x` records `app.core.state`; `from
+    app.core import state` records `app.core` *and* `app.core.state`
+    (the name may be a submodule). Before phase-6 package D only the
+    first spelling was recorded, so `from app.core import state` or
+    `from app import tg` slipped straight past the ban -- and the idle
+    modules already use that spelling for their allowed imports.
+    """
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.append(node.module)
+            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
     return names
+
+
+# Function names that must not be imported into idle code from anywhere,
+# whatever module they come from: the live-control writer and card
+# adoption. (Outbound sending is covered by the module bans above plus
+# the app.tg prefix.)
+FORBIDDEN_SYMBOLS = {
+    "update_state": "writes a live control field of user_state",
+    "set_counters": "writes the outbound counters",
+    "adopt": "adopts a research card (or an amendment)",
+}
+
+
+def _imported_symbols(tree: ast.AST) -> list[str]:
+    return [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    ]
 
 
 def test_there_are_idle_modules_to_check():
@@ -115,6 +145,11 @@ def test_no_idle_module_imports_a_forbidden_name(path):
         for name in imported
         if any(name == prefix or name.startswith(prefix + ".") for prefix in FORBIDDEN_PREFIXES)
     )
+    violations.extend(
+        f"{path}: imports {name} ({FORBIDDEN_SYMBOLS[name]})"
+        for name in _imported_symbols(tree)
+        if name in FORBIDDEN_SYMBOLS
+    )
     assert not violations, "\n".join(violations)
 
 
@@ -130,6 +165,27 @@ def test_the_detector_would_actually_catch_a_violation():
     assert "app.core.state" in imported
     assert "app.core.outbound_gate" in imported
     assert any(name.startswith("app.tg") for name in imported)
+
+
+@pytest.mark.parametrize(
+    ("source", "caught"),
+    [
+        ("from app.core import state\n", "app.core.state"),
+        ("from app.core import outbound_send\n", "app.core.outbound_send"),
+        ("from app.core import cards\n", "app.core.cards"),
+        ("from app import tg\n", "app.tg"),
+    ],
+)
+def test_the_detector_catches_the_from_package_import_spelling(source, caught):
+    assert caught in _imported_names(ast.parse(source))
+
+
+def test_the_detector_catches_a_forbidden_symbol_from_anywhere():
+    tree = ast.parse(
+        "from app.some.reexport import update_state\n"
+        "from app.core.somewhere import adopt as take\n"
+    )
+    assert {"update_state", "adopt"} <= set(_imported_symbols(tree))
 
 
 def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):

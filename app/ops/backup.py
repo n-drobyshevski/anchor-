@@ -46,6 +46,7 @@ its byte length ever reaches a log line, via `SAFE_EXTRA_KEYS`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime
 import hashlib
 import logging
@@ -70,6 +71,7 @@ BACKUP = "backup"
 OK = "ok"
 FAILED = "failed"
 PRUNED = "pruned"
+PURGED = "purged"
 
 NOT_CONFIGURED = "not_configured"
 PG_DUMP_MISSING = "pg_dump_missing"
@@ -519,13 +521,25 @@ def _list_all_objects(s3_client, bucket: str, prefix: str) -> list[str]:
     return keys
 
 
-def _purge_all_sync(settings: Settings) -> int:
+@dataclasses.dataclass(frozen=True)
+class PurgeResult:
+    """What /delete's bucket purge did. `deleted` holds object keys (a
+    date and a timestamp each -- no content); `failed` counts objects
+    that could not be deleted, or -1 when the bucket could not even be
+    listed. `failed != 0` means /delete must not claim the backups are
+    gone."""
+
+    deleted: tuple[str, ...] = ()
+    failed: int = 0
+
+
+def _purge_all_sync(settings: Settings) -> PurgeResult:
     """Blocking: delete every object under the `anchor/` prefix.
 
-    Returns the count deleted. A no-op (0) if S3 is not configured --
-    /delete must still proceed with the database wipe in that case
-    (plan section 9.3's own "if S3 isn't configured, the wipe still
-    proceeds").
+    An empty result if S3 is not configured -- /delete must still
+    proceed with the database wipe in that case (plan section 9.3's own
+    "if S3 isn't configured, the wipe still proceeds"). A failure is
+    reported, never raised, for the same reason.
     """
     if not (
         settings.BACKUP_S3_ENDPOINT
@@ -533,29 +547,53 @@ def _purge_all_sync(settings: Settings) -> int:
         and settings.BACKUP_S3_ACCESS_KEY_ID
         and settings.BACKUP_S3_SECRET_ACCESS_KEY
     ):
-        return 0
+        return PurgeResult()
 
-    s3_client = build_s3_client(settings)
-    keys = _list_all_objects(s3_client, settings.BACKUP_S3_BUCKET, f"{_PREFIX}/")
-    deleted = 0
+    try:
+        s3_client = build_s3_client(settings)
+        keys = _list_all_objects(s3_client, settings.BACKUP_S3_BUCKET, f"{_PREFIX}/")
+    except Exception:  # noqa: BLE001 - boto3 raises ValueError/ClientError/BotoCoreError
+        return PurgeResult(failed=-1)
+    deleted: list[str] = []
+    failed = 0
     for batch_start in range(0, len(keys), 1000):
         batch = keys[batch_start : batch_start + 1000]
         try:
-            s3_client.delete_objects(
+            resp = s3_client.delete_objects(
                 Bucket=settings.BACKUP_S3_BUCKET,
                 Delete={"Objects": [{"Key": k} for k in batch]},
             )
         except (ClientError, BotoCoreError):
+            failed += len(batch)
             continue
-        deleted += len(batch)
-    return deleted
+        # A 200 can still carry per-key errors.
+        errored = {entry.get("Key") for entry in (resp or {}).get("Errors", [])}
+        failed += len(errored)
+        deleted.extend(k for k in batch if k not in errored)
+    return PurgeResult(deleted=tuple(deleted), failed=failed)
 
 
-async def purge_all_backups(settings: Settings) -> int:
+async def purge_all_backups(settings: Settings) -> PurgeResult:
     """/delete's S3 side (plan section 9.3): purge every backup object
-    under the `anchor/` prefix. Returns the count deleted, for a log
-    line only -- never the keys themselves."""
+    under the `anchor/` prefix."""
     return await asyncio.to_thread(_purge_all_sync, settings)
+
+
+async def record_purged(
+    session: AsyncSession, clock: Clock, result: PurgeResult
+) -> None:
+    """Plan section 9.3: purged objects are logged as `purged` in
+    `backup_log`. Called by /delete *after* the database wipe, which
+    truncates `backup_log` itself -- otherwise the record of the purge
+    would be wiped along with everything else. Object keys and times
+    only."""
+    now = clock.now_utc()
+    for key in result.deleted:
+        session.add(
+            BackupLog(started_at=now, finished_at=now, object_key=key, status=PURGED)
+        )
+    if result.deleted:
+        await session.commit()
 
 
 async def latest_backup_status(

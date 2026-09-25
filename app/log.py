@@ -79,6 +79,8 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "error_code",
     # Setting *names* (never values), e.g. which backup vars are empty.
     "fields",
+    # Code location of a failure (module:function:line), never its message.
+    "where",
     "cards",
     "dropped",
     # Grok access (app/web/mcp.py)
