@@ -1661,3 +1661,61 @@ data") since Grok shipped. C1 keeps it out, which keeps less, and
 changes nothing in the export. C2 adds the `oauth_*` tables to the same
 list.
 
+## C2 dry run — a probe, because only a server can observe claude.ai
+
+C2 may not write OAuth code before plan section 11 is answered, and
+claude.ai's discovery, registration and authorize requests can only be
+seen by a public server that answers them. `app/web/oauth_probe.py` is
+that server. It sits behind `CLAUDE_OAUTH_PROBE` (off | both | cimd |
+dcr) and is refusing by construction:
+- `/mcp/claude` is always 401;
+- authorize shows a page and never redirects, so no code, token or connection can exist;
+- it writes no row and sends no Telegram message;
+- its imports are pinned to aiohttp and `app.config`.
+
+Two deviations from the approved sketch, both toward seeing more without granting more:
+- **DCR registration answers 201** with one fixed public `client_id` (`anchor-dry-run`, stored nowhere) instead of refusing. Otherwise claude.ai would stop before authorize, and the DCR run could not show its `resource` and PKCE shapes.
+- **`/.well-known/...` paths the probe does not serve are logged by path,** so a discovery URL we did not expect still shows up.
+
+It is registered before Grok's `/mcp/{token}`, which would otherwise match `/mcp/claude` and 404 it. C2 replaces the module and removes the setting.
+
+**This would be wrong if** claude.ai behaved differently against a
+server that later issues tokens. The registration, callback and
+`resource` shapes are request-side and do not depend on that. The
+token-side questions (§11.4, §11.5) are deferred to C2's manual check
+for exactly this reason.
+
+## C2 dry run — a client_id URL is logged only on claude.ai
+
+The probe logs a `client_id` URL's host always, and its path only when
+the host is `claude.ai` or `claude.com` (the user's choice). That
+document is Anthropic's public client metadata, and C2 must pin its
+exact URL on an allowlist. A `client_id` on any other host is a
+stranger's input: its host is logged, its path is not. No other value
+reaches a log line: parameters and headers appear by name, and
+everything else is a closed vocabulary or a boolean.
+`tests/test_research_isolation.py` forbids a log key named for free
+text ("path" among them), so `client_id_path` is a named, commented
+exemption there. It goes when C2 removes the probe.
+
+## C2 prep — Railway's http log is where the Grok token leaks (§11.7)
+
+The plan asked whether `mcp__Railway__http-requests` reveals request
+paths. From the tool's own description, it does not: it returns counts
+per status class, and `path` is only an input filter. It stays allowed.
+The leak is next to it. `mcp__Railway__get-logs` with `types: ["http"]`
+returns Railway's edge log: method, **path**, status and timing
+(docs.railway.com/cli/logs#http-logs). That tool was allowed, so Grok's
+`/mcp/<token>` was readable from Claude Code. The guard hook now blocks
+`get-logs` whenever `types` includes `http` (any case, or a malformed
+`types`). Nothing was called to confirm this; the finding is from the
+documentation, as the plan asked.
+
+## C2 prep — the guard blocks every "anchor…" server
+
+The plan's pattern `(?i)^mcp__(?:claude_ai_)?anchor\w*?__` also matches
+an unrelated server named, say, `anchorage`. That is kept: over-blocking
+a stranger costs a denied call, while missing a renamed Anchor costs
+the dialogs. Any `mcp__*` tool whose own name is one of Anchor's read
+tools is blocked too, whatever its server is called.
+

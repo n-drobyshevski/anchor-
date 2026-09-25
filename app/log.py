@@ -119,6 +119,26 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # app/core/retention.py) -- a ciphertext object's size, never its
     # key or contents.
     "bytes",
+    # Claude connector dry run (app/web/oauth_probe.py): shapes, never
+    # values. Names of parameters and headers, closed vocabularies
+    # ("S256", "exact", "authorization_code"), booleans, and a client_id
+    # URL's host (its path only on claude.ai/claude.com, a public
+    # document). Never state, a challenge, a code, a token, a cookie or
+    # a header value.
+    "header_names",
+    "probe_mode",
+    "http_method",
+    "client_id_kind",
+    "client_host",
+    "client_id_path",
+    "redirect_uri_expected",
+    "grant_type",
+    "auth_method",
+    "resource_form",
+    "pkce_method",
+    "response_type",
+    "scope_form",
+    "outcome",
 )
 
 

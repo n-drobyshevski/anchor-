@@ -35,6 +35,27 @@ vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_AUTH_TOKEN`,
 `OBSIDIAN_E2EE_PASSWORD`) are blocked by the guard hook like the
 others.
 
+**The Claude connector is off limits to Claude Code.**
+`anchor-claude-connector-plan.md` lets claude.ai read Anchor through a
+custom connector, and a claude.ai account's connectors also appear in
+Claude Code sessions and routines: as `mcp__Anchor__...` in cloud
+sessions and `mcp__claude_ai_Anchor__...` in the CLI. The server cannot
+tell a claude.ai chat from a Claude Code session, so this repo refuses
+on its side: `.claude/settings.json` denies both server names, and the
+guard hook, which now runs on every `mcp__*` tool, blocks any server
+whose name starts with "anchor" and any tool named after one of
+Anchor's read tools, so a renamed connector is still caught. A
+malformed MCP call is blocked, not waved through. This protects
+sessions in this repository only; the other layers are short `/claude`
+windows and a Telegram notice on every read.
+
+**Railway's `http` log stream is off limits too.** It records each
+request's path, and Grok's capability URL is `/mcp/<token>`: the path
+*is* the credential (and C2's authorize URL carries OAuth `state`). The
+guard blocks `get-logs` whenever `types` includes `http`. The deploy,
+build, network-flow and dns streams stay allowed, and so does
+`http-requests`, which returns counts per status class, not paths.
+
 ## One-time setup
 
 1. Deploy, so the migration runs (`alembic upgrade head` is part of the

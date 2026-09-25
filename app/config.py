@@ -532,6 +532,15 @@ class Settings(BaseSettings):
     # Per grant, a sliding one-minute window on the MCP endpoint.
     GROK_MAX_CALLS_PER_MINUTE: int = 30
 
+    # --- Claude connector dry run (docs/claude-connector-dry-run.md) ---
+    #
+    # `off`, or which registration method app/web/oauth_probe.py
+    # advertises to claude.ai: `both`, `cimd` or `dcr`. The probe grants
+    # nothing and logs only shapes; it exists to answer the connector
+    # plan's section 11 before C2's OAuth code is written, and C2
+    # removes it. Needs webhook mode and an https PUBLIC_URL.
+    CLAUDE_OAUTH_PROBE: str = "off"
+
     # The three /study packets. Comma-separated domains, parsed by the
     # validator below. GUIDES ships empty and /study guides refuses
     # until it is set -- picking those domains is the user's call, not a
@@ -955,6 +964,7 @@ REQUIRED_PLANNER = (
 
 
 VALID_VAULT_MODES = ("off", "status", "mirror", "sync")
+VALID_CLAUDE_OAUTH_PROBE = ("off", "both", "cimd", "dcr")
 # The same floor vaultd enforces on its side (vaultd/vaultd/boot.py).
 VAULT_TOKEN_MIN_CHARS = 32
 # 8e: the most note chunks of one class a prompt may ever carry. A
@@ -1095,6 +1105,20 @@ def check_runtime_settings(settings: Settings) -> None:
                 "deployment environment; the expected shape is "
                 "scrypt$17$8$1$<salt>$<hash>."
             )
+
+    probe = settings.CLAUDE_OAUTH_PROBE
+    if probe not in VALID_CLAUDE_OAUTH_PROBE:
+        raise SystemExit(
+            f"CLAUDE_OAUTH_PROBE must be one of {', '.join(VALID_CLAUDE_OAUTH_PROBE)}, "
+            f"got {probe!r}."
+        )
+    if probe != "off" and (
+        settings.MODE != "webhook" or not settings.PUBLIC_URL.strip().startswith("https://")
+    ):
+        raise SystemExit(
+            "CLAUDE_OAUTH_PROBE requires MODE=webhook and an https:// PUBLIC_URL: "
+            "claude.ai reaches the probe only over public HTTPS."
+        )
 
     check_vault_settings(settings)
 
