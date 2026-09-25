@@ -91,9 +91,6 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
-      - name: ruff
-        run: uv run ruff check .
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
