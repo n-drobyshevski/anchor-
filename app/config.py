@@ -373,6 +373,10 @@ class Settings(BaseSettings):
     # service. The only vault credential the bot ever holds; the
     # Obsidian ones live on the vault service alone.
     VAULT_API_TOKEN: str = ""
+    # 5b: PUTs and DELETEs per sync pass. Bootstrap and backfill are
+    # paced, not bursted: a first enable with 400 facts takes eight
+    # passes (minutes), and Sync uploads a trickle rather than a flood.
+    VAULT_MAX_WRITES_PER_PASS: int = 50
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -630,3 +634,8 @@ def check_vault_settings(settings: Settings) -> None:
     problem = vault_url_problem(settings.VAULT_URL)
     if problem is not None:
         raise SystemExit(f"VAULT_URL {problem} (the value is deliberately not shown).")
+    if not 1 <= settings.VAULT_MAX_WRITES_PER_PASS <= 1000:
+        raise SystemExit(
+            "VAULT_MAX_WRITES_PER_PASS must be between 1 and 1000, got "
+            f"{settings.VAULT_MAX_WRITES_PER_PASS}."
+        )

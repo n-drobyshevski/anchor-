@@ -854,7 +854,7 @@ class StudyCard(Base):
             "risk_final in ('low', 'medium', 'high')", name="ck_study_card_risk_final"
         ),
         CheckConstraint(
-            "status in ('pending', 'adopted', 'rejected', 'hidden', 'expired')",
+            "status in ('pending', 'adopted', 'rejected', 'hidden', 'expired', 'forgotten')",
             name="ck_study_card_status",
         ),
         # Both invariants the schema can state: a high card is hidden,

@@ -57,6 +57,12 @@ Like every other job kind above except `SEND_OUTBOUND`, it needs
 neither `provider` nor a bot; unlike all of them, it needs neither
 `safety_provider` either -- it is two SQL UPDATEs and a pair of log
 lines, no model call at all.
+
+5b adds `VAULT_SYNC` (queued every minute by `_heartbeat_loop` in mirror
+and sync modes, pruned after an hour) and `VAULT_PURGE` (queued by
+/delete inside its own transaction). Neither calls a model or needs the
+bot; a purge that cannot reach the vault service is deferred, never
+failed.
 """
 
 from __future__ import annotations
@@ -87,8 +93,13 @@ from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
 from app.tg.proposals import send_proposal
+from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
+from app.vault.sync import maybe_enqueue_vault_sync, run_vault_purge, run_vault_sync
 
 logger = logging.getLogger(__name__)
+
+# How long a failed vault purge waits before the next try (plan 10).
+VAULT_PURGE_RETRY = datetime.timedelta(minutes=5)
 
 IDLE_SLEEP_SECONDS = 0.5
 RECOVER_INTERVAL_SECONDS = 60
@@ -249,6 +260,21 @@ async def _run_job(
             local_date=datetime.date.fromisoformat(payload["local_date"]),
             hour=payload["hour"],
         )
+        return ExtractOutcome()
+
+    if kind == VAULT_SYNC:
+        # 5b: one sync pass (phase-5 plan section 7). No model call, no
+        # bot: an unreachable vault completes the job normally, and the
+        # next minute's pass tries again.
+        await run_vault_sync(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == VAULT_PURGE:
+        # 5b: /delete's reach into the vault (phase-5 plan section 10).
+        # Any failure defers by five minutes -- Deferred keeps attempts
+        # at 0, so "/delete must really delete" never gives up.
+        if not await run_vault_purge(settings):
+            raise Deferred(clock.now_utc() + VAULT_PURGE_RETRY)
         return ExtractOutcome()
 
     raise ValueError(f"unknown job kind: {kind}")
@@ -433,6 +459,10 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_research_sweep(session, clock, state.timezone)
+            # 5b: this minute's vault pass, in mirror/sync only -- a
+            # sibling step for the same reason as the research sweep.
+            async with sessionmaker() as session:
+                await maybe_enqueue_vault_sync(session, settings, clock)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
 

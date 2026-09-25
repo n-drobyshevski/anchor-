@@ -353,6 +353,7 @@ def build_router(
                 ),
             )
             vault_health = await vault_status.probe(session, settings, clock)
+            vault_purge_pending = await vault_status.purge_pending(session)
         await message.answer(
             _format_state(
                 user_state,
@@ -364,7 +365,9 @@ def build_router(
                 outbound=outbound,
                 welfare_counts=welfare_counts,
                 research_counts=research_counts,
-                vault_line=vault_ui.format_state_line(vault_health, clock, user_state.timezone),
+                vault_line=vault_ui.format_state_line(
+                    vault_health, clock, user_state.timezone, purge_pending=vault_purge_pending
+                ),
             )
         )
 
@@ -374,8 +377,9 @@ def build_router(
         async with sessionmaker() as session:
             user_state = await get_state(session)
             health = await vault_status.probe(session, settings, clock)
+            facts = await vault_status.count_fact_files(session)
         await message.answer(
-            vault_ui.format_vault(health, settings, clock, user_state.timezone)
+            vault_ui.format_vault(health, settings, clock, user_state.timezone, facts=facts)
         )
 
     @router.message(Command("out"))
@@ -615,7 +619,7 @@ def build_router(
             return
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
-            message.bot, message.chat.id, data_ui.CONFIRM_TEXT, data_ui.confirm_keyboard()
+            message.bot, message.chat.id, data_ui.confirm_text(settings), data_ui.confirm_keyboard()
         )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/delete]", scene_id=scene_id

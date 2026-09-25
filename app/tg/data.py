@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 CONFIRM_TTL = 300
 
 CONFIRM_TEXT = "Удалить все данные? Это необратимо."
+# 5b (phase-5 plan section 10): the one copy Anchor cannot reach, stated
+# rather than implied. Obsidian Sync Standard keeps version history for
+# a month (Plus: a year); the user is on Standard. Shown only when a
+# vault is configured -- a vault line with no vault would be a lie too.
+CONFIRM_VAULT_LINE = (
+    "Файлы Anchor в хранилище тоже удалятся. Obsidian Sync хранит их "
+    "в истории версий ещё до месяца, зашифрованными."
+)
 CONFIRM_YES = "Да, удалить"
 CONFIRM_NO = "Отмена"
 
@@ -61,6 +69,12 @@ STALE_TEXT = "Устарело."
 
 EXPORT_CAPTION = "Все данные на {date}."
 EXPORT_TOO_BIG = "Слишком много данных для одного файла ({size} МБ). Напиши — разберёмся."
+
+
+def confirm_text(settings: Settings) -> str:
+    if settings.VAULT_API_TOKEN:
+        return CONFIRM_TEXT + "\n" + CONFIRM_VAULT_LINE
+    return CONFIRM_TEXT
 
 
 def confirm_keyboard(issued_at: int | None = None) -> InlineKeyboardMarkup:

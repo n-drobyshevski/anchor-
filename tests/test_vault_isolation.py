@@ -103,3 +103,20 @@ def test_the_bot_never_imports_vaultd():
             if module.split(".")[0] == "vaultd":
                 offenders.append(f"{path.relative_to(ROOT)} imports {module}")
     assert offenders == []
+
+
+# 5b: mirror records the vault's edits and applies none of them. Until
+# 5c, nothing in app/vault/ may so much as name a function that changes
+# memory. 5c replaces this with the narrower rule of plan section 13
+# (only write_memory, set_pinned and forget_lineage).
+MEMORY_WRITERS = {"write_memory", "set_pinned", "hard_delete", "forget_lineage", "add_pending"}
+
+
+def test_mirror_mode_applies_nothing_to_memory():
+    offenders = []
+    for path in _modules():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+            if name in MEMORY_WRITERS:
+                offenders.append(f"{path.name}: {name}")
+    assert offenders == []

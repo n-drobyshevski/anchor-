@@ -158,11 +158,20 @@ async def test_a_token_mismatch_is_named(sessionmaker, stub):
     assert TOKEN not in reply
 
 
-@pytest.mark.parametrize("mode", ["mirror", "sync"])
-async def test_early_modes_say_they_are_status_only(sessionmaker, stub, mode):
+async def test_mirror_counts_facts_and_says_edits_are_not_applied(sessionmaker, stub):
     await _seed(sessionmaker)
-    reply = await _run(sessionmaker, _settings(mode, stub.url), "/vault")
-    assert reply.splitlines()[1] == vault_ui.EARLY_MODE_NOTE.format(mode=mode)
+    reply = await _run(sessionmaker, _settings("mirror", stub.url), "/vault")
+    lines = reply.splitlines()
+    assert lines[0] == "Хранилище: синхронизация ок (работает с 10:00, перезапусков 0) · фактов 0"
+    assert lines[1] == vault_ui.MIRROR_NOTE
+
+
+async def test_sync_says_it_acts_as_mirror_until_5c(sessionmaker, stub):
+    await _seed(sessionmaker)
+    reply = await _run(sessionmaker, _settings("sync", stub.url), "/vault")
+    lines = reply.splitlines()
+    assert lines[1] == vault_ui.EARLY_MODE_NOTE.format(mode="sync")
+    assert lines[2] == vault_ui.MIRROR_NOTE
 
 
 # --- /state ---

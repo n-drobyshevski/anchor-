@@ -931,6 +931,71 @@ The table of what was checked, and what each finding changed, is in
   secrets like the other credentials, and `CLAUDE.md` gains a rule:
   never read the vault, and never connect Obsidian tools to it.
 
+## Milestone 5b — your facts in Obsidian, one way
+
+With `VAULT_MODE=mirror`, a sync pass runs every minute and renders the
+database into the vault:
+
+- every active fact becomes `Anchor/Memory/0142-k3f9qa.md`. Its text is
+  in the `fact` property, so an Obsidian Bases table shows it inline
+  (`docs/vault/Memory.base`);
+- every day with a journal entry or a check-in becomes
+  `Anchor/Journal/2026-09-25-k3f9qa.md`.
+
+It is one-way. An edit you make in the vault is **recorded and not
+applied**: Anchor stores the file's new hash and changes nothing, and
+the next change to that fact in the database overwrites your edit.
+`/vault` says so. Applying edits is 5c, and `sync` mode behaves exactly
+like `mirror` until then.
+
+### Anchor never overwrites what it has not seen
+
+Every write is compare-and-swap against the hash Anchor last recorded.
+If you edit a file between the pass reading the manifest and writing
+the file, the write gets a 412 and is skipped. The next pass records
+your version first. A new fact's row is committed *before* its file is
+created, so a crash in between leaves a row to reconcile, never an
+untracked file. The tests crash the pass on both sides of the PUT and
+check that it converges.
+
+A rewrite keeps your own properties **verbatim**: the raw YAML lines of
+every key Anchor does not own are carried over, never re-quoted. A file
+whose properties the strict loader cannot read (for example, two
+`fact:` lines left by a Sync merge) is not rewritten. It is quarantined
+until the file changes again, because rewriting it would drop your
+properties.
+
+A digest over Anchor's own keys and the body decides whether a file
+needs writing. It never includes `use_count`, `last_used_at` or your
+extra properties. A pass over an unchanged database writes nothing, and
+a bootstrap is paced by `VAULT_MAX_WRITES_PER_PASS` (50 a minute), not
+sent as one burst.
+
+### /forget, /delete, and the epoch
+
+- **`/forget`** now deletes the fact's file on the next pass, also by
+  compare-and-swap. Because a correction moves the file's row to the
+  new head in the same transaction, a `/forget` of an id that was
+  already superseded can never orphan a live file.
+- **`/delete`** queues a `vault_purge` job inside its single
+  transaction, whenever a token is set, in any mode. The job retries
+  every five minutes, forever, without spending an attempt. The
+  confirmation now says what Anchor cannot reach: Obsidian Sync keeps
+  version history for up to a month.
+- **A file from before a delete** carries the old epoch in its name and
+  in `anchor_epoch`. When an offline phone re-uploads one, the next
+  pass deletes it and never imports it.
+
+### Two fixes on the way
+
+- **`/forget` of an adopted technique raised.** `study_card.memory_id`
+  had no `ON DELETE` rule, and the phase-4 test used a technique with
+  no card. The card is now marked `forgotten` first.
+- **A check-in note that tripped the welfare check keeps its text in
+  `checkin.note`.** The message is retagged; the note is not. The day
+  file therefore leaves the note out on any day with a welfare message,
+  or the day after, and a test proves no welfare text reaches any file.
+
 ## Decisions
 
 The `## Hardening H*` sections that used to live here have moved to

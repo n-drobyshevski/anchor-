@@ -64,6 +64,7 @@ async def enqueue_job(
     *,
     dedup_key: str | None = None,
     run_after: datetime.datetime | None = None,
+    commit: bool = True,
 ) -> bool:
     """Insert a job; returns True iff a row was actually inserted.
 
@@ -75,6 +76,10 @@ async def enqueue_job(
     With `dedup_key=None` the insert always succeeds: NULLs do not
     conflict in a unique index, which is the correct reading of "this
     job is not deduplicated".
+
+    `commit=False` (5b) leaves the insert in the caller's transaction:
+    /delete queues `vault_purge` inside its single wipe transaction, and
+    a commit here would split it in two.
     """
     values: dict = {"kind": kind, "payload": payload, "dedup_key": dedup_key}
     if run_after is not None:
@@ -87,8 +92,10 @@ async def enqueue_job(
         .returning(Job.id)
     )
     result = await session.execute(stmt)
-    await session.commit()
-    return result.first() is not None
+    inserted = result.first() is not None
+    if commit:
+        await session.commit()
+    return inserted
 
 
 async def claim_job(session: AsyncSession) -> Job | None:

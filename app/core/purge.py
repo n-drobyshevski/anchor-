@@ -37,7 +37,9 @@ from app.core.clock import Clock
 from app.config import Settings
 from app.core.state import STATE_ID, record_change
 from app.db.models import Job, StudyJob, UserState
+from app.db.jobs import enqueue_job
 from app.vault.epoch import new_epoch
+from app.vault.kinds import VAULT_PURGE, VAULT_PURGE_DEDUP_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,15 @@ async def delete_everything(
     await session.execute(
         sql_update(UserState).where(UserState.id == STATE_ID).values(**reset_values(settings, clock))
     )
+    # 5b (phase-5 plan section 10): the vault's copy goes too. Queued
+    # here, after the TRUNCATE emptied `job` and inside the same single
+    # transaction -- a commit in between would split the wipe in two.
+    # Whenever a token is set, in any mode: files from an earlier mode
+    # may still be there. The epoch was reset just above.
+    if settings.VAULT_API_TOKEN:
+        await enqueue_job(
+            session, VAULT_PURGE, {}, dedup_key=VAULT_PURGE_DEDUP_KEY, commit=False
+        )
     await session.commit()
 
     await record_change(

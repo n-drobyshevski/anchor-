@@ -1112,3 +1112,109 @@ own epoch for the existing row, so it does not import app code.
 
 **This would be wrong if** 5c's reason codes needed digits or more than
 40 characters. Widening a CHECK is one migration.
+
+## 5b — mirror records edits and applies none
+
+Plan section 7 has mirror's ingest update `disk_sha256` and nothing
+else. 5b implements exactly that, and no more. It resolves no
+identities, creates no fact from a file, runs no deletions (section 7.2
+is skipped in mirror) and holds nothing. So a fact file you delete or
+rename is not recreated: its compare-and-swap update fails and is
+skipped, until 5c decides what the deletion means. `sync` mode behaves
+exactly like `mirror` until 5c ships. An AST test pins that nothing in
+`app/vault/` so much as names a function that changes memory.
+
+The fact file's callout tells the truth for the mode it is written in.
+In mirror it says edits are not applied, not plan 4.1's «Меняй `fact`…».
+5c changes the text back, and that rewrite of every fact file is paced
+by the write cap like any other.
+
+**This would be wrong if** someone ran mirror for weeks expecting edits
+to stick. `/vault` says in plain words that they do not.
+
+## 5b — your properties are carried over verbatim
+
+Plan 4.4 says a re-render writes Anchor's keys first, then "your keys
+in their original order and form". "Form" is taken literally: the
+composer's line marks cut each non-Anchor top-level key out of the
+source text, comments and flow style included, and the lines are
+appended unchanged. Re-dumping them through PyYAML would re-quote and
+re-flow them. The file would then look as if Anchor had edited your
+properties, which it must not.
+
+A file whose frontmatter fails the strict loader (duplicate keys from a
+Sync merge, an alias, a syntax error) is **not rewritten**. It is
+quarantined `bad_yaml`, and the quarantine lifts the next time the
+file's hash changes. Rewriting it would silently drop whatever the
+loader could not read.
+
+**This would be wrong if** users routinely left broken YAML in fact
+files. Such a file then stays frozen until fixed. The problem list
+that shows it arrives in 5c; until then `debug.vault_file` shows the
+reason code.
+
+## 5b — crashes on either side of the PUT converge
+
+A new fact's row is committed before the create-only PUT (plan 7.3).
+Two crash points follow:
+
+- **Before the PUT:** a row with no hash and no file. The next pass
+  creates the file.
+- **After the PUT, before the hash is recorded:** a row with no hash and
+  a file. The next pass records the manifest's hash first. The render
+  then finds its own content already on disk and adopts it, with no
+  write and no `name_taken`.
+
+Both are tests.
+
+`name_taken` is reserved for a create-only PUT that finds a file Anchor
+has no record of. With the epoch in every name, that is practically
+impossible.
+
+## 5b — a welfare day keeps its check-in note out of the vault
+
+A check-in note is stored before the welfare check runs on it. If it
+trips the check, the message is retagged `welfare`, but `checkin.note`
+keeps the text. Rendering «Заметка: …» would put welfare text in the
+vault, which plan section 10 forbids.
+
+**Decision (yours):** the day file omits the note whenever a
+`message.kind='welfare'` row falls on the check-in's local date or the
+day after, since a check-in can be answered past midnight. There is no
+schema change and no change to Phase 2. A test renders a welfare day
+and asserts that the text appears in no file.
+
+**This would be wrong if** an unrelated note on a welfare day mattered
+in the vault. It is still in the database and in `/export`.
+
+## 5b — `/delete`'s vault line appears only with a vault
+
+«Файлы Anchor в хранилище тоже удалятся. Obsidian Sync хранит их в
+истории версий ещё до месяца, зашифрованными.» is added to the
+confirmation only when `VAULT_API_TOKEN` is set. A vault line with no
+vault configured would itself be a false statement. The retention
+figure is Standard's month (plan §18.3, your answer). On Plus it would
+read «до года».
+
+## 5b — `/forget` of a corrected fact, pending §18.1
+
+5b keeps today's `/forget`: deleting a corrected fact's head
+reactivates its predecessor (`test_forget_the_head_of_a_chain_clears_the_pointer`).
+In the vault, the head's file is deleted and the predecessor gets a
+file of its own on the next pass. Whether `/forget` should forget the
+whole lineage, as deleting a file will in 5c, is plan §18.1, to be
+settled before 5c.
+
+## 5b — technique sources, and the lowest card id
+
+A technique's file quotes the card it came from, and names the domain
+from the card's clip. The card still points at the row originally
+adopted, so every id in the lineage is searched. When several cards
+match (adoption falls back to a near-duplicate memory, so two cards can
+land on one fact), the lowest card id wins, so the file is
+deterministic.
+
+The whole memory table and the linked cards are read in two queries
+per pass, and lineages are walked in Python. That avoids 2 × N queries
+a minute for N facts; a personal memory is hundreds of rows, not
+millions.
