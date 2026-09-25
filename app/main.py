@@ -342,7 +342,11 @@ def build_webhook_app(
     # /mcp/{token}, which would otherwise match /mcp/claude. Off, none
     # of these routes exist: aiohttp's own 404.
     if settings.CLAUDE_ACCESS_ENABLED:
-        oauth.register(app, settings, claude_pending or oauth_store.PendingStore(clock))
+        # `is not None`, never `or`: an empty PendingStore has len() 0,
+        # and `or` once silently gave /oauth/authorize a second store
+        # that /claude connect never saw (docs/decisions.md).
+        pending = claude_pending if claude_pending is not None else oauth_store.PendingStore(clock)
+        oauth.register(app, settings, pending)
         mcp_claude.register(app, settings)
     if settings.GROK_ACCESS_ENABLED:
         mcp.register(app, settings)

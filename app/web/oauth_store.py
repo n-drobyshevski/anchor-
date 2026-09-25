@@ -70,6 +70,15 @@ REVOKED_CONNECTION_RETENTION = datetime.timedelta(days=30)
 # Uppercase without 0/O/1/I: read off a screen, typed on a phone.
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 6
+# Typed on a Russian keyboard layout, the code's letters come out as
+# their Cyrillic twins. Mapping them back keeps the match exact (it is
+# still one live code, compared in constant time) while the keyboard
+# layout stops mattering. Only true look-alikes: no Cyrillic letter maps
+# to anything but the Latin letter it is drawn as.
+_LOOKALIKES = str.maketrans(
+    "АВЕКМНРСТУХавекмнрстух",
+    "ABEKMHPCTYXABEKMHPCTYX",
+)
 TOKEN_BYTES = 32
 
 
@@ -126,6 +135,13 @@ class PendingStore:
     def __len__(self) -> int:
         self._prune()
         return len(self._pending)
+
+    def __bool__(self) -> bool:
+        # An empty store is still the store. Without this, `__len__`
+        # makes it falsy, and `store or PendingStore()` quietly builds a
+        # second one -- which is exactly how /claude connect once never
+        # matched in production.
+        return True
 
     def _prune(self) -> None:
         now = self.clock.now_utc()
@@ -193,7 +209,7 @@ class PendingStore:
         """The unapproved entry whose code this is. Every live code is
         compared in constant time, so timing says nothing about which."""
         self._prune()
-        typed = code.strip().upper()
+        typed = code.strip().translate(_LOOKALIKES).upper()
         if len(typed) != CODE_LENGTH or any(ch not in CODE_ALPHABET for ch in typed):
             return None
         found = None

@@ -626,3 +626,38 @@ async def test_the_retention_job_runs_the_oauth_sweep(sessionmaker):
     async with sessionmaker() as session:
         await retention.run_retention_sweep(session, world.settings, world.clock)
     assert await world.request_rows() == 0
+
+
+# --- the code, as a phone types it ---
+
+_TO_CYRILLIC = str.maketrans("ABEKMHPCTYX", "АВЕКМНРСТУХ")
+
+
+@pytest.mark.parametrize("shape", ["cyrillic", "lower", "cyrillic_lower", "spaced"])
+async def test_a_code_typed_on_another_layout_still_matches(sessionmaker, shape):
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        await world.start(client)
+        # A code made only of look-alike letters, so no draw of the
+        # random code can make this test vacuous.
+        entry = next(iter(world.pending._pending.values()))
+        entry.code = code = "KEMA3X"
+        typed = {
+            "cyrillic": code.translate(_TO_CYRILLIC),
+            "lower": code.lower(),
+            "cyrillic_lower": code.translate(_TO_CYRILLIC).lower(),
+            "spaced": f"  {code} ",
+        }[shape]
+        # /claude connect takes one argument; `spaced` exercises strip() directly.
+        if shape == "spaced":
+            assert world.pending.match(typed) is not None
+            return
+        assert (await world.command(f"/claude connect {typed}")).startswith("Подтверждено")
+
+
+async def test_a_cyrillic_letter_that_is_not_a_look_alike_matches_nothing(sessionmaker):
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        _handle, code, _cookie = await world.start(client)
+        typed = "Ж" + code[1:]
+        assert await world.command(f"/claude connect {typed}") == "Код не найден или устарел."

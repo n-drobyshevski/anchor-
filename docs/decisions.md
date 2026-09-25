@@ -1831,3 +1831,24 @@ clears it, alongside the WebHub. Before, the web `CodeStore` was
 cleared only by `/weblogout`; that is noted here and left as it was,
 outside C2's scope.
 
+## C2 fix — one PendingStore, really (and the code on a Russian keyboard)
+
+In production, `/claude connect <code>` always answered «Код не найден
+или устарел». `build_webhook_app` registered the authorization server
+with `claude_pending or PendingStore(clock)`. Because `PendingStore`
+has `__len__`, an empty store is falsy, so at startup `or` built a second
+store. `/oauth/authorize` filled that second store, and `/claude connect`
+searched the one `main()` gave the dispatcher. The tests missed it
+because they handed one store to both sides directly.
+
+The fix has three parts:
+- an explicit `is not None`;
+- `PendingStore.__bool__` returns True, so an empty store can never be falsy again;
+- `tests/test_claude_wiring.py` builds both sides through `main.build_webhook_app` and `main.build_dispatcher`, from one empty store, exactly as `main()` does.
+
+`match()` also maps the Cyrillic twins of the code's letters (А В Е К
+М Н Р С Т У Х) to Latin before comparing. A code typed on a Russian
+layout is otherwise unmatchable and counts toward the lockout. It is
+still one exact, constant-time match against a live code. A Cyrillic
+letter that is not a look-alike still matches nothing.
+
