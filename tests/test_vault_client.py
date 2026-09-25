@@ -12,7 +12,7 @@ import pytest
 
 from app.vault import client as client_module
 from app.vault import errors
-from app.vault.client import VaultClient
+from app.vault.client import NotesSummary, VaultClient
 from app.vault.errors import VaultError
 from vault_stub import TOKEN, start_stub
 
@@ -117,18 +117,25 @@ async def test_the_other_routes(stub) -> None:
     sha = "a" * 64
     stub.respond(
         "GET", "/v1/manifest", 200,
-        {"files": [{"path": "Бег.md", "sha256": sha, "size": 10, "scope": "note"}]},
+        {
+            "files": [{"path": "Бег.md", "sha256": sha, "size": 10, "scope": "note", "class": "personal"}],
+            "summary": {"conflict": 1, "legacy_read": 2, "unknown_value": 3, "settings": "ok"},
+        },
     )
-    stub.respond("GET", "/v1/file", 200, {"path": "Бег.md", "sha256": sha, "content": "текст"})
+    stub.respond(
+        "GET", "/v1/file", 200, {"path": "Бег.md", "sha256": sha, "content": "текст", "class": "personal"}
+    )
     stub.respond("PUT", "/v1/file", 200, {"sha256": sha})
     stub.respond("DELETE", "/v1/file", 200, {"deleted": True})
     stub.respond("POST", "/v1/purge", 200, {"deleted": 3})
     client = _client(stub)
 
-    [entry] = await client.manifest()
-    assert (entry.path, entry.scope) == ("Бег.md", "note")
+    manifest = await client.manifest()
+    [entry] = manifest.entries
+    assert (entry.path, entry.scope, entry.note_class) == ("Бег.md", "note", "personal")
+    assert manifest.summary == NotesSummary(conflict=1, legacy_read=2, unknown_value=3, settings="ok")
     got = await client.get_file("Бег.md")
-    assert got.content == "текст"
+    assert (got.content, got.note_class) == ("текст", "personal")
     assert await client.put_file("Anchor/Memory/0001-abcdef.md", "факт", None) == sha
     await client.delete_file("Anchor/Memory/0001-abcdef.md", sha)
     assert await client.purge() == 3
@@ -155,3 +162,43 @@ async def test_a_file_answer_for_another_path_is_refused(stub) -> None:
 def test_an_unknown_code_cannot_be_raised() -> None:
     with pytest.raises(ValueError):
         VaultError("some free text from a server")
+
+
+SUMMARY = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "absent"}
+NOTE = {"path": "Бег.md", "sha256": "a" * 64, "size": 10, "scope": "note"}
+FACT = {"path": "Anchor/Memory/0001-abcdef.md", "sha256": "a" * 64, "size": 10, "scope": "anchor"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # 8e: a note entry with a missing or foreign class.
+        {"files": [NOTE], "summary": SUMMARY},
+        {"files": [{**NOTE, "class": "never"}], "summary": SUMMARY},
+        {"files": [{**NOTE, "class": "Personal"}], "summary": SUMMARY},
+        {"files": [{**NOTE, "class": ["personal"]}], "summary": SUMMARY},
+        {"files": [{**NOTE, "class": None}], "summary": SUMMARY},
+        # An Anchor file must carry no class at all.
+        {"files": [{**FACT, "class": "personal"}], "summary": SUMMARY},
+        {"files": [{**FACT, "class": None}], "summary": SUMMARY},
+        # The summary: missing, or anything but counts and a known state.
+        {"files": []},
+        {"files": [], "summary": {**SUMMARY, "settings": "broken"}},
+        {"files": [], "summary": {**SUMMARY, "conflict": -1}},
+        {"files": [], "summary": {**SUMMARY, "conflict": True}},
+        {"files": [], "summary": {**SUMMARY, "unknown_value": "3"}},
+        {"files": [], "summary": {k: v for k, v in SUMMARY.items() if k != "legacy_read"}},
+    ],
+)
+async def test_a_manifest_with_a_bad_class_or_summary_is_refused(stub, body) -> None:
+    stub.respond("GET", "/v1/manifest", 200, body)
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).manifest()
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def test_a_file_with_a_foreign_class_is_refused(stub) -> None:
+    stub.respond("GET", "/v1/file", 200, {"path": "Бег.md", "sha256": "a" * 64, "content": "x", "class": "never"})
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).get_file("Бег.md")
+    assert exc.value.code == errors.BAD_RESPONSE

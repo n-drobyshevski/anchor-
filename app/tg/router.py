@@ -97,6 +97,7 @@ from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
 from app.web import auth as web_auth
 from app.web.hub import WebHub
+from app.vault import consent as vault_consent
 from app.vault import status as vault_status
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,8 @@ PRIVACY_TEXT = (
     "еженедельных копий, остальные удаляются.\n"
     "Текст страниц, найденных при поиске, хранится 30 дней, потом "
     "стирается — карточки и ссылки остаются.\n"
+    "Заметки из Obsidian Anchor читает только с твоей меткой: личные — только для "
+    "разговора с тобой, никогда для поиска или исследований; знания — как справка.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
     "/delete — удалить все данные и все резервные копии, безвозвратно."
@@ -613,14 +616,39 @@ def build_router(
         )
 
     @router.message(Command("vault"))
-    async def vault(message: Message) -> None:
-        """Status only in 8a (phase-8 plan section 8). Off makes no request."""
+    async def vault(message: Message, command: CommandObject) -> None:
+        """Status (phase-8 plan section 8), and 8e's `/vault notes on|off`.
+
+        Off makes no request. The manifest is read only while notes
+        consent is on, and only to count notes by class.
+        """
+        args = (command.args or "").split()
+        if args:
+            if args == ["notes", "on"]:
+                async with sessionmaker() as session:
+                    await vault_consent.set_notes_consent(session, True)
+                await message.answer(vault_ui.NOTES_ON_REPLY)
+            elif args == ["notes", "off"]:
+                async with sessionmaker() as session:
+                    await vault_consent.set_notes_consent(session, False)
+                await message.answer(vault_ui.NOTES_OFF_REPLY)
+            else:
+                await message.answer(vault_ui.VAULT_USAGE)
+            return
         async with sessionmaker() as session:
             user_state = await get_state(session)
             health = await vault_status.probe(session, settings, clock)
             facts = await vault_status.count_fact_files(session)
+        notes_line = None
+        if health.state != vault_status.OFF:
+            overview = None
+            if user_state.notes_consent:
+                overview = await vault_status.notes_overview(settings, health)
+            notes_line = vault_ui.format_notes_line(user_state.notes_consent, overview)
         await message.answer(
-            vault_ui.format_vault(health, settings, clock, user_state.timezone, facts=facts)
+            vault_ui.format_vault(
+                health, settings, clock, user_state.timezone, facts=facts, notes_line=notes_line
+            )
         )
 
     @router.message(Command("out"))

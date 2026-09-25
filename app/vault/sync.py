@@ -178,7 +178,7 @@ async def run_vault_sync(
 
     result.ran = True
     try:
-        manifest = {entry.path: entry for entry in await client.manifest()}
+        manifest = {entry.path: entry for entry in (await client.manifest()).entries}
         state = (await session.execute(select(UserState))).scalar_one()
         budget = _Budget(settings.VAULT_MAX_WRITES_PER_PASS)
         await _delete_orphans(session, client, manifest, state.vault_epoch, budget, result)

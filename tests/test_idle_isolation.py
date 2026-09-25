@@ -58,6 +58,11 @@ FORBIDDEN_IMPORTS = {
     "app.core.amendments": "persona amendments -- not an idle-writable table",
     "app.core.review": "the weekly review -- writes WeeklyReview/ReviewProposal",
     "app.core.cards": "research card adoption",
+    # 8e (8e plan sections 7-8): vault notes reach only the persona's
+    # turn. Personal note text never reaches an idle model, in any phase;
+    # knowledge note text does not in 8e either.
+    "app.vault.notes_personal": "personal vault notes reach only the persona's turn",
+    "app.vault.notes_knowledge": "knowledge vault notes reach only the persona's turn in 8e",
     # 6d: `app.research.jobs` is deliberately no longer banned.
     # app/core/idle/research.py (and, for its own gate fact,
     # app/core/idle/facts.py) calls `run_research_job`/`study_quota_used`

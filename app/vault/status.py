@@ -95,6 +95,49 @@ async def probe(
     )
 
 
+@dataclass(frozen=True)
+class NotesOverview:
+    """Counts for `/vault`'s notes line (8e). Never a path or a title."""
+
+    personal: int
+    knowledge: int
+    conflict: int
+    legacy_read: int
+    unknown_value: int
+    settings: str
+
+
+async def notes_overview(
+    settings: Settings,
+    health: Health,
+    client_factory: ClientFactory = VaultClient.from_settings,
+) -> NotesOverview | None:
+    """One manifest request, reduced to counts. None if the service did not answer.
+
+    Called only while notes consent is on, and only after a probe that
+    reached vaultd; in `status` mode too, so the classification can be
+    checked before mirroring (docs/decisions.md, "8e -- /vault reads the
+    manifest"). The entries' paths are counted and dropped here.
+    """
+    if health.state not in (OK, STOPPED):
+        return None
+    try:
+        manifest = await client_factory(settings).manifest()
+    except VaultError as exc:
+        logger.warning("vault manifest unavailable", extra={"error_code": exc.code})
+        return None
+    classes = [entry.note_class for entry in manifest.entries if entry.scope == "note"]
+    summary = manifest.summary
+    return NotesOverview(
+        personal=classes.count("personal"),
+        knowledge=classes.count("knowledge"),
+        conflict=summary.conflict,
+        legacy_read=summary.legacy_read,
+        unknown_value=summary.unknown_value,
+        settings=summary.settings,
+    )
+
+
 async def count_fact_files(session: AsyncSession) -> int:
     """Fact files Anchor has written and still tracks, for /vault."""
     result = await session.execute(

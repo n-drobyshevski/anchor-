@@ -43,6 +43,7 @@ CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
 SECRET_TEXT = "пользователь живёт в Лилле"
 NOTE_CHUNK_TEXT = "Бегаю по утрам в парке."
+KNOWLEDGE_CHUNK_TEXT = "Hyperstition: fictions that make themselves real."
 
 
 def _command_update(update_id: int, text: str) -> dict:
@@ -232,10 +233,14 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 path="Anchor/Memory/0001-abcdef.md", role="fact", state="held", hold_id=hold.id
             )
         )
-        note = models.VaultFile(path="Бег.md", role="note")
-        session.add(note)
+        note = models.VaultFile(path="Бег.md", role="note", note_class="personal")
+        library = models.VaultFile(path="Library/CCRU.md", role="note", note_class="knowledge")
+        session.add_all([note, library])
         await session.flush()
-        session.add(models.VaultChunk(file_id=note.id, ord=0, heading="Бег", text=NOTE_CHUNK_TEXT))
+        session.add(models.NoteChunkPersonal(file_id=note.id, ord=0, heading="Бег", text=NOTE_CHUNK_TEXT))
+        session.add(
+            models.NoteChunkKnowledge(file_id=library.id, ord=0, heading="CCRU", text=KNOWLEDGE_CHUNK_TEXT)
+        )
         session.add(models.VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 
@@ -258,16 +263,23 @@ async def test_export_omits_the_plumbing_tables(sessionmaker, clock):
     """telegram_update, job and pending_memory are transport and queue;
     their only real content is message text `messages` already carries.
     8a adds vault_chunk (a copy of the user's own notes, which live in
-    their vault) and vault_status (timestamps)."""
+    their vault) and vault_status (timestamps); 8e splits the chunks
+    into note_chunk_personal and note_chunk_knowledge."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
         payload = await export.build_export(session, clock)
 
     for name in (
-        "telegram_update", "job", "pending_memory", "persona_version", "vault_chunk", "vault_status"
+        "telegram_update", "job", "pending_memory", "persona_version",
+        "note_chunk_personal", "note_chunk_knowledge", "vault_status",
     ):
         assert name not in payload["tables"]
-    assert NOTE_CHUNK_TEXT not in json.dumps(payload, default=str, ensure_ascii=False)
+    dumped = json.dumps(payload, default=str, ensure_ascii=False)
+    assert NOTE_CHUNK_TEXT not in dumped
+    assert KNOWLEDGE_CHUNK_TEXT not in dumped
+    # vault_file is exported with its class.
+    classes = {row["path"]: row["note_class"] for row in payload["tables"]["vault_file"]}
+    assert classes["Library/CCRU.md"] == "knowledge"
 
 
 async def test_the_bytes_are_valid_json_and_round_trip(sessionmaker, clock):
@@ -434,7 +446,9 @@ NOT_EXPORTED = {
     "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
     "access_grant": "token hashes and grant bookkeeping, not user data",
     # 8a (phase-8 plan section 6).
-    "vault_chunk": "a derived copy of the user's own opted-in notes, rebuildable from the vault",
+    # 8e (8e plan section 5): vault_chunk split by class, same reason.
+    "note_chunk_personal": "a derived copy of the user's own personal notes, rebuildable from the vault",
+    "note_chunk_knowledge": "a derived copy of the user's own library notes, rebuildable from the vault",
     "vault_status": "operational timestamps, no content",
 }
 

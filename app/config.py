@@ -667,6 +667,15 @@ class Settings(BaseSettings):
     # paced, not bursted: a first enable with 400 facts takes eight
     # passes (minutes), and Sync uploads a trickle rather than a flood.
     VAULT_MAX_WRITES_PER_PASS: int = 50
+    # 8e (8e plan section 6): declared and validated here, read by 8d.
+    # Notes are indexed and retrieved per class, each behind its own
+    # switch and cap, and only while user_state.notes_consent is on.
+    # They replace the phase-8 plan's VAULT_NOTES_ENABLED/_IN_PROMPT.
+    # Rollout flips knowledge first and personal later, separately.
+    VAULT_KNOWLEDGE_ENABLED: bool = False
+    VAULT_PERSONAL_ENABLED: bool = False
+    VAULT_KNOWLEDGE_IN_PROMPT: int = 2
+    VAULT_PERSONAL_IN_PROMPT: int = 2
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -948,6 +957,9 @@ REQUIRED_PLANNER = (
 VALID_VAULT_MODES = ("off", "status", "mirror", "sync")
 # The same floor vaultd enforces on its side (vaultd/vaultd/boot.py).
 VAULT_TOKEN_MIN_CHARS = 32
+# 8e: the most note chunks of one class a prompt may ever carry. A
+# constant, so a deploy cannot paste a variable that floods the prompt.
+NOTES_IN_PROMPT_MAX = 5
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1108,6 +1120,10 @@ def check_vault_settings(settings: Settings) -> None:
     `off` *or* a token is set, because from 8b on a set token alone
     makes /delete reach the vault service, in any mode.
     """
+    for name in ("VAULT_KNOWLEDGE_IN_PROMPT", "VAULT_PERSONAL_IN_PROMPT"):
+        value = getattr(settings, name)
+        if not 0 <= value <= NOTES_IN_PROMPT_MAX:
+            raise SystemExit(f"{name} must be between 0 and {NOTES_IN_PROMPT_MAX}, got {value}.")
     mode = settings.VAULT_MODE
     if mode not in VALID_VAULT_MODES:
         raise SystemExit(
