@@ -1,5 +1,8 @@
 # Claude connector: the dry run
 
+**Done on 2026-09-25.** The results are below and pinned in
+`docs/decisions.md` ("C2 — the dry run's answers"). The probe is off.
+
 `anchor-claude-connector-plan.md` section 11 asks what claude.ai
 actually sends before C2 writes an authorization server: which client
 registration it uses, its `client_id`, its callback, whether and how it
@@ -60,3 +63,29 @@ The findings go into `docs/decisions.md` as pinned constants:
 - the `resource` form.
 
 C2's authorization server (`app/web/oauth.py`) replaces the probe, and the `CLAUDE_OAUTH_PROBE` setting goes away.
+
+## Results (2026-09-25)
+
+There were two runs: `both` at 19:58 UTC and `cimd` at 20:35 UTC. They matched request for request. The `dcr` run was skipped, because CIMD works on its own and DCR will never be offered.
+
+| # | Request | What it showed |
+|---|---|---|
+| 1 | `POST /mcp/claude` from claude.ai's servers, with `mcp-protocol-version` and no `Authorization` | Discovery starts from the 401 challenge. |
+| 2 | `GET /.well-known/oauth-protected-resource/mcp/claude` | The path-suffixed RFC 9728 URL named in `resource_metadata`. The root copy was never requested. |
+| 3 | `GET /.well-known/oauth-authorization-server` | Root RFC 8414. No OpenID discovery, and no other `/.well-known` path. |
+| — | no `POST /oauth/register` | **CIMD, in both runs,** including when DCR was also offered. |
+| 4 | `GET /oauth/authorize` in the user's browser | Detailed below. |
+
+What the authorize request (row 4) carried:
+- `client_id` = `https://claude.ai/oauth/mcp-oauth-client-metadata`;
+- `redirect_uri` = `https://claude.ai/api/mcp/auth_callback`;
+- `resource` exactly the canonical URI;
+- `code_challenge_method=S256`, `response_type=code`, `scope=anchor.read`;
+- `state` present;
+- no other parameters.
+
+Other findings:
+- **Authorize can arrive several times in a row.** In the `cimd` run it came four more times within three minutes, from two browser profiles: reloads, or Connect pressed again.
+- **No per-surface switch (§11.6).** claude.ai's connector settings offered nothing to keep the connector out of Claude Code sessions or routines.
+- **The first attempt failed in claude.ai's form.** The form rejected the URL before any request was made. The exact URL `https://<PUBLIC_URL>/mcp/claude`, with no port and no trailing characters, worked.
+
