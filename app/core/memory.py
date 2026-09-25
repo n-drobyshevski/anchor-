@@ -689,14 +689,11 @@ async def has_predecessors(session: AsyncSession, memory_ids: list[int]) -> set[
     least one predecessor -- some other row's `superseded_by` points at
     them (W3 finding).
 
-    Forgetting such a row is `hard_delete`'s documented section-11
-    behavior of relinking to a NULL successor, which makes the
-    predecessor active again -- see `hard_delete`'s own docstring and
-    tests/test_memory.py::test_forget_the_head_of_a_chain_clears_the_
-    pointer, which pins that this is intentional, not a bug to fix
-    here. The web panel uses this set to warn in the forget confirm
-    dialog before the user does it, since the head of a chain is
-    exactly what "Исправить" or a consolidate merge produces.
+    Forgetting such a row forgets its predecessors too (`forget` goes
+    through `forget_lineage` since phase-8 plan section 18.1). The web
+    panel uses this set to say so in the forget confirm dialog before
+    the user does it, since the head of a chain is exactly what
+    "Исправить" or a consolidate merge produces.
     """
     if not memory_ids:
         return set()

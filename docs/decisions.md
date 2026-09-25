@@ -1348,6 +1348,8 @@ read «до года».
 
 ## 8b — `/forget` of a corrected fact, pending §18.1
 
+*Superseded by "8c — `/forget` forgets the whole lineage" below.*
+
 8b keeps today's `/forget`: deleting a corrected fact's head
 reactivates its predecessor (`test_forget_the_head_of_a_chain_clears_the_pointer`).
 In the vault, the head's file is deleted and the predecessor gets a
@@ -1876,4 +1878,49 @@ UI's in-memory `CodeStore` kept any pending login code. A code issued
 just before `/delete` could still open a fresh session after it. The
 handler now clears it, next to Claude's pending requests
 (`tests/test_claude_access.py`).
+
+## 8c — `/forget` forgets the whole lineage (§18.1)
+
+Settled: `/forget` and deleting a fact file agree. `memory.forget`
+is now a thin wrapper over `memory.forget_lineage`, which resolves any
+id forward to the head, then deletes the head and every predecessor.
+It writes one `state_change` row (`old_value` = the head's id, no
+text). A corrected fact's old text no longer comes back when the
+correction is forgotten, whichever path forgot it.
+`test_forget_the_head_of_a_chain_clears_the_pointer` still pins
+`hard_delete`'s own single-row relink. `forget` no longer calls
+`hard_delete`, and the new behaviour is pinned by
+`test_forget_the_head_of_a_chain_forgets_the_whole_lineage` and
+`tests/test_forget_lineage.py`.
+
+The web panel's «Забыть» dialog used to warn that an earlier version
+«снова станет активной». It now says the earlier versions are
+forgotten with the record.
+
+## 8c — `FORGET_PROTECTED` covers the whole lineage
+
+"8b on main" kept `main`'s refusal to forget a fact behind an adopted
+technique. Before, only the row being deleted was checked, because
+`hard_delete` could relink a card to the successor. `forget_lineage`
+deletes the whole chain, so no successor is left to relink to. It
+refuses if an adopted card points at *any* row in the lineage, and
+nothing changes. This also closes a case that used to succeed: an
+adopted card on a predecessor was silently moved to the successor
+when the predecessor was forgotten. That forget is now refused.
+A non-adopted card pointing into the lineage has its pointer cleared,
+because `study_card.memory_id` has no `ON DELETE`. `cards.adopt` never
+produces such a card; the clear is defensive. No migration: the
+`forgotten` card status stays dropped, as "8b on main" decided.
+
+## 8c — the vault's safety limits are constants, not settings
+
+Plan §3 lists `VAULT_DELETE_GRACE_S`, `VAULT_SYNC_WARMUP_S`,
+`VAULT_MASS_DELETE_MAX` and `VAULT_HOLD_TTL_DAYS` as environment
+variables. Each is a floor or ceiling on forgetting facts or accepting
+a rule, and a deploy must not be able to loosen one. They are
+constants in `app/vault/limits.py`: 600 s, 300 s, 3 per rolling hour,
+7 days, plus the 300-character fact cap. This is the same call as
+"8a — limits that are constants, not settings".
+`tests/test_vault_limits.py` pins the values and that `Settings` has
+no such fields.
 

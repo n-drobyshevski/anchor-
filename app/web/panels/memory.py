@@ -119,12 +119,11 @@ def _memory_dto(row: memory_core.Memory, *, has_predecessor: bool = False) -> di
         "use_count": row.use_count,
         "last_used_at": _iso(row.last_used_at),
         "created_at": _iso(row.created_at),
-        # W3 finding: forgetting the head of a chain with a predecessor
-        # (an edited or consolidate-merged row) resurrects that
-        # predecessor -- hard_delete's own documented behavior, not a
-        # bug (see app/core/memory.py's has_predecessors docstring).
-        # The confirm dialog warns on this rather than the backend
-        # silently changing what "Забыть" does.
+        # W3 finding, revised by 8c (phase-8 plan section 18.1): forgetting
+        # the head of a chain with a predecessor (an edited or
+        # consolidate-merged row) now forgets every earlier version too
+        # (`memory.forget_lineage`). The confirm dialog says so, so
+        # "Забыть" never deletes more than the user was told.
         "has_predecessor": has_predecessor,
     }
 

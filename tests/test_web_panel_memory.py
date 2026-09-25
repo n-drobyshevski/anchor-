@@ -214,10 +214,10 @@ async def test_memories_excludes_superseded_rows_and_confidence(sessionmaker):
 
 
 async def test_memories_has_predecessor_marks_chain_heads(sessionmaker):
-    """W3 finding: forgetting a chain head with a predecessor resurrects
-    it (hard_delete's own documented section-11 behavior). The confirm
-    dialog warns on this using `has_predecessor`, which must be true for
-    an edited row's replacement and false for anything else."""
+    """W3 finding, revised by 8c (section 18.1): forgetting a chain head
+    with a predecessor forgets the predecessor too. The confirm dialog
+    says so using `has_predecessor`, which must be true for an edited
+    row's replacement and false for anything else."""
     await _seed_state(sessionmaker)
     old = await _write(sessionmaker, kind="identity", text="живёт в Лилле", source="user")
     async with sessionmaker() as session:
