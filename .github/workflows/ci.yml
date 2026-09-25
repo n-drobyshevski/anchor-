@@ -1,9 +1,10 @@
 name: CI
 
-# Milestone 6e (Phase 6 plan section 9.6). Three independent jobs:
+# Milestone 6e (Phase 6 plan section 9.6). Independent jobs:
 # the test suite against the production Postgres major (18), pip-audit
 # for known vulnerabilities with an available fix, and gitleaks for
-# committed secrets -- all against every push and pull request.
+# committed secrets -- all against every push and pull request. Phase 8
+# adds the vaultd job and audits vaultd's lock alongside the bot's.
 
 on:
   push:
@@ -65,6 +66,41 @@ jobs:
       - name: eval dry run
         run: uv run python -m eval.run --dry-run
 
+  vaultd:
+    # Phase 8: the vault service is its own project (vaultd/, own
+    # uv.lock and package-lock.json). Its tests need no database: a
+    # temp dir and a fake `ob`.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vaultd
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Informational: obsidian-headless is pinned exactly and has no
+      # alternative, so a finding is read, not a reason to block.
+      - name: npm audit (informational)
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
   pip-audit:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +119,12 @@ jobs:
         # scripts/pip_audit_gate.py runs it with JSON output and applies
         # that filter itself. See the script's own docstring.
         run: uv run python scripts/pip_audit_gate.py requirements.txt
+
+      - name: Export vaultd requirements
+        run: uv export --directory vaultd --frozen --no-dev --no-hashes --no-emit-project -o ../vaultd-requirements.txt
+
+      - name: pip-audit vaultd (fails only when a fix is available)
+        run: uv run python scripts/pip_audit_gate.py vaultd-requirements.txt
 
   gitleaks:
     runs-on: ubuntu-latest
