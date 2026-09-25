@@ -79,9 +79,12 @@ logger = logging.getLogger(__name__)
 
 PRUNE_AFTER = datetime.timedelta(hours=1)
 
-# Codes a quarantined row can carry in 8b (ck_vault_file_reason_code).
-NAME_TAKEN = "name_taken"
-BAD_YAML = "bad_yaml"
+# Quarantine codes are app/vault/errors.py's alone (8c: QUARANTINE_CODES
+# unifies what used to be a second copy here). Kept as local names for
+# every call site below, which read better as bare NAME_TAKEN/BAD_YAML
+# than errors.NAME_TAKEN/errors.BAD_YAML.
+NAME_TAKEN = errors.NAME_TAKEN
+BAD_YAML = errors.BAD_YAML
 
 
 @dataclass

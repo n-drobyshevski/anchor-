@@ -420,8 +420,15 @@ async def test_forget_relinks_a_chain_and_does_not_resurrect(sessionmaker):
 
 
 async def test_forget_the_head_of_a_chain_clears_the_pointer(sessionmaker):
-    """When the deleted row had no successor, relinking degenerates into
-    exactly the clear section 11 describes."""
+    """`hard_delete` itself still relinks-to-NULL when the deleted row
+    had no successor -- that degenerate case of the general relink is
+    what makes `hard_delete(head)` equivalent to clearing the pointer.
+    `forget()` no longer calls this directly (see
+    test_forget_the_head_of_a_chain_forgets_the_whole_lineage below,
+    tests/test_core_memory_ops.py's forget tests, and
+    tests/test_forget_lineage.py): this test pins `hard_delete`'s own
+    primitive behavior, which forget_lineage's bulk delete does not
+    reuse."""
     async with sessionmaker() as session:
         a = await _write(session, txt="факт А")
         b = await _write(session, txt="факт Б")
@@ -432,6 +439,25 @@ async def test_forget_the_head_of_a_chain_clears_the_pointer(sessionmaker):
         await session.refresh(a)
 
     assert a.superseded_by is None
+
+
+async def test_forget_the_head_of_a_chain_forgets_the_whole_lineage(sessionmaker):
+    """At the `forget()` level (phase-8 plan section 18.1), the same
+    setup no longer resurrects `a`: forgetting the head forgets the
+    whole lineage, so a fact corrected in chat and then forgotten does
+    not come back as its old, superseded text."""
+    async with sessionmaker() as session:
+        a = await _write(session, txt="факт А")
+        b = await _write(session, txt="факт Б")
+        a.superseded_by = b.id
+        await session.commit()
+
+        outcome = await memory.forget(session, b.id, source="command")
+
+    assert outcome == memory.FORGET_OK
+    async with sessionmaker() as session:
+        assert await session.get(Memory, a.id) is None
+        assert await session.get(Memory, b.id) is None
 
 
 # --- pin / list ---

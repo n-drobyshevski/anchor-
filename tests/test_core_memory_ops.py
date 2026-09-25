@@ -151,10 +151,11 @@ async def test_forget_a_missing_id_returns_false_and_writes_no_audit(sessionmake
     assert changes == []
 
 
-async def test_forget_repairs_supersede_pointers_like_hard_delete(sessionmaker):
-    """forget() is hard_delete plus the audit row; the chain-relinking
-    behavior is hard_delete's own (see tests/test_memory.py), asserted
-    here only to confirm forget() doesn't bypass it."""
+async def test_forget_on_a_mid_chain_id_forgets_the_whole_lineage(sessionmaker):
+    """forget() now routes through forget_lineage (phase-8 plan section
+    18.1): forgetting `b` in a -> b -> c no longer relinks `a` to `c`
+    and leaves `a` retired -- it forgets `a`, `b` and `c` together, the
+    same as deleting a fact's file in the vault does."""
     async with sessionmaker() as session:
         a = await _write(session, txt="a")
         b = await memory.write_memory(
@@ -166,8 +167,8 @@ async def test_forget_repairs_supersede_pointers_like_hard_delete(sessionmaker):
         outcome = await memory.forget(session, b.id, source="web")
     assert outcome == memory.FORGET_OK
     async with sessionmaker() as session:
-        refreshed_a = await session.get(Memory, a.id)
-    assert refreshed_a.superseded_by == c.id
+        for row_id in (a.id, b.id, c.id):
+            assert await session.get(Memory, row_id) is None
 
 
 # --- forget vs an adopted StudyCard (W3 finding) ---
@@ -198,11 +199,14 @@ async def test_forget_an_adopted_technique_is_protected_not_a_500(sessionmaker):
     assert changes == []  # refused before the audit row would be written
 
 
-async def test_forget_relinks_a_study_card_when_a_successor_exists(sessionmaker):
-    """The other half of the same finding: editing (superseding) an
-    adopted technique and then forgetting the *old* row must not crash
-    either -- hard_delete relinks study_card.memory_id to the successor
-    the same way it relinks a predecessor's superseded_by."""
+async def test_forget_a_predecessor_an_adopted_card_points_at_is_protected(sessionmaker):
+    """forget_lineage's protection is lineage-wide (phase-8 plan section
+    18.1), not just "is this row the head": editing (superseding) an
+    adopted technique and then forgetting the *old* row is refused too,
+    because forgetting now takes the whole chain -- new row included --
+    with nothing left outside it to relink the card to. Before 8c's
+    lineage-wide check this relinked the card to the successor instead
+    (see git history); now neither row is touched."""
     async with sessionmaker() as session:
         card_memory = await _write(session, kind="technique", txt="дыши перед сном", source="adopt")
         card = await _adopted_card(session, card_memory.id)
@@ -213,12 +217,16 @@ async def test_forget_relinks_a_study_card_when_a_successor_exists(sessionmaker)
             supersedes_id=old_id,
         )
         outcome = await memory.forget(session, old_id, source="web")
-    assert outcome == memory.FORGET_OK
+    assert outcome == memory.FORGET_PROTECTED
 
     async with sessionmaker() as session:
-        assert await session.get(Memory, old_id) is None
+        assert await session.get(Memory, old_id) is not None
+        assert await session.get(Memory, new.id) is not None
         refreshed_card = await session.get(StudyCard, card_id)
-    assert refreshed_card.memory_id == new.id
+    assert refreshed_card.memory_id == old_id
+    async with sessionmaker() as session:
+        changes = (await session.execute(select(StateChange))).scalars().all()
+    assert changes == []
 
 
 # --- has_predecessors ---

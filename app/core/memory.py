@@ -43,7 +43,11 @@ head of its lineage and a /forget of an already-superseded id can never
 orphan a live file. That UPDATE is the only place this module knows the
 vault exists. `write_memory` and `set_pinned` take `commit=False` so the
 vault's sync pass (8c) can put a memory write and its `vault_file`
-update in one transaction.
+update in one transaction; `forget_lineage` takes the same parameter
+for the same reason, when the vault forgets a fact whose file vanished
+(plan section 7.2). `forget()` (Telegram's /forget, the web panel) is a
+thin wrapper over it: as of plan section 18.1 the two agree, and any id
+in a supersede chain forgets the whole chain.
 
 Both numbers are worth re-measuring once there is a real corpus;
 tests/test_memory.py asserts the ranking and the separation, not the
@@ -59,8 +63,8 @@ from sqlalchemy import delete, func, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core.state import Source, record_change
-from app.db.models import Memory, PendingMemory, StudyCard, VaultFile
+from app.core.state import Source
+from app.db.models import Memory, PendingMemory, StateChange, StudyCard, VaultFile
 
 logger = logging.getLogger(__name__)
 
@@ -477,10 +481,13 @@ async def hard_delete(session: AsyncSession, memory_id: int) -> bool:
     section 11 describes.
 
     Returns False, deleting nothing, rather than raise when
-    `_study_card_blocks_delete` refuses -- `forget` (below) is what
-    turns that specific refusal into its own distinct outcome; a bare
-    `hard_delete` caller only ever needs to know whether the row is
-    gone afterward.
+    `_study_card_blocks_delete` refuses. `forget` (below) no longer
+    calls this directly -- it routes through `forget_lineage`, whose
+    own lineage-wide check plays the same role -- but the single-row
+    relink this function does is still what `forget_lineage` cannot
+    reuse (it deletes the whole chain rather than repairing one link in
+    it), so this stays the primitive tests/test_memory.py exercises
+    directly.
     """
     memory = await session.get(Memory, memory_id)
     if memory is None:
@@ -559,32 +566,113 @@ async def set_pinned_capped(
 
 
 async def forget(session: AsyncSession, memory_id: int, *, source: Source) -> str:
-    """Hard-delete a memory and write its content-free audit row (W3,
-    lifted from app/tg/memory.py's `run_forget`).
+    """Forget the whole lineage `memory_id` belongs to (W3; phase-8 plan
+    section 18.1).
 
-    Returns FORGET_OK, FORGET_MISSING (no such active-or-not row -- a
-    missing id) or FORGET_PROTECTED (the row exists but hard_delete
-    refuses it: it is the head of a chain and a StudyCard still points
-    at it, so there is nothing to relink `memory_id` to -- see
-    `_study_card_blocks_delete`). The distinction from FORGET_MISSING
-    matters to callers: MISSING means "nothing to do", PROTECTED means
-    "this row is real and still exists, refused on purpose".
-
-    Plan section 11: "state_change records `memory <id> deleted` with
-    no text" -- record_change's old_value is the id, stringified,
-    never the memory's own text.
+    A thin wrapper over `forget_lineage`, kept as its own name because
+    every caller -- Telegram's /forget, the web panel -- says "forget",
+    not "forget this lineage". Any id in a supersede chain forgets the
+    entire chain, the same as deleting a fact's file in the vault does
+    (`forget_lineage`'s own docstring says why: a corrected fact's
+    predecessor used to come back active when the correction was
+    forgotten, and a file the user deleted must not come back with its
+    old text either).
     """
-    memory = await session.get(Memory, memory_id)
-    if memory is None:
+    return await forget_lineage(session, memory_id, source=source)
+
+
+async def forget_lineage(
+    session: AsyncSession, head_id: int, *, source: Source, commit: bool = True
+) -> str:
+    """Forget an entire supersede chain in one stroke (phase-8 plan
+    sections 7.2 and 18.1).
+
+    `head_id` need not be the chain's actual head -- a Telegram /forget
+    can still be given an older id shown before a correction, and this
+    resolves forward to the head first. (The vault always names the
+    head already: `write_memory`'s supersede branch keeps
+    `vault_file.memory_id` there.) The lineage is then walked backward
+    from the head, collecting every predecessor -- more than one, if
+    idle consolidation merged two originals into it (see
+    app/core/idle/consolidate.py and docs/decisions.md's "8b on main --
+    idle consolidation moves memory behind the vault's back").
+
+    Returns FORGET_OK, FORGET_MISSING (no row at all, at `head_id`), or
+    FORGET_PROTECTED. Protected means some row anywhere in the lineage
+    backs an adopted StudyCard (the lineage-wide generalisation of
+    `_study_card_blocks_delete`): deleting the whole chain would leave
+    that card with nothing to point at, and unlike a single relink
+    there is no successor left outside the chain to relink it to.
+    Nothing changes when protected -- not even a card elsewhere in the
+    same lineage that is *not* adopted.
+
+    A card that points into the lineage without being adopted (never
+    seen in practice -- app/core/cards.py's `adopt` sets `memory_id`
+    and `status='adopted'` in the same flush -- but not ruled out by
+    the schema) has its pointer cleared rather than left dangling: the
+    bare FK on `study_card.memory_id` has no `ON DELETE`, so the delete
+    below would otherwise raise.
+
+    Exactly one `state_change` row is written, `old_value` the head's
+    id (not necessarily `head_id` itself), and no text. `commit=False`
+    flushes instead of committing, so the vault's sync pass (8c) can
+    fold this into the same transaction as the file it is deleting.
+    """
+    row = await session.get(Memory, head_id)
+    if row is None:
         return FORGET_MISSING
-    if await _study_card_blocks_delete(session, memory):
+
+    head = row
+    seen = {head.id}
+    while head.superseded_by is not None and head.superseded_by not in seen:
+        seen.add(head.superseded_by)
+        nxt = await session.get(Memory, head.superseded_by)
+        if nxt is None:
+            break
+        head = nxt
+
+    lineage = [head.id]
+    frontier = [head.id]
+    while frontier:
+        result = await session.execute(
+            select(Memory.id).where(Memory.superseded_by.in_(frontier))
+        )
+        found = [mid for mid in result.scalars().all() if mid not in lineage]
+        if not found:
+            break
+        lineage.extend(found)
+        frontier = found
+
+    blocked = await session.execute(
+        select(func.count())
+        .select_from(StudyCard)
+        .where(StudyCard.memory_id.in_(lineage))
+        .where(StudyCard.status == "adopted")
+    )
+    if blocked.scalar_one() > 0:
         return FORGET_PROTECTED
 
-    deleted = await hard_delete(session, memory_id)
-    if not deleted:
-        return FORGET_MISSING
-    await record_change(
-        session, field="memory", old_value=str(memory_id), new_value=None, source=source
+    await session.execute(
+        sql_update(StudyCard).where(StudyCard.memory_id.in_(lineage)).values(memory_id=None)
+    )
+    # Delete deepest predecessor first, head last: `lineage` is built
+    # head-outward, so reversing it deletes every row before whatever
+    # still points at it via `superseded_by`, self-referential FK and
+    # all. A single multi-row DELETE would leave that ordering to
+    # chance.
+    for memory_id in reversed(lineage):
+        await session.execute(delete(Memory).where(Memory.id == memory_id))
+    session.add(
+        StateChange(field="memory", old_value=str(head.id), new_value=None, source=source)
+    )
+
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
+    logger.info(
+        "memory lineage forgotten",
+        extra={"memory_id": head.id, "count": len(lineage)},
     )
     return FORGET_OK
 
