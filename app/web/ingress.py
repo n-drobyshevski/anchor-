@@ -55,8 +55,10 @@ from app.web.hub import WebHub
 #
 # `grok` joins it for the same reason as `planner_link`: its reply
 # becomes a capability URL granting read access to the data
-# (app/tg/grok.py), which must only ever be shown in Telegram.
-BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok"})
+# (app/tg/grok.py), which must only ever be shown in Telegram. `claude`
+# joins it because `/claude connect <code>` *approves* an OAuth
+# connection (app/tg/claude.py): Telegram is the only approval channel.
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather
@@ -65,9 +67,10 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok"})
 # sent by WebSinkSession in the first place (delete_command's is_web_sink
 # guard fires before send_keyboard is ever called), so this can only
 # ever fire on a forged press. `g:` is the /grok picker's prefix
-# (app/tg/grok.py), blocked for the reason BLOCKED_COMMANDS gives.
-# A tuple, because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:")
+# (app/tg/grok.py) and `cl:` the /claude window picker's
+# (app/tg/claude.py), both blocked for the reasons BLOCKED_COMMANDS
+# gives. A tuple, because str.startswith takes one.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:")
 
 
 class BlockedCommand(Exception):

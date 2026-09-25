@@ -1173,8 +1173,9 @@ class AccessGrant(Base):
     truncates the table.
 
     `client` names the assistant (connector plan section 7). A `grok`
-    grant has a token hash and a `claude` one will not; until C2 makes
-    `token_sha256` nullable, the pairing check refuses any `claude` row.
+    grant has a token hash and no connection; a `claude` grant is a
+    *window* on an OAuth connection (app/tg/claude.py) and has no token
+    of its own. The two pairing checks keep each shape exclusive.
     """
 
     __tablename__ = "access_grant"
@@ -1183,7 +1184,10 @@ class AccessGrant(Base):
     client: Mapped[str] = mapped_column(
         String, nullable=False, default="grok", server_default=text("'grok'")
     )
-    token_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    token_sha256: Mapped[str | None] = mapped_column(String, unique=True)
+    connection_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("oauth_connection.id", ondelete="CASCADE")
+    )
     scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     dialog_days: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -1213,6 +1217,118 @@ class AccessGrant(Base):
             "(client = 'grok') = (token_sha256 is not null)",
             name="ck_access_grant_client_token",
         ),
+        CheckConstraint(
+            "(client = 'claude') = (connection_id is not null)",
+            name="ck_access_grant_client_connection",
+        ),
+    )
+
+
+class OauthConnection(Base):
+    """claude.ai's one OAuth connection (connector plan sections 5 and 7).
+
+    Created when claude.ai redeems an authorization code that the user
+    approved by typing it into Telegram. At most one is active: the
+    partial unique index makes a second unrevoked row impossible, and
+    app/web/oauth_store.py revokes the old one in the same transaction
+    that inserts the new. `expires_at` is absolute (30 days); refreshing
+    never moves it. Only app/web/oauth_store.py writes this table.
+    """
+
+    __tablename__ = "oauth_connection"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="ck_oauth_connection_expiry"),
+        Index(
+            "uq_oauth_connection_active",
+            text("(true)"),
+            unique=True,
+            postgresql_where=text("revoked_at is null"),
+        ),
+    )
+
+
+class OauthRequest(Base):
+    """An authorization request the user approved in Telegram.
+
+    Pending requests live only in memory (app/web/oauth_store.py's
+    PendingStore): nothing is written for a stranger who merely opens
+    /oauth/authorize. A row appears when `/claude connect <code>`
+    matches, carrying the sha256 of a 60-second authorization code and
+    everything that code is bound to. Redeeming it is one atomic UPDATE
+    from `approved` to `redeemed`; a second redemption finds it
+    `redeemed` and revokes what the first one issued.
+    """
+
+    __tablename__ = "oauth_request"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[str] = mapped_column(String, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String, nullable=False)
+    resource: Mapped[str] = mapped_column(String, nullable=False)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String, nullable=False)
+    code_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    code_expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    connection_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("oauth_connection.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('approved', 'redeemed', 'expired')", name="ck_oauth_request_status"
+        ),
+    )
+
+
+class OauthToken(Base):
+    """An access or refresh token for a connection; only its sha256.
+
+    `audience` is the canonical resource URI the token is bound to.
+    A refresh token is rotated on every use: the old row gets
+    `replaced_at` (and `replaced_by`), and presenting it again more than
+    30 seconds later is the standard theft signal, which revokes the
+    whole connection. `request_id` lets a replayed authorization code
+    revoke every token issued from it.
+    """
+
+    __tablename__ = "oauth_token"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("oauth_connection.id", ondelete="CASCADE"), nullable=False
+    )
+    # SET NULL, not the plan's CASCADE: requests are swept after a day,
+    # and a live token must outlive the request that minted it.
+    request_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("oauth_request.id", ondelete="SET NULL")
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    token_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    audience: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    replaced_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("oauth_token.id", ondelete="SET NULL")
+    )
+    replaced_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("kind in ('access', 'refresh')", name="ck_oauth_token_kind"),
+        CheckConstraint("expires_at > created_at", name="ck_oauth_token_expiry"),
+        Index("ix_oauth_token_connection_id", "connection_id"),
     )
 
 

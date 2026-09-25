@@ -25,6 +25,7 @@ from app.core import grants
 from app.core.clock import Clock
 from app.core.clock import zone as zone_of
 from app.core.state import get_state
+from app.tg import access
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
 
@@ -55,11 +56,8 @@ GRANTED_TEXT = (
     "После подключения удали это сообщение.\n"
     "Каждое чтение я покажу здесь. Закрыть доступ: /revoke"
 )
-REVOKED_TEXT = (
-    "Доступ для Grok закрыт ({count}). Коннектор в grok.com можно удалить: "
-    "ссылка больше не работает."
-)
-NOTHING_TO_REVOKE = "Открытых доступов нет."
+REVOKED_TEXT = access.GROK_REVOKED_TEXT
+NOTHING_TO_REVOKE = access.NOTHING_TO_REVOKE
 
 
 def _mask_scopes(mask: int) -> list[str]:
@@ -114,7 +112,7 @@ def available(settings: Settings) -> str | None:
 
 async def opening_text(sessionmaker, clock: Clock, period: int, ttl: int) -> str:
     async with sessionmaker() as session:
-        active = await grants.list_active(session, clock)
+        active = await grants.list_active(session, clock, client=grants.GROK)
         timezone = (await get_state(session)).timezone
     text = grant_text(period, ttl)
     if active:
@@ -215,7 +213,5 @@ async def handle_callback(
 
 
 async def revoke(sessionmaker, clock: Clock) -> str:
-    async with sessionmaker() as session:
-        count = await grants.revoke_all(session, clock)
-    logger.info("grants revoked", extra={"event": "revoke", "count": count})
-    return REVOKED_TEXT.format(count=count) if count else NOTHING_TO_REVOKE
+    """/revoke: shared with Claude's windows (app/tg/access.py)."""
+    return await access.revoke(sessionmaker, clock)

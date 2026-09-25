@@ -128,6 +128,14 @@ PURGED_TABLES = (
     # Grok access: "delete all my data" also closes every door that was
     # opened onto it. Truncating revokes all grants at once.
     "access_grant",
+    # Claude access (connector plan section 7): the connection, its
+    # approved requests and every token hash. access_grant's Claude
+    # windows reference oauth_connection, so all go in the same
+    # statement; the in-memory pending requests are cleared by the
+    # /delete handler (app/tg/data.py).
+    "oauth_token",
+    "oauth_request",
+    "oauth_connection",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a

@@ -532,14 +532,21 @@ class Settings(BaseSettings):
     # Per grant, a sliding one-minute window on the MCP endpoint.
     GROK_MAX_CALLS_PER_MINUTE: int = 30
 
-    # --- Claude connector dry run (docs/claude-connector-dry-run.md) ---
+    # --- Claude access (docs/claude-connector.md) ---
     #
-    # `off`, or which registration method app/web/oauth_probe.py
-    # advertises to claude.ai: `both`, `cimd` or `dcr`. The probe grants
-    # nothing and logs only shapes; it exists to answer the connector
-    # plan's section 11 before C2's OAuth code is written, and C2
-    # removes it. Needs webhook mode and an https PUBLIC_URL.
-    CLAUDE_OAUTH_PROBE: str = "off"
+    # Read access for claude.ai through a custom connector with OAuth,
+    # approved by typing a code into Telegram. Ships off: with this
+    # false, /mcp/claude, /oauth/* and the well-known routes do not
+    # exist, /claude refuses, and startup revokes every connection, so
+    # turning it back on never revives an old token. Even when on,
+    # nothing is readable outside a window opened with /claude.
+    # Lifetimes, caps and the accepted client are constants in
+    # app/web/oauth_store.py, not settings.
+    CLAUDE_ACCESS_ENABLED: bool = False
+    # The ceiling on one window; /claude offers 1 h and 24 h.
+    CLAUDE_WINDOW_MAX_HOURS: int = 24
+    # Per connection, a sliding one-minute window on /mcp/claude.
+    CLAUDE_MAX_CALLS_PER_MINUTE: int = 30
 
     # The three /study packets. Comma-separated domains, parsed by the
     # validator below. GUIDES ships empty and /study guides refuses
@@ -964,7 +971,6 @@ REQUIRED_PLANNER = (
 
 
 VALID_VAULT_MODES = ("off", "status", "mirror", "sync")
-VALID_CLAUDE_OAUTH_PROBE = ("off", "both", "cimd", "dcr")
 # The same floor vaultd enforces on its side (vaultd/vaultd/boot.py).
 VAULT_TOKEN_MIN_CHARS = 32
 # 8e: the most note chunks of one class a prompt may ever carry. A
@@ -1106,19 +1112,16 @@ def check_runtime_settings(settings: Settings) -> None:
                 "scrypt$17$8$1$<salt>$<hash>."
             )
 
-    probe = settings.CLAUDE_OAUTH_PROBE
-    if probe not in VALID_CLAUDE_OAUTH_PROBE:
-        raise SystemExit(
-            f"CLAUDE_OAUTH_PROBE must be one of {', '.join(VALID_CLAUDE_OAUTH_PROBE)}, "
-            f"got {probe!r}."
-        )
-    if probe != "off" and (
+    if settings.CLAUDE_ACCESS_ENABLED and (
         settings.MODE != "webhook" or not settings.PUBLIC_URL.strip().startswith("https://")
     ):
         raise SystemExit(
-            "CLAUDE_OAUTH_PROBE requires MODE=webhook and an https:// PUBLIC_URL: "
-            "claude.ai reaches the probe only over public HTTPS."
+            "CLAUDE_ACCESS_ENABLED requires MODE=webhook and an https:// PUBLIC_URL: "
+            "claude.ai reaches the connector only over public HTTPS, and the "
+            "authorization server's cookie is Secure."
         )
+    if not 1 <= settings.CLAUDE_WINDOW_MAX_HOURS <= 24:
+        raise SystemExit("CLAUDE_WINDOW_MAX_HOURS must be between 1 and 24.")
 
     check_vault_settings(settings)
 

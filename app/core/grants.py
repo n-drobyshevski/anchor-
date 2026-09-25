@@ -9,10 +9,12 @@ only its sha256 is stored. `find_active_grant` hashes what it is given
 and looks the hash up, so a timing difference can only reveal whether
 some *hash* prefix exists, which says nothing about a valid token.
 
-A grant belongs to one client (`access_grant.client`). Only Grok's
-grants exist so far; `create_grant` writes `grok` and
-`find_active_grant` looks at nothing else, so a token can never open a
-row meant for another client (connector plan section 7).
+A grant belongs to one client (`access_grant.client`). Grok's grants
+carry a capability token (`create_grant`, `find_active_grant`, which
+looks at nothing but `grok` rows). Claude's are *windows* on an OAuth
+connection: no token of their own, opened by `open_window`, at most one
+open at a time, found by `find_open_window` (connector plan section
+6.1). /revoke closes both kinds.
 
 The read functions return plain JSON-ready dicts. They are the only
 place the MCP endpoints (app/web/mcp_core.py) touch content, so what
@@ -55,6 +57,7 @@ MAX_DIALOG_MESSAGES = 500
 NOTIFY_EVERY = datetime.timedelta(minutes=10)
 TOKEN_BYTES = 32
 GROK = "grok"
+CLAUDE = "claude"
 
 
 def hash_token(token: str) -> str:
@@ -105,23 +108,104 @@ async def find_active_grant(
     return result.scalar_one_or_none()
 
 
-async def list_active(session: AsyncSession, clock: Clock) -> list[AccessGrant]:
-    result = await session.execute(
-        select(AccessGrant)
-        .where(AccessGrant.revoked_at.is_(None), AccessGrant.expires_at > clock.now_utc())
-        .order_by(AccessGrant.id)
+async def list_active(
+    session: AsyncSession, clock: Clock, client: str | None = None
+) -> list[AccessGrant]:
+    query = select(AccessGrant).where(
+        AccessGrant.revoked_at.is_(None), AccessGrant.expires_at > clock.now_utc()
     )
+    if client is not None:
+        query = query.where(AccessGrant.client == client)
+    result = await session.execute(query.order_by(AccessGrant.id))
     return list(result.scalars().all())
 
 
 async def revoke_all(session: AsyncSession, clock: Clock) -> int:
+    return sum((await revoke_all_by_client(session, clock)).values())
+
+
+async def revoke_all_by_client(session: AsyncSession, clock: Clock) -> dict[str, int]:
+    """Close every open grant and window. Returns {client: how many}."""
     result = await session.execute(
         update(AccessGrant)
         .where(AccessGrant.revoked_at.is_(None), AccessGrant.expires_at > clock.now_utc())
         .values(revoked_at=clock.now_utc())
+        .returning(AccessGrant.client)
     )
+    counts = {GROK: 0, CLAUDE: 0}
+    for client in result.scalars().all():
+        counts[client] = counts.get(client, 0) + 1
     await session.commit()
-    return result.rowcount or 0
+    return counts
+
+
+# --- Claude windows ---
+
+
+async def open_window(
+    session: AsyncSession,
+    clock: Clock,
+    *,
+    connection_id: int,
+    scopes: tuple[str, ...] | list[str],
+    ttl_hours: int,
+    dialog_days: int | None = None,
+    max_hours: int = 24,
+) -> AccessGrant:
+    """Open the one Claude window on a connection, closing any other.
+
+    The caller has checked that the connection is the active one; the
+    foreign key and the pairing checks refuse anything else.
+    """
+    scopes = [s for s in SCOPES if s in set(scopes)]
+    if not scopes:
+        raise ValueError("a window needs at least one scope")
+    ttl_hours = max(1, min(int(ttl_hours), max_hours))
+    now = clock.now_utc()
+    await close_windows(session, now, None)
+    window = AccessGrant(
+        client=CLAUDE,
+        connection_id=connection_id,
+        scopes=scopes,
+        dialog_days=dialog_days if "dialogs" in scopes else None,
+        created_at=now,
+        expires_at=now + datetime.timedelta(hours=ttl_hours),
+    )
+    session.add(window)
+    await session.commit()
+    await session.refresh(window)
+    return window
+
+
+async def find_open_window(
+    session: AsyncSession, clock: Clock, connection_id: int
+) -> AccessGrant | None:
+    """The connection's open window, if any (at most one by construction)."""
+    result = await session.execute(
+        select(AccessGrant)
+        .where(
+            AccessGrant.client == CLAUDE,
+            AccessGrant.connection_id == connection_id,
+            AccessGrant.revoked_at.is_(None),
+            AccessGrant.expires_at > clock.now_utc(),
+        )
+        .order_by(AccessGrant.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def close_windows(
+    session: AsyncSession, now: datetime.datetime, connection_ids: list[int] | None
+) -> None:
+    """Close open Claude windows (all, or those of `connection_ids`). No commit:
+    the caller closes them in the same transaction as whatever ended them."""
+    statement = update(AccessGrant).where(
+        AccessGrant.client == CLAUDE, AccessGrant.revoked_at.is_(None)
+    )
+    if connection_ids is not None:
+        statement = statement.where(AccessGrant.connection_id.in_(connection_ids))
+    await session.execute(statement.values(revoked_at=now))
 
 
 async def record_use(session: AsyncSession, clock: Clock, grant_id: int) -> bool:

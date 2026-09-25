@@ -68,7 +68,7 @@ from app.tg.planner import LINK_FAILED, LINKED_OK
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
-from app.web import mcp, oauth_probe
+from app.web import mcp, mcp_claude, oauth, oauth_store
 from app.web import auth as web_auth
 from app.web.hub import WebHub
 from app.web.routes import setup_web
@@ -138,6 +138,7 @@ def build_dispatcher(
     clock: Clock | None = None,
     hub: WebHub | None = None,
     code_store: web_auth.CodeStore | None = None,
+    claude_pending: oauth_store.PendingStore | None = None,
 ) -> Dispatcher:
     """`hub` and `code_store` (web-chat plan track 2) default to None so
     every caller and test predating the web UI keeps its shorter call;
@@ -155,6 +156,7 @@ def build_dispatcher(
             clock or SystemClock(),
             hub,
             code_store,
+            claude_pending,
         )
     )
     return dp
@@ -302,6 +304,7 @@ def build_webhook_app(
     code_store: web_auth.CodeStore | None = None,
     planner_client: PlannerClient | None = None,
     planner_http: aiohttp.ClientSession | None = None,
+    claude_pending: oauth_store.PendingStore | None = None,
 ) -> web.Application:
     """`hub` (web-chat plan track 2) is passed in, not built here, so the
     same WebHub instance `main()` handed to `build_dispatcher()` (for
@@ -314,6 +317,9 @@ def build_webhook_app(
     share-one-instance treatment for the same reason: /weblogout's
     kill switch (app/tg/router.py) must invalidate the very CodeStore
     POST /api/auth/passphrase issues codes into, not a second, empty one.
+    `claude_pending` is shared the same way: `/claude connect` in
+    Telegram must match codes in the very store /oauth/authorize fills,
+    and /delete must empty it.
     """
     app = web.Application()
     app["settings"] = settings
@@ -332,9 +338,12 @@ def build_webhook_app(
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
-    # Before Grok's /mcp/{token}, which would otherwise match /mcp/claude.
-    if settings.CLAUDE_OAUTH_PROBE in oauth_probe.MODES:
-        oauth_probe.register_routes(app, settings)
+    # Claude access (docs/claude-connector.md), before Grok's
+    # /mcp/{token}, which would otherwise match /mcp/claude. Off, none
+    # of these routes exist: aiohttp's own 404.
+    if settings.CLAUDE_ACCESS_ENABLED:
+        oauth.register(app, settings, claude_pending or oauth_store.PendingStore(clock))
+        mcp_claude.register(app, settings)
     if settings.GROK_ACCESS_ENABLED:
         mcp.register(app, settings)
 
@@ -439,7 +448,13 @@ def main() -> None:
     # share this exact CodeStore instance, not one each (see
     # build_webhook_app's docstring).
     code_store = web_auth.CodeStore() if settings.WEB_UI_ENABLED else None
-    dp = build_dispatcher(sessionmaker, settings, provider, safety_provider, clock, hub, code_store)
+    # Claude access: one PendingStore, shared by /oauth/authorize (which
+    # fills it) and /claude connect and /delete (which match and empty it).
+    claude_pending = oauth_store.PendingStore(clock) if settings.CLAUDE_ACCESS_ENABLED else None
+    dp = build_dispatcher(
+        sessionmaker, settings, provider, safety_provider, clock, hub, code_store,
+        claude_pending=claude_pending,
+    )
     # planner_client/planner_http are NOT built here: see _on_startup
     # and _run_polling_mode, which build them once the event loop is
     # actually running.
@@ -458,10 +473,11 @@ def main() -> None:
             clock,
             hub,
             code_store,
+            claude_pending=claude_pending,
         )
         # access_log=None: the default access log prints the request
-        # path, and /mcp/{token} carries a credential in its path (as
-        # /oauth/authorize's query will carry `state`).
+        # path and query: /mcp/{token} carries a credential in its path,
+        # and /oauth/authorize's query carries `state`.
         web.run_app(app, host="0.0.0.0", port=settings.PORT, access_log=None)
     else:
         asyncio.run(

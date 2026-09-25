@@ -24,6 +24,9 @@ from app.core import purge
 from app.db.models import (
     Obligation,
     AccessGrant,
+    OauthConnection,
+    OauthRequest,
+    OauthToken,
     BackupLog,
     Base,
     BriefNote,
@@ -319,6 +322,49 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 created_at=now,
                 expires_at=now + datetime.timedelta(hours=1),
             )
+        )
+        # Claude access: a connection with a window, an approved request
+        # and a token.
+        connection = OauthConnection(
+            client_id="https://claude.ai/oauth/mcp-oauth-client-metadata",
+            created_at=now,
+            expires_at=now + datetime.timedelta(days=30),
+        )
+        session.add(connection)
+        await session.flush()
+        request = OauthRequest(
+            client_id=connection.client_id,
+            redirect_uri="https://claude.ai/api/mcp/auth_callback",
+            resource="https://anchor.example/mcp/claude",
+            scope="anchor.read",
+            code_challenge="c" * 43,
+            code_sha256="1" * 64,
+            code_expires_at=now + datetime.timedelta(seconds=60),
+            status="redeemed",
+            connection_id=connection.id,
+            created_at=now,
+        )
+        session.add(request)
+        await session.flush()
+        session.add_all(
+            [
+                OauthToken(
+                    connection_id=connection.id,
+                    request_id=request.id,
+                    kind="access",
+                    token_sha256="2" * 64,
+                    audience="https://anchor.example/mcp/claude",
+                    created_at=now,
+                    expires_at=now + datetime.timedelta(hours=1),
+                ),
+                AccessGrant(
+                    client="claude",
+                    connection_id=connection.id,
+                    scopes=["journal"],
+                    created_at=now,
+                    expires_at=now + datetime.timedelta(hours=1),
+                ),
+            ]
         )
         # Phase 5: an open debt.
         session.add(Obligation(text="прислать отчёт", kind="promised", source="user"))

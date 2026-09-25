@@ -15,7 +15,9 @@ and that both name Obsidian (8e).
 - If the planner is connected: the agenda (including a partner's shared
   events) and, with PLANNER_HEALTH, sleep and heart-rate metrics go into
   the model's prompt; the planner's tokens are stored in the database
-  and left out of `/export`.
+  and left out of `/export`. If access is open (`/grok`, `/claude`),
+  what is read goes to xAI or Anthropic; closing access stops further
+  reads, not what was already read.
 - Telegram chats are not end-to-end encrypted -- messages pass through
   Telegram's own servers and this bot's server.
 - Database backups are encrypted (age) and kept as 14 daily plus 8

@@ -1,7 +1,10 @@
 # Claude connector: the dry run
 
 **Done on 2026-09-25.** The results are below and pinned in
-`docs/decisions.md` ("C2 — the dry run's answers"). The probe is off.
+`docs/decisions.md` ("C2 — the dry run's answers"). C2 removed the
+probe and its `CLAUDE_OAUTH_PROBE` setting; the real authorization
+server is `app/web/oauth.py` (docs/claude-connector.md). This page is
+kept as the record of what was measured.
 
 `anchor-claude-connector-plan.md` section 11 asks what claude.ai
 actually sends before C2 writes an authorization server: which client
