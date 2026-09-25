@@ -1,8 +1,11 @@
-"""`python -m vaultd`: boot, supervise ob, serve the API on [::]:$PORT.
+"""`python -m vaultd`: boot, supervise ob, serve the API on $PORT.
 
-Binding `::` is deliberate: Railway's private DNS resolves to IPv6 only
-in legacy environments (dual-stack in newer ones), and a dual-stack
-Linux socket bound to `::` accepts both.
+The API listens on every address family, not on `::` alone. Railway's
+private DNS resolves to IPv6 only in legacy environments, but its
+healthcheck connects over IPv4. A plain Linux socket on `::` would take
+both, yet asyncio sets IPV6_V6ONLY on every IPv6 listener, so `::` alone
+means IPv6 only and the healthcheck never connects. `host=None` makes
+asyncio bind one socket per family the host has (docs/decisions.md).
 """
 
 from __future__ import annotations
@@ -20,6 +23,13 @@ from vaultd.store import Store
 from vaultd.supervisor import Supervisor
 
 
+async def start_site(runner: web.AppRunner, port: int) -> web.TCPSite:
+    """Listen on `port` on every address family: 0.0.0.0 and ::."""
+    site = web.TCPSite(runner, host=None, port=port)
+    await site.start()
+    return site
+
+
 async def serve(cfg: config.Config, env: dict[str, str], ob_bin: str = config.OB_BIN) -> None:
     ob_env = await boot.boot(cfg, env, ob_bin)
     supervisor = Supervisor(boot.sync_argv(ob_bin, cfg.vault_path), ob_env, cfg.config_home)
@@ -31,7 +41,7 @@ async def serve(cfg: config.Config, env: dict[str, str], ob_bin: str = config.OB
     )
     runner = web.AppRunner(app, access_log=None, handle_signals=False)
     await runner.setup()
-    await web.TCPSite(runner, host="::", port=cfg.port).start()
+    await start_site(runner, cfg.port)
     sync_task = asyncio.create_task(supervisor.run())
 
     stop = asyncio.Event()
