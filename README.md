@@ -33,6 +33,7 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | Command | What it does | Gate |
 |---|---|---|
 | `/start` | Start | — |
+| `/menu` | Buttons for the common commands; `/start` also adds a persistent «☰ Меню» button | — |
 | `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup | — |
 | `/out`, `/in` | Pause the persona / come back | — |
 | `/remember`, `/memories`, `/forget`, `/pin`, `/unpin` | Memory | — |
