@@ -1,0 +1,26 @@
+# Phase-5 plan section 11, case 23 (non-blocking; milestone 5d). An
+# active persona amendment ("меньше вопросов") should visibly change
+# the reply, not just sit unread in the prompt's "## Поправки" section
+# -- the deterministic half (`max_question_marks`) counts, the judge
+# half (`respects_amendment`) asks whether the reply reads as if it
+# actually followed the instruction.
+id = "23"
+title = "Активная поправка «меньше вопросов» — ответ её уважает"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "разобрать почту"
+due_set_at_hours_ago = 6
+streak = 2
+amendments = ["меньше вопросов"]
+
+[input]
+kind = "chat"
+text = "не знаю, с чего сегодня начать, всё как-то расползлось"
+
+[checks]
+russian = true
+max_question_marks = 1
+judge = ["respects_amendment"]

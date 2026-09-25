@@ -65,8 +65,35 @@ _STUDY_JOB_NON_TERMINAL = ("queued", "searching", "fetching", "distilling")
 PURGED_TABLES = (
     "message",
     "memory",
+    # 5b: Anchor's own working notes plus the user's own `/mind add`
+    # intentions (phase-5 plan section 3). Listed ahead of `scene`,
+    # child-first, though `scene_id` is `ON DELETE SET NULL` rather than
+    # CASCADE -- the same "TRUNCATE the whole list in one statement"
+    # reasoning as `study_card`/`study_clip`/`study_job` below applies
+    # regardless of which FK action a column carries.
+    "notebook_entry",
     "scene",
+    # 5c: standing orders and their check-in results (phase-5 plan
+    # section 3). checkin_order_result is listed ahead of checkin and
+    # standing_order, child-first -- same "TRUNCATE the whole list in
+    # one statement" reasoning as study_card/study_clip/study_job below,
+    # even though both its FKs are ON DELETE CASCADE.
+    "checkin_order_result",
     "checkin",
+    # 5d: the weekly review and persona amendments (phase-5 plan sections
+    # 3, 8 and 9). Listed child-first -- persona_amendment.proposal_id
+    # references review_proposal, and standing_order.review_proposal_id
+    # (already listed above, ON DELETE SET NULL) references it too --
+    # same "TRUNCATE the whole list in one statement" reasoning as
+    # study_card/study_clip/study_job below: every table any of these
+    # three FKs into is itself in this list, so ordering is for
+    # readability, not correctness.
+    "persona_amendment",
+    "review_proposal",
+    "weekly_review",
+    "standing_order",
+    # Phase 5 (spec 2026-09-25): the debt queue.
+    "obligation",
     "proposal",
     "journal",
     "state_change",
@@ -97,6 +124,49 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # Grok access: "delete all my data" also closes every door that was
+    # opened onto it. Truncating revokes all grants at once.
+    "access_grant",
+    # Web-chat plan track 1 (app/db/models.py's WebSession). A live
+    # session cookie is a credential, and "delete all my data" has to
+    # revoke every way back in along with the data itself -- leaving a
+    # `web_session` row behind after a wipe would mean the browser that
+    # ran /delete could still read the (now-empty) conversation through
+    # a cookie /delete never touched. tests/test_delete.py's coverage
+    # test is what forces this: `web_session` has to be listed here or
+    # in KEPT_TABLES, or that test fails.
+    "web_session",
+    # Web-chat plan track 2 (app/db/models.py's WebUpdate, added when the
+    # migration was reworked to avoid an ALTER on telegram_update). It
+    # holds no content -- only the client_key idempotency marker for a
+    # browser-originated update -- but it is still a record tied to this
+    # user's browser sessions, and tests/test_delete.py's coverage test
+    # forces every table to be listed here or in KEPT_TABLES.
+    "web_update",
+    # 6a: the idle framework's own tables (Phase 6 plan section 3).
+    # idle_change is listed child-first, though its FK is ON DELETE
+    # CASCADE -- same "TRUNCATE the whole list in one statement"
+    # reasoning as study_card/study_clip/study_job above. All five are
+    # user data by the same reasoning purge.py already applies
+    # elsewhere: idle_run/idle_change are a record of background work
+    # done on this user's behalf and its undo trail; brief_note and
+    # interest_topic are content the user will see or chose themselves;
+    # backup_log names only ciphertext object keys and sizes, but a
+    # backup taken *of* this user's data is still about them.
+    "idle_change",
+    "idle_run",
+    "brief_note",
+    "interest_topic",
+    "backup_log",
+    # P2: the planner link. planner_credential holds live OAuth tokens --
+    # "delete all my data" purging them is the same call plan section
+    # 3.1 makes for a revoked grant: the credential is gone, and
+    # /planner_link must be run again to relink. planner_snapshot and
+    # planner_action are the cached agenda and (from P3) pending writes,
+    # both plainly user data.
+    "planner_credential",
+    "planner_snapshot",
+    "planner_action",
     # 8a: the vault's four tables (phase-8 plan section 6), child-first.
     # vault_chunk is a derived copy of the user's own opted-in notes,
     # vault_file names their files, vault_hold carries fact text waiting
@@ -112,8 +182,11 @@ PURGED_TABLES = (
 
 # user_state is reset in place, never dropped. persona_version is a
 # hash of a file in this repo, not user data, and startup rebuilds it
-# anyway (plan section 11: "Keep persona_version").
-KEPT_TABLES = ("user_state", "persona_version")
+# anyway (plan section 11: "Keep persona_version"). heartbeat_state
+# (6a) is the same kind of operational marker -- when the heartbeat
+# loop last ran, not anything about the user -- and the heartbeat loop
+# keeps stamping it right through a /delete.
+KEPT_TABLES = ("user_state", "persona_version", "heartbeat_state")
 
 # Columns that survive a wipe. Everything else on user_state must appear
 # in reset_values() below.
@@ -153,6 +226,18 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         "last_outbound_at": None,
         "ignored_in_row": 0,
         "welfare_at": None,
+        # 5a: the nickname rotation resets like everything else here --
+        # a wipe returns the bot to a state where no nickname has been
+        # used yet, exactly as a fresh deploy would see it.
+        "nickname_last": None,
+        # 5e: the callback tracker resets too -- `scene` is purged along
+        # with everything else, so a stale callback_scene would point at
+        # a row that no longer exists, and the first persona turn after
+        # a wipe should get to offer a callback again regardless.
+        "callback_scene": None,
+        # Phase 5: back to full attention, as on a fresh deploy.
+        "attention": "present",
+        "attention_until": None,
         # 8a (phase-8 plan section 4): a fresh epoch, so a file
         # re-uploaded from before this delete can never share a path
         # with a file rendered after it, and is deleted as an orphan

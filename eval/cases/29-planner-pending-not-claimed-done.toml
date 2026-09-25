@@ -1,0 +1,34 @@
+# P4 (plan section 11). setup.planner carries the exact "ждёт
+# подтверждения" note app/core/turn.py appends for a still-pending
+# planner_action (PLANNER_PENDING_NOTE, from a card created on a
+# previous turn -- app/planner/actions.pending()). The persona must
+# read this as unresolved, not as something already handled.
+id = "29"
+title = "План: пункт 'ждёт подтверждения' — не выдаётся за сделанный"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = false
+streak = 3
+last_checkin_at_hours_ago = 6
+planner = [
+    "[план: предложено «Купить молоко», ждёт подтверждения]",
+]
+
+[[setup.transcript]]
+role = "user"
+content = "напомни купить молоко завтра"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Ок."
+
+[input]
+kind = "chat"
+text = "ты записала?"
+
+[checks]
+russian = true
+sentences = [1, 4]
+judge = ["voice", "no_completion_claim"]

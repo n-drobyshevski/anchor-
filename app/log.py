@@ -77,8 +77,48 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "clip_id",
     "domain",
     "error_code",
+    # Setting *names* (never values), e.g. which backup vars are empty.
+    "fields",
+    # Code location of a failure (module:function:line), never its message.
+    "where",
     "cards",
     "dropped",
+    # Grok access (app/web/mcp.py)
+    "grant_id",
+    # web-chat plan track 2 (design section 5). "source" is
+    # 'telegram'/'web', derived from the sign of telegram_update.
+    # update_id (negative == web, app/db/queue.py) rather than a stored
+    # column, never which text or command a request carried; "route" is
+    # a fixed handler name (e.g. "auth_passphrase", "send"), never a URL
+    # path or query string, which -- unlike this closed, hand-written
+    # set of route names -- could carry a memory id, a card id or a
+    # search term. Every web-chat log line uses only these two plus the
+    # existing "event" key, with event values fixed to web_login_ok/
+    # web_login_fail/web_code_sent/web_lockout/web_logout/web_rejected
+    # (app/web/routes.py, app/tg/router.py's /weblogout) -- never the
+    # passphrase, the code, a session token, or an IP address.
+    "source",
+    "route",
+    # 5b: notebook reflect/expiry counts only, never text (app/core/
+    # notebook.py).
+    "added",
+    "closed",
+    "updated",
+    # 5c: standing order ids only, never order text (app/core/orders.py,
+    # app/tg/orders.py).
+    "order_id",
+    # 5d: weekly review / amendment ids and pass/fail counts only, never
+    # review, proposal or amendment text or model output (app/core/
+    # review.py, app/core/amendments.py).
+    "review_id",
+    "proposal_id",
+    "amendment_id",
+    "passed",
+    "reason",
+    # 6e: backup/retention housekeeping (app/ops/backup.py,
+    # app/core/retention.py) -- a ciphertext object's size, never its
+    # key or contents.
+    "bytes",
 )
 
 

@@ -7,8 +7,7 @@
   deleted by the next pass, never imported;
 - `write_memory`/`set_pinned` can share the caller's transaction, and a
   supersede moves `vault_file.memory_id` to the head;
-- `/forget` of an adopted technique with a real card works (a phase-4
-  fix): the card becomes `forgotten`.
+- a technique `/forget` refuses (main's protection) keeps its file.
 """
 
 from __future__ import annotations
@@ -194,9 +193,12 @@ async def test_a_supersede_moves_the_file_pointer_to_the_head(sessionmaker):
     assert row.memory_id == new.id
 
 
-async def test_forget_of_an_adopted_technique_with_a_real_card(sessionmaker):
-    """Phase-4 bug: study_card.memory_id had no ON DELETE rule, so this raised."""
+async def test_a_protected_technique_keeps_its_file(sessionmaker):
+    """main refuses /forget of an adopted technique's head (FORGET_PROTECTED,
+    app/core/memory.py). The vault follows: the memory stays, so its file
+    stays, and nothing about the card changes."""
     async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris", vault_epoch="abcdef"))
         job = StudyJob(kind="read", local_date=datetime.date(2026, 9, 25), status="done")
         session.add(job)
         await session.flush()
@@ -215,8 +217,17 @@ async def test_forget_of_an_adopted_technique_with_a_real_card(sessionmaker):
             )
         )
         await session.commit()
-        assert await memory.hard_delete(session, technique.id)
+    vault = FakeVault()
+    settings = Settings(VAULT_MODE="mirror", VAULT_API_TOKEN=TOKEN)
+    clock = FrozenClock(NOW)
+    async with sessionmaker() as session:
+        await run_vault_sync(session, settings, clock, vault)
+    [path] = list(vault.files)
+    async with sessionmaker() as session:
+        assert await memory.forget(session, technique.id, source="command") == memory.FORGET_PROTECTED
+    async with sessionmaker() as session:
+        result = await run_vault_sync(session, settings, clock, vault)
+    assert result.deleted == 0 and list(vault.files) == [path]
     async with sessionmaker() as session:
         [card] = list((await session.execute(select(StudyCard))).scalars())
-        assert (card.status, card.memory_id) == ("forgotten", None)
-        assert list((await session.execute(select(Memory))).scalars()) == []
+        assert (card.status, card.memory_id) == ("adopted", technique.id)

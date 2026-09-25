@@ -453,3 +453,48 @@ async def test_a_note_on_an_ordinary_day_is_rendered(sessionmaker, vault, clock)
     await _pass(sessionmaker, vault, clock)
     [content] = vault.files.values()
     assert "- Заметка: отлично" in content
+
+
+# --- writers that bypass write_memory (phase 6's idle consolidation) --------
+
+
+async def test_a_consolidation_merge_keeps_one_file_on_the_new_head(sessionmaker, vault, clock):
+    """Idle consolidation (app/core/idle/consolidate.py) inserts the merged
+    fact and supersedes the originals directly, not through write_memory,
+    so vault_file.memory_id is not moved for it. The pass follows the
+    chain itself: the oldest file keeps the head, the other is deleted."""
+    await _seed(sessionmaker)
+    first = await _fact(sessionmaker, "Любит кофе по утрам")
+    second = await _fact(sessionmaker, "Пьёт эспрессо после обеда")
+    await _pass(sessionmaker, vault, clock)
+    assert sorted(vault.files) == [_path(first), _path(second)]
+
+    async with sessionmaker() as session:
+        merged = Memory(kind="preference", text="Пьёт кофе утром и после обеда", source="consolidate")
+        session.add(merged)
+        await session.flush()
+        for original in (first, second):
+            (await session.get(Memory, original)).superseded_by = merged.id
+        await session.commit()
+        merged_id = merged.id
+
+    result = await _pass(sessionmaker, vault, clock)
+    assert result.deleted == 1 and result.updated == 1
+    assert list(vault.files) == [_path(first)]
+    meta = frontmatter.load(vault.files[_path(first)])
+    assert (meta["anchor_id"], meta["fact"]) == (merged_id, "Пьёт кофе утром и после обеда")
+    [row] = await _rows(sessionmaker)
+    assert row.memory_id == merged_id
+
+    # Undo (app/core/idle/undo.py) deletes the merged row and reactivates
+    # the originals, again directly: the merged file goes, both come back.
+    async with sessionmaker() as session:
+        for original in (first, second):
+            (await session.get(Memory, original)).superseded_by = None
+        await session.flush()
+        await session.delete(await session.get(Memory, merged_id))
+        await session.commit()
+    await _pass(sessionmaker, vault, clock)
+    texts = sorted(frontmatter.load(content)["fact"] for content in vault.files.values())
+    assert texts == ["Любит кофе по утрам", "Пьёт эспрессо после обеда"]
+    assert len(await _rows(sessionmaker)) == 2

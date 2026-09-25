@@ -47,6 +47,7 @@ __all__ = [
     "fail_job",
     "defer_job",
     "recover_stuck_jobs",
+    "touch_job_lock",
 ]
 
 JOB_SPEC = QueueSpec(
@@ -77,9 +78,12 @@ async def enqueue_job(
     conflict in a unique index, which is the correct reading of "this
     job is not deduplicated".
 
-    `commit=False` (8b) leaves the insert in the caller's transaction:
-    /delete queues `vault_purge` inside its single wipe transaction, and
-    a commit here would split it in two.
+    `commit=False` folds the insert into the caller's own transaction
+    (see app/planner/actions.py's accept(), which must flip the action
+    to `accepted` and enqueue its write job atomically -- a crash
+    between two separate commits would otherwise leave an `accepted`
+    action with no job ever enqueued for it). /delete uses it too (8b):
+    `vault_purge` is queued inside its single wipe transaction.
     """
     values: dict = {"kind": kind, "payload": payload, "dedup_key": dedup_key}
     if run_after is not None:
@@ -92,10 +96,9 @@ async def enqueue_job(
         .returning(Job.id)
     )
     result = await session.execute(stmt)
-    inserted = result.first() is not None
     if commit:
         await session.commit()
-    return inserted
+    return result.first() is not None
 
 
 async def claim_job(session: AsyncSession) -> Job | None:
@@ -107,8 +110,47 @@ async def complete_job(session: AsyncSession, job_id: int) -> None:
     await _complete(session, JOB_SPEC, job_id)
 
 
-async def fail_job(session: AsyncSession, job_id: int, error: str) -> None:
-    await _fail(session, JOB_SPEC, job_id, error)
+async def fail_job(session: AsyncSession, job_id: int, error: str) -> bool:
+    """Returns True iff this failure was terminal (retries exhausted)."""
+    return await _fail(session, JOB_SPEC, job_id, error)
+
+
+async def touch_job_lock(session: AsyncSession, job_id: int) -> None:
+    """Refresh a claimed job's `locked_at` to now, extending its lease.
+
+    5d: `recover_stuck_jobs` (below) resets any `processing` row whose
+    `locked_at` is older than `STUCK_AFTER` (5 minutes) back to
+    `pending` -- reasonable for every job kind that existed before
+    `amendment_trial`, none of which runs anywhere near that long, but
+    wrong for a trial of ~13 blocking cases at two model calls each:
+    at realistic per-call latency that can run past 5 minutes, and the
+    60-second `_recover_loop` (app/worker.py) would then reclaim it
+    mid-run -- a second worker (or the same one, after `_run_job`
+    eventually returns and completes it) could pick the same job up
+    again while the first run is still generating and judging replies,
+    running the whole blocking subset -- and its API spend -- twice.
+
+    `app/core/amendments.py`'s `run_trial` calls this once per blocking
+    case (via `eval.trial.run_blocking_subset`'s `on_case_done` hook),
+    which keeps the lease continuously fresh across a run that can take
+    several minutes: the gap between any two touches is one case's
+    worth of two model calls, comfortably under `STUCK_AFTER`. A crash
+    mid-run still recovers normally -- the last touch simply ages out
+    like any other stuck lock once heartbeats stop arriving.
+
+    Only `locked_at` moves; `status`, `attempts` and `run_after` are
+    untouched; a job already claimed and not (yet) marked otherwise
+    stays exactly as claimed. A no-op, not an error, if the job has
+    since finished or been recovered by someone else -- the caller does
+    not need to check first.
+    """
+    await session.execute(
+        sql_update(Job)
+        .where(Job.id == job_id)
+        .where(Job.status == "processing")
+        .values(locked_at=datetime.datetime.now(datetime.timezone.utc))
+    )
+    await session.commit()
 
 
 async def defer_job(session: AsyncSession, job_id: int, run_after: datetime.datetime) -> None:

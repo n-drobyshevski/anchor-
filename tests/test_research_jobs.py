@@ -1405,3 +1405,76 @@ async def test_an_observability_failure_cannot_fail_the_job(sessionmaker, clock)
             fetch_fn=_fetch_ok(_clip()),
         )
     assert outcome.status == "done"
+
+
+# --- Package B: the switch and the packet are re-checked at run time ------
+
+
+def _must_not_run(name):
+    async def _fn(*args, **kwargs):
+        raise AssertionError(f"{name} must not be called")
+
+    return _fn
+
+
+async def test_a_read_queued_before_research_was_switched_off_does_nothing(sessionmaker, clock):
+    job_id = await _enqueue(sessionmaker, clock, _settings())
+    provider = FakeLLMProvider(text="{}", model="safety-fake")
+
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, _settings(RESEARCH_ENABLED=False), provider,
+            job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_must_not_run("fetch"), search_fn=_must_not_run("search"),
+        )
+
+    assert (outcome.status, outcome.error_code) == ("failed", jobs.DISABLED)
+    assert provider.calls == 0
+    async with sessionmaker() as session:
+        row = await session.get(StudyJob, job_id)
+    assert (row.status, row.error_code) == ("failed", jobs.DISABLED)
+
+
+async def test_a_study_queued_before_research_was_switched_off_never_searches(
+    sessionmaker, clock
+):
+    job_id, _ = await _enqueue_study(sessionmaker, clock, _study_settings())
+    provider = FakeLLMProvider(text="{}", model="safety-fake")
+
+    outcome = await _run_study(
+        sessionmaker, clock, _study_settings(RESEARCH_ENABLED=False), job_id,
+        search_fn=_must_not_run("search"), fetch_fn=_must_not_run("fetch"), provider=provider,
+    )
+
+    assert (outcome.status, outcome.error_code) == ("failed", jobs.DISABLED)
+    assert provider.calls == 0
+
+
+async def test_a_guides_job_with_an_empty_packet_never_searches_the_open_web(sessionmaker, clock):
+    """An idle-created job (app/core/idle/research.py) skips enqueue_study,
+    so the runtime guard is the only thing between an empty PACKET_GUIDES
+    and a paid, unfiltered search."""
+    settings = _study_settings(PACKET_GUIDES="")
+    async with sessionmaker() as session:
+        job = StudyJob(
+            kind=jobs.STUDY, status="queued", packet="guides", query=TOPIC,
+            local_date=clock_module.local_date(clock, TIMEZONE),
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+    provider = FakeLLMProvider(text="{}", model="safety-fake")
+
+    outcome = await _run_study(
+        sessionmaker, clock, settings, job_id,
+        search_fn=_must_not_run("search"), fetch_fn=_must_not_run("fetch"), provider=provider,
+    )
+
+    assert (outcome.status, outcome.error_code) == ("failed", jobs.EMPTY_PACKET)
+    assert provider.calls == 0
+
+
+def test_the_disabled_code_has_a_russian_reason():
+    from app.tg import research as research_ui
+
+    assert jobs.DISABLED in research_ui.ERROR_RU

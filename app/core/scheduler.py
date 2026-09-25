@@ -86,20 +86,34 @@ from app.core.outbound_gate import (
     MORNING,
     OK,
     SILENCE,
+    WEEKLY_REVIEW,
     Kind,
     config_from_settings,
     gate,
 )
+from app.core.notebook import NOTEBOOK_EXPIRY
+from app.core.obligations import OBLIGATION_SWEEP
+from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound_send import SEND_OUTBOUND, outbound_dedup_key
+from app.core.review import REVIEW_EXPIRY
 from app.core.state import get_state
 from app.db.jobs import enqueue_job
 from app.db.models import Outbound
+from app.planner import auth as planner_auth
+from app.planner.jobs import PLANNER_SYNC
 from app.research.sweeps import RESEARCH_SWEEP
+from app.core import retention as retention_module
+from app.ops import backup as backup_module
 
 logger = logging.getLogger(__name__)
 
-# Highest first (plan section 6).
-PRIORITY: tuple[Kind, ...] = (EVENING_NAG, MORNING, SILENCE)
+# Highest first (plan section 6; phase-5 plan section 8: "evening_nag >
+# weekly_review > morning > silence"). 5d: on a Sunday evening the
+# evening nag may take a few ticks to be planned or refused, and the
+# review is only planned once that has happened -- the grace window
+# below (clamped to QUIET_START, same as the evening nag's own) leaves
+# room for that, and tests/test_scheduler.py covers it.
+PRIORITY: tuple[Kind, ...] = (EVENING_NAG, WEEKLY_REVIEW, MORNING, SILENCE)
 
 # Fixed intents and the silence nudge are one-per-local-date, so their
 # bucket is always 0. Only the tick (3d) uses it, for the local hour.
@@ -147,14 +161,31 @@ def _window(
         time_of_day = settings.MORNING_TIME
     elif kind == EVENING_NAG:
         time_of_day = settings.EVENING_TIME
+    elif kind == WEEKLY_REVIEW:
+        time_of_day = settings.REVIEW_TIME
     else:
         return None
 
     today = clock_module.local_date(clock, timezone)
+
+    # 5d: the review only has a window at all on REVIEW_DOW. Returning
+    # None here (like the silence nudge's "no window") would be wrong --
+    # it would make _is_due() true on every day of the week instead of
+    # none. A window whose grace_end equals its own target is never due
+    # (`target <= now < grace_end` is false for target==grace_end), which
+    # is the correct "not today" answer while keeping the same tuple
+    # shape every other caller of this function expects.
+    if kind == WEEKLY_REVIEW and today.isoweekday() != settings.REVIEW_DOW:
+        target = clock_module.combine_local(today, time_of_day, timezone)
+        return target, target
+
     target = clock_module.combine_local(today, time_of_day, timezone)
     grace_end = target + datetime.timedelta(minutes=settings.SEND_GRACE_MIN)
 
-    if kind == EVENING_NAG:
+    if kind in (EVENING_NAG, WEEKLY_REVIEW):
+        # The grace runs until QUIET_START, same clamp for both: a nag or
+        # a review that lands during quiet hours is exactly what quiet
+        # hours exist to prevent (plan section 2; phase-5 plan section 8).
         quiet_start = clock_module.combine_local(today, settings.QUIET_START, timezone)
         grace_end = min(grace_end, quiet_start)
 
@@ -386,6 +417,230 @@ async def maybe_enqueue_research_sweep(
     )
     if enqueued:
         logger.info("research sweep queued", extra={"event": RESEARCH_SWEEP})
+    return enqueued
+
+
+def notebook_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `research_sweep_dedup_key`."""
+    return f"notebook_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_notebook_expiry(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's notebook thread-expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_research_sweep` right above --
+    same dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a third sibling
+    step, right after the research sweep), for the same reason: several
+    tests call `heartbeat()` directly and assert an exact `job` table
+    state afterwards, and this must not perturb that.
+
+    Unlike `maybe_enqueue_research_sweep`, this one has no "deliberately
+    not gated on a feature switch" note -- the notebook has no switch to
+    gate on.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, NOTEBOOK_EXPIRY, {}, dedup_key=notebook_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("notebook expiry queued", extra={"event": NOTEBOOK_EXPIRY})
+    return enqueued
+
+
+def orders_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `notebook_expiry_dedup_key`."""
+    return f"orders_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_orders_expiry(session: AsyncSession, clock: Clock, timezone: str) -> bool:
+    """Queue today's standing-order expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_notebook_expiry` right above --
+    same dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a fourth sibling
+    step), for the same reason: several tests call `heartbeat()`
+    directly and assert an exact `job` table state afterwards, and this
+    must not perturb that.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, ORDERS_EXPIRY, {}, dedup_key=orders_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("orders expiry queued", extra={"event": ORDERS_EXPIRY})
+    return enqueued
+
+
+def obligation_sweep_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `orders_expiry_dedup_key`."""
+    return f"obligation_sweep:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_obligation_sweep(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's missed-check-in debt sweep, at most once per local day.
+
+    Phase 5 (spec 2026-09-25). Same shape and same "not called from
+    `heartbeat()`" split as `maybe_enqueue_orders_expiry` above. The
+    first heartbeat after local midnight queues it, so yesterday's
+    evening is already over when it looks.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, OBLIGATION_SWEEP, {}, dedup_key=obligation_sweep_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("obligation sweep queued", extra={"event": OBLIGATION_SWEEP})
+    return enqueued
+
+
+def review_expiry_dedup_key(local_date: datetime.date) -> str:
+    """One sweep per local date, ever -- mirrors `orders_expiry_dedup_key`."""
+    return f"review_expiry:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_review_expiry(session: AsyncSession, clock: Clock, timezone: str) -> bool:
+    """Queue today's review-proposal expiry sweep, at most once per local day.
+
+    Modelled exactly on `maybe_enqueue_orders_expiry` right above -- same
+    dedup-keyed enqueue, same "not called from `heartbeat()`" split
+    (app/worker.py's `_heartbeat_loop` calls this as a fifth sibling
+    step), for the same reason: several existing tests call `heartbeat()`
+    directly and assert an exact `job` table state afterwards.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session, REVIEW_EXPIRY, {}, dedup_key=review_expiry_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("review expiry queued", extra={"event": REVIEW_EXPIRY})
+    return enqueued
+
+
+async def maybe_enqueue_backup(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue tonight's encrypted backup, at most once per local day
+    (Phase 6 plan section 9.1; milestone 6e).
+
+    Modelled on `maybe_enqueue_research_sweep`'s dedup-keyed enqueue and
+    "not called from `heartbeat()`" split (app/worker.py's
+    `_heartbeat_loop` calls this as a sibling step), but unlike every
+    sweep above it this one *is* gated -- on `BACKUP_ENABLED` (the same
+    global-kill-switch shape as `OUTBOUND_ENABLED`/`IDLE_ENABLED`) and
+    on the local wall clock reaching `BACKUP_TIME`. It is deliberately
+    NOT gated on the idle budget, the idle window, or
+    `user_state.persona_active` -- a backup is infrastructure, not
+    courtesy, and app/ops/backup.py's own job runs with no provider and
+    no bot regardless of whether the persona would speak right now.
+
+    No grace window: any heartbeat at or after `BACKUP_TIME` local, on a
+    day nothing has queued yet, queues it -- unlike the fixed outbound
+    intents, a backup that runs at 04:07 instead of 04:00 because the
+    worker restarted has lost nothing worth clamping.
+    """
+    if not settings.BACKUP_ENABLED:
+        return False
+    local_date = clock_module.local_date(clock, timezone)
+    target = clock_module.combine_local(local_date, settings.BACKUP_TIME, timezone)
+    if clock.now_utc() < target:
+        return False
+    enqueued = await enqueue_job(
+        session, backup_module.BACKUP, {}, dedup_key=backup_module.backup_dedup_key(local_date)
+    )
+    if enqueued:
+        logger.info("backup queued", extra={"event": backup_module.BACKUP})
+    return enqueued
+
+
+async def maybe_enqueue_retention_sweep(
+    session: AsyncSession, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's retention sweep, at most once per local day (Phase 6
+    plan section 9.4; milestone 6e).
+
+    Modelled exactly on `maybe_enqueue_notebook_expiry` -- same
+    dedup-keyed enqueue, same "not inside `heartbeat()`" split, same
+    "no gate beyond the dedup key" shape: housekeeping on rows that
+    already exist, unconditional on every other switch in this file.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    enqueued = await enqueue_job(
+        session,
+        retention_module.RETENTION_SWEEP,
+        {},
+        dedup_key=retention_module.retention_sweep_dedup_key(local_date),
+    )
+    if enqueued:
+        logger.info("retention sweep queued", extra={"event": retention_module.RETENTION_SWEEP})
+    return enqueued
+
+
+def planner_sync_dedup_key(local_date: datetime.date, hour: int, bucket: int) -> str:
+    """One planner sync per (local date, hour, bucket) -- mirrors tick_dedup_key.
+
+    `bucket` is left to the caller rather than fixed here: the heartbeat
+    below uses `minute // 15` (its own steady cadence), while
+    app/core/turn.py's stale-snapshot trigger uses a finer `minute // 5`
+    so a chat turn that notices staleness does not wait a full quarter
+    hour for the next fetch. The two never need to collide -- a losing
+    duplicate enqueue is free, same as every other dedup-keyed job here.
+    """
+    return f"planner_sync:{local_date.isoformat()}:{hour}:{bucket}"
+
+
+async def maybe_enqueue_planner_sync(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue a PLANNER_SYNC job, roughly every PLANNER_SYNC_EVERY_MIN minutes.
+
+    Shaped like maybe_enqueue_research_sweep: this only decides whether
+    to ask, app/planner/jobs.py does the actual work. Deliberately not
+    called from inside heartbeat() either, for the identical reason that
+    function's docstring gives for the research sweep -- several
+    existing tests call heartbeat() directly and assert an exact job
+    table state afterwards. app/worker.py's _heartbeat_loop calls this as
+    a second sibling step, alongside maybe_enqueue_research_sweep.
+
+    Also queues one extra sync ~10 minutes before MORNING_TIME (design
+    review section 2.3), on its own dedup key, so the morning message
+    reflects a same-morning agenda rather than whatever the last
+    15-minute tick happened to catch.
+
+    No-ops entirely when PLANNER_ENABLED is False -- the whole feature
+    stays dark, unlike the research sweep, which runs regardless of its
+    own switch because it is retention hygiene on rows that may already
+    exist. There is no equivalent backlog here: with the feature off,
+    nothing ever populated planner_snapshot in the first place.
+    """
+    if not settings.PLANNER_ENABLED:
+        return False
+    if not await planner_auth.is_enabled(session):
+        return False
+
+    now_local = clock_module.now_local(clock, timezone)
+    today = now_local.date()
+    enqueued = False
+
+    key = planner_sync_dedup_key(today, now_local.hour, now_local.minute // 15)
+    if await enqueue_job(session, PLANNER_SYNC, {}, dedup_key=key):
+        enqueued = True
+
+    premorning_target = clock_module.combine_local(
+        today, settings.MORNING_TIME, timezone
+    ) - datetime.timedelta(minutes=10)
+    now = clock.now_utc()
+    if premorning_target <= now < premorning_target + datetime.timedelta(minutes=1):
+        premorning_key = f"planner_sync:{today.isoformat()}:premorning"
+        if await enqueue_job(session, PLANNER_SYNC, {}, dedup_key=premorning_key):
+            enqueued = True
+
+    if enqueued:
+        logger.info("planner sync queued", extra={"event": PLANNER_SYNC})
     return enqueued
 
 

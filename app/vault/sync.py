@@ -240,6 +240,7 @@ async def _delete_orphans(
                 continue
             raise
         result.orphans += 1
+        manifest.pop(path, None)
 
 
 # --- step 4: mirror's ingest -------------------------------------------------
@@ -355,7 +356,12 @@ async def _render_facts(
     result: PassResult,
 ) -> None:
     epoch = state.vault_epoch
-    rows = (await session.execute(select(VaultFile).where(VaultFile.role == "fact"))).scalars().all()
+    rows = (
+        (await session.execute(select(VaultFile).where(VaultFile.role == "fact").order_by(VaultFile.id)))
+        .scalars()
+        .all()
+    )
+    await _follow_heads(session, rows)
 
     # Forgotten facts: the memory is gone (on delete set null), so is the file.
     for row in rows:
@@ -374,6 +380,10 @@ async def _render_facts(
                 if exc.code != errors.NOT_FOUND:
                     raise
             result.deleted += 1
+            # This pass's snapshot must not still show a file it deleted:
+            # a new fact rendered to the same path later in the pass
+            # would read as "someone else's file" and wait a minute.
+            manifest.pop(row.path, None)
         await session.delete(row)
         await session.commit()
 
@@ -402,6 +412,41 @@ async def _render_facts(
         if budget.left <= 0:
             return
 
+
+
+async def _follow_heads(session: AsyncSession, rows: list[VaultFile]) -> None:
+    """Keep every fact file on the head of its lineage, whoever superseded it.
+
+    `write_memory` moves `vault_file.memory_id` to the new head in the
+    same transaction. Phase 6's idle consolidation does not go through
+    it: it inserts the merged fact and sets `superseded_by` on the
+    originals directly (app/core/idle/consolidate.py), and can merge two
+    originals into one. So before rendering, a row pointing at a
+    superseded memory follows the chain to its head. The oldest row to
+    reach a head keeps it; any later row that lands on the same head is
+    a duplicate, and is treated as forgotten -- its file is deleted by
+    compare-and-swap on this pass, exactly as a /forget would be.
+    """
+    successor = dict(
+        (await session.execute(select(Memory.id, Memory.superseded_by))).all()
+    )
+    claimed = {row.memory_id for row in rows if row.memory_id is not None and successor.get(row.memory_id) is None}
+    changed = False
+    for row in rows:
+        if row.memory_id is None or successor.get(row.memory_id) is None:
+            continue
+        head, seen = row.memory_id, set()
+        while successor.get(head) is not None and head not in seen:
+            seen.add(head)
+            head = successor[head]
+        if head in claimed:
+            row.memory_id = None
+        else:
+            row.memory_id = head
+            claimed.add(head)
+        changed = True
+    if changed:
+        await session.commit()
 
 async def _write_fact(
     session: AsyncSession,

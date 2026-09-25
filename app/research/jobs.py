@@ -170,6 +170,25 @@ async def _quota_used(session: AsyncSession, kind: str, local_date) -> int:
     return result.scalar_one()
 
 
+async def study_quota_used(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """True iff today's `/study` quota (`RESEARCH_JOBS_PER_DAY`) is already spent.
+
+    Phase 6 plan section 6.5: idle `research` "shares the daily research
+    quota: it runs only if the user hasn't used their /study today". The
+    counter this reads -- `study_job` rows of kind `STUDY` for today's
+    local date -- is the same one `enqueue_study`'s own check below
+    counts, and idle research writes its `StudyJob` row into the same
+    table (app/core/idle/research.py), never a parallel counter. That is
+    what makes the sharing symmetric: whichever of the two runs first,
+    the other sees this same query return `True` for the rest of the
+    day, with nothing idle-specific for a plain `/study` to know about.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    return await _quota_used(session, STUDY, local_date) >= settings.RESEARCH_JOBS_PER_DAY
+
+
 async def enqueue_study(
     session: AsyncSession,
     settings: Settings,
@@ -726,6 +745,15 @@ async def run_research_job(
             visible_cards=visible, hidden_cards=hidden,
         )
 
+    # The flag was on when this job was queued and may be off now. A job
+    # never outlives the switch: finish it as refused before any fetch,
+    # search or model call. Enqueue already refuses while it is off
+    # (enqueue_study/enqueue_read), so this only catches the gap between.
+    if not settings.RESEARCH_ENABLED:
+        return await _finish(
+            session, clock, job, status="failed", error_code=DISABLED, visible=0, hidden=0
+        )
+
     robots = make_robots_cache(
         timeout_s=settings.FETCH_TIMEOUT_S,
         max_redirects=settings.FETCH_MAX_REDIRECTS,
@@ -936,4 +964,5 @@ __all__ = [
     "enqueue_study",
     "packet_domains",
     "run_research_job",
+    "study_quota_used",
 ]

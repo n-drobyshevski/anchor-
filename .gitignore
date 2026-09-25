@@ -11,5 +11,7 @@ dist/
 # local Postgres data dir, if one is ever initdb'd for tests
 pgdata/
 
+# screenshots from scripts/web_e2e.py
+.e2e-out/
 # vaultd: obsidian-headless is installed from npm at build time, never vendored
 node_modules/

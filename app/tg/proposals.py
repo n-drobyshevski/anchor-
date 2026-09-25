@@ -17,7 +17,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.clock import Clock, SystemClock
-from app.core import proposal
+from app.core import obligations, proposal
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
 logger = logging.getLogger(__name__)
@@ -28,12 +28,14 @@ REJECT = "Отклонить"
 ACCEPTED_TEXT = "✅ Принято"
 REJECTED_TEXT = "✖️ Отклонено"
 STALE = "Устарело."
+CAP_REACHED = "Долгов уже {max} — сначала закрой один (/paid)."
 
 # Plan section 8's example message, generalised over the three fields.
 FIELD_LABELS = {
     proposal.DUE_ACTION: "Главное действие",
     proposal.FOCUS_ON: "Фокус",
     proposal.RULE: "Правило",
+    proposal.OBLIGATION: "В долг",
 }
 CONFIRM_TEXT = "Записать? {label}: «{value}»"
 
@@ -98,6 +100,39 @@ async def retire_buttons(sessionmaker, bot: Bot, *, chat_id: int, proposal_id: i
     )
 
 
+async def show_decision_outcome(
+    bot: Bot, *, chat_id: int, message_id: int, decided: proposal.Proposal, accepted: bool
+) -> None:
+    """Edit a just-decided proposal's message to show the outcome
+    (accepted or rejected) and remove its buttons.
+
+    The shared other half of `handle_decision_callback`'s success
+    branch below -- W2's web Proposals panel calls this too after
+    `proposal.accept`/`reject`, so a decision made from either
+    transport is reflected on the Telegram message identically (never
+    `retire_buttons`' "Устарело.", which means something else: a
+    proposal superseded by a different decision, not this one being
+    decided).
+
+    `message_id` is taken explicitly rather than read off `decided.
+    tg_message_id`, matching what this function replaced: the Telegram
+    callback path below already knows the message its own button lives
+    on and must keep using exactly that id, not a second lookup. The
+    web panel, which has no callback message of its own, passes
+    `decided.tg_message_id` and skips the call entirely when that is
+    None (a proposal never sent to Telegram, e.g. one accepted or
+    rejected before `send_proposal` runs).
+    """
+    outcome = ACCEPTED_TEXT if accepted else REJECTED_TEXT
+    await edit_keyboard(
+        bot,
+        chat_id,
+        message_id,
+        f"{confirm_text(decided.field, decided.value)}\n{outcome}",
+        None,
+    )
+
+
 async def handle_decision_callback(
     sessionmaker,
     bot: Bot,
@@ -117,13 +152,31 @@ async def handle_decision_callback(
     "If the proposal is not `pending`, just remove the buttons").
     """
     _, action, raw_id = data.split(":", 2)
-    await answer_callback(bot, callback_id)
 
     try:
         proposal_id = int(raw_id)
     except ValueError:
+        await answer_callback(bot, callback_id)
         await edit_keyboard(bot, chat_id, message_id, STALE, None)
         return
+
+    # Phase 5: accepting a debt at the cap would open nothing. Say so
+    # and leave the proposal pending, so it can be accepted once a debt
+    # is closed.
+    if action == "a":
+        async with sessionmaker() as session:
+            row = await session.get(proposal.Proposal, proposal_id)
+            full = (
+                row is not None
+                and row.field == proposal.OBLIGATION
+                and await obligations.open_count(session) >= obligations.MAX_OPEN
+            )
+        if full:
+            await answer_callback(
+                bot, callback_id, CAP_REACHED.format(max=obligations.MAX_OPEN)
+            )
+            return
+    await answer_callback(bot, callback_id)
 
     clock = clock or SystemClock()
     async with sessionmaker() as session:
@@ -141,11 +194,6 @@ async def handle_decision_callback(
         await edit_keyboard(bot, chat_id, message_id, text, None)
         return
 
-    outcome = ACCEPTED_TEXT if action == "a" else REJECTED_TEXT
-    await edit_keyboard(
-        bot,
-        chat_id,
-        message_id,
-        f"{confirm_text(decided.field, decided.value)}\n{outcome}",
-        None,
+    await show_decision_outcome(
+        bot, chat_id=chat_id, message_id=message_id, decided=decided, accepted=action == "a"
     )

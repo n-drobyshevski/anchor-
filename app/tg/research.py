@@ -207,6 +207,8 @@ ERROR_RU = {
     # refused us -- so the wording says what happened rather than
     # blaming the site.
     research_jobs.INTERRUPTED: "задание прервалось на полпути",
+    # Research was switched off after this job was queued.
+    research_jobs.DISABLED: "исследования выключены",
 }
 # A safe fallback for a code this mapping does not carry. Codes are a
 # closed, reviewed set (tests/test_research_isolation.py pins it), so

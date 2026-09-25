@@ -36,14 +36,16 @@ from app.core import export, purge
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core.outbound import cancel_outbound
+from app.ops import backup
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
+from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
 
 # How long a delete confirmation stays live, in seconds.
 CONFIRM_TTL = 300
 
-CONFIRM_TEXT = "Удалить все данные? Это необратимо."
+CONFIRM_TEXT = "Удалить все данные и все резервные копии? Это необратимо."
 # 8b (phase-8 plan section 10): the one copy Anchor cannot reach, stated
 # rather than implied. Obsidian Sync Standard keeps version history for
 # a month (Plus: a year); the user is on Standard. Shown only when a
@@ -55,14 +57,21 @@ CONFIRM_VAULT_LINE = (
 CONFIRM_YES = "Да, удалить"
 CONFIRM_NO = "Отмена"
 
-# Plan section 11's text says copies sit with xAI for up to 30 days.
-# Both halves stopped being true: milestone 1e moved this bot to
-# OpenRouter, and LLM_DATA_COLLECTION=deny routes only to providers that
-# do not retain prompts at all. A privacy statement the user would act
-# on has to describe what the code actually does.
+# 6e (plan section 9.3): the wipe now also purges every backup object,
+# and the confirm/final text says so. Superseded the 1e-era wording
+# (which described only the OpenRouter side) because a privacy
+# statement the user would act on has to describe what the code
+# actually does, and 6e adds a whole other thing it does.
 DELETED_TEXT = (
-    "Удалено. Запросы к модели идут через OpenRouter с запретом на хранение "
-    "промптов — копий у провайдера не остаётся."
+    "Удалено, включая бэкапы. Копии у провайдеров моделей удаляются по их "
+    "правилам хранения."
+)
+# The bucket refused (or could not be reached) for some backup objects:
+# the database is wiped, the backups may not be.
+DELETED_BACKUPS_FAILED_TEXT = (
+    "Данные удалены, но часть резервных копий удалить не удалось — удали их "
+    "в бакете вручную (префикс anchor/). Копии у провайдеров моделей удаляются "
+    "по их правилам хранения."
 )
 CANCELLED_TEXT = "Отменено."
 STALE_TEXT = "Устарело."
@@ -138,8 +147,24 @@ async def handle_delete_callback(
     chat_id: int,
     message_id: int,
     data: str,
+    hub: WebHub | None = None,
 ) -> None:
-    """`d:yes:<epoch>` / `d:no`."""
+    """`d:yes:<epoch>` / `d:no`.
+
+    `hub` (web-chat plan track 1/2, optional and keyword-only so every
+    call site predating it -- there is exactly one production caller,
+    app/tg/router.py's delete_decision, which always has a hub to pass
+    once WEB_UI_ENABLED -- keeps working unchanged) is closed after a
+    successful wipe below. Without this, a Telegram-issued `/delete`
+    truncated `message` and `web_session` but never touched the hub's
+    in-memory ring buffer: any later GET /api/events with a low
+    Last-Event-ID would still replay the supposedly deleted
+    conversation's text straight out of that buffer (a medium-severity
+    finding). `/weblogout`'s own kill switch (app/web/auth.py's
+    revoke_all) already does this for its own path; `/delete` needed
+    the same call on this one, since app/core/purge.py itself has no
+    idea a WebHub exists (by design -- see app/web/sink.py's docstring).
+    """
     clock = clock or SystemClock()
     await answer_callback(bot, callback_id)
     parts = data.split(":")
@@ -160,6 +185,20 @@ async def handle_delete_callback(
         await edit_keyboard(bot, chat_id, message_id, STALE_TEXT, None)
         return
 
+    # 6e (plan section 9.3): purge every backup object under the
+    # `anchor/` prefix before the database wipe. Order does not matter
+    # for correctness -- the two are unrelated stores -- but doing it
+    # first means a crash between the two steps leaves the smaller
+    # blast radius (backups already gone, database still there) rather
+    # than the reverse. A no-op, not a failure, when S3 isn't
+    # configured: the database wipe still proceeds either way (backup.
+    # purge_all_backups' own docstring).
+    purged = await backup.purge_all_backups(settings)
+    logger.info(
+        "backup objects purged",
+        extra={"event": "delete", "count": len(purged.deleted), "error_code": purged.failed or None},
+    )
+
     async with sessionmaker() as session:
         # 3b (plan section 6): /delete cancels first. The wipe
         # truncates `outbound` and `job` anyway, so this is
@@ -168,5 +207,13 @@ async def handle_delete_callback(
         # must not silently resurrect a scheduled message.
         await cancel_outbound(session, clock)
         await purge.delete_everything(session, settings, clock)
+        # After the wipe, which truncates backup_log: the record of which
+        # objects were purged is the one thing that must outlive it.
+        await backup.record_purged(session, clock, purged)
 
-    await edit_keyboard(bot, chat_id, message_id, DELETED_TEXT, None)
+    if hub is not None:
+        hub.close_all()
+
+    # Never claim the backups are gone when the bucket said otherwise.
+    final = DELETED_BACKUPS_FAILED_TEXT if purged.failed else DELETED_TEXT
+    await edit_keyboard(bot, chat_id, message_id, final, None)

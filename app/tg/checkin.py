@@ -16,6 +16,13 @@ either when the note arrives as plain text (handled in app/core/turn.py,
 which owns that path because a pause word has to be checked first) or
 when Пропустить is pressed, which is the only completion this module
 performs itself.
+
+5c (phase-5 plan section 7) inserts one step per active standing order
+due today, between the due-action step and the note step: `c:o:<id>:
+<d|n>`. `_ask_order_or_note` is the fork every completed step (the
+rating step's auto-none branch, the due step, and the order step
+itself) funnels through -- it asks the next due, unanswered order if
+there is one, or falls through to the note step exactly as before.
 """
 
 from __future__ import annotations
@@ -25,9 +32,10 @@ import logging
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.core.clock import Clock, SystemClock
 from app.config import Settings
-from app.core import checkin
+from app.core import checkin, orders
+from app.core import clock as clock_module
+from app.core.clock import Clock, SystemClock
 from app.core.state import get_state
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
@@ -46,6 +54,22 @@ SKIP = "Пропустить"
 STALE = "Устарело."
 
 DONE_TEXT = "Записал. Серия: {streak} дн."
+
+# W4: the note step's Пропустить, as a named constant (the router's
+# `c:` handler and the tests read the same value this keyboard sends).
+SKIP_CALLBACK = "c:n:skip"
+
+# W4: the completion row app/web/ingress.py's `checkin_complete` queues
+# for a check-in filled on the web. Never on a keyboard: only the
+# server builds it, with the check-in's own minted message id, and it
+# finishes exactly that check-in (core `finish_submitted`) without the
+# note step ever being opened.
+WEB_SUBMIT_CALLBACK = "c:n:web"
+
+# W4: what a live Telegram check-in keyboard is replaced with when the
+# same day's check-in is then filled in on the web (app/web/panels/
+# checkin.py), so a leftover button can never restart or finish it.
+WEB_TAKEOVER_TEXT = "Чек-ин заполнен в вебе."
 
 
 def rating_keyboard() -> InlineKeyboardMarkup:
@@ -69,7 +93,22 @@ def due_keyboard() -> InlineKeyboardMarkup:
 
 def note_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=SKIP, callback_data="c:n:skip")]]
+        inline_keyboard=[[InlineKeyboardButton(text=SKIP, callback_data=SKIP_CALLBACK)]]
+    )
+
+
+ORDER_DONE = "Да"
+ORDER_NO = "Нет"
+
+
+def order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=ORDER_DONE, callback_data=f"c:o:{order_id}:d"),
+                InlineKeyboardButton(text=ORDER_NO, callback_data=f"c:o:{order_id}:n"),
+            ]
+        ]
     )
 
 
@@ -101,6 +140,40 @@ async def _advance_to_note(sessionmaker, bot: Bot, *, chat_id: int, message_id: 
     await edit_keyboard(bot, chat_id, message_id, NOTE_TEXT, note_keyboard())
 
 
+async def _ask_order_or_note(
+    sessionmaker,
+    settings: Settings,
+    clock: Clock,
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    checkin_id: int,
+    timezone: str,
+) -> None:
+    """The fork every completed step before the note funnels through
+    (5c, plan section 7): ask the next due, unanswered order, or fall
+    through to the note step. Stateless, like app/core/orders.py's
+    `next_due_order` itself -- nothing here remembers "which step" a
+    check-in is on beyond what that query already answers.
+    """
+    local_date = clock_module.local_date(clock, timezone)
+    async with sessionmaker() as session:
+        order = await orders.next_due_order(
+            session, checkin_id, local_date, settings.ORDERS_IN_CHECKIN_MAX
+        )
+    if order is not None:
+        await edit_keyboard(
+            bot,
+            chat_id,
+            message_id,
+            orders.CHECKIN_STEP_TEXT.format(text=order.text),
+            order_keyboard(order.id),
+        )
+        return
+    await _advance_to_note(sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=checkin_id)
+
+
 async def retire(bot: Bot, chat_id: int, message_id: int, streak: int) -> None:
     """Replace the check-in message with its result and drop the buttons.
 
@@ -109,6 +182,20 @@ async def retire(bot: Bot, chat_id: int, message_id: int, streak: int) -> None:
     leaves a live button that would finish it again.
     """
     await edit_keyboard(bot, chat_id, message_id, DONE_TEXT.format(streak=streak), None)
+
+
+async def retire_for_web(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Drop a check-in keyboard made stale by a web submission (W4).
+
+    The web form restarts today's row with a fresh, web-minted message
+    id, so this keyboard's buttons would already answer STALE -- this
+    just makes that visible instead of leaving dead buttons live.
+    app/web/panels/checkin.py calls it with the real bot for a positive
+    (Telegram) id and with the web bot for a negative one (a /checkin
+    typed into the web chat); edit_keyboard itself refuses the
+    mismatched combinations.
+    """
+    await edit_keyboard(bot, chat_id, message_id, WEB_TAKEOVER_TEXT, None)
 
 
 async def handle_callback(
@@ -125,7 +212,7 @@ async def handle_callback(
     update_id: int,
     data: str,
 ) -> None:
-    """`c:start` (3b) / `c:r:<n>` / `c:d:<result>` / `c:n:skip`."""
+    """`c:start` (3b) / `c:r:<n>` / `c:d:<result>` / `c:o:<id>:<d|n>` (5c) / `c:n:skip`."""
     clock = clock or SystemClock()
 
     async with sessionmaker() as session:
@@ -162,8 +249,9 @@ async def handle_callback(
 
         # Step 2 only exists when there is a main action to report on
         # (plan section 9); otherwise record 'none' and skip straight
-        # to the note.
-        if user_state.due_action:
+        # to the note. The rule itself lives in app/core/checkin.py (W4),
+        # shared with the web form.
+        if checkin.due_step_needed(user_state.due_action):
             await edit_keyboard(
                 bot,
                 chat_id,
@@ -173,9 +261,12 @@ async def handle_callback(
             )
             return
         async with sessionmaker() as session:
-            await checkin.set_due_result(session, row.id, checkin.NONE)
-        await _advance_to_note(
-            sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=row.id
+            await checkin.set_due_result(
+                session, row.id, checkin.resolve_due_result(user_state.due_action, None)
+            )
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
         )
         return
 
@@ -183,8 +274,27 @@ async def handle_callback(
         async with sessionmaker() as session:
             if await checkin.set_due_result(session, row.id, value) is None:
                 return
-        await _advance_to_note(
-            sessionmaker, bot, chat_id=chat_id, message_id=message_id, checkin_id=row.id
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
+        )
+        return
+
+    if step == "o":
+        # 5c: `value` is `<order_id>:<d|n>` -- the generic `split(":", 2)`
+        # above only peeled off the leading `c:o:`, so the order id and
+        # the answer letter are still joined here.
+        order_id_str, _, letter = value.partition(":")
+        try:
+            order_id = int(order_id_str)
+        except ValueError:
+            return
+        result = checkin.DONE if letter == "d" else checkin.NO
+        async with sessionmaker() as session:
+            await orders.record_result(session, row.id, order_id, result, clock=clock)
+        await _ask_order_or_note(
+            sessionmaker, settings, clock, bot,
+            chat_id=chat_id, message_id=message_id, checkin_id=row.id, timezone=timezone,
         )
         return
 
@@ -195,10 +305,15 @@ async def handle_callback(
             settings,
             provider,
             safety_provider,
+            # W4 fix: the router's clock, not finish_and_react's own
+            # SystemClock default -- otherwise `finish` computes "today"
+            # from a different clock than `_current` just did.
+            clock,
             chat_id=chat_id,
             update_id=update_id,
             message_id=message_id,
             timezone=timezone,
+            web_submission=data == WEB_SUBMIT_CALLBACK,
         )
 
 
@@ -214,8 +329,15 @@ async def finish_and_react(
     update_id: int,
     message_id: int | None,
     timezone: str,
+    web_submission: bool = False,
 ) -> None:
     """Complete the check-in with no note, then run the in-character turn.
+
+    `web_submission=True` (W4, WEB_SUBMIT_CALLBACK): the check-in was
+    filled -- note included -- by the web form, which never opens the
+    note step. It is finished by its message id instead
+    (`checkin.finish_submitted`), whose own guard plays the part of the
+    note-step guard below.
 
     The note-supplied path does not come through here: app/core/turn.py
     handles it inline, because a pause word must be matched before the
@@ -230,13 +352,22 @@ async def finish_and_react(
 
     clock = clock or SystemClock()
     async with sessionmaker() as session:
-        user_state = await get_state(session)
-        if user_state.awaiting != checkin.AWAITING_NOTE:
-            return
-        row, streak = await checkin.finish(session, clock, timezone)
+        if web_submission:
+            # Web-minted ids are always negative: a positive one would be
+            # a Telegram message, whose check-ins finish only through the
+            # note step.
+            if message_id is None or message_id >= 0:
+                return
+            row, streak = await checkin.finish_submitted(session, clock, timezone, message_id)
+        else:
+            user_state = await get_state(session)
+            if user_state.awaiting != checkin.AWAITING_NOTE:
+                return
+            row, streak = await checkin.finish(session, clock, timezone)
         if row is None:
             return
-        line = checkin.synthetic_line(row)
+        order_results = await orders.results_for_checkin(session, row.id)
+        line = checkin.synthetic_line(row, order_results)
 
     if message_id is not None:
         await retire(bot, chat_id, message_id, streak)

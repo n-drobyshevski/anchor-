@@ -61,6 +61,7 @@ there is no file in the repo for them (docs/decisions.md):
 | Setting | Value |
 |---|---|
 | Source → Root Directory | `/vaultd` |
+| Source → Config file path | leave **empty**: the bot's root `railway.json` must not apply here |
 | Build → Builder | Dockerfile (picked up from `vaultd/Dockerfile`) |
 | Build → Watch Paths | `/vaultd/**` |
 | Deploy → Healthcheck Path | `/healthz` |

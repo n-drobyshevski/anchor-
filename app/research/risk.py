@@ -120,16 +120,26 @@ RULES: tuple[Rule, ...] = (
         r"(\bголодани\w*|\bголодовк\w*|\bразгрузочн\w+ (день|дня|дни)|"
         r"\bсутки без (еды|сна|воды)|\bдень без (еды|воды)|"
         r"\bне есть (весь день|сутки|двое|целый день)|"
+        r"\bне есть до (вечера|обеда|ужина|ночи)\b|\bбез еды до\b|"
+        r"\bпропускать (завтрак\w*|обед\w*|ужин\w*)|"
+        r"\bне (завтракать|обедать|ужинать)\b(?!\s+(после|позже|поздно))|"
         r"\bне спать (всю ночь|сутки|двое|ночь)|\bночь без сна\b|"
         r"\bдефицит калори\w*|\bменьше \d{3,4} (ккал|калори\w*)|"
         r"\b\d{3,4} ккал\b|\bограничени\w+ воды\b|\bобезвоживан\w*|"
         r"\bfasting\b|\bfast for \d|\bsleep deprivation|\bstay awake all|"
         r"\bcalorie deficit|\bunder \d{3,4} calories|\bwater restriction|"
         r"\bje[uû]ne\b|\bprivation de sommeil)",
-        "Shapes, not verbs. «не есть за три часа до сна» and «не спать днём» "
-        "are both ordinary advice and neither matches; «сутки без еды» and "
-        "«не спать всю ночь» do. Calorie numbers need three or four digits, "
-        "so «25 минут» and «8 часов» are safe.",
+        "Shapes, not verbs. «не есть за три часа до сна», «не есть сладкое» "
+        "and «не спать днём» are all ordinary advice and none matches; "
+        "«сутки без еды», «не спать всю ночь» and «не есть до вечера» do. "
+        "5c widens this for standing orders, which are screened regardless "
+        "of author: «не ко мне» has to cover «не есть до обеда» the same "
+        "way it already covers a full fast, so the shape also matches "
+        "«не есть до <часть дня>», «без еды до …», «пропускать "
+        "завтрак/обед/ужин» and «не завтракать/обедать/ужинать» -- a bare "
+        "«не есть <что-то>» like «не есть сладкое» still does not match, "
+        "because there is no meal-skipping shape in it. Calorie numbers "
+        "need three or four digits, so «25 минут» and «8 часов» are safe.",
     ),
     Rule(
         "illegal",

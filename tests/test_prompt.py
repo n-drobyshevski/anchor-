@@ -18,7 +18,14 @@ from __future__ import annotations
 import datetime
 from zoneinfo import ZoneInfo
 
-from app.core.prompt import PERSONA_PATH, build_messages, build_now_block, load_persona
+from app.core import prompt
+from app.core.prompt import (
+    PERSONA_PATH,
+    PLAN_HEADER,
+    build_messages,
+    build_now_block,
+    load_persona,
+)
 from app.db.models import Message, TelegramUpdate
 
 
@@ -228,6 +235,173 @@ def test_build_now_block_includes_flags(clock):
     assert "жёлтый" in block
 
 
+# --- 5a: section order, omission, and the neutral/welfare exclusion ---------
+
+
+async def test_full_order_with_every_section_populated(sessionmaker, tmp_path, clock):
+    """Plan section 10's order, checked by header index: persona ->
+    Поправки -> Голос -> pinned -> Договорённости -> Твои заметки ->
+    Прошлые сессии -> transcript -> Сейчас -> user text."""
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+            amendments=["меньше вопросов по утрам"],
+            voice_lines=["Коротко. По делу."],
+            pinned=["живёт в Лилле"],
+            orders=["не есть после десяти"],
+            notebook={"intentions": ["держать темп"], "observations": ["пишет вечером"]},
+            summaries=["вчера говорили про отчёт"],
+            mood="ровный",
+            nickname_directive="Обращение в этом ответе: напарник",
+            retrieved=["живёт в Лилле"],
+            techniques=["пятиминутка"],
+            callback="ходил на скалодром две недели назад",
+            flags=["Пользователь сказал «жёлтый»"],
+        )
+
+    contents = [m.content for m in messages]
+    assert contents[0] == "# Anchor\n"
+    idx = {
+        "amendments": next(i for i, c in enumerate(contents) if "## Поправки" in c),
+        "voice": next(i for i, c in enumerate(contents) if "## Голос" in c),
+        "pinned": next(i for i, c in enumerate(contents) if prompt.PINNED_HEADER in c),
+        "orders": next(i for i, c in enumerate(contents) if "## Договорённости" in c),
+        "notebook": next(i for i, c in enumerate(contents) if "## Твои заметки" in c),
+        "sessions": next(i for i, c in enumerate(contents) if prompt.SESSIONS_HEADER in c),
+        "now": next(i for i, c in enumerate(contents) if "## Сейчас" in c),
+    }
+    assert (
+        0
+        < idx["amendments"]
+        < idx["voice"]
+        < idx["pinned"]
+        < idx["orders"]
+        < idx["notebook"]
+        < idx["sessions"]
+        < idx["now"]
+    )
+    assert messages[-1].role == "user"
+    assert idx["now"] == len(messages) - 2
+
+    now_block = messages[idx["now"]].content
+    # "## Сейчас" internal order: mood before due action/last check-in,
+    # nickname directive after both.
+    assert now_block.index("Настроение:") < now_block.index("Главное действие:")
+    assert now_block.index("Главное действие:") < now_block.index("Последний чек-ин:")
+    assert now_block.index("Последний чек-ин:") < now_block.index("Обращение в этом ответе")
+    # 5e: "## Можно вспомнить" sits after the techniques header and
+    # before the flags -- plan section 10's own ordering ("## Приёмы"
+    # then "## Можно вспомнить" then flags).
+    assert now_block.index(prompt.TECHNIQUES_HEADER) < now_block.index(prompt.CALLBACK_HEADER)
+    assert now_block.index(prompt.CALLBACK_HEADER) < now_block.index("Пользователь сказал «жёлтый»")
+
+
+async def test_notebook_omits_empty_kinds_but_keeps_populated_ones(sessionmaker, tmp_path, clock):
+    """Plan section 6: a kind with no active entries is left out entirely,
+    not rendered as an empty "Незакрытое:" line."""
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+            notebook={"intentions": ["держать темп"], "observations": [], "threads": []},
+        )
+
+    contents = "\n".join(m.content for m in messages)
+    assert "## Твои заметки" in contents
+    assert "Намерения: держать темп" in contents
+    assert "Наблюдения:" not in contents
+    assert "Незакрытое:" not in contents
+
+
+async def test_empty_new_sections_are_omitted(sessionmaker, tmp_path, clock):
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    async with sessionmaker() as session:
+        messages = await build_messages(
+            session,
+            clock=clock,
+            timezone="Europe/Paris",
+            intensity=3,
+            user_text="привет",
+            update_id=1,
+            transcript_turns=30,
+            persona_path=persona_path,
+        )
+
+    contents = "\n".join(m.content for m in messages)
+    for marker in (
+        "## Поправки",
+        "## Голос",
+        "## Договорённости",
+        "## Твои заметки",
+        "Настроение:",
+        "Обращение в этом ответе",
+        "Без обращения в этом ответе",
+        "## Можно вспомнить",
+    ):
+        assert marker not in contents
+
+
+async def test_neutral_messages_carry_none_of_the_persona_mode_sections(sessionmaker):
+    from app.core.prompt import build_neutral_messages
+
+    async with sessionmaker() as session:
+        messages = await build_neutral_messages(session, user_text="привет", update_id=None)
+
+    contents = "\n".join(m.content for m in messages)
+    for marker in (
+        "Поправки",
+        "## Голос",
+        "Договорённости",
+        "Твои заметки",
+        "Настроение",
+        "Обращение в этом ответе",
+        "Без обращения",
+        "Можно вспомнить",
+    ):
+        assert marker not in contents
+
+
+async def test_welfare_prompts_carry_none_of_the_persona_mode_sections():
+    """app/core/welfare.py never calls build_messages() at all, so this
+    is a property of its own fixed prompts -- checked directly rather
+    than through a turn, since welfare.py owns its own prompt text."""
+    from app.core import welfare
+
+    all_prompt_text = welfare.CLASSIFIER_PROMPT + welfare.WELFARE_PROMPT + welfare.FALLBACK_REPLY
+    for marker in (
+        "Поправки",
+        "## Голос",
+        "Договорённости",
+        "Твои заметки",
+        "Настроение",
+        "Обращение в этом ответе",
+        "Без обращения",
+        "Можно вспомнить",
+    ):
+        assert marker not in all_prompt_text
+
+
 def test_build_now_block_weekday_does_not_rely_on_locale(clock):
     """A hardcoded Russian weekday name, independent of strftime("%A")
     and any ru_RU locale being installed."""
@@ -245,3 +419,95 @@ def test_build_now_block_weekday_does_not_rely_on_locale(clock):
 
     now_local = datetime.datetime.now(ZoneInfo("Europe/Paris"))
     assert weekday_names[now_local.weekday()] in block
+
+
+# --- P2: the planner section --------------------------------------------
+
+
+def test_build_now_block_planner_none_is_byte_identical(clock):
+    """planner=None (every pre-P2 call site) must change nothing at all."""
+    without_param = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3)
+    with_none = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, planner=None)
+    assert without_param == with_none
+    assert PLAN_HEADER not in without_param
+
+
+def test_build_now_block_planner_empty_list_omits_the_section(clock):
+    block = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, planner=[])
+    assert PLAN_HEADER not in block
+
+
+def test_build_now_block_planner_lines_appear_after_due_action(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        due_action="сдать отчёт",
+        planner=["10:00 — «Встреча»"],
+    )
+    assert PLAN_HEADER in block
+    assert "10:00 — «Встреча»" in block
+    due_idx = block.index("Главное действие")
+    plan_idx = block.index(PLAN_HEADER)
+    retrieved_idx = block.find("Может быть важно")
+    assert due_idx < plan_idx
+    # No retrieved-memories section in this call, so there is nothing to
+    # compare against; when there is one (below), plan must still come first.
+    assert retrieved_idx == -1
+
+
+def test_build_now_block_planner_precedes_retrieved_memories(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        planner=["10:00 — «Встреча»"],
+        retrieved=["любит утренний кофе"],
+    )
+    assert block.index(PLAN_HEADER) < block.index("Может быть важно")
+
+
+# --- Phase 5 (spec 2026-09-25): "## Долг" and PERSONA_FILE -----------------
+
+
+def test_build_now_block_debts_none_is_byte_identical(clock):
+    without_param = build_now_block(clock=clock, timezone="Europe/Paris", intensity=3)
+    assert build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, debts=None) == without_param
+    assert build_now_block(clock=clock, timezone="Europe/Paris", intensity=3, debts=[]) == without_param
+
+
+def test_build_now_block_debts_follow_the_flat_lines_and_precede_the_planner(clock):
+    block = build_now_block(
+        clock=clock,
+        timezone="Europe/Paris",
+        intensity=3,
+        nickname_directive="Обращение в этом ответе: капитан",
+        debts=["«прислать отчёт» (с 20.09, просрочено)"],
+        planner=["09:00 созвон"],
+        flags=["ФЛАГ"],
+    )
+    lines = block.splitlines()
+    debt_at = lines.index(prompt.DEBT_HEADER)
+    assert lines[debt_at + 1] == "- «прислать отчёт» (с 20.09, просрочено)"
+    assert lines.index("Обращение в этом ответе: капитан") < debt_at
+    assert next(i for i, line in enumerate(lines) if line.startswith("Последний чек-ин")) < debt_at
+    assert debt_at < lines.index(prompt.PLAN_HEADER)
+    assert lines[-1] == "ФЛАГ"
+
+
+def test_persona_file_setting_resolves_against_the_repo_root(tmp_path):
+    from app.config import Settings
+
+    assert prompt.persona_path_for(Settings()) == prompt.PERSONA_PATH
+    private = tmp_path / "private.md"
+    private.write_text("# Private\n", encoding="utf-8")
+    # An absolute path is used as is.
+    assert prompt.persona_path_for(Settings(PERSONA_FILE=str(private))) == private
+
+
+def test_persona_carries_the_debt_and_short_mode_rules():
+    body, _ = prompt.load_persona()
+    assert "## Долг" in body
+    assert "следующий приказ закрывает один из них" in body
+    assert "режим: коротко" in body
+    assert "Никогда не называй его вслух" in body

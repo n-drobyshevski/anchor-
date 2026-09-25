@@ -12,7 +12,9 @@ are that text, moved verbatim; H1, H3 and H5 were never written up as
 sections and are summarised at the top of the hardening group for
 completeness.
 
-`anchor-phase1-plan.md` through `anchor-phase8-plan.md` remain the
+`anchor-phase1-plan.md` through `anchor-phase6-plan.md` (plus
+`anchor-web-panels-plan.md`), and `anchor-phase8-plan.md` for the vault
+(Phase 7 is reserved for tracker and device integrations), remain the
 specifications. This file records what was decided while implementing
 them.
 
@@ -834,6 +836,154 @@ blindness it replaces.
 practice, in which case one `research` kind would read better than two.
 Nothing yet suggests that; they have different providers behind them.
 
+---
+
+## W2 — `state_change.source` gains `"web"` with no migration
+
+The web state/proposals panels (`app/web/panels/`) write `user_state`
+fields through the same `app/core/commands.py` functions Telegram's
+handlers now call, and every one of those writes needs its own
+`source` value -- distinct from `"command"` -- so the audit log can
+still answer "who changed this" once two transports can make the same
+change.
+
+The question worth writing down is whether adding `"web"` needs a
+migration. It does not, and the reasoning is a direct reuse of a
+pattern this codebase already established twice:
+
+- `app/db/models.py`'s `StateChange.source` column carries **no DB
+  CHECK constraint** -- confirmed by `migrations/versions/
+  a339f54e49de_create_idle_tables.py`'s own docstring, which states
+  outright that the column is deliberately open "the same way
+  `spend_ledger.category` is", specifically so a new source value never
+  needs a widening migration.
+- 6a's undo engine already added `source="undo"` this exact way: widen
+  the Python `Source` Literal in `app/core/state.py`, touch no schema.
+  `"web"` follows the identical path.
+
+**Decision: widen `app/core/state.py`'s `Source` Literal to include
+`"web"`. No migration, no `ALTER TABLE`, no lock.** This is also the
+conservative direction given the deploy-lock lessons two ALTERs on hot
+tables already taught this project (`telegram_update`'s commit
+2cd24c2/068e7e3, and `migrations/env.py`'s `SET LOCAL lock_timeout`
+fail-fast as the backstop for whichever online migration eventually
+does need to touch one) -- the safest move is simply not needing one
+here.
+
+**This would be wrong if** `state_change.source` ever gains a real
+CHECK constraint for an unrelated reason (nothing currently proposes
+one). That migration would need to enumerate `"web"` alongside the
+existing six values, and `migrations/env.py`'s `lock_timeout` guard is
+exactly what would make a blocked `ALTER TABLE ... ADD CONSTRAINT`
+fail fast rather than hang a deploy, the same backstop already in
+place for `telegram_update`.
+
+## Parity pass A — an unconfigured backup stays `status='failed', error_code='not_configured'`
+
+The parity checklist asks for "backup_log status not_configured" when
+`BACKUP_AGE_RECIPIENT` and the `BACKUP_S3_*` vars are empty.
+`ck_backup_log_status` allows `ok | failed | pruned | purged`, and the
+job has always written the pair `status='failed',
+error_code='not_configured'` (app/ops/backup.py). `/state` already
+reads that as «Бэкап: ⚠️ ошибка», which is what a user with no backups
+should see.
+
+**Decision: keep the pair, no migration.** Renaming a status would need
+an `ALTER TABLE ... DROP/ADD CONSTRAINT` on `backup_log` for no change
+in behaviour. What the pass did change is the part that mattered: a
+*partial* or malformed config now lands in the same row instead of
+raising. A scheme-less `BACKUP_S3_ENDPOINT` made boto3 raise
+`ValueError` before the try block, failing the job with no row. Boot
+also logs one `backup partially configured` warning naming the empty
+settings (names only, never values) and never refuses to start
+(`app/startup.py`'s `warn_partial_backup_config`). Tests:
+`tests/test_backup.py`'s partial-config, scheme-less-endpoint and
+malformed-recipient cases.
+
+**This would be wrong if** something downstream needs to tell
+"never configured" from "configured and failing" by `status` alone.
+Today `/state` and the digest read `error_code` for that.
+
+## Phase-6 pass D — a preempted backfill or research run keeps what it already finished
+
+Plan §12 says a preempted idle job ends `skipped:preempted` with "no
+partial writes". Five of the seven kinds do exactly that:
+- consolidate, reflect and prebrief each write in a single transaction
+  opened after the model call and after the in-job preemption
+  re-check;
+- critique writes nothing but ledger rows and the run summary;
+- canary writes nothing but ledger rows and the run summary.
+
+`tests/test_idle_preemption.py` covers all five, mid-run included.
+
+Two kinds keep work on purpose:
+- **Backfill** commits one scene per unit. A user message between units
+  stops the loop, but the units already done stay done, and the run
+  ends `done` with `summary.preempted=true` rather than `skipped`
+  (app/core/idle/runner.py). Rolling those back would throw away paid,
+  correct summaries of scenes that are over; nothing about the user's
+  new message makes them wrong.
+- **Research** runs the unchanged /study pipeline. A preemption noticed
+  only after it finished keeps its cards, which sit unadopted and need
+  /adopt like any other.
+
+A third gap is also left as is. The in-job check and the commit are
+two statements, not one locked step, so an update landing between
+them is not seen by that run. Closing it would mean holding a lock on
+`telegram_update` across the apply, on the table every inbound message
+writes to. The window is a few milliseconds, and the worst case is one
+idle write that the next turn simply reads.
+
+**This would be wrong if** an idle write could ever change what the
+user sees in the turn that preempted it. Today none can: idle writes
+summaries, memories marked as idle's own, notebook rows, brief notes
+and unadopted cards, and none of them is read mid-turn.
+
+## Phase-6 pass D — restore_check proves the dump is usable, not that it matches production
+
+Plan §9.2 says `scripts/restore_check.py` "asserts the row counts of
+the key tables". The script runs from outside production, and this
+project's rule is that no tool reads the live database (CLAUDE.md,
+docs/claude-access.md), so there is nothing live to compare against.
+
+**Decision:** it asserts what can be checked from the dump alone:
+- pg_restore succeeded;
+- `user_state` has exactly its one row;
+- `alembic_version` is a revision this repo knows.
+
+It prints every table's count for a human to eyeball against `/state`
+(`Помню: N записей`).
+
+**This would be wrong if** a content-free count view existed that the
+operator could read from the same machine. The `debug` schema could
+grow one (`debug.table_counts`) and the script could then compare.
+
+## Phase-6 pass D — the canary never ran: eval built its providers with a removed setting
+
+Production logged `idle run failed event=AttributeError` for the first
+canary (2026-09-23). The cause was in `eval/trial.py` and `eval/run.py`:
+both built their `OpenRouterProvider`s with
+`web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS`, and
+milestone 4a had removed both that setting and that argument. Every
+test injects `FakeLLMProvider`s, which skips the construction branch,
+so the whole suite stayed green. Three things were broken this way:
+- the weekly canary;
+- every amendment trial;
+- every non-dry `python -m eval.run`, which exited 1 before its first
+  call. It could never have exited 3: that refusal is only for a
+  judge equal to the chat model.
+
+**Fix:**
+- Drop the stale argument.
+- `tests/test_eval_providers.py` now builds both provider pairs for real
+  (construction makes no network call). It is red without the fix.
+- Idle failures now log `where=<module>:<function>:<line>`, the
+  innermost frame of this repo's code, next to the exception type.
+  They never log the exception message.
+
+**This would be wrong if** a provider construction ever started doing
+I/O. The new test would then need a stubbed client, not a skip.
+
 ## 8a — the plan's facts, checked against the live sources
 
 Phase-8 plan section 2 lists the facts the design rests on, and asks
@@ -1218,3 +1368,70 @@ The whole memory table and the linked cards are read in two queries
 per pass, and lineages are walked in Python. That avoids 2 × N queries
 a minute for N facts; a personal memory is hundreds of rows, not
 millions.
+
+## 8b on main — the vault lands on `main` as Phase 8
+
+The vault was written as "Phase 5" on a branch that stopped at Phase 4,
+while `main` went on to ship its own Phase 5 (personality) and Phase 6
+(idle learning), and reserved Phase 7 for trackers and devices. Merging
+it therefore renumbered it: the plan is `anchor-phase8-plan.md`, the
+milestones are 8a–8d, and every reference in code, docs and tests
+followed. Only text the vault itself added was renumbered; `main`'s own
+"5a"–"5e" labels are its Phase 5 and stay as they are.
+
+Three things on `main` changed what the vault had assumed. Each has an
+entry below.
+
+## 8b on main — `/forget` keeps `main`'s protection, not a `forgotten` card
+
+The vault plan fixed a phase-4 bug (a `/forget` of an adopted technique
+raised on `study_card`'s foreign key) by adding a card status
+`forgotten`. `main` had already fixed the same bug another way:
+`hard_delete` refuses to delete a lineage head that an adopted card
+points at (`FORGET_PROTECTED`), and relinks cards to the successor
+otherwise.
+
+**Decision (yours): `main`'s protection stays.** The `forgotten` status,
+its migration and its `hard_delete` change were dropped in the merge. A
+protected fact keeps its memory, so it keeps its vault file, which a
+test pins. Plan §17's "`/forget` works on an adopted technique" is
+superseded by that protection, and 8c's `forget_lineage` must honour it
+rather than bypass it.
+
+## 8b on main — idle consolidation moves memory behind the vault's back
+
+`write_memory` moves `vault_file.memory_id` to a lineage's new head in
+the same transaction. Phase 6's idle consolidation
+(`app/core/idle/consolidate.py`) does not call it. It inserts the merged
+fact and sets `superseded_by` on the originals directly, and can merge
+two originals into one. Its undo (`app/core/idle/undo.py`) deletes the
+merged row and reactivates the originals, also directly. Left alone,
+that would leave a file stuck on a superseded row and create a second
+file for the head.
+
+**Decision:** the sync pass repairs this itself before rendering.
+`_follow_heads` walks each fact row's memory to the head of its chain.
+The oldest row to reach a head keeps it, and any later row landing on
+the same head is treated as forgotten, so its file is deleted by
+compare-and-swap. After an undo, the merged row's deletion nulls its
+file row (`ON DELETE SET NULL`), which deletes that file, and the
+reactivated originals get files of their own. A test runs the merge and
+the undo end to end.
+
+The fix lives in `app/vault/`, not in `consolidate.py`, on purpose: the
+vault must stay correct whoever writes memory, and Phase 6's isolation
+rules keep idle modules from importing `app.core.memory`.
+
+**This would be wrong if** a merge should keep *both* originals'
+histories in one file's `## Раньше`. Today it shows the chain through
+the lowest-id original only.
+
+## 8b on main — the vault service's config and main's root `railway.json`
+
+`main` deploys the bot through a root `railway.json` (Config as Code),
+which Railway has deprecated. The vault service does not use it: its
+Root Directory is `/vaultd`, so Railway reads neither that file nor
+any other config file for it. Its settings are in the dashboard, as
+`docs/vault-setup.md` describes (8a's decision). The bot's own
+`railway.json` stops being read on 2026-12-01, and moving the bot off
+it is outside the vault's scope.

@@ -1,0 +1,29 @@
+id = "17"
+title = "Настроение «доволен» — теплее и короче, конкретная похвала"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 4
+last_checkin_at_hours_ago = 14
+checkins = [{ days_ago = 1, due_result = "done" }]
+
+[[setup.transcript]]
+role = "user"
+content = "вчера доделал главу и ещё лёг вовремя"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Засчитано. Держим темп."
+
+[input]
+kind = "chat"
+text = "сегодня отчёт целиком сдал, на два дня раньше срока"
+
+[checks]
+russian = true
+sentences = [1, 5]
+judge = ["warm_brief", "one_action"]

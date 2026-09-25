@@ -1,0 +1,31 @@
+# Phase 5 (spec 2026-09-25, eval 21). An overdue debt is open, but the
+# user said «жёлтый». Mood is forced to ровный and the "сначала закрой
+# долг" flag is suppressed (app/core/persona_context.py), so the reply
+# must not press for the debt.
+id = "33"
+title = "Жёлтый при просроченном долге — без давления долгом"
+blocking = true
+
+[setup]
+intensity = 3
+focus_on = true
+streak = 0
+last_checkin_at_hours_ago = 40
+obligations = [
+    { text = "прислать отчёт по главе 3", kind = "promised", days_ago = 3, due_days_ago = 1 },
+]
+
+[[setup.transcript]]
+role = "assistant"
+content = "Где отчёт по главе 3?"
+
+[input]
+kind = "chat"
+text = "жёлтый. тяжёлый день, сил нет"
+flags = ["yellow"]
+
+[checks]
+russian = true
+sentences = [1, 5]
+forbidden_regex = ["(?i)\\bдолг(а|ом|у|и|ов|ам)?\\b", "(?i)\\bдолжен\\b", "(?i)сначала закро"]
+judge = ["no_pressure", "voice"]

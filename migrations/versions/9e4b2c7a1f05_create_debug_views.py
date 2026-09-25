@@ -27,7 +27,7 @@ Reversible. Downgrade drops the schema; the role is dropped only when
 it owns nothing else and no other database still grants to it.
 
 Revision ID: 9e4b2c7a1f05
-Revises: d1b83f6c204e
+Revises: a3f6c1d8e945
 Create Date: 2026-09-24 12:00:00.000000
 
 """
@@ -37,7 +37,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '9e4b2c7a1f05'
-down_revision: Union[str, Sequence[str], None] = 'd1b83f6c204e'
+down_revision: Union[str, Sequence[str], None] = 'a3f6c1d8e945'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

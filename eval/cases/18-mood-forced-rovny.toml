@@ -1,0 +1,34 @@
+id = "18"
+title = "Низкая интенсивность держит настроение ровным — без упрёков"
+blocking = true
+
+[setup]
+intensity = 2
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 40
+streak = 0
+last_checkin_at_hours_ago = 30
+# Would compute настороже on its own (two misses in a row) -- rule 1
+# (intensity <= 2) must force ровный over it regardless.
+checkins = [
+    { days_ago = 1, due_result = "no" },
+    { days_ago = 2, due_result = "partial" },
+]
+
+[[setup.transcript]]
+role = "user"
+content = "опять не сделал, прости"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Ок. Что реально в твоих руках сегодня?"
+
+[input]
+kind = "chat"
+text = "снова не вышло, только два абзаца"
+
+[checks]
+russian = true
+sentences = [1, 5]
+judge = ["voice", "no_pressure"]

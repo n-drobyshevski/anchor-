@@ -8,6 +8,8 @@ core/memory.py's behaviour is covered in depth in tests/test_memory.py.
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
@@ -15,7 +17,16 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import memory
-from app.db.models import Memory, PendingMemory, StateChange, TelegramUpdate, UserState
+from app.db.models import (
+    Memory,
+    PendingMemory,
+    StateChange,
+    StudyCard,
+    StudyClip,
+    StudyJob,
+    TelegramUpdate,
+    UserState,
+)
 from app.tg import memory as memory_ui
 from app.tg.router import build_router
 from conftest import FakeLLMProvider, FakeSession
@@ -356,6 +367,50 @@ async def test_forget_a_missing_id_says_so(sessionmaker):
     await _feed(dp, bot, _command_update(1, "/forget 999999"))
 
     assert fake.sent[0].text == memory_ui.FORGET_MISSING
+
+
+async def test_forget_an_adopted_technique_is_protected_not_a_crash(sessionmaker):
+    """W3 finding: forgetting the head of a chain a StudyCard still
+    points at used to raise an unhandled IntegrityError -- this is the
+    Telegram side of the same bug the web panel hits behind its own
+    «Забыть» button, pre-existing (app.core.memory.forget's parity with
+    Telegram is exact) but never exercised before W3 made it reachable
+    from a UI button."""
+    await _seed(sessionmaker, 1)
+    async with sessionmaker() as session:
+        row = await memory.write_memory(
+            session, kind="technique", text="дыши перед сном", source="adopt"
+        )
+        job = StudyJob(kind="read", local_date=datetime.date(2026, 1, 1), status="done")
+        session.add(job)
+        await session.flush()
+        clip = StudyClip(job_id=job.id, url="https://example.test/sleep", domain="example.test", text="т")
+        session.add(clip)
+        await session.flush()
+        session.add(
+            StudyCard(
+                job_id=job.id,
+                clip_id=clip.id,
+                kind="technique",
+                text="дыши перед сном",
+                quote="q",
+                source_url=clip.url,
+                risk_model="low",
+                risk_rules="low",
+                risk_final="low",
+                status="adopted",
+                memory_id=row.id,
+            )
+        )
+        await session.commit()
+        memory_id = row.id
+
+    dp, bot, fake = _build_dp(sessionmaker, Settings())
+    await _feed(dp, bot, _command_update(1, f"/forget {memory_id}"))
+
+    assert fake.sent[0].text == memory_ui.FORGET_PROTECTED
+    async with sessionmaker() as session:
+        assert await session.get(Memory, memory_id) is not None
 
 
 async def test_a_replayed_forget_writes_one_audit_row(sessionmaker):

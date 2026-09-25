@@ -24,7 +24,7 @@ which the vault itself does not need: from 8b the database is the
 source the files are rendered from, not the other way round.
 
 Revision ID: a5c1e0d9b3f2
-Revises: 9e4b2c7a1f05
+Revises: fa77c0b747fd
 Create Date: 2026-09-25 12:00:00.000000
 
 """
@@ -37,7 +37,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'a5c1e0d9b3f2'
-down_revision: Union[str, Sequence[str], None] = '9e4b2c7a1f05'
+down_revision: Union[str, Sequence[str], None] = 'fa77c0b747fd'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

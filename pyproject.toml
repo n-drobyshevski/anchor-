@@ -12,11 +12,14 @@ dependencies = [
     "pydantic-settings>=2.15.0,<3",
     "openai>=3.16.2,<4",
     "trafilatura>=2.2.0,<3",
+    "pyrage>=1.4.0",
+    "boto3>=1.43.100",
     "pyyaml>=6.0.2,<7",
 ]
 
 [dependency-groups]
 dev = [
+    "pip-audit>=2.10.1",
     "pytest>=8.3,<9",
     "pytest-asyncio>=1.4.0,<2",
 ]

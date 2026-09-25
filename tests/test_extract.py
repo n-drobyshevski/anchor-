@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.core import extract, proposal
-from app.db.models import Journal, Memory, Proposal, SpendLedger, StateChange, UserState
+from app.db.models import Journal, Memory, Proposal, SpendLedger, StandingOrder, StateChange, UserState
 from conftest import FakeLLMProvider
 
 pytestmark = pytest.mark.asyncio
@@ -147,6 +147,10 @@ async def test_extract_module_has_no_name_that_writes_sensitive_state(sessionmak
     assert "intensity =" not in code and ".intensity" not in code
     # The only proposal function it may reach for is create().
     assert "proposal.create" in code
+    # Phase 5: a debt is only ever proposed. Opening one is
+    # proposal.accept()'s job, behind a button.
+    assert "obligations" not in code, "extract.py must not reach app/core/obligations.py"
+    assert "Obligation(" not in code
 
 
 async def test_a_rule_memory_is_never_written_even_at_full_confidence(sessionmaker, clock):
@@ -716,3 +720,163 @@ async def test_the_worker_runs_the_extract_job_and_sends_the_proposal(sessionmak
     assert len(fake.sent) == 1
     assert "Записать?" in fake.sent[0].text
     assert stored.tg_message_id is not None
+
+
+# --- 5c: standing_order proposals (plan's "Extractor schema") --------------
+
+
+async def test_validate_keeps_a_standing_order_with_a_valid_cadence():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "пить воду по утрам",
+                        "reason": "user asked",
+                        "cadence": "daily",
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert len(result["proposals"]) == 1
+    item = result["proposals"][0]
+    assert item["field"] == "standing_order"
+    assert item["cadence"] == "daily"
+    assert item["weekday"] is None
+
+
+async def test_validate_drops_a_standing_order_with_no_cadence():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "пить воду по утрам",
+                        "reason": None,
+                        "cadence": None,
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"] == []
+
+
+async def test_validate_drops_a_weekly_standing_order_with_no_weekday():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "бегать по средам",
+                        "reason": None,
+                        "cadence": "weekly",
+                        "weekday": None,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"] == []
+
+
+async def test_validate_keeps_a_weekly_standing_order_with_a_weekday():
+    result = extract.validate(
+        json.loads(
+            _payload(
+                proposals=[
+                    {
+                        "field": "standing_order",
+                        "value": "бегать по средам",
+                        "reason": None,
+                        "cadence": "weekly",
+                        "weekday": 3,
+                    }
+                ]
+            )
+        ),
+        offered_ids=set(),
+    )
+    assert result["proposals"][0]["cadence"] == "weekly"
+    assert result["proposals"][0]["weekday"] == 3
+
+
+async def test_apply_routes_a_standing_order_to_orders_propose_not_a_proposal_row(sessionmaker, clock):
+    await _seed(sessionmaker, 1)
+    payload = _payload(
+        proposals=[
+            {
+                "field": "standing_order",
+                "value": "пить воду по утрам",
+                "reason": None,
+                "cadence": "daily",
+                "weekday": None,
+            }
+        ]
+    )
+
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
+
+    async with sessionmaker() as session:
+        proposals = (await session.execute(select(Proposal))).scalars().all()
+        order_rows = (await session.execute(select(StandingOrder))).scalars().all()
+
+    assert proposals == [], "a standing_order item must never become a Proposal row"
+    assert len(order_rows) == 1
+    assert order_rows[0].status == "proposed"
+    assert order_rows[0].source == "anchor"
+    assert outcome.order_proposed == order_rows[0].id
+    assert outcome.created == []
+
+
+async def test_apply_drops_a_standing_order_that_fails_the_risk_screen(sessionmaker, clock):
+    await _seed(sessionmaker, 1)
+    payload = _payload(
+        proposals=[
+            {
+                "field": "standing_order",
+                "value": "не есть до вечера",
+                "reason": None,
+                "cadence": "daily",
+                "weekday": None,
+            }
+        ]
+    )
+
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
+
+    async with sessionmaker() as session:
+        order_rows = (await session.execute(select(StandingOrder))).scalars().all()
+    assert order_rows == []
+    assert outcome.order_proposed is None
+
+
+async def test_an_obligation_item_becomes_a_pending_proposal_never_a_debt(sessionmaker, clock):
+    """Phase 5 (spec 2026-09-25): the extractor may propose a debt; only
+    the [Принять] button (proposal.accept) opens one."""
+    from app.db.models import Obligation
+
+    await _seed(sessionmaker, 1, user="завтра пришлю отчёт по главе 3")
+    payload = _payload(
+        proposals=[
+            {"field": "obligation", "value": "прислать отчёт по главе 3", "reason": "обещал"}
+        ]
+    )
+
+    outcome = await _run(sessionmaker, FakeLLMProvider(text=payload), clock=clock)
+
+    async with sessionmaker() as session:
+        proposals = (await session.execute(select(Proposal))).scalars().all()
+        debts = (await session.execute(select(Obligation))).scalars().all()
+    assert [(row.field, row.status) for row in proposals] == [("obligation", "pending")]
+    assert outcome.created == [proposals[0].id]
+    assert debts == []

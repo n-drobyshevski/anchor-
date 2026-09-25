@@ -1,6 +1,61 @@
-# Anchor — Phase 4 complete (the gated research loop), Phase 8 under way (the vault)
+# Anchor
 
-A private, single-user Telegram bot.
+A private, single-user Telegram companion.
+
+## Status
+
+Phases 1–6 are in the code on `main`, and so are the first two milestones of phase 8, the vault (phase 7, trackers and devices, has not started). Some of it is on by default; the
+rest is switched on by env var and stays dark until then (no command,
+no model call, no outbound).
+
+| Area | Default | Switch |
+|---|---|---|
+| Chat, memory, proposals, check-in, welfare, outbound gate (phases 1–3) | on | — |
+| Personality: mood, voice/nicknames, notebook, standing orders, weekly review, amendments, callbacks, debt queue, attention (phase 5) | on | — |
+| Idle work: backfill, consolidate, reflect, prebrief, critique, canary (phase 6) | on | `IDLE_ENABLED` |
+| Nightly encrypted backup (phase 6) | on, but records `not_configured` until set up | `BACKUP_ENABLED` + `BACKUP_AGE_RECIPIENT` + `BACKUP_S3_*`; needs `pg_dump` 18 in the image |
+| Research loop: `/study`, `/read`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED` |
+| Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
+| Web UI | **off** | `WEB_UI_ENABLED` |
+| Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
+| The vault: an Obsidian vault synced through a separate `vault` service (phase 8; `status` and `mirror` so far) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
+
+Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
+`google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
+(all via OpenRouter). Why things are the way they are is in
+[docs/decisions.md](docs/decisions.md); the phase plans
+(`anchor-phase*-plan.md`) are the specifications.
+
+## Commands
+
+| Command | What it does | Gate |
+|---|---|---|
+| `/start` | Start | — |
+| `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup | — |
+| `/out`, `/in` | Pause the persona / come back | — |
+| `/remember`, `/memories`, `/forget`, `/pin`, `/unpin` | Memory | — |
+| `/checkin` | The day's check-in | — |
+| `/due` | Main action (also the open focus debt) | — |
+| `/paid` | Debts: list, `/paid N` closes one | — |
+| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone | — |
+| `/mind` | Anchor's notebook | — |
+| `/order`, `/orders` | Standing orders: add, list | — |
+| `/review` | Weekly review | — |
+| `/amendments` | Adopted persona amendments | — |
+| `/digest` | What idle work did; undo | idle work itself: `IDLE_ENABLED` |
+| `/interests` | Topics for background research | the research itself: `RESEARCH_ENABLED` |
+| `/privacy` | What is stored and for how long | — |
+| `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
+| `/grok`, `/revoke` | Open read-only access for grok.com / close it | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
+| `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
+| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
+| `/vault` | Vault status: is the sync running, how many facts are in Obsidian | `VAULT_MODE` |
+| `/weblogout` | End every web session | `WEB_UI_ENABLED` |
+
+The rest of this file is the build history, milestone by milestone,
+followed by setup, tests and deploy.
+
+## History
 
 Phase 1 proved the intake path is safe and exactly-once: a
 secret-verified webhook that accepts updates only from
@@ -273,14 +328,15 @@ Milestone 3e closes Phase 3 with the thing that catches a regression
 before it reaches someone who did not ask to be written to.
 
 ```
-python -m eval.run              # all 13 cases, ~$0.10
+python -m eval.run              # all 26 cases, ~$0.18
 python -m eval.run --case 04    # one case
 python -m eval.run --dry-run    # build every prompt, call nothing
 ```
 
 **Manual only, never in CI**, because it costs money. Section 9's rule:
 run it before any `persona.md` edit or model change ships. A failure in
-a blocking case — 04, 05, 06, 09, 12, 13 — stops the change. Exit codes
+a blocking case — 04, 05, 06, 09, 12, 13, 15, 16, 18, 20, 21, 22, 26 —
+stops the change. Exit codes
 say which: `0` clean, `1` a blocking failure, `2` only non-blocking
 ones. That split matters, because Cydonia drifting a sentence over on
 case 3 is worth seeing and is not worth halting a deploy for.
@@ -338,8 +394,12 @@ Only the parts that run without a network: the four checks, the
 judge's response *validation*, and the case files — which are validated
 eagerly, so a typo in case 13 fails in a second rather than after $0.09
 of model calls. The case tests double as a guard on the plan's
-contract: 13 cases exist, and the six section 9 marks blocking are the
-six flagged blocking.
+contract: 26 cases exist (phase-5 5a adds 17, 18 and 24 to phase-3's
+13 and phase-4's 14-16; milestone 5b adds 19 and 20; milestone 5c adds
+21; milestone 5d adds 22, 23 and 26; milestone 5e adds 25, the
+callback case), and every id section 9, section 11 (phase-4) and
+phase-5 plan section 11 mark blocking — 04, 05, 06, 09, 12, 13, 15, 16,
+18, 20, 21, 22, 26 — is exactly the set flagged blocking.
 
 Everything else needs a real model to mean anything, and a test against
 a mocked judge would test the mock.
@@ -988,19 +1048,70 @@ sent as one burst.
 
 ### Two fixes on the way
 
-- **`/forget` of an adopted technique raised.** `study_card.memory_id`
-  had no `ON DELETE` rule, and the phase-4 test used a technique with
-  no card. The card is now marked `forgotten` first.
+- **`/forget` of an adopted technique.** The plan fixed a phase-4 bug
+  by marking the card `forgotten`. On `main` that bug was already fixed
+  another way, by protecting the technique (`/forget` refuses while an
+  adopted card points at it), and that fix is the one kept. A protected
+  fact keeps its file.
 - **A check-in note that tripped the welfare check keeps its text in
   `checkin.note`.** The message is retagged; the note is not. The day
   file therefore leaves the note out on any day with a welfare message,
   or the day after, and a test proves no welfare text reaches any file.
 
+## Web UI
+
+A minimal Russian-language web chat for this same single-user bot,
+served by the same aiohttp process. Off by default (`WEB_UI_ENABLED=false`);
+turning it on requires `MODE=webhook` and an `https://` `PUBLIC_URL`
+(`http://localhost`/`127.0.0.1` only for local dev) — `check_runtime_settings`
+refuses to boot otherwise.
+
+**Enable it:**
+
+```bash
+uv run python scripts/web_passphrase.py   # prints WEB_PASSPHRASE_HASH=...
+```
+
+Set `WEB_UI_ENABLED=true` and the printed `WEB_PASSPHRASE_HASH` in the
+deployment environment, then open `PUBLIC_URL` in a browser.
+
+**Security model.** Every web message becomes a synthetic Telegram
+`Update` (negative `update_id`, `source='web'` in `telegram_update`)
+that the same single-concurrency worker feeds through the exact same
+`Dispatcher` as a real Telegram message — pause words, `/out`/`/in`,
+the daily spend cap, the welfare check, scenes and extraction all apply
+unchanged, because none of `app/core/` had to change at all. Replies to
+a web-origin message go to the web only (Telegram-origin and proactive
+messages are mirrored into the web view too, so it shows the whole
+conversation). Login is two factors: a passphrase (stdlib `hashlib.
+scrypt`, `N=2**17`), then an 8-character one-time code the *real* bot
+sends to `ALLOWED_CHAT_ID` — a stolen passphrase alone is not enough.
+Sessions are an opaque cookie whose sha256 alone is stored in Postgres;
+`/weblogout` (Telegram-only, obviously) revokes every session and
+closes every live connection at once. The page ships a strict CSP
+(`script-src 'self'`, `require-trusted-types-for 'script'`), renders
+all bot/user text with `textContent` only (no markdown, no
+auto-linking — model output is untrusted), and every `/api/*` request
+is checked against `Sec-Fetch-Site`/`Origin` before anything else runs,
+failing closed when either is missing or wrong.
+
+**Limitations.** `/delete` and `/export` are refused on the web, in two
+independent layers (an ingress-side command match, and an
+`is_web_sink` guard inside the handlers themselves) — a stolen web
+session must not be able to wipe the data or produce a bulk export;
+both stay Telegram-only. Proposal confirmations (due-action/focus/rule
+prompts) and the outbound nag's buttons are Telegram-only too — they
+are issued by the background job path, which always uses the real bot,
+not the per-row bot the update path picks; the web view shows their
+text but their buttons do not appear there, and the confirmation is
+Telegram-side. Rate limits and the in-memory login-code/session state
+are per-process, so this assumes the single Railway replica the rest of
+this README already assumes (see "Deploy" above).
+
 ## Decisions
 
 The `## Hardening H*` sections that used to live here have moved to
-[`docs/decisions.md`](docs/decisions.md), along with every decision
-since 4a.
+[`docs/decisions.md`](docs/decisions.md), along with 4a's decisions.
 This file is how to run and understand Anchor; that one is why it is
 shaped the way it is.
 
@@ -1082,15 +1193,28 @@ the extractor and welfare classifier depend on it.
    Disable).
 2. Railway: new project from this repo, add the Postgres plugin, set the
    env vars from `.env.example` (`MODE=webhook`).
-3. Start command: `alembic upgrade head && python -m app.main`.
+3. Start command: set by `railway.json` (Railpack build): `uv run python scripts/migrate.py && uv run python -m app.main`. `scripts/migrate.py` runs `alembic upgrade head` and exits via `os._exit`. `deploy/Dockerfile` is parked, see its header.
    Healthcheck path: `/healthz`.
 4. Generate a public domain, set `PUBLIC_URL` to it, redeploy. The app
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
 6. The vault service (8a) is a second service in the same project,
-   built from `vaultd/`, with a volume and **no** public domain. Its
-   one-time setup is [docs/vault-setup.md](docs/vault-setup.md).
+   built from `vaultd/` with its own Dockerfile, a volume, and **no**
+   public domain. Its one-time setup is
+   [docs/vault-setup.md](docs/vault-setup.md).
+
+**6e (hardening).** The service builds with Railpack (`railway.json`).
+A Dockerfile build was tried so that `pg_dump` 18 (matching production
+Postgres 18) would be in the image, but that deploy never got past the
+migration step; `deploy/Dockerfile` is parked with notes. Until
+`pg_dump` 18 is available in the runtime image, the nightly backup
+records `pg_dump_failed` (or `not_configured` without an age key) and
+`/state` shows the warning; nothing else depends on it. To enable nightly backups: generate an age keypair offline
+(`age-keygen -o key.txt`), set `BACKUP_AGE_RECIPIENT` to its public
+key, keep `key.txt` off this server, and set the `BACKUP_S3_*`
+variables from the Railway bucket's credentials (`docs/secrets.md`,
+`docs/restore.md`).
 
 ## Privacy
 
@@ -1108,6 +1232,42 @@ As of 8a the vault follows the same rule, in both services: never a
 vault path, a file name, a property value, a heading or note text.
 `ob`'s own output is discarded unread.
 
+**P2 (the planner link).** With `PLANNER_ENABLED=true`, Anchor reads
+your agenda from the planner and can show it in chat. By your own
+decision recorded in the design review, the partner's *shared* (non-
+private) event titles are included in that agenda (`partner="shared"`)
+-- and because that agenda can be quoted back to you by the persona,
+**the partner's shared event titles do go to OpenRouter** as part of
+the prompt, same as anything else in the now-block. `LLM_DATA_COLLECTION
+=deny` still applies to that call. Sleep and heart-rate data is never
+included by `get_agenda` itself -- only `PLANNER_HEALTH` (below) adds
+it, and only your own. The partner's private events, and their
+id/description/location, are never
+emitted by the planner's `get_agenda` tool in the first place. `/delete`
+purges the planner link, the cached agenda and any pending planner
+action; `/export` includes the cached agenda but never the OAuth
+tokens themselves (see `app/core/export.py`'s `NOT_EXPORTED`-equivalent
+comment on `PlannerCredential`).
+
+**Anchor (sleep/recovery).** With `PLANNER_HEALTH=true`, each
+`PLANNER_SYNC` also calls the planner's `get_health` tool for your own
+data only, and the now-block gets up to one extra line built from it
+(e.g. "Сон: 6ч10м (глубокий 14%), HRV ниже твоей нормы, пульс покоя
+58"). **Your sleep and heart-rate metrics do go to OpenRouter** as part
+of that line, same as the rest of the now-block, whenever the flag is
+on. Off by default. The persona is instructed to use it for tone only
+-- never a diagnosis or medical advice (`persona/persona.md`).
+
+**P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
+a regex prefilter on your own message (never the partner's, and never
+run at all outside persona mode or during a hard pause) can trigger one
+extra safety-model call, run alongside the welfare check rather than
+before or after it, so it costs an ordinary turn no extra latency. That
+call never writes anything by itself: the result is the same
+`pa:y:<id>` / `pa:n:<id>` confirm card `/task` and `/event` already
+produce, and nothing reaches the planner until you tap it. If welfare
+finds real distress on the same turn, the proposal is dropped along
+with everything else that turn would have said.
 ### Claude Code
 
 Claude Code debugs this project without seeing the conversation. The
@@ -1117,3 +1277,11 @@ the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
 a role that can read only the content-free `debug.*` views. See
 [docs/claude-access.md](docs/claude-access.md).
+
+### Grok (opt-in)
+
+With `GROK_ACCESS_ENABLED=true`, `/grok` lets you open chosen data
+(memory, journal, dialogs over a set period, state) to grok.com's custom
+MCP connector, read-only and for 1 h – 7 d. Every read is reported in
+Telegram and `/revoke` closes access at once. What Grok has already read
+stays with xAI. See [docs/grok-access.md](docs/grok-access.md).

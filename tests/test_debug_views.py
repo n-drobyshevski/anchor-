@@ -10,11 +10,10 @@ so it is asserted here in SQL.
 from __future__ import annotations
 
 import pytest
-import sqlalchemy
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
-from app.db.models import Base, Message, VaultChunk, VaultFile, VaultHold, VaultStatus
+from app.db.models import Message, VaultChunk, VaultFile, VaultHold, VaultStatus
 
 # Free-text columns: what a user wrote, what the model wrote, or what was
 # derived from either. None may appear as a column of any debug view.
@@ -35,6 +34,7 @@ CONTENT_COLUMNS = {
     "study_job": {"packet", "query"},
     "study_clip": {"text", "url", "title", "text_sha256"},
     "study_card": {"text", "quote", "source_url"},
+    "access_grant": {"token_sha256"},
     # 8a. A path is a file name the user chose, a note's title is
     # content, and a hash of a short fact confirms a guess at its text.
     "vault_file": {"path", "disk_sha256", "render_digest"},
@@ -67,20 +67,14 @@ async def test_no_debug_view_exposes_a_content_column(sessionmaker):
         assert not leaked, f"debug.{view} exposes {leaked}"
 
 
-def test_every_table_with_content_is_classified():
-    # A new table must be classified here before it can get a view, so
-    # the leak check above never silently skips one.
-    text_columns = {
-        table.name
-        for table in Base.metadata.sorted_tables
-        for column in table.columns
-        if isinstance(column.type, (sqlalchemy.String, sqlalchemy.JSON))
-        and column.name not in {"status", "kind", "role", "model", "error", "source"}
-    }
-    unclassified = text_columns - set(CONTENT_COLUMNS) - {
-        "spend_ledger",
-        "safety_event",
-    }
+async def test_every_debug_view_source_is_classified(sessionmaker):
+    # A view may only exist over a table whose free-text columns are
+    # listed above, so the leak check never silently skips one. Tables
+    # with no view (web_session, planner_credential, ...) are simply
+    # invisible to anchor_debug and need no entry.
+    async with sessionmaker() as session:
+        views = set(await _debug_columns(session))
+    unclassified = views - set(CONTENT_COLUMNS) - {"spend_ledger", "safety_event"}
     assert not unclassified, f"classify these tables in CONTENT_COLUMNS: {unclassified}"
 
 

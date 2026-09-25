@@ -8,6 +8,8 @@ else can do what it does.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
@@ -270,6 +272,103 @@ async def test_send_proposal_records_the_message_id(sessionmaker, clock):
     assert row.tg_message_id is not None
     labels = [b.text for r in fake.sent[0].reply_markup.inline_keyboard for b in r]
     assert labels == [proposals_ui.ACCEPT, proposals_ui.REJECT]
+
+
+# --- concurrent decisions (review finding: no row lock let a double
+# accept, an accept racing a reject, or an accept racing an expiry all
+# apply) ---
+
+
+async def test_concurrent_accepts_apply_exactly_once(sessionmaker, clock):
+    """Two concurrent `accept()` calls (Telegram racing the web panel,
+    or two web tabs) on the same real Postgres row: only the one that
+    wins the row lock may apply anything; the other must see it is no
+    longer pending and return None -- not both writing `due_action`.
+    """
+    await _seed(sessionmaker)
+    pid = await _make(sessionmaker, clock, "due_action", "сдать отчёт до пятницы")
+
+    async def do_accept():
+        async with sessionmaker() as session:
+            return await proposal.accept(session, clock, pid)
+
+    results = await asyncio.gather(do_accept(), do_accept())
+    accepted = [r for r in results if r is not None]
+    assert len(accepted) == 1, "exactly one of the two racing accepts applied"
+
+    async with sessionmaker() as session:
+        changes = (
+            (await session.execute(select(StateChange).where(StateChange.field == "due_action")))
+            .scalars()
+            .all()
+        )
+    assert len(changes) == 1, "only one due_action write, not a duplicate audit row per race loser"
+
+
+async def test_accept_racing_a_reject_applies_only_one_decision(sessionmaker, clock):
+    await _seed(sessionmaker)
+    pid = await _make(sessionmaker, clock, "due_action", "сдать отчёт")
+
+    async def do_accept():
+        async with sessionmaker() as session:
+            return await proposal.accept(session, clock, pid)
+
+    async def do_reject():
+        async with sessionmaker() as session:
+            return await proposal.reject(session, clock, pid)
+
+    results = await asyncio.gather(do_accept(), do_reject())
+    decided = [r for r in results if r is not None]
+    assert len(decided) == 1, "only the race's winner decides anything"
+
+    async with sessionmaker() as session:
+        row = await session.get(Proposal, pid)
+        state = await session.get(UserState, 1)
+    # Whichever one won, the row's final status and user_state must
+    # agree with each other -- not "rejected" while due_action was
+    # still applied by a loser that thought it won.
+    if row.status == "accepted":
+        assert state.due_action == "сдать отчёт"
+    else:
+        assert row.status == "rejected"
+        assert state.due_action is None
+
+
+async def test_accept_does_not_trust_a_stale_identity_mapped_row(sessionmaker, clock):
+    """The bug this regression pins: before the fix, `accept()` read the
+    row with a plain `session.get()`, which -- for a row this same
+    session already loaded earlier (e.g. a caller's own pre-check, like
+    app/web/panels/proposals.py's `_decide`) -- returns the *cached*
+    Python object straight out of the identity map, without a query,
+    even though a *different* session committed a status change to that
+    row in the meantime. `accept()` must see the current row, not that
+    stale one.
+    """
+    await _seed(sessionmaker)
+    pid = await _make(sessionmaker, clock, "due_action", "сдать отчёт")
+
+    async with sessionmaker() as session:
+        # Load the row once, priming this session's identity map --
+        # mirrors _decide's own pre-check `session.get`.
+        row = await session.get(Proposal, pid)
+        assert row.status == proposal.PENDING
+
+        # A concurrent decision, in a different session/transaction,
+        # rejects it first and commits.
+        async with sessionmaker() as other:
+            rejected = await proposal.reject(other, clock, pid)
+        assert rejected is not None and rejected.status == "rejected"
+
+        # This session's cached object is now stale in memory...
+        assert row.status == proposal.PENDING
+        # ...but accept() in this same session must not trust that: it
+        # has to see the row is no longer pending.
+        result = await proposal.accept(session, clock, pid)
+    assert result is None
+
+    async with sessionmaker() as session:
+        state = await session.get(UserState, 1)
+    assert state.due_action is None
 
 
 async def test_sending_a_new_proposal_retires_the_old_ones_buttons(sessionmaker, clock):

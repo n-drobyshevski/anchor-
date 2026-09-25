@@ -16,6 +16,15 @@ startup/system-driven changes. `extractor` may only ever appear on a
 memory or journal write -- never on a user_state field, which is the
 invariant app/core/extract.py exists to keep (plan section 13).
 
+W2 adds `web`: a change made through a web panel (app/web/panels/,
+calling app/core/commands.py) rather than Telegram. `state_change.
+source` carries no DB CHECK constraint -- see this module's own
+StateChange docstring precedent, `migrations/versions/
+a339f54e49de_create_idle_tables.py`'s note that the column is
+deliberately unconstrained, and 6a's own `source="undo"` widening the
+same way -- so admitting a new value here needs no migration, no ALTER
+on this hot table, and no lock. See docs/decisions.md's W2 entry.
+
 3a adds set_counters() -- the one sanctioned way to write a
 `user_state` field *without* an audit row. See its docstring for why
 the exception exists and what keeps it from widening.
@@ -39,7 +48,7 @@ from app.db.models import StateChange, UserState
 STATE_ID = 1
 
 # 8b: "vault" (phase-8 plan section 6), only ever on field="memory" rows.
-Source = Literal["command", "pause", "system", "button", "extractor", "welfare", "vault"]
+Source = Literal["command", "pause", "system", "button", "extractor", "welfare", "web", "vault"]
 
 # The only fields set_counters() may write (phase-3 plan section 4).
 # An explicit allow-list rather than a denylist: a new sensitive column

@@ -41,7 +41,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
 from app.core import memory
-from app.core.state import record_change
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
 logger = logging.getLogger(__name__)
@@ -72,6 +71,11 @@ MEMORIES_HEADER = "Помню {total}:"
 FORGET_USAGE = "Что забыть? Напиши так: /forget 12."
 FORGET_DONE = "Забыл #{id}."
 FORGET_MISSING = "Нет такой записи."
+# W3 finding: forgetting the head of a chain a StudyCard still points at
+# (an adopted technique, or the merged/corrected row of one) would
+# either violate memory's own FK or, relinked to NULL, ck_study_card_
+# adopted_has_memory -- app.core.memory.forget refuses it outright.
+FORGET_PROTECTED = "Эта запись — часть принятой техники, так её не забыть."
 
 PIN_USAGE = "Что закрепить? Напиши так: /pin 12."
 UNPIN_USAGE = "Что открепить? Напиши так: /unpin 12."
@@ -80,7 +84,8 @@ UNPIN_DONE = "Открепил #{id}."
 PIN_MISSING = "Нет такой записи."
 PIN_OVER_CAP = "Закреплено уже {max}. Открепи что-нибудь сначала."
 
-MEMORY_TEXT_MAX = 300
+# Moved to app/core/memory.py (W3): both transports share one cap.
+MEMORY_TEXT_MAX = memory.MEMORY_TEXT_MAX
 TOO_LONG = "Слишком длинно — максимум {max} символов."
 
 
@@ -223,21 +228,16 @@ async def run_forget(sessionmaker, bot: Bot, *, chat_id: int, memory_id: int) ->
 
     The audit row deliberately carries the id and nothing else -- plan
     section 11: "`state_change` records `memory <id> deleted` with no
-    text".
+    text". W3: the delete-plus-audit logic itself now lives in
+    `memory.forget` (source="command", matching this handler's own
+    audit source before the extraction), shared with the web panel;
+    this function keeps only the reply text.
     """
     async with sessionmaker() as session:
-        deleted = await memory.hard_delete(session, memory_id)
-    if not deleted:
-        return FORGET_MISSING
-    async with sessionmaker() as session:
-        await record_change(
-            session,
-            field="memory",
-            old_value=str(memory_id),
-            new_value=None,
-            source="command",
-        )
-    return FORGET_DONE.format(id=memory_id)
+        outcome = await memory.forget(session, memory_id, source="command")
+    if outcome == memory.FORGET_PROTECTED:
+        return FORGET_PROTECTED
+    return FORGET_DONE.format(id=memory_id) if outcome == memory.FORGET_OK else FORGET_MISSING
 
 
 async def run_set_pinned(
@@ -249,16 +249,18 @@ async def run_set_pinned(
     silently: plan section 7 caps the *render* at that number, so a
     ninth pin would quietly stop reaching the model -- the worst
     possible outcome for a memory the user explicitly asked to always be
-    remembered.
+    remembered. W3: the cap check and the write itself now live in
+    `memory.set_pinned_capped`, shared with the web panel; this function
+    keeps only the reply text.
     """
     async with sessionmaker() as session:
-        target = await memory.get_active(session, memory_id)
-        if target is None:
-            return PIN_MISSING
-        if pinned and not target.pinned:
-            if await memory.count_pinned(session) >= settings.MEMORY_PINNED_MAX:
-                return PIN_OVER_CAP.format(max=settings.MEMORY_PINNED_MAX)
-        await memory.set_pinned(session, memory_id, pinned)
+        outcome = await memory.set_pinned_capped(
+            session, memory_id, pinned, max_pinned=settings.MEMORY_PINNED_MAX
+        )
+    if outcome == memory.PIN_MISSING:
+        return PIN_MISSING
+    if outcome == memory.PIN_OVER_CAP:
+        return PIN_OVER_CAP.format(max=settings.MEMORY_PINNED_MAX)
     return (PIN_DONE if pinned else UNPIN_DONE).format(id=memory_id)
 
 

@@ -108,20 +108,17 @@ def _providers(settings: Settings):
     makes 26 calls and opening two pools for them would be silly.
     """
     client = build_client(settings.OPENROUTER_API_KEY)
-    # web_search_max_results is a required positional argument of
-    # OpenRouterProvider. H5: both constructions here omitted it, so every
-    # non-dry-run invocation of this harness died with a TypeError before
-    # reaching the first API call -- which is the actual reason
-    # eval/reports/ was still empty, rather than the missing key everyone
-    # assumed. The value is irrelevant (the harness never searches) but
-    # the argument is not optional.
+    # No web_search_max_results: milestone 4a removed both the provider
+    # argument and the LLM_WEB_SEARCH_MAX_RESULTS setting, and these two
+    # constructions kept passing it, so every real run died with an
+    # AttributeError before its first call. tests/test_eval_providers.py
+    # now builds them for real (no network) so that cannot recur.
     main = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.LLM_MODEL,
         max_tokens=settings.LLM_MAX_TOKENS,
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
     )
     judge_model = judge_model_for(settings)
@@ -131,7 +128,6 @@ def _providers(settings: Settings):
         max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
         temperature=settings.LLM_CHEAP_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
-        web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
     )
@@ -139,11 +135,28 @@ def _providers(settings: Settings):
 
 
 async def run_case(
-    sessionmaker, case: Case, settings: Settings, clock, main, judge, dry_run: bool
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    main,
+    judge,
+    dry_run: bool,
+    *,
+    amendments: list[str] | None = None,
 ) -> Outcome:
+    """Run one case against a fresh, seeded scenario.
+
+    `amendments` (5d) overrides the case's own `setup.amendments` list
+    when given -- eval/trial.py's `run_blocking_subset` passes the
+    amendment_trial's own candidate-plus-every-other-active-amendment
+    set here, so a trial exercises the persona with the amendment
+    actually in place rather than whatever (if anything) a case file
+    happens to seed on its own.
+    """
     async with sessionmaker() as session:
         await scenario.reset(session)
-        state = await scenario.seed(session, case, clock)
+        state = await scenario.seed(session, case, clock, amendments=amendments)
         messages = await scenario.build(session, case, state, settings, clock)
 
     if dry_run:
@@ -158,7 +171,7 @@ async def run_case(
         )
 
     reply = response.text.strip()
-    check_results = checks_module.run_all(reply, case.checks)
+    check_results = checks_module.run_all(reply, case.checks, settings)
     verdict = await judge_module.judge(
         judge,
         items=case.judge_items,

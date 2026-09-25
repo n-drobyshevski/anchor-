@@ -6,13 +6,16 @@ one code path decides which updates get stored, no matter the transport.
 
 from __future__ import annotations
 
+import datetime
 import hmac
 import logging
 
 from aiohttp import web
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.config import Settings
+from app.core.clock import Clock, SystemClock
+from app.db.models import HeartbeatState
 from app.db.queue import enqueue
 
 logger = logging.getLogger(__name__)
@@ -94,11 +97,39 @@ async def healthz(request: web.Request) -> web.Response:
     return web.Response(status=200, text="ok")
 
 
+def heartbeat_stale(
+    heartbeat_at: datetime.datetime | None, now: datetime.datetime, stale_after_min: int
+) -> bool:
+    """True iff the heartbeat has not run within `stale_after_min` minutes
+    (Phase 6 plan section 9.6; milestone 6e).
+
+    `heartbeat_at is None` (the heartbeat loop has never stamped
+    `heartbeat_state` at all -- a fresh deploy, before its first tick)
+    also counts as stale: /readyz's whole job is gating *readiness*, and
+    a service that has never run its heartbeat is not ready, full stop.
+    This is deliberately simpler than app/worker.py's `watchdog_is_stale`,
+    which adds a startup grace before it will actively kill the process
+    -- /readyz only ever reports a status, so there is nothing to guard
+    against overreacting to.
+    """
+    if heartbeat_at is None:
+        return True
+    return now - heartbeat_at > datetime.timedelta(minutes=stale_after_min)
+
+
 async def readyz(request: web.Request) -> web.Response:
     sessionmaker = request.app["sessionmaker"]
+    settings: Settings = request.app["settings"]
+    clock: Clock = request.app.get("clock") or SystemClock()
     try:
         async with sessionmaker() as session:
             await session.execute(text("SELECT 1"))
+            result = await session.execute(
+                select(HeartbeatState.heartbeat_at).where(HeartbeatState.id == 1)
+            )
+            heartbeat_at = result.scalar_one_or_none()
     except Exception:
         return web.Response(status=503, text="not ready")
+    if heartbeat_stale(heartbeat_at, clock.now_utc(), settings.LIVENESS_STALE_MIN):
+        return web.Response(status=503, text="heartbeat stale")
     return web.Response(status=200, text="ok")
