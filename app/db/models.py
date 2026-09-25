@@ -1163,19 +1163,26 @@ class AccessGrant(Base):
     """An opt-in, time-limited read grant for an outside assistant.
 
     Created only by the user pressing [Разрешить] on /grok
-    (app/tg/grok.py); read by the MCP endpoint (app/web/mcp.py). The
-    capability token itself is shown to the user once and never
-    stored -- only its sha256, so a leaked database cannot be replayed
-    against the endpoint.
+    (app/tg/grok.py); read by the MCP endpoint (app/web/mcp.py, then
+    app/web/mcp_core.py). The capability token itself is shown to the
+    user once and never stored -- only its sha256, so a leaked database
+    cannot be replayed against the endpoint.
 
     `scopes` is what the grant may read; `dialog_days` bounds how far
     back the `dialogs` scope reaches. /revoke sets `revoked_at`, /delete
     truncates the table.
+
+    `client` names the assistant (connector plan section 7). A `grok`
+    grant has a token hash and a `claude` one will not; until C2 makes
+    `token_sha256` nullable, the pairing check refuses any `claude` row.
     """
 
     __tablename__ = "access_grant"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client: Mapped[str] = mapped_column(
+        String, nullable=False, default="grok", server_default=text("'grok'")
+    )
     token_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     dialog_days: Mapped[int | None] = mapped_column(Integer)
@@ -1200,6 +1207,11 @@ class AccessGrant(Base):
         CheckConstraint(
             "dialog_days is null or dialog_days between 1 and 365",
             name="ck_access_grant_dialog_days",
+        ),
+        CheckConstraint("client in ('grok', 'claude')", name="ck_access_grant_client"),
+        CheckConstraint(
+            "(client = 'grok') = (token_sha256 is not null)",
+            name="ck_access_grant_client_token",
         ),
     )
 

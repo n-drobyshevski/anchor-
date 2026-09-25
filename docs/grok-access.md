@@ -57,9 +57,14 @@ a public HTTPS URL that speaks MCP Streamable HTTP.
 ## For developers
 
 - Grants: `app/core/grants.py` (this is also where each scope's content
-  is decided). Table `access_grant`, migration `5c8e1d2b7a94`.
-- Endpoint: `app/web/mcp.py`. It is stateless JSON-RPC:
-  `initialize`, `ping`, `tools/list`, `tools/call`.
+  is decided). Table `access_grant`, migrations `5c8e1d2b7a94` and
+  `d4a7b9e2c1f3` (`client`, always `grok` for these grants).
+- Endpoint: `app/web/mcp.py` checks the capability URL and nothing
+  else. Everything after that is `app/web/mcp_core.py`, shared with the
+  Claude connector (`anchor-claude-connector-plan.md`): stateless
+  JSON-RPC (`initialize`, `ping`, `tools/list`, `tools/call`), the
+  tools, the per-grant rate limiter and the read notice. Grok keeps its
+  own limiter instance and its `-32602` refusal.
 - Telegram UI: `app/tg/grok.py`. The callback data is
   `g:<action>:<mask>:<period>:<ttl>:<epoch>`.
 - Tests: `tests/test_grok_access.py`.

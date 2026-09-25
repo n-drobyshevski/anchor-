@@ -18,6 +18,7 @@ no model call, no outbound).
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
+| Read-only access for claude.ai (connector plan; C1 of 3 so far: the shared MCP core, no Claude route yet) | **not built** | `CLAUDE_ACCESS_ENABLED` from C2 |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8; `status` and `mirror` so far) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e; nothing is indexed or used until 8d) | **off** | `/vault notes on`; later `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` (8d) |
 
@@ -1403,3 +1404,14 @@ With `GROK_ACCESS_ENABLED=true`, `/grok` lets you open chosen data
 MCP connector, read-only and for 1 h – 7 d. Every read is reported in
 Telegram and `/revoke` closes access at once. What Grok has already read
 stays with xAI. See [docs/grok-access.md](docs/grok-access.md).
+
+### Claude (planned: C1 done)
+
+`anchor-claude-connector-plan.md` adds the same read access for
+claude.ai, through an OAuth connector you approve by typing a code into
+Telegram, and reads only inside a `/claude` window. C1 is the
+groundwork and changes nothing you can see: the MCP server now lives in
+`app/web/mcp_core.py`, shared by both clients, with `app/web/mcp.py`
+keeping only Grok's capability-URL check, and `access_grant` has a
+`client` column that is `grok` on every row. The database refuses a
+Claude grant until C2 builds the connection it would belong to.

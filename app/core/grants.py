@@ -9,9 +9,14 @@ only its sha256 is stored. `find_active_grant` hashes what it is given
 and looks the hash up, so a timing difference can only reveal whether
 some *hash* prefix exists, which says nothing about a valid token.
 
+A grant belongs to one client (`access_grant.client`). Only Grok's
+grants exist so far; `create_grant` writes `grok` and
+`find_active_grant` looks at nothing else, so a token can never open a
+row meant for another client (connector plan section 7).
+
 The read functions return plain JSON-ready dicts. They are the only
-place the MCP endpoint touches content, so what an outside assistant
-can see is decided here and nowhere else:
+place the MCP endpoints (app/web/mcp_core.py) touch content, so what
+an outside assistant can see is decided here and nowhere else:
 
 - dialogs exclude `ooc` rows and the welfare/canned/system kinds. A
   welfare exchange is the most sensitive thing this bot stores, and
@@ -49,6 +54,7 @@ DIALOG_KINDS = ("chat", "checkin", "outbound")
 MAX_DIALOG_MESSAGES = 500
 NOTIFY_EVERY = datetime.timedelta(minutes=10)
 TOKEN_BYTES = 32
+GROK = "grok"
 
 
 def hash_token(token: str) -> str:
@@ -72,6 +78,7 @@ async def create_grant(
     now = clock.now_utc()
     token = secrets.token_urlsafe(TOKEN_BYTES)
     grant = AccessGrant(
+        client=GROK,
         token_sha256=hash_token(token),
         scopes=scopes,
         dialog_days=dialog_days if "dialogs" in scopes else None,
@@ -89,6 +96,7 @@ async def find_active_grant(
 ) -> AccessGrant | None:
     result = await session.execute(
         select(AccessGrant).where(
+            AccessGrant.client == GROK,
             AccessGrant.token_sha256 == hash_token(token),
             AccessGrant.revoked_at.is_(None),
             AccessGrant.expires_at > clock.now_utc(),
