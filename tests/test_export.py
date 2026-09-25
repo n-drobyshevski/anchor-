@@ -403,6 +403,7 @@ NOT_EXPORTED = {
     "backup_log": "ciphertext object keys and sizes, not user data (plan section 3)",
     "heartbeat_state": "operational liveness marker, not user data",
     "planner_credential": "live OAuth tokens; never exported (design review section 3.2)",
+    "access_grant": "token hashes and grant bookkeeping, not user data",
 }
 
 

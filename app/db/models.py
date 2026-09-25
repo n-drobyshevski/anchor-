@@ -1129,6 +1129,51 @@ class StudyCard(Base):
     )
 
 
+class AccessGrant(Base):
+    """An opt-in, time-limited read grant for an outside assistant.
+
+    Created only by the user pressing [Разрешить] on /grok
+    (app/tg/grok.py); read by the MCP endpoint (app/web/mcp.py). The
+    capability token itself is shown to the user once and never
+    stored -- only its sha256, so a leaked database cannot be replayed
+    against the endpoint.
+
+    `scopes` is what the grant may read; `dialog_days` bounds how far
+    back the `dialogs` scope reaches. /revoke sets `revoked_at`, /delete
+    truncates the table.
+    """
+
+    __tablename__ = "access_grant"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    token_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
+    dialog_days: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    use_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_notified_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "scopes <@ array['memory', 'journal', 'dialogs', 'state']::varchar[] "
+            "and cardinality(scopes) > 0",
+            name="ck_access_grant_scopes",
+        ),
+        CheckConstraint("expires_at > created_at", name="ck_access_grant_expiry"),
+        CheckConstraint(
+            "dialog_days is null or dialog_days between 1 and 365",
+            name="ck_access_grant_dialog_days",
+        ),
+    )
+
+
 class NotebookEntry(Base):
     """One of Anchor's own working notes (phase-5 plan sections 3 and 6).
 

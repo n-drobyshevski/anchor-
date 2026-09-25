@@ -52,7 +52,11 @@ from app.web.hub import WebHub
 # to trigger or read that reply either -- see planner_link_command's
 # own is_web_sink guard in app/tg/router.py for the second, redundant
 # layer, matching /delete's and /export's own belt-and-braces shape.
-BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link"})
+#
+# `grok` joins it for the same reason as `planner_link`: its reply
+# becomes a capability URL granting read access to the data
+# (app/tg/grok.py), which must only ever be shown in Telegram.
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather
@@ -60,8 +64,10 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link"})
 # synthetic Update -- the /delete confirmation keyboard itself is never
 # sent by WebSinkSession in the first place (delete_command's is_web_sink
 # guard fires before send_keyboard is ever called), so this can only
-# ever fire on a forged press.
-BLOCKED_CALLBACK_PREFIX = "d:"
+# ever fire on a forged press. `g:` is the /grok picker's prefix
+# (app/tg/grok.py), blocked for the reason BLOCKED_COMMANDS gives.
+# A tuple, because str.startswith takes one.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:")
 
 
 class BlockedCommand(Exception):

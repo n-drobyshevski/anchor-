@@ -22,6 +22,7 @@ from sqlalchemy import func, select, update as sql_update
 from app.config import Settings
 from app.core import purge
 from app.db.models import (
+    AccessGrant,
     BackupLog,
     Base,
     BriefNote,
@@ -301,6 +302,17 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         session.add(InterestTopic(text="сон", packet="ref"))
         session.add(
             BackupLog(started_at=now, finished_at=now, object_key="anchor/x", bytes=10, status="ok")
+        )
+        await session.commit()
+
+        # Grok access: an open grant must not survive "delete all my data".
+        session.add(
+            AccessGrant(
+                token_sha256="0" * 64,
+                scopes=["memory"],
+                created_at=now,
+                expires_at=now + datetime.timedelta(hours=1),
+            )
         )
         await session.commit()
 

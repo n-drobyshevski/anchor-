@@ -68,6 +68,7 @@ from app.tg.planner import LINK_FAILED, LINKED_OK
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
+from app.web import mcp
 from app.web import auth as web_auth
 from app.web.hub import WebHub
 from app.web.routes import setup_web
@@ -331,6 +332,9 @@ def build_webhook_app(
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+    if settings.GROK_ACCESS_ENABLED:
+        mcp.register(app, settings)
+
     # P2: registered unconditionally, like the planner's own /api/mcp
     # route mirrors -- the handler itself 404s when PLANNER_ENABLED is
     # off, rather than the route's existence leaking the setting.
@@ -452,7 +456,9 @@ def main() -> None:
             hub,
             code_store,
         )
-        web.run_app(app, host="0.0.0.0", port=settings.PORT)
+        # access_log=None: the default access log prints the request
+        # path, and /mcp/{token} carries a credential in its path.
+        web.run_app(app, host="0.0.0.0", port=settings.PORT, access_log=None)
     else:
         asyncio.run(
             _run_polling_mode(

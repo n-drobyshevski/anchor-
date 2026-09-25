@@ -118,6 +118,9 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
+    # Grok access: "delete all my data" also closes every door that was
+    # opened onto it. Truncating revokes all grants at once.
+    "access_grant",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a

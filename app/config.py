@@ -481,6 +481,19 @@ class Settings(BaseSettings):
     # the persona is not a reference manual.
     RESEARCH_TECHNIQUES_IN_PROMPT: int = 2
 
+    # --- Grok access (docs/grok-access.md) ---
+    #
+    # Opt-in read access for an outside assistant (grok.com's custom MCP
+    # connector). Ships off: with this false the /mcp route does not
+    # exist and /grok refuses. Even when on, nothing is readable until
+    # the user presses [Разрешить] on a /grok grant, and every grant
+    # expires on its own.
+    GROK_ACCESS_ENABLED: bool = False
+    # The ceiling on one grant's lifetime, whatever the keyboard offers.
+    GROK_GRANT_MAX_HOURS: int = 168
+    # Per grant, a sliding one-minute window on the MCP endpoint.
+    GROK_MAX_CALLS_PER_MINUTE: int = 30
+
     # The three /study packets. Comma-separated domains, parsed by the
     # validator below. GUIDES ships empty and /study guides refuses
     # until it is set -- picking those domains is the user's call, not a

@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Railway__get-logs",
+      "mcp__Railway__list-deployments",
+      "mcp__Railway__get-status",
+      "mcp__Railway__environment-status",
+      "mcp__Railway__get-service-metrics",
+      "mcp__Railway__http-requests",
+      "mcp__Railway__http-error-rate",
+      "mcp__Railway__http-response-time",
+      "mcp__Railway__list-traces",
+      "mcp__Railway__get-trace",
+      "mcp__Railway__get-deployment-diagnosis",
+      "mcp__Railway__list-services",
+      "mcp__Railway__describe-service",
+      "mcp__Railway__list-projects"
+    ],
+    "deny": [
+      "mcp__Railway__list-variables",
+      "mcp__Railway__set-variables",
+      "mcp__Railway__railway-agent",
+      "mcp__Railway__create-tcp-proxy",
+      "mcp__Railway__get-function-source-code",
+      "mcp__Railway__update-function-source-code",
+      "mcp__Railway__deploy-template",
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Bash(railway variables:*)",
+      "Bash(railway run:*)",
+      "Bash(railway connect:*)",
+      "Bash(railway shell:*)",
+      "Bash(railway ssh:*)",
+      "Bash(printenv:*)",
+      "Bash(cat .env)",
+      "WebFetch(domain:api.telegram.org)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|WebFetch|Read|Grep|Edit|Write|mcp__Railway__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_private_data.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

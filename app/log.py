@@ -79,6 +79,8 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     "error_code",
     "cards",
     "dropped",
+    # Grok access (app/web/mcp.py)
+    "grant_id",
     # web-chat plan track 2 (design section 5). "source" is
     # 'telegram'/'web', derived from the sign of telegram_update.
     # update_id (negative == web, app/db/queue.py) rather than a stored
