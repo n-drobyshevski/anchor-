@@ -608,6 +608,8 @@ def _write_static_tree(base):
     (base / "app.css").write_text("body { color: red }", encoding="utf-8")
     (base / "icon.svg").write_text("<svg></svg>", encoding="utf-8")
     (base / "vendor" / "preact.module.js").write_text("export {};", encoding="utf-8")
+    (base / "vendor" / "fonts").mkdir()
+    (base / "vendor" / "fonts" / "x.woff2").write_bytes(b"wOF2\x00\x01")
     (base / "vendor" / "VENDOR.lock").write_text("{}", encoding="utf-8")
     (base / "index.html").write_text("<html></html>", encoding="utf-8")
     (base / "app" / "big.js").write_bytes(b"x" * (1024 * 1024 + 1))
@@ -643,6 +645,11 @@ async def test_static_serves_js_css_svg_with_correct_content_types(
         resp = await client.get("/static/vendor/preact.module.js")
         assert resp.status == 200
         assert resp.headers["Content-Type"] == "text/javascript; charset=utf-8"
+
+        resp = await client.get("/static/vendor/fonts/x.woff2")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "font/woff2"
+        assert (await resp.read()) == b"wOF2\x00\x01"
 
 
 async def test_static_304_on_matching_if_none_match(sessionmaker, tmp_path, monkeypatch):

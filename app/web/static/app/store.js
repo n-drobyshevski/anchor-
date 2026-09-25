@@ -4,6 +4,7 @@
 // Preact integration) and written by api.js/sse.js/screens without
 // either side needing to know who else is listening.
 import { signal } from '../vendor/signals.module.js';
+import { apiPost } from './api.js';
 
 // The single source of truth for which screen the app shows:
 //   'unknown' - before the bootstrap GET /api/me (main.js) resolves
@@ -22,6 +23,36 @@ export const auth = signal('unknown');
 export function forceLogout() {
   auth.value = 'none';
 }
+
+// The toolbar's «Выйти» (ui/Toolbar.js). Was Chat.js's handleLogout
+// until the toolbar replaced #chat-header; unchanged in behavior.
+export async function logout() {
+  await apiPost('/api/auth/logout', {});
+  forceLogout();
+}
+
+// The toolbar's «Пауза» (ui/Toolbar.js) sends `/out` exactly as it did
+// from #chat-header: through Chat's own sendMessage, so it still shows
+// as an optimistic own message and goes through POST /api/send. Chat
+// is always mounted while logged in (ui/Shell.js), and registers its
+// handler on mount; requestPause() before that is a no-op.
+let pauseHandler = null;
+
+export function registerPauseHandler(fn) {
+  pauseHandler = fn;
+  return () => {
+    if (pauseHandler === fn) pauseHandler = null;
+  };
+}
+
+export function requestPause() {
+  if (pauseHandler) pauseHandler();
+}
+
+// An optional second line under the toolbar's screen title (for
+// State: «следующее сообщение ~HH:MM»). The screen that sets it clears
+// it again on unmount.
+export const screenSubtitle = signal('');
 
 // SSE connection indicator; mirrors the old #conn-dot dataset.state.
 export const conn = signal('down');
@@ -70,8 +101,9 @@ export function pushToast(text) {
 // readers, via hooks.js's useAutoRefetch().
 export const invalidate = signal(null);
 
-// 1 when a proposal is awaiting a decision, 0 otherwise -- ui/Nav.js's
-// badge on the "Предложения" tab. Populated from two places, both
+// 1 when a proposal is awaiting a decision, 0 otherwise -- the
+// switcher's pip and the «Предложения» item's count
+// (ui/SurfaceSwitcher.js). Populated from two places, both
 // GET /api/proposals responses: main.js, right after login and on
 // every SSE invalidate("proposals") *regardless of which screen is
 // open* (the plan's "not only when the screen is open" rule -- a

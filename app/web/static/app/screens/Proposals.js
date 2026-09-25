@@ -49,15 +49,18 @@ function PendingCard({ proposal, onDecide }) {
   return html`
     <section class="card proposal-card" aria-labelledby="pending-heading">
       <h2 id="pending-heading">${proposal.field_label}</h2>
-      <p class="field-value">${displayValue(proposal.field, proposal.value)}</p>
+      <p class="field-value value-strong">${displayValue(proposal.field, proposal.value)}</p>
       ${proposal.reason ? html`<p class="field-hint">Почему: ${proposal.reason}</p>` : null}
-      <div class="btn-row">
-        <button type="button" class="btn btn-primary" disabled=${busy} onClick=${() => decide('accept')}>
-          Принять
-        </button>
-        <button type="button" class="btn btn-ghost" disabled=${busy} onClick=${() => decide('reject')}>
-          Отклонить
-        </button>
+      <div class="card-footer">
+        <span></span>
+        <div class="card-footer-actions">
+          <button type="button" class="btn" disabled=${busy} onClick=${() => decide('reject')}>
+            Отклонить
+          </button>
+          <button type="button" class="btn btn-primary" disabled=${busy} onClick=${() => decide('accept')}>
+            Принять
+          </button>
+        </div>
       </div>
     </section>
   `;
@@ -65,10 +68,10 @@ function PendingCard({ proposal, onDecide }) {
 
 function HistoryRow({ item }) {
   return html`
-    <li class="history-row">
-      <div>
+    <li class="row">
+      <div class="row-main">
         <p class="field-value">${item.field_label}: ${displayValue(item.field, item.value)}</p>
-        <p class="field-hint">${formatDateTime(item.decided_at || item.created_at)}</p>
+        <p class="field-hint mono">${formatDateTime(item.decided_at || item.created_at)}</p>
       </div>
       <span class="status-chip" data-status=${item.status}>${STATUS_LABELS[item.status] || item.status}</span>
     </li>
@@ -150,15 +153,14 @@ export function Proposals() {
   return html`
     <div class="screen-wrap">
       <div class="screen screen-proposals">
-        <h1 class="screen-title">Предложения</h1>
         ${data.pending
           ? html`<${PendingCard} proposal=${data.pending} onDecide=${decide} />`
           : html`<p class="empty-hint">Сейчас предложений нет</p>`}
-        <section class="card">
-          <h2>История</h2>
+        <section class="card" aria-labelledby="proposals-history-heading">
+          <h2 id="proposals-history-heading">История</h2>
           ${data.recent.length
             ? html`
-                <ul class="history-list">
+                <ul class="card-list">
                   ${data.recent.map((item) => html`<${HistoryRow} key=${item.id} item=${item} />`)}
                 </ul>
               `

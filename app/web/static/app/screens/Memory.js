@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiGet, apiPost } from '../api.js';
 import { forceLogout, pushToast } from '../store.js';
 import { useAutoRefetch } from '../hooks.js';
+import { Icon } from '../ui/Icon.js';
 import { Toasts } from '../ui/Toasts.js';
 
 // Mirrors app/core/memory.py's MEMORY_TEXT_MAX. Unlike State.js's
@@ -169,7 +170,9 @@ function MemoryCard({ item, forgetBusy, onPin, onEdit, onForgetClick }) {
 
   const canSave = draft.trim().length > 0 && draft.length <= MEMORY_TEXT_MAX;
   const usedText = item.use_count > 0
-    ? `использовано ${item.use_count} раз${item.last_used_at ? ` · последний раз ${formatDateTime(item.last_used_at)}` : ''}`
+    ? html`использовано <span class="mono">${item.use_count}</span> раз${item.last_used_at
+        ? html` · последний раз <span class="mono">${formatDateTime(item.last_used_at)}</span>`
+        : ''}`
     : 'ещё не использовалось';
 
   return html`
@@ -184,7 +187,7 @@ function MemoryCard({ item, forgetBusy, onPin, onEdit, onForgetClick }) {
           disabled=${pinBusy}
           onClick=${togglePin}
         >
-          <span aria-hidden="true">📌</span>
+          <${Icon} name="pin" size=${16} />
         </button>
       </div>
       ${editing
@@ -213,8 +216,7 @@ function MemoryCard({ item, forgetBusy, onPin, onEdit, onForgetClick }) {
           `
         : html`
             <p class="field-value">${item.text}</p>
-            <p class="field-hint">${SOURCE_LABELS[item.source] || item.source}</p>
-            <p class="field-hint">${usedText}</p>
+            <p class="field-hint">${SOURCE_LABELS[item.source] || item.source} · ${usedText}</p>
             <div class="btn-row">
               <button
                 type="button"
@@ -752,7 +754,10 @@ export function Memory() {
     <div class="screen-wrap">
       <div class="screen screen-memory">
         <div class="card-row">
-          <h1 class="screen-title">Память</h1>
+          <p class="memory-counter${overCap ? ' char-counter-over' : ''}" aria-live="polite">
+            <span class="mono">${total}</span> записей · закреплено
+            <span class="mono">${pinnedCount}/${pinnedMax}</span>
+          </p>
           <button
             type="button"
             id="memory-add-toggle"
@@ -762,9 +767,6 @@ export function Memory() {
             ${showAddForm ? 'Закрыть' : '+ Добавить'}
           </button>
         </div>
-        <p class="memory-counter${overCap ? ' char-counter-over' : ''}" aria-live="polite">
-          ${total} записей · закреплено ${pinnedCount}/${pinnedMax}
-        </p>
         <${AddForm} open=${showAddForm} onClose=${() => setShowAddForm(false)} onAdd=${addMemory} />
         <div class="filters">
           <div class="chip-row" role="group" aria-label="Вид">
@@ -800,13 +802,16 @@ export function Memory() {
           </button>
           <div class="search-field">
             <label for="memory-search" class="sr-only">Поиск</label>
-            <input
-              id="memory-search"
-              type="search"
-              placeholder="Поиск"
-              value=${search}
-              onInput=${(e) => setSearch(e.target.value)}
-            />
+            <div class="search-input-wrap">
+              <span class="search-icon"><${Icon} name="search" size=${16} /></span>
+              <input
+                id="memory-search"
+                type="search"
+                placeholder="Поиск"
+                value=${search}
+                onInput=${(e) => setSearch(e.target.value)}
+              />
+            </div>
             <p class="field-hint">ищет в загруженных</p>
           </div>
         </div>

@@ -111,6 +111,7 @@ _STATIC_CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 
 # 1 MiB: generous for every file this app actually ships (the largest
@@ -154,7 +155,7 @@ def _build_static_manifest(static_dir: pathlib.Path) -> dict[str, _StaticFile]:
       through one to wherever it points;
     - anything whose extension is not in `_STATIC_CONTENT_TYPES` --
       `index.html`, `vendor/VENDOR.lock`, a stray `.map`, or anything
-      else that is not one of the three kinds this app ever serves;
+      else that is not one of the four kinds this app ever serves;
     - a file over `MAX_STATIC_FILE_BYTES`.
 
     Called once, at `setup_web` time (this module's own docstring):

@@ -2,7 +2,7 @@
 // `location.hash`, normalizing anything unrecognized back to the
 // default screen. It does not pick a component itself -- ui/Shell.js
 // reads `route` and maps it to a screen -- so adding a screen later
-// only means adding its hash here and to ui/Nav.js's NAV_ITEMS.
+// only means adding its hash here and to ui/SurfaceSwitcher.js's NAV_ITEMS.
 import { route } from './store.js';
 
 const KNOWN_ROUTES = ['#/chat', '#/state', '#/memory', '#/checkin', '#/proposals'];

@@ -102,7 +102,7 @@ export function Login({ stage }) {
           minlength="1"
           maxlength="4000"
         />
-        <button type="submit" disabled=${passphraseBusy}>Войти</button>
+        <button type="submit" class="btn btn-primary btn-block" disabled=${passphraseBusy}>Войти</button>
         <p id="passphrase-error" class="login-error" role="alert" hidden=${!passphraseError}>
           ${passphraseError}
         </p>
@@ -131,7 +131,7 @@ export function Login({ stage }) {
           required
           maxlength="9"
         />
-        <button type="submit" disabled=${codeBusy}>Подтвердить</button>
+        <button type="submit" class="btn btn-primary btn-block" disabled=${codeBusy}>Подтвердить</button>
         <button type="button" id="code-back" class="link-button" onClick=${() => { auth.value = 'none'; }}>
           Назад
         </button>
