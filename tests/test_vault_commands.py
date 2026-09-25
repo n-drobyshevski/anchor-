@@ -1,9 +1,9 @@
-"""/vault, the /state line, and what every VAULT_MODE does *not* do (phase-5 plan 3, 8).
+"""/vault, the /state line, and what every VAULT_MODE does *not* do (phase-8 plan 3, 8).
 
-5a's kill-switch contract, pinned here:
+8a's kill-switch contract, pinned here:
 
 - `off`: no request to the vault service at all, not even a status probe;
-- `status`, and `mirror`/`sync` until 5b/5c ship: `GET /v1/status` and
+- `status`, and `mirror`/`sync` until 8b/8c ship: `GET /v1/status` and
   nothing else -- never the manifest, a file, a write, a delete or a
   purge;
 - in no mode does the heartbeat enqueue a vault job.

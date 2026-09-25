@@ -10,8 +10,8 @@ directly (`GET /v1/status`, one short request) and record the answer in
 `off` makes no request and writes nothing: the kill switch means the
 bot does not so much as open a socket to the vault service.
 
-5a treated `mirror` and `sync` like `status`; 5b implements `mirror`,
-and `sync` behaves exactly like it until 5c (docs/decisions.md).
+8a treated `mirror` and `sync` like `status`; 8b implements `mirror`,
+and `sync` behaves exactly like it until 8c (docs/decisions.md).
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ STOPPED = "stopped"
 UNREACHABLE = "unreachable"
 UNAUTHORIZED = "unauthorized"
 
-# The modes this build implements. `sync` arrives in 5c; until then it
+# The modes this build implements. `sync` arrives in 8c; until then it
 # behaves exactly like `mirror` (docs/decisions.md).
 IMPLEMENTED_MODES = ("off", "status", "mirror")
 

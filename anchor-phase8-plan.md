@@ -1,9 +1,9 @@
-# Anchor — Phase 5 Implementation Plan
+# Anchor — Phase 8 Implementation Plan
 
-Version: 2026-09-25 (rev. 3: 5a's verification of §2 against the live sources; each change is marked *5a*) · Scope: **the vault**, an Obsidian vault that is Anchor's second brain, persistent and editable, synced through Obsidian Sync.
-Parent docs: the Phase 1–4 plans and `docs/decisions.md`. For Phase 5 work, **this file wins**. Earlier invariants stay in force unless §13 amends them.
+Version: 2026-09-25 (rev. 4: renumbered from "Phase 5" to Phase 8 when merged into `main`; rev. 3 was 8a's verification of §2 against the live sources, each change marked *8a*) · Scope: **the vault**, an Obsidian vault that is Anchor's second brain, persistent and editable, synced through Obsidian Sync.
+Parent docs: the Phase 1–6 plans and `docs/decisions.md`. For Phase 8 work, **this file wins**. Earlier invariants stay in force unless §13 amends them.
 
-Phase 4 §1 earmarked Phase 5 for the notebook, `/mind` and weekly review. This plan takes the Phase 5 slot instead, because a notebook is most naturally a place in the vault. Those three move to Phase 6, alongside idle learning, and build on what this phase ships.
+**Numbering.** This plan was written as "Phase 5" against a branch that stopped at Phase 4. On `main`, Phase 5 is personality (notebook, `/mind`, weekly review, standing orders), Phase 6 is idle learning, and Phase 7 is reserved for tracker and device integrations. So the vault is Phase 8, and its milestones are 8a–8d throughout. Where this plan says a notebook or idle learning comes later, read "already on `main`": nothing here changes them, and anything they do to memory must keep the vault's invariants (docs/decisions.md, "8b on main").
 
 ---
 
@@ -26,7 +26,7 @@ Obsidian (phone, desktop)  ⇄  Obsidian Sync (end-to-end encrypted)  ⇄  vault
 
 ## 1. Out of scope (do not build)
 
-- Anchor writing free-form pages (wiki, people, projects, weekly reviews). That is Phase 6's idle learning, and this phase leaves room for it (§4).
+- Anchor writing free-form pages (wiki, people, projects, weekly reviews). That belongs to idle work (Phase 6 and later), and this phase leaves room for it (§4).
 - Embeddings and pgvector. Notes are retrieved with full-text search, measured (§9). pgvector is reconsidered only if that measurement fails.
 - Rendering messages, transcripts or scene summaries into the vault.
 - Deciding study cards from the vault. `/notes` stays in Telegram.
@@ -69,16 +69,16 @@ Obsidian (phone, desktop)  ⇄  Obsidian Sync (end-to-end encrypted)  ⇄  vault
   - It sets file mtimes from the server.
   - `sync-setup` accepts vaults shared with you as well as your own.
   - The end-to-end password is accepted only as `--password` on argv.
-  - *5a:* `sync-list-remote --json` prints `{"vaults": […], "shared": […]}`, each entry `{id, name, region}`. Membership of `shared` is the only mark of a vault shared with you.
-  - *5a:* `ob sync` tees its console output, file names included, into `$XDG_CONFIG_HOME/obsidian-headless/sync/<vaultId>/sync.log`, append-only and never rotated.
-  - *5a:* its lock is a directory, `<vault>/.obsidian/.sync.lock`, refreshed every second and treated as stale 5 s after the last refresh.
+  - *8a:* `sync-list-remote --json` prints `{"vaults": […], "shared": […]}`, each entry `{id, name, region}`. Membership of `shared` is the only mark of a vault shared with you.
+  - *8a:* `ob sync` tees its console output, file names included, into `$XDG_CONFIG_HOME/obsidian-headless/sync/<vaultId>/sync.log`, append-only and never rotated.
+  - *8a:* its lock is a directory, `<vault>/.obsidian/.sync.lock`, refreshed every second and treated as stale 5 s after the last refresh.
 - **Obsidian Sync plans.** Standard: 1 synced vault, 1 GB, 5 MB per file, **1 month** of version history. Plus: 12 months.
 - **Railway.**
   - One volume per service; no replicas with a volume; a short downtime on each redeploy.
-  - The private DNS name is `<service>.railway.internal`, and legacy environments resolve it to IPv6 only, so `vaultd` binds `::`. *5a:* environments created after 2025-10-16 resolve it to IPv4 and IPv6; `::` covers both.
+  - The private DNS name is `<service>.railway.internal`, and legacy environments resolve it to IPv6 only, so `vaultd` binds `::`. *8a:* environments created after 2025-10-16 resolve it to IPv4 and IPv6; `::` covers both.
   - `RAILWAY_PUBLIC_DOMAIN` is set whenever a service has a public domain.
-  - *5a:* a TCP proxy is a second public endpoint, and it sets `RAILWAY_TCP_PROXY_DOMAIN`, not `RAILWAY_PUBLIC_DOMAIN`.
-  - *5a:* Config as Code (`railway.json`/`railway.toml`) is deprecated. New services cannot opt into it, and existing files stop being read on 2026-12-01. The vault service is configured in the dashboard instead (§5.1).
+  - *8a:* a TCP proxy is a second public endpoint, and it sets `RAILWAY_TCP_PROXY_DOMAIN`, not `RAILWAY_PUBLIC_DOMAIN`.
+  - *8a:* Config as Code (`railway.json`/`railway.toml`) is deprecated. New services cannot opt into it, and existing files stop being read on 2026-12-01. The vault service is configured in the dashboard instead (§5.1).
 
 ---
 
@@ -95,7 +95,7 @@ VAULT_SYNC_WARMUP_S=300             # no deletions until ob has run continuously
 VAULT_MASS_DELETE_MAX=3             # more forgets than this within a rolling hour -> ask first
 VAULT_MAX_WRITES_PER_PASS=50        # bootstrap and backfill are paced, not bursted
 VAULT_HOLD_TTL_DAYS=7               # an unanswered hold resolves as "revert"
-VAULT_NOTES_ENABLED=false           # 5d; stays false until eval 17-18 pass
+VAULT_NOTES_ENABLED=false           # 8d; stays false until eval 17-18 pass
 VAULT_NOTES_IN_PROMPT=2
 VAULT_NOTE_CHUNK_CHARS=800
 VAULT_NOTE_MAX_BYTES=200000         # notes larger than this are not indexed
@@ -141,7 +141,7 @@ PORT=8080
   Anchor/
     Memory/            ← one active fact per file. Anchor reads and writes here.
     Journal/           ← one day per file. Anchor writes here; it only reads to detect your edits.
-    (anything else)    ← yours: a .base view, a README, Phase 6's future folders. Anchor ignores it.
+    (anything else)    ← yours: a .base view, a README, later phases' folders. Anchor ignores it.
   (everything else)    ← yours. Anchor reads a note only if its properties say `anchor: read`.
 ```
 
@@ -241,21 +241,21 @@ These steps go in `docs/vault-setup.md`, and I do them myself:
 
 1. In desktop Obsidian, create the remote vault with **end-to-end encryption**.
 2. On my own machine, run `npx obsidian-headless login`, then copy `~/.config/obsidian-headless/auth_token` (Linux; `~/.obsidian-headless/auth_token` on macOS/Windows) into `OBSIDIAN_AUTH_TOKEN` on the vault service. That token grants full access to the Obsidian account. It goes into Railway variables and nowhere else.
-3. Create the `vault` service from this repo with Root Directory `/vaultd` (so `vaultd/Dockerfile` builds it), healthcheck path `/healthz`, watch paths `/vaultd/**`, and a volume at `/data`. **Do not generate a domain or a TCP proxy.** *5a:* these are dashboard settings, not a `railway.json`, because Config as Code is deprecated (§2).
+3. Create the `vault` service from this repo with Root Directory `/vaultd` (so `vaultd/Dockerfile` builds it), healthcheck path `/healthz`, watch paths `/vaultd/**`, and a volume at `/data`. **Do not generate a domain or a TCP proxy.** *8a:* these are dashboard settings, not a `railway.json`, because Config as Code is deprecated (§2).
 
 ### 5.2 Boot
 
 1. **Refuse to start** if any of these holds. Exit non-zero, naming the variable but never its value:
    - `RAILWAY_PUBLIC_DOMAIN` is set;
-   - *5a:* `RAILWAY_TCP_PROXY_DOMAIN` is set;
+   - *8a:* `RAILWAY_TCP_PROXY_DOMAIN` is set;
    - `VAULT_API_TOKEN` is shorter than 32 characters;
    - any `OBSIDIAN_*` is empty.
 2. Create `/data/vault`, `/data/config` and `/data/tmp`.
-3. Run `ob sync-list-remote --json`, and **refuse to start if `OBSIDIAN_VAULT` is a vault shared with you** rather than your own: a collaborator on a shared vault could write your facts. *5a:* it must name exactly one entry of `vaults` (by id, else by a unique name) and nothing in `shared`; a name that is both yours and shared is refused.
-4. If `ob sync-list-local --json` does not list `VAULT_PATH`, run `ob sync-setup --vault <resolved id> --path … --password … --device-name … --json`. *5a:* if it lists `VAULT_PATH` under a different vault id, refuse to start.
+3. Run `ob sync-list-remote --json`, and **refuse to start if `OBSIDIAN_VAULT` is a vault shared with you** rather than your own: a collaborator on a shared vault could write your facts. *8a:* it must name exactly one entry of `vaults` (by id, else by a unique name) and nothing in `shared`; a name that is both yours and shared is refused.
+4. If `ob sync-list-local --json` does not list `VAULT_PATH`, run `ob sync-setup --vault <resolved id> --path … --password … --device-name … --json`. *8a:* if it lists `VAULT_PATH` under a different vault id, refuse to start.
 5. **On every boot**, run `ob sync-config --path $VAULT_PATH --mode bidirectional --conflict-strategy merge --configs "" --json`.
-6. Pass all arguments as a list, never through a shell. The password appears on the child's argv, visible to processes in the same container. Record this residual exposure in `docs/decisions.md`. *5a:* every `ob` child gets an allowlisted environment (`PATH`, `HOME`, `XDG_CONFIG_HOME`, `OBSIDIAN_AUTH_TOKEN`), never `VAULT_API_TOKEN`.
-7. Start `ob sync --continuous --path $VAULT_PATH` as a child process, and serve HTTP on `[::]:$PORT`. *5a:* before each start, truncate `ob`'s own `sync.log` without reading it (§2).
+6. Pass all arguments as a list, never through a shell. The password appears on the child's argv, visible to processes in the same container. Record this residual exposure in `docs/decisions.md`. *8a:* every `ob` child gets an allowlisted environment (`PATH`, `HOME`, `XDG_CONFIG_HOME`, `OBSIDIAN_AUTH_TOKEN`), never `VAULT_API_TOKEN`.
+7. Start `ob sync --continuous --path $VAULT_PATH` as a child process, and serve HTTP on `[::]:$PORT`. *8a:* before each start, truncate `ob`'s own `sync.log` without reading it (§2).
 
 ### 5.3 Supervisor
 
@@ -387,7 +387,7 @@ vault_status (                                 -- singleton, id = 1; operational
 5. **Deletions** (§7.2). Skipped in `mirror` mode.
 6. **Render facts** (§7.3).
 7. **Render journal** (§7.4).
-8. **Notes index** (§9, milestone 5d).
+8. **Notes index** (§9, milestone 8d).
 9. **Expire holds** older than `VAULT_HOLD_TTL_DAYS`: status `expired`, then perform the hold's revert action (§8).
 10. **One notice** summarising the pass, if anything happened (§8).
 
@@ -513,7 +513,7 @@ For every active memory of every kind, and every `fact` row:
 
 ---
 
-## 9. Your notes: index and retrieval (milestone 5d)
+## 9. Your notes: index and retrieval (milestone 8d)
 
 ### Indexing
 
@@ -744,7 +744,7 @@ Location `vaultd/tests`: no network, a temp directory, a fake `ob`.
 - **Phase 4 fix:** `/forget` of an adopted technique that has a real card succeeds, and the card becomes `forgotten`.
 - **Welfare:** after a welfare exchange, no rendered file contains any of its text.
 - **Jobs:** `vault_sync` rows older than an hour with status `done` are pruned.
-- **Notes (5d):**
+- **Notes (8d):**
   - chunking;
   - masking, using spans;
   - removing the opt-in removes the chunks;
@@ -761,12 +761,12 @@ Location `vaultd/tests`: no network, a temp directory, a fake `ob`.
 
 ## 16. Milestones (each deployable)
 
-- **5a. Vault service + plumbing** (`VAULT_MODE=status`):
-  - **vaultd:** the `vaultd/` package; a `Dockerfile` (`node:22-bookworm-slim`, with [uv](https://github.com/astral-sh/uv) providing Python 3.12); `package.json` with its lockfile; the supervisor; the API; every vaultd test. *5a:* no `railway.json` (§2); the dashboard settings are in `docs/vault-setup.md`.
+- **8a. Vault service + plumbing** (`VAULT_MODE=status`):
+  - **vaultd:** the `vaultd/` package; a `Dockerfile` (`node:22-bookworm-slim`, with [uv](https://github.com/astral-sh/uv) providing Python 3.12); `package.json` with its lockfile; the supervisor; the API; every vaultd test. *8a:* no `railway.json` (§2); the dashboard settings are in `docs/vault-setup.md`.
   - **bot:** `app/vault/client.py`, `VAULT_MODE` and the config, the tables, `user_state.vault_epoch` and their migrations, export/delete coverage, the debug views and grants, the guard hook names, `_may_report_now` moved to `app/core/report.py`, and `/vault` (status only).
   - **Docs:** `docs/vault-setup.md`.
   - **Manual check:** I deploy, and `/vault` says the sync is running.
-- **5b. Into the vault** (`VAULT_MODE=mirror`):
+- **8b. Into the vault** (`VAULT_MODE=mirror`):
   - rendering facts and journal, with bootstrap and backfill under the write cap;
   - compare-and-swap writes;
   - `/forget` deleting files;
@@ -776,14 +776,14 @@ Location `vaultd/tests`: no network, a temp directory, a fake `ob`.
   - `docs/vault/Memory.base` and `Факт.md`.
 
   **Manual check:** I see my facts in Obsidian and the Bases table works.
-- **5c. Back from the vault** (`VAULT_MODE=sync`):
+- **8c. Back from the vault** (`VAULT_MODE=sync`):
   - parse and validate; identity resolution; the three-way ingest;
   - create and pin;
   - grace, warmup and the rolling mass-delete cap; `forget_lineage`;
   - holds, notices, quarantine, and the problem list in `/vault`.
 
   Then I switch to `sync`.
-- **5d. Notes:**
+- **8d. Notes:**
   - opt-in indexing and span masking;
   - the measurement and `NOTES_MIN_RANK`;
   - the prompt block;
@@ -814,7 +814,7 @@ Location `vaultd/tests`: no network, a temp directory, a fake `ob`.
 
 ---
 
-## 18. Decisions for me before 5c
+## 18. Decisions for me before 8c
 
 1. **`/forget` on a corrected fact currently reactivates the previous version.** That is plan section 11 taken literally, and `test_forget_the_head_of_a_chain_clears_the_pointer` pins it. Deleting a file in the vault forgets the whole lineage instead (§7.2). Should `/forget` switch to `forget_lineage` too, so the two paths agree?
 2. **PyYAML** as a new dependency (§3).

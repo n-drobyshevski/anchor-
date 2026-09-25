@@ -1,6 +1,6 @@
 """content-free debug views over the vault tables
 
-Milestone 5a (phase-5 plan section 11). Same rules as 9e4b2c7a1f05:
+Milestone 8a (phase-8 plan section 11). Same rules as 9e4b2c7a1f05:
 explicit column lists, no free text, lengths where size is diagnostic.
 
 - `debug.vault_file` has **no path**: a file name the user chose is

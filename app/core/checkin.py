@@ -37,7 +37,7 @@ NONE = "none"
 DUE_RESULTS = (DONE, PARTIAL, NO, NONE)
 
 _DUE_LABELS = {DONE: "сделано", PARTIAL: "частично", NO: "не сделано", NONE: "нет действия"}
-# Public for the vault's day file (phase-5 plan section 4.2), which says
+# Public for the vault's day file (phase-8 plan section 4.2), which says
 # the same thing the synthetic line does.
 DUE_LABELS_TEXT = _DUE_LABELS
 

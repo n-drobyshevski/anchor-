@@ -150,7 +150,7 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         )
         await session.commit()
 
-    # 5a: the two exported vault tables, plus the two omitted ones so the
+    # 8a: the two exported vault tables, plus the two omitted ones so the
     # omission is tested against rows that exist.
     async with sessionmaker() as session:
         hold = models.VaultHold(
@@ -189,7 +189,7 @@ async def test_export_contains_every_exported_table_with_rows(sessionmaker, cloc
 async def test_export_omits_the_plumbing_tables(sessionmaker, clock):
     """telegram_update, job and pending_memory are transport and queue;
     their only real content is message text `messages` already carries.
-    5a adds vault_chunk (a copy of the user's own notes, which live in
+    8a adds vault_chunk (a copy of the user's own notes, which live in
     their vault) and vault_status (timestamps)."""
     await _seed_everything(sessionmaker)
     async with sessionmaker() as session:
@@ -346,7 +346,7 @@ NOT_EXPORTED = {
     "job": "queue plumbing; payloads reference rows that are exported",
     "pending_memory": "unclassified /remember text, exported once it becomes a memory",
     "persona_version": "a hash of a file in this repo, not user data",
-    # 5a (phase-5 plan section 6).
+    # 8a (phase-8 plan section 6).
     "vault_chunk": "a derived copy of the user's own opted-in notes, rebuildable from the vault",
     "vault_status": "operational timestamps, no content",
 }

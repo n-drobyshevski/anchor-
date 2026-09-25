@@ -1,4 +1,4 @@
-"""The bot's frontmatter rules (phase-5 plan section 4.4).
+"""The bot's frontmatter rules (phase-8 plan section 4.4).
 
 **Its own copy.** vaultd has the same loader; the two projects share
 nothing but an HTTP API (tests/test_vault_isolation.py), so the rule is

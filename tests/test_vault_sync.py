@@ -1,4 +1,4 @@
-"""The sync pass in mirror mode (phase-5 plan sections 7, 7.3, 7.4, 10).
+"""The sync pass in mirror mode (phase-8 plan sections 7, 7.3, 7.4, 10).
 
 Every test runs the real pass against the throwaway database and an
 in-memory vault with vaultd's compare-and-swap semantics

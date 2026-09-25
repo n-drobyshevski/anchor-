@@ -275,7 +275,7 @@ class UserState(Base):
     )
     welfare_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
-    # 5a (phase-5 plan section 4). Six base32 characters that every
+    # 8a (phase-8 plan section 4). Six base32 characters that every
     # file Anchor creates in the vault carries; /delete replaces it, so
     # a file re-uploaded from before a delete is recognisably an orphan
     # (app/vault/epoch.py). A Python default rather than a server one:
@@ -875,9 +875,9 @@ class StudyCard(Base):
     )
 
 
-# --- 5a: the vault (phase-5 plan section 6) --------------------------------
+# --- 8a: the vault (phase-8 plan section 6) --------------------------------
 #
-# Four tables, all empty until 5b. Every invariant the plan states in a
+# Four tables, all empty until 8b. Every invariant the plan states in a
 # comment is a CHECK here, for the same reason as study_card's: a bug in
 # app/vault/ must not be able to store a row the plan says cannot exist.
 
@@ -929,7 +929,7 @@ class VaultFile(Base):
     # the user chose is theirs, so no debug view carries it.
     path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     role: Mapped[str] = mapped_column(String, nullable=False)
-    # For a fact, always the lineage's current head (5b keeps it there).
+    # For a fact, always the lineage's current head (8b keeps it there).
     memory_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("memory.id", ondelete="SET NULL")
     )
@@ -979,7 +979,7 @@ class VaultFile(Base):
 
 
 class VaultChunk(Base):
-    """A searchable piece of an opted-in note (plan section 9, milestone 5d).
+    """A searchable piece of an opted-in note (plan section 9, milestone 8d).
 
     A derived copy of the user's own notes, rebuildable from the vault:
     purged by /delete, omitted from /export.
@@ -1022,7 +1022,7 @@ class VaultStatus(Base):
         DateTime(timezone=True)
     )
     ob_running_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
-    # Timestamps of vault-driven forgets, for 5c's rolling-hour cap.
+    # Timestamps of vault-driven forgets, for 8c's rolling-hour cap.
     forgets_window: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
     )

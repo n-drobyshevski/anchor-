@@ -1,13 +1,13 @@
-"""`/vault` and the `/state` line (phase-5 plan section 8).
+"""`/vault` and the `/state` line (phase-8 plan section 8).
 
 The plan's `/vault` has two parts: a first line about the sync, and a
-list of files that need attention. The list is 5c's (quarantines and
-holds come with ingest). 5b adds the fact count to the first line in
+list of files that need attention. The list is 8c's (quarantines and
+holds come with ingest). 8b adds the fact count to the first line in
 mirror, and says outright that edits in the vault are not applied yet.
 
 Every line here is a reply to a command, so it is sent whatever the
 pause, quiet or welfare state; `may_report_now` governs unsolicited
-vault messages (5c), not this.
+vault messages (8c), not this.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def format_vault(
 def format_state_line(
     health: vault_status.Health, clock: Clock, timezone: str, *, purge_pending: bool = False
 ) -> str:
-    # 5b: a /delete whose vault purge is still retrying outranks every
+    # 8b: a /delete whose vault purge is still retrying outranks every
     # other state -- it is the one thing the user asked for and has not
     # got yet.
     if purge_pending:

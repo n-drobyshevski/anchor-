@@ -356,12 +356,12 @@ class Settings(BaseSettings):
         "AnchorBot/1.0 (personal, single-user; contact via repo owner)"
     )
 
-    # --- 5a: the vault (phase-5 plan section 3) ---
+    # --- 8a: the vault (phase-8 plan section 3) ---
     #
     # The kill switch, staged per milestone: off -> status -> mirror ->
-    # sync. `off` means nothing reads or writes the vault. 5a implements
+    # sync. `off` means nothing reads or writes the vault. 8a implements
     # `status` only; `mirror` and `sync` are accepted so a config set
-    # ahead of a deploy cannot take chat down, and until 5b/5c they do
+    # ahead of a deploy cannot take chat down, and until 8b/8c they do
     # exactly what `status` does (docs/decisions.md). The plan's other
     # VAULT_* settings arrive with the milestones that read them.
     VAULT_MODE: str = "off"
@@ -373,7 +373,7 @@ class Settings(BaseSettings):
     # service. The only vault credential the bot ever holds; the
     # Obsidian ones live on the vault service alone.
     VAULT_API_TOKEN: str = ""
-    # 5b: PUTs and DELETEs per sync pass. Bootstrap and backfill are
+    # 8b: PUTs and DELETEs per sync pass. Bootstrap and backfill are
     # paced, not bursted: a first enable with 400 facts takes eight
     # passes (minutes), and Sync uploads a trickle rather than a flood.
     VAULT_MAX_WRITES_PER_PASS: int = 50
@@ -510,7 +510,7 @@ _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
 def vault_url_problem(url: str) -> str | None:
     """Why VAULT_URL is unacceptable, or None. Never includes the value.
 
-    Strict on purpose (phase-5 plan section 3): scheme `http`, a host on
+    Strict on purpose (phase-8 plan section 3): scheme `http`, a host on
     Railway's private network (or exactly 127.0.0.1/localhost for local
     dev), no userinfo, no path, no query. The bearer token rides on
     every request to this URL, so anything that could point it at the
@@ -610,11 +610,11 @@ def check_runtime_settings(settings: Settings) -> None:
 
 
 def check_vault_settings(settings: Settings) -> None:
-    """The vault's part of the boot check (phase-5 plan section 3).
+    """The vault's part of the boot check (phase-8 plan section 3).
 
     The mode is echoed (it is not a secret); the token and the URL
     never are. The token and URL are checked whenever the mode is not
-    `off` *or* a token is set, because from 5b on a set token alone
+    `off` *or* a token is set, because from 8b on a set token alone
     makes /delete reach the vault service, in any mode.
     """
     mode = settings.VAULT_MODE

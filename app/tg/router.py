@@ -113,7 +113,7 @@ BOT_COMMANDS = [
     BotCommand(command="card", description="Карточка по id"),
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
-    # 5a (phase-5 plan section 8): the Obsidian vault's status.
+    # 8a (phase-8 plan section 8): the Obsidian vault's status.
     BotCommand(command="vault", description="Хранилище Obsidian"),
 ]
 
@@ -279,7 +279,7 @@ def _format_state(
         ),
         welfare=welfare_line,
         research=research_line,
-        # 5a (phase-5 plan section 8). Always shown, «выключено» included:
+        # 8a (phase-8 plan section 8). Always shown, «выключено» included:
         # whether the vault is connected is a fact about the bot's state
         # worth one line even when the answer is no.
         vault=(vault_line + "\n") if vault_line else "",
@@ -373,7 +373,7 @@ def build_router(
 
     @router.message(Command("vault"))
     async def vault(message: Message) -> None:
-        """Status only in 5a (phase-5 plan section 8). Off makes no request."""
+        """Status only in 8a (phase-8 plan section 8). Off makes no request."""
         async with sessionmaker() as session:
             user_state = await get_state(session)
             health = await vault_status.probe(session, settings, clock)

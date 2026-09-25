@@ -36,13 +36,13 @@ off-topic message peaked at 0.049). RETRIEVAL_MIN_SCORE = 0.15 sits in
 that gap. Section 6's 0.3 was calibrated for the un-flipped
 orientation and rejects five of six true positives under this one.
 
-**The vault (phase-5 plan section 6).** `write_memory`'s supersede
+**The vault (phase-8 plan section 6).** `write_memory`'s supersede
 branch also moves `vault_file.memory_id` from the old row to the new
 one, in the same transaction, so a fact's file always points at the
 head of its lineage and a /forget of an already-superseded id can never
 orphan a live file. That UPDATE is the only place this module knows the
 vault exists. `write_memory` and `set_pinned` take `commit=False` so the
-vault's sync pass (5c) can put a memory write and its `vault_file`
+vault's sync pass (8c) can put a memory write and its `vault_file`
 update in one transaction.
 
 Both numbers are worth re-measuring once there is a real corpus;
@@ -349,7 +349,7 @@ async def write_memory(
     duplicate this function exists to prevent.
 
     `commit=False` flushes instead of committing, leaving the caller to
-    commit this write together with its own (phase-5 plan section 6).
+    commit this write together with its own (phase-8 plan section 6).
     """
     old: Memory | None = None
     if supersedes_id is not None:
@@ -379,7 +379,7 @@ async def write_memory(
 
     if old is not None:
         old.superseded_by = memory.id
-        # 5b: the fact's vault file follows the head of its lineage.
+        # 8b: the fact's vault file follows the head of its lineage.
         await session.execute(
             sql_update(VaultFile)
             .where(VaultFile.memory_id == old.id)
@@ -417,7 +417,7 @@ async def hard_delete(session: AsyncSession, memory_id: int) -> bool:
     successor is NULL, and relinking degenerates into exactly the clear
     section 11 describes.
 
-    **Adopted cards first (phase-5 plan section 6, a phase-4 fix).**
+    **Adopted cards first (phase-8 plan section 6, a phase-4 fix).**
     `study_card.memory_id` has no ON DELETE rule, so deleting the memory
     an adopted card points at used to fail on the foreign key -- /forget
     of an adopted technique raised. Any card pointing at this row is

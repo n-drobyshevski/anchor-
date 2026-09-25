@@ -1,10 +1,10 @@
-"""Anchor's side of the vault (phase-5 plan).
+"""Anchor's side of the vault (phase-8 plan).
 
 The vault itself lives on a separate Railway service; `vaultd` there is
 the enforcement point, and everything in this package is a client of
-it. 5a ships the plumbing only: the HTTP client, the epoch, and the
+it. 8a ships the plumbing only: the HTTP client, the epoch, and the
 health probe behind `/vault` and `/state`. Nothing here reads or writes
-a vault file yet -- that is 5b (render) and 5c (ingest).
+a vault file yet -- that is 8b (render) and 8c (ingest).
 
 **What this package may not touch (plan section 13), pinned by
 tests/test_vault_isolation.py:** no LLM provider, no `update_state`, no

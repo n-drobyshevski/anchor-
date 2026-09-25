@@ -1,8 +1,8 @@
-"""The vault epoch (phase-5 plan section 4).
+"""The vault epoch (phase-8 plan section 4).
 
 Six random lowercase base32 characters, stored in
 `user_state.vault_epoch`, set by the migration and replaced by
-`/delete`. From 5b every file Anchor creates carries it, in its name
+`/delete`. From 8b every file Anchor creates carries it, in its name
 and in `anchor_epoch`.
 
 It exists because `/delete` restarts identities. Without it, a phone

@@ -16,7 +16,7 @@ means "no frontmatter", and so "not opted in".
 
 **Opting in** takes exactly `anchor: read`, as a string, at the top
 level of a mapping. Not a folder, not a tag, not `anchor: Read`, not
-`anchor: [read]`. The bot keeps its own copy of this loader (5b); the
+`anchor: [read]`. The bot keeps its own copy of this loader (8b); the
 two never share code, by the independence rule.
 """
 

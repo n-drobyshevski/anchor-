@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Mapping
 
 # A note larger than this is never listed, read or indexed. The bot's
-# later VAULT_NOTE_MAX_BYTES (5d) can only narrow it: vaultd decides
+# later VAULT_NOTE_MAX_BYTES (8d) can only narrow it: vaultd decides
 # what is readable, and a bot setting must not be able to widen that.
 NOTE_MAX_BYTES = 200_000
 

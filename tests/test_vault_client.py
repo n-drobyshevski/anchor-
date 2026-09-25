@@ -1,4 +1,4 @@
-"""app/vault/client.py against a loopback stub (phase-5 plan section 5.4).
+"""app/vault/client.py against a loopback stub (phase-8 plan section 5.4).
 
 No network beyond 127.0.0.1, no vaultd, no Obsidian.
 """

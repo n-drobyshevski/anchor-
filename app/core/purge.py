@@ -97,12 +97,12 @@ PURGED_TABLES = (
     "study_card",
     "study_clip",
     "study_job",
-    # 5a: the vault's four tables (phase-5 plan section 6), child-first.
+    # 8a: the vault's four tables (phase-8 plan section 6), child-first.
     # vault_chunk is a derived copy of the user's own opted-in notes,
     # vault_file names their files, vault_hold carries fact text waiting
     # for a yes, and vault_status is only timestamps -- but it records
     # when this user's vault was reachable, which is theirs too. The
-    # files in the vault itself are 5b's vault_purge job; this empties
+    # files in the vault itself are 8b's vault_purge job; this empties
     # the database's record of them.
     "vault_chunk",
     "vault_file",
@@ -153,10 +153,10 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         "last_outbound_at": None,
         "ignored_in_row": 0,
         "welfare_at": None,
-        # 5a (phase-5 plan section 4): a fresh epoch, so a file
+        # 8a (phase-8 plan section 4): a fresh epoch, so a file
         # re-uploaded from before this delete can never share a path
         # with a file rendered after it, and is deleted as an orphan
-        # rather than imported (5b).
+        # rather than imported (8b).
         "vault_epoch": new_epoch(),
         "updated_at": clock.now_utc(),
     }
@@ -256,7 +256,7 @@ async def delete_everything(
     await session.execute(
         sql_update(UserState).where(UserState.id == STATE_ID).values(**reset_values(settings, clock))
     )
-    # 5b (phase-5 plan section 10): the vault's copy goes too. Queued
+    # 8b (phase-8 plan section 10): the vault's copy goes too. Queued
     # here, after the TRUNCATE emptied `job` and inside the same single
     # transaction -- a commit in between would split the wipe in two.
     # Whenever a token is set, in any mode: files from an earlier mode

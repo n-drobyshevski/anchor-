@@ -1,11 +1,11 @@
 """create the vault tables and user_state.vault_epoch
 
-Milestone 5a (phase-5 plan section 6). Four tables, all empty until 5b
-and 5c fill them, and one column:
+Milestone 8a (phase-8 plan section 6). Four tables, all empty until 8b
+and 8c fill them, and one column:
 
 - `vault_hold`: a vault change waiting for a yes in Telegram;
 - `vault_file`: one tracked file (fact, journal day or opted-in note);
-- `vault_chunk`: searchable pieces of opted-in notes (5d), with a
+- `vault_chunk`: searchable pieces of opted-in notes (8d), with a
   generated Russian tsvector and a GIN index;
 - `vault_status`: a singleton of operational timestamps;
 - `user_state.vault_epoch`: six base32 characters, set here for the
@@ -20,7 +20,7 @@ The epoch is drawn here with `secrets`, not imported from app code, so
 this revision means the same thing whatever app/ looks like later.
 
 Reversible. The downgrade drops everything the vault tables recorded,
-which the vault itself does not need: from 5b the database is the
+which the vault itself does not need: from 8b the database is the
 source the files are rendered from, not the other way round.
 
 Revision ID: a5c1e0d9b3f2

@@ -187,7 +187,7 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         )
         await session.commit()
 
-        # 5a: the vault's four tables (phase-5 plan section 6). A held
+        # 8a: the vault's four tables (phase-8 plan section 6). A held
         # fact file with its hold, an opted-in note with one chunk of
         # the user's own text, and the status singleton.
         memory_id = (await session.execute(select(Memory.id))).scalar_one()

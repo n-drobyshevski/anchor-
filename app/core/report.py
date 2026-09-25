@@ -1,4 +1,4 @@
-"""May a report go out right now? (phase-4 plan section 9, phase-5 plan section 8).
+"""May a report go out right now? (phase-4 plan section 9, phase-8 plan section 8).
 
 A report is a short system line the user is owed because of something
 they started: a /read job finishing, and from phase 5 on a vault
@@ -6,8 +6,8 @@ notice or a vault hold asking for a decision. It is not an unsolicited
 message, so it is not the outbound gate's business -- but it still
 respects the three states that mean "not now" in the user's own voice.
 
-This lived in app/worker.py as `_may_report_now` until 5a. The vault
-needs it too, and app/vault/ must not import app.worker (phase-5 plan
+This lived in app/worker.py as `_may_report_now` until 8a. The vault
+needs it too, and app/vault/ must not import app.worker (phase-8 plan
 section 13), so it moved here, unchanged.
 """
 

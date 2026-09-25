@@ -1,4 +1,4 @@
-"""vaultd: the vault service's own process (phase-5 plan section 5).
+"""vaultd: the vault service's own process (phase-8 plan section 5).
 
 The vault service runs two things under one supervisor: `ob sync
 --continuous`, which keeps /data/vault in step with Obsidian Sync, and

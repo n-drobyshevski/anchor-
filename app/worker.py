@@ -58,7 +58,7 @@ neither `provider` nor a bot; unlike all of them, it needs neither
 `safety_provider` either -- it is two SQL UPDATEs and a pair of log
 lines, no model call at all.
 
-5b adds `VAULT_SYNC` (queued every minute by `_heartbeat_loop` in mirror
+8b adds `VAULT_SYNC` (queued every minute by `_heartbeat_loop` in mirror
 and sync modes, pruned after an hour) and `VAULT_PURGE` (queued by
 /delete inside its own transaction). Neither calls a model or needs the
 bot; a purge that cannot reach the vault service is deferred, never
@@ -263,14 +263,14 @@ async def _run_job(
         return ExtractOutcome()
 
     if kind == VAULT_SYNC:
-        # 5b: one sync pass (phase-5 plan section 7). No model call, no
+        # 8b: one sync pass (phase-8 plan section 7). No model call, no
         # bot: an unreachable vault completes the job normally, and the
         # next minute's pass tries again.
         await run_vault_sync(session, settings, clock)
         return ExtractOutcome()
 
     if kind == VAULT_PURGE:
-        # 5b: /delete's reach into the vault (phase-5 plan section 10).
+        # 8b: /delete's reach into the vault (phase-8 plan section 10).
         # Any failure defers by five minutes -- Deferred keeps attempts
         # at 0, so "/delete must really delete" never gives up.
         if not await run_vault_purge(settings):
@@ -459,7 +459,7 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_research_sweep(session, clock, state.timezone)
-            # 5b: this minute's vault pass, in mirror/sync only -- a
+            # 8b: this minute's vault pass, in mirror/sync only -- a
             # sibling step for the same reason as the research sweep.
             async with sessionmaker() as session:
                 await maybe_enqueue_vault_sync(session, settings, clock)

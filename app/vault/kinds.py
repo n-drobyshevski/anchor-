@@ -21,5 +21,5 @@ SYNC_MODES = ("mirror", "sync")
 
 
 def sync_dedup_key(now_utc: datetime.datetime) -> str:
-    """One pass per UTC minute (phase-5 plan section 7)."""
+    """One pass per UTC minute (phase-8 plan section 7)."""
     return f"{VAULT_SYNC}:{now_utc.astimezone(datetime.timezone.utc):%Y-%m-%dT%H:%M}"

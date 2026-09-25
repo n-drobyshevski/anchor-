@@ -1,4 +1,4 @@
-# The vault service (phase-5 plan section 5): obsidian-headless + vaultd.
+# The vault service (phase-8 plan section 5): obsidian-headless + vaultd.
 #
 # Build context is vaultd/ -- the Railway service's Root Directory is
 # /vaultd (docs/vault-setup.md). Node 22 for ob, Python 3.12 via uv for

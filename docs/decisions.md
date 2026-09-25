@@ -12,7 +12,7 @@ are that text, moved verbatim; H1, H3 and H5 were never written up as
 sections and are summarised at the top of the hardening group for
 completeness.
 
-`anchor-phase1-plan.md` through `anchor-phase5-plan.md` remain the
+`anchor-phase1-plan.md` through `anchor-phase8-plan.md` remain the
 specifications. This file records what was decided while implementing
 them.
 
@@ -834,9 +834,9 @@ blindness it replaces.
 practice, in which case one `research` kind would read better than two.
 Nothing yet suggests that; they have different providers behind them.
 
-## 5a — the plan's facts, checked against the live sources
+## 8a — the plan's facts, checked against the live sources
 
-Phase-5 plan section 2 lists the facts the design rests on, and asks
+Phase-8 plan section 2 lists the facts the design rests on, and asks
 that they be re-verified before any code. They were checked against
 `obsidian-headless` 0.0.14 (its README and the published `cli.js`,
 fetched with `npm pack`) and Railway's docs, on 2026-09-25:
@@ -857,9 +857,9 @@ fetched with `npm pack`) and Railway's docs, on 2026-09-25:
 | A config-file path for a monorepo service | **Changed**: Config as Code is deprecated (below). |
 
 Four findings changed the plan, and each is its own entry below. The
-plan file carries them as rev. 3, each marked *5a*.
+plan file carries them as rev. 3, each marked *8a*.
 
-## 5a — no `railway.json`: Config as Code is deprecated
+## 8a — no `railway.json`: Config as Code is deprecated
 
 The plan had the vault service read `vaultd/railway.json` through a
 custom config-file path. Railway's docs now say Config as Code is
@@ -882,7 +882,7 @@ Docker build context, so `vaultd/Dockerfile` is found without a
 for every service. At that point the vault service belongs in that
 file with the rest.
 
-## 5a — vaultd also refuses a TCP proxy
+## 8a — vaultd also refuses a TCP proxy
 
 The plan refuses to boot when `RAILWAY_PUBLIC_DOMAIN` is set, because a
 public URL would put the API on the internet. A Railway **TCP proxy**
@@ -895,7 +895,7 @@ refuses either variable.
 that sets neither. The bearer token is then the only remaining line.
 It is at least 32 characters and compared in constant time.
 
-## 5a — `ob sync` writes its own log, and vaultd truncates it unread
+## 8a — `ob sync` writes its own log, and vaultd truncates it unread
 
 `cli.js` tees everything `ob sync` prints into
 `$XDG_CONFIG_HOME/obsidian-headless/sync/<vault id>/sync.log`,
@@ -916,7 +916,7 @@ of a sync failure worth debugging. It would then need a size cap rather
 than truncation, and it would still never be read by anything that
 logs.
 
-## 5a — `ob` children get an allowlisted environment
+## 8a — `ob` children get an allowlisted environment
 
 vaultd's own environment holds `VAULT_API_TOKEN`, the Obsidian token
 and the end-to-end password. None of that needs to reach `ob` except
@@ -928,7 +928,7 @@ all, because setup stored the derived key in `config.json`.
 **This would be wrong if** a future `ob` needed another variable. It
 would then fail loudly at boot, which is the direction we want.
 
-## 5a — the end-to-end password is on `sync-setup`'s argv
+## 8a — the end-to-end password is on `sync-setup`'s argv
 
 `ob` accepts the vault's end-to-end password only as `--password` on
 the command line, or at an interactive prompt that `--json` disables.
@@ -948,7 +948,7 @@ patching `cli.js`, which is UNLICENSED and must not be vendored.
 service's container, or if `ob` grew a `--password-file` or an
 environment variable, which we would then use.
 
-## 5a — refuse a vault path linked to a different vault
+## 8a — refuse a vault path linked to a different vault
 
 `sync-list-local` reports which remote vault each local path is linked
 to. If `VAULT_PATH` is already linked, and not to the vault
@@ -965,20 +965,20 @@ vault and a shared one is refused rather than guessed at.
 **This would be wrong if** two vaults ever legitimately shared one
 path. They cannot: ob keeps one link per path.
 
-## 5a — PyYAML, which 3e avoided
+## 8a — PyYAML, which 3e avoided
 
 Phase 3e kept PyYAML out: the eval cases were the only YAML in sight,
 and `tomllib` served them from the standard library (README, "Two
-deviations from section 9"). Phase 5 is different in kind, not degree.
+deviations from section 9"). Phase 8 is different in kind, not degree.
 Obsidian properties *are* YAML, written by Obsidian, by Bases and by
 Sync's merge. A hand-written parser for them would be a security
 boundary built on a subset guessed from examples.
 
 **Decision:** PyYAML goes into both projects, and is used only through
 one loader: `SafeLoader` subclassed to raise on anchors, aliases and
-duplicate keys, fed at most 4 KB. vaultd has it from 5a for the opt-in
-check. The bot declares it in 5a (approved for this milestone) and first
-imports it in 5b. No `python-frontmatter`: splitting a fence is a dozen
+duplicate keys, fed at most 4 KB. vaultd has it from 8a for the opt-in
+check. The bot declares it in 8a (approved for this milestone) and first
+imports it in 8b. No `python-frontmatter`: splitting a fence is a dozen
 lines (`vaultd/vaultd/frontmatter.py`). The two projects each keep
 their own loader, by the independence rule.
 
@@ -986,7 +986,7 @@ their own loader, by the independence rule.
 arbitrary objects. It does not, and a `!!python/…` tag is one of
 vaultd's refusal tests.
 
-## 5a — vaultd's residual write race
+## 8a — vaultd's residual write race
 
 Every write and delete is compare-and-swap, serialised through one
 `asyncio.Lock`, and the lock only orders vaultd's own requests. `ob` is
@@ -1006,7 +1006,7 @@ target exists (a test injects exactly that race).
 **This would be wrong if** `ob` ever held a lock that another process
 could take. We would then take it.
 
-## 5a — what vaultd's status codes promise
+## 8a — what vaultd's status codes promise
 
 - **400:** the request is malformed (the path or the body). It says
   nothing about the vault.
@@ -1019,7 +1019,7 @@ could take. We would then take it.
 - **412:** compare-and-swap lost.
 - **422:** a file in `Anchor/Memory/` or `Anchor/Journal/` that is not
   UTF-8. It is in Anchor's scope, so it is listed and it exists, but it
-  cannot be returned as text. 5c quarantines it. A note that is not
+  cannot be returned as text. 8c quarantines it. A note that is not
   UTF-8 is never opted in, and so is simply absent.
 
 Symlinks are refused by walking each path one component at a time with
@@ -1030,16 +1030,16 @@ link between the two.
 **This would be wrong if** the bot needed to tell "missing" from "not
 opted in". It must not, which is why they are the same.
 
-## 5a — limits that are constants, not settings
+## 8a — limits that are constants, not settings
 
 vaultd's note size cap (`NOTE_MAX_BYTES`, 200 000), the 4 KB
 frontmatter cap, the 64 KB body cap, the restart backoff, and the bot's
 client timeout (5 s) and response cap (8 MB) are all code constants.
 Each of them protects the boundary, and a deploy must not be able to
-widen it by pasting a variable. The plan's `VAULT_NOTE_MAX_BYTES` (5d)
+widen it by pasting a variable. The plan's `VAULT_NOTE_MAX_BYTES` (8d)
 is a bot setting, and it can only narrow what vaultd already lists.
 
-The bot gets only the settings 5a reads: `VAULT_MODE`, `VAULT_URL` and
+The bot gets only the settings 8a reads: `VAULT_MODE`, `VAULT_URL` and
 `VAULT_API_TOKEN`. The plan's grace, warmup, caps and notes settings
 arrive with the milestones that read them, so no setting exists that
 does nothing.
@@ -1048,24 +1048,24 @@ does nothing.
 that should be searchable. Split them; the chunker would cut them up
 anyway.
 
-## 5a — `mirror` and `sync` are accepted, and act as `status`
+## 8a — `mirror` and `sync` are accepted, and act as `status`
 
 `check_runtime_settings` accepts all four modes, so a `VAULT_MODE=sync`
 set ahead of a deploy does not take chat down. Plan section 2's failure
-isolation says the vault never takes the bot down. Until 5b and 5c
+isolation says the vault never takes the bot down. Until 8b and 8c
 ship, `mirror` and `sync` do exactly what `status` does, and `/vault`
 says the mode is not in this build yet. `tests/test_vault_commands.py`
 pins, for every mode, that nothing beyond `GET /v1/status` is ever
 requested, and that the heartbeat queues no vault job.
 
 The token and URL are checked whenever the mode is not `off` *or* a
-token is set. From 5b, a set token alone lets `/delete` reach the vault
+token is set. From 8b, a set token alone lets `/delete` reach the vault
 service in any mode.
 
 **This would be wrong if** accepting an unimplemented mode ever hid a
 misconfiguration. `/vault` names it, which is the place you would look.
 
-## 5a — `/vault` and `/state` probe the service and remember the answer
+## 8a — `/vault` and `/state` probe the service and remember the answer
 
 In `status` mode no sync pass runs, so nothing else would notice the
 vault service going away. Both commands make one `GET /v1/status` and
@@ -1076,14 +1076,14 @@ request and write nothing.
 
 `/state` gained one state the plan's list lacks, «синхронизация
 остановлена». vaultd answers but `ob` is not running, which is neither
-«ок» nor «нет связи». «удаление файлов ожидает» arrives with 5b's
+«ок» nor «нет связи». «удаление файлов ожидает» arrives with 8b's
 `vault_purge`.
 
 **This would be wrong if** `/state`'s latency mattered more than the
 line. A hung vault service costs it up to the client's 5 s timeout. A
 refused connection costs nothing.
 
-## 5a — the CHECKs the schema states
+## 8a — the CHECKs the schema states
 
 Every invariant plan section 6 writes as a comment is a constraint:
 
@@ -1092,7 +1092,7 @@ Every invariant plan section 6 writes as a comment is a constraint:
 - `ck_vault_file_held_has_hold`: `held` if and only if there is a hold.
 - `ck_vault_file_reason_code`: a reason is a snake_case code of at most
   40 characters, never text. The plan says "a code from errors.py,
-  never free text". The list itself is 5c's, so the shape is what 5a
+  never free text". The list itself is 8c's, so the shape is what 8a
   can pin.
 - `ck_vault_file_path_relative`: non-empty, no leading `/`, no
   backslash. The same rule vaultd enforces, stated again where the
@@ -1110,29 +1110,29 @@ Postgres cannot draw from a CSPRNG without an extension, and every
 insert of that row goes through SQLAlchemy. The migration draws its
 own epoch for the existing row, so it does not import app code.
 
-**This would be wrong if** 5c's reason codes needed digits or more than
+**This would be wrong if** 8c's reason codes needed digits or more than
 40 characters. Widening a CHECK is one migration.
 
-## 5b — mirror records edits and applies none
+## 8b — mirror records edits and applies none
 
 Plan section 7 has mirror's ingest update `disk_sha256` and nothing
-else. 5b implements exactly that, and no more. It resolves no
+else. 8b implements exactly that, and no more. It resolves no
 identities, creates no fact from a file, runs no deletions (section 7.2
 is skipped in mirror) and holds nothing. So a fact file you delete or
 rename is not recreated: its compare-and-swap update fails and is
-skipped, until 5c decides what the deletion means. `sync` mode behaves
-exactly like `mirror` until 5c ships. An AST test pins that nothing in
+skipped, until 8c decides what the deletion means. `sync` mode behaves
+exactly like `mirror` until 8c ships. An AST test pins that nothing in
 `app/vault/` so much as names a function that changes memory.
 
 The fact file's callout tells the truth for the mode it is written in.
 In mirror it says edits are not applied, not plan 4.1's «Меняй `fact`…».
-5c changes the text back, and that rewrite of every fact file is paced
+8c changes the text back, and that rewrite of every fact file is paced
 by the write cap like any other.
 
 **This would be wrong if** someone ran mirror for weeks expecting edits
 to stick. `/vault` says in plain words that they do not.
 
-## 5b — your properties are carried over verbatim
+## 8b — your properties are carried over verbatim
 
 Plan 4.4 says a re-render writes Anchor's keys first, then "your keys
 in their original order and form". "Form" is taken literally: the
@@ -1150,10 +1150,10 @@ loader could not read.
 
 **This would be wrong if** users routinely left broken YAML in fact
 files. Such a file then stays frozen until fixed. The problem list
-that shows it arrives in 5c; until then `debug.vault_file` shows the
+that shows it arrives in 8c; until then `debug.vault_file` shows the
 reason code.
 
-## 5b — crashes on either side of the PUT converge
+## 8b — crashes on either side of the PUT converge
 
 A new fact's row is committed before the create-only PUT (plan 7.3).
 Two crash points follow:
@@ -1171,7 +1171,7 @@ Both are tests.
 has no record of. With the epoch in every name, that is practically
 impossible.
 
-## 5b — a welfare day keeps its check-in note out of the vault
+## 8b — a welfare day keeps its check-in note out of the vault
 
 A check-in note is stored before the welfare check runs on it. If it
 trips the check, the message is retagged `welfare`, but `checkin.note`
@@ -1187,7 +1187,7 @@ and asserts that the text appears in no file.
 **This would be wrong if** an unrelated note on a welfare day mattered
 in the vault. It is still in the database and in `/export`.
 
-## 5b — `/delete`'s vault line appears only with a vault
+## 8b — `/delete`'s vault line appears only with a vault
 
 «Файлы Anchor в хранилище тоже удалятся. Obsidian Sync хранит их в
 истории версий ещё до месяца, зашифрованными.» is added to the
@@ -1196,16 +1196,16 @@ vault configured would itself be a false statement. The retention
 figure is Standard's month (plan §18.3, your answer). On Plus it would
 read «до года».
 
-## 5b — `/forget` of a corrected fact, pending §18.1
+## 8b — `/forget` of a corrected fact, pending §18.1
 
-5b keeps today's `/forget`: deleting a corrected fact's head
+8b keeps today's `/forget`: deleting a corrected fact's head
 reactivates its predecessor (`test_forget_the_head_of_a_chain_clears_the_pointer`).
 In the vault, the head's file is deleted and the predecessor gets a
 file of its own on the next pass. Whether `/forget` should forget the
-whole lineage, as deleting a file will in 5c, is plan §18.1, to be
-settled before 5c.
+whole lineage, as deleting a file will in 8c, is plan §18.1, to be
+settled before 8c.
 
-## 5b — technique sources, and the lowest card id
+## 8b — technique sources, and the lowest card id
 
 A technique's file quotes the card it came from, and names the domain
 from the card's clip. The card still points at the row originally

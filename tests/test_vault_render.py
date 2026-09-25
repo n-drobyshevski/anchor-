@@ -1,4 +1,4 @@
-"""Rendering facts and days into files (phase-5 plan sections 4.1, 4.2, 4.4). Pure."""
+"""Rendering facts and days into files (phase-8 plan sections 4.1, 4.2, 4.4). Pure."""
 
 from __future__ import annotations
 

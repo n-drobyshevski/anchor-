@@ -1,4 +1,4 @@
-"""/delete reaches the vault (phase-5 plan section 10), and the 5b write-path changes.
+"""/delete reaches the vault (phase-8 plan section 10), and the 8b write-path changes.
 
 - `/delete` queues exactly one `vault_purge` inside its own single
   transaction whenever a token is set, and draws a new epoch;
@@ -166,7 +166,7 @@ async def test_old_epoch_files_reuploaded_after_a_delete_are_deleted_not_importe
     assert texts == ["новый факт"]
 
 
-# --- memory.py's 5b changes -----------------------------------------------------
+# --- memory.py's 8b changes -----------------------------------------------------
 
 
 async def test_commit_false_shares_the_callers_transaction(sessionmaker):

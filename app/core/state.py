@@ -38,7 +38,7 @@ from app.db.models import StateChange, UserState
 
 STATE_ID = 1
 
-# 5b: "vault" (phase-5 plan section 6), only ever on field="memory" rows.
+# 8b: "vault" (phase-8 plan section 6), only ever on field="memory" rows.
 Source = Literal["command", "pause", "system", "button", "extractor", "welfare", "vault"]
 
 # The only fields set_counters() may write (phase-3 plan section 4).

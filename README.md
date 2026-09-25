@@ -1,4 +1,4 @@
-# Anchor — Phase 4 complete (the gated research loop), Phase 5 under way (the vault)
+# Anchor — Phase 4 complete (the gated research loop), Phase 8 under way (the vault)
 
 A private, single-user Telegram bot.
 
@@ -826,10 +826,10 @@ OpenRouter's reported `usage.cost` — and tells you whether annotations
 arrive at all. Then `python -m eval.run`, which must pass cases 15 and
 16 or exit non-zero.
 
-## Milestone 5a — the vault service, and a bot that can only ask how it is
+## Milestone 8a — the vault service, and a bot that can only ask how it is
 
-Phase 5 connects Anchor to an Obsidian vault that you can open and edit
-on any device, synced by Obsidian Sync (`anchor-phase5-plan.md`):
+Phase 8 connects Anchor to an Obsidian vault that you can open and edit
+on any device, synced by Obsidian Sync (`anchor-phase8-plan.md`):
 
 ```
 Obsidian (phone, desktop)  ⇄  Obsidian Sync (end-to-end encrypted)  ⇄  vault service on Railway
@@ -839,7 +839,7 @@ Obsidian (phone, desktop)  ⇄  Obsidian Sync (end-to-end encrypted)  ⇄  vault
                                                         anchor (bot + worker)  ⇄  Postgres
 ```
 
-5a ships the vault service and the plumbing, and no behaviour. Nothing
+8a ships the vault service and the plumbing, and no behaviour. Nothing
 is written into the vault or read from it yet. `VAULT_MODE` defaults to
 `off`. `status` is the one mode with meaning so far: `/vault` and
 `/state` ask the vault service whether the sync is running. The setup
@@ -912,7 +912,7 @@ The table of what was checked, and what each finding changed, is in
   token rides on every request to it, so the boot check refuses
   anything that could point it at the internet, and never prints the
   value. `mirror` and `sync` are accepted, and act exactly like
-  `status` until 5b and 5c. A test pins that no mode requests anything
+  `status` until 8b and 8c. A test pins that no mode requests anything
   but `GET /v1/status`.
 - **Schema.** `vault_file`, `vault_hold`, `vault_chunk` and
   `vault_status` exist and are empty, and every invariant the plan
@@ -925,13 +925,13 @@ The table of what was checked, and what each finding changed, is in
   own migration: the first debug migration's grant covered only the
   views that existed then.
 - **`may_report_now`** moved from `app/worker.py` to
-  `app/core/report.py`, unchanged, so that 5c's vault notices can use it
+  `app/core/report.py`, unchanged, so that 8c's vault notices can use it
   without `app/vault/` importing the worker.
 - **The guard hook** treats `VAULT_API_TOKEN` and both `OBSIDIAN_*`
   secrets like the other credentials, and `CLAUDE.md` gains a rule:
   never read the vault, and never connect Obsidian tools to it.
 
-## Milestone 5b — your facts in Obsidian, one way
+## Milestone 8b — your facts in Obsidian, one way
 
 With `VAULT_MODE=mirror`, a sync pass runs every minute and renders the
 database into the vault:
@@ -945,7 +945,7 @@ database into the vault:
 It is one-way. An edit you make in the vault is **recorded and not
 applied**: Anchor stores the file's new hash and changes nothing, and
 the next change to that fact in the database overwrites your edit.
-`/vault` says so. Applying edits is 5c, and `sync` mode behaves exactly
+`/vault` says so. Applying edits is 8c, and `sync` mode behaves exactly
 like `mirror` until then.
 
 ### Anchor never overwrites what it has not seen
@@ -1035,7 +1035,7 @@ uv run pytest
 uv run --directory vaultd pytest   # the vault service: no database, no network
 ```
 
-The second command is the vault service's own suite (5a). It is a
+The second command is the vault service's own suite (8a). It is a
 separate project with its own lockfile, and it runs against a temp
 directory and a fake `ob` script. Nothing in either suite talks to
 Obsidian.
@@ -1088,7 +1088,7 @@ the extractor and welfare classifier depend on it.
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
-6. The vault service (5a) is a second service in the same project,
+6. The vault service (8a) is a second service in the same project,
    built from `vaultd/`, with a volume and **no** public domain. Its
    one-time setup is [docs/vault-setup.md](docs/vault-setup.md).
 
@@ -1104,7 +1104,7 @@ status, an error code, a count and a cost, and never a URL path or
 query, page text, card text, a quote or a topic. A path can carry
 personal information as easily as a message can.
 
-As of 5a the vault follows the same rule, in both services: never a
+As of 8a the vault follows the same rule, in both services: never a
 vault path, a file name, a property value, a heading or note text.
 `ob`'s own output is discarded unread.
 

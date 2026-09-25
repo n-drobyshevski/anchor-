@@ -1,4 +1,4 @@
-"""What app/vault/ may import, and that the bot never imports vaultd (phase-5 plan 13).
+"""What app/vault/ may import, and that the bot never imports vaultd (phase-8 plan 13).
 
 **The sync path makes no model call** and can change no `user_state`
 field. Rather than trusting a docstring, this walks the AST of every
@@ -105,9 +105,9 @@ def test_the_bot_never_imports_vaultd():
     assert offenders == []
 
 
-# 5b: mirror records the vault's edits and applies none of them. Until
-# 5c, nothing in app/vault/ may so much as name a function that changes
-# memory. 5c replaces this with the narrower rule of plan section 13
+# 8b: mirror records the vault's edits and applies none of them. Until
+# 8c, nothing in app/vault/ may so much as name a function that changes
+# memory. 8c replaces this with the narrower rule of plan section 13
 # (only write_memory, set_pinned and forget_lineage).
 MEMORY_WRITERS = {"write_memory", "set_pinned", "hard_delete", "forget_lineage", "add_pending"}
 

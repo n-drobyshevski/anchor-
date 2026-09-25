@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 CONFIRM_TTL = 300
 
 CONFIRM_TEXT = "Удалить все данные? Это необратимо."
-# 5b (phase-5 plan section 10): the one copy Anchor cannot reach, stated
+# 8b (phase-8 plan section 10): the one copy Anchor cannot reach, stated
 # rather than implied. Obsidian Sync Standard keeps version history for
 # a month (Plus: a year); the user is on Standard. Shown only when a
 # vault is configured -- a vault line with no vault would be a lie too.

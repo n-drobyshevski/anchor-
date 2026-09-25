@@ -25,7 +25,7 @@ Still allowed: Railway `get-logs`, deployments, status, metrics,
 traces (logs never carry message text, see `app/log.py`), local tests
 and eval against a throwaway local database, and the `debug.*` views.
 
-**Phase 5: the Obsidian vault is off limits too.** It holds the same
+**Phase 8: the Obsidian vault is off limits too.** It holds the same
 data as the database, as files. Claude never reads it and never
 connects Obsidian tools to it: no Obsidian MCP server, no Local REST
 API, no `ob` against the real vault. The vault service's logs, like the
@@ -73,7 +73,7 @@ psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.vault_status"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select role, state, reason, count(*) from debug.vault_file group by 1, 2, 3"
 ```
 
-The vault views (5a, migration `b8d24f6e0a17`) carry no path, no hash,
+The vault views (8a, migration `b8d24f6e0a17`) carry no path, no hash,
 no hold payload and no chunk text. They have their own grant, because
 `9e4b2c7a1f05`'s `GRANT ... ON ALL TABLES` covered only the views that
 existed when it ran.

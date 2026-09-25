@@ -1,6 +1,6 @@
-"""The sync pass (phase-5 plan section 7), job `vault_sync`, in `mirror`.
+"""The sync pass (phase-8 plan section 7), job `vault_sync`, in `mirror`.
 
-5b implements the database -> vault direction. Each pass:
+8b implements the database -> vault direction. Each pass:
 
 0. prunes `vault_sync` jobs done more than an hour ago (the per-minute
    dedup key would otherwise grow the job table by ~1,440 rows a day),
@@ -36,7 +36,7 @@ DELETE. Bootstrap and backfill are therefore paced, not bursted: 400
 facts become files over eight minutes, not in one burst Sync would
 upload all at once.
 
-**What 5b does not do** (5c): apply an edit, create a fact from a file,
+**What 8b does not do** (8c): apply an edit, create a fact from a file,
 resolve renames, forget a fact whose file vanished, or hold anything.
 A file the user deleted is not recreated -- its CAS update fails and is
 skipped. `sync` mode behaves exactly like `mirror` until then.
@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 
 PRUNE_AFTER = datetime.timedelta(hours=1)
 
-# Codes a quarantined row can carry in 5b (ck_vault_file_reason_code).
+# Codes a quarantined row can carry in 8b (ck_vault_file_reason_code).
 NAME_TAKEN = "name_taken"
 BAD_YAML = "bad_yaml"
 
@@ -585,7 +585,7 @@ async def _render_journal(
             result.created += 1
             continue
         if entry is None:
-            # Deleted by the user. Dismissing it is 5c's; mirror leaves it.
+            # Deleted by the user. Dismissing it is 8c's; mirror leaves it.
             result.skipped += 1
             continue
         budget.take()

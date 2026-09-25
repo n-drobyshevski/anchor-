@@ -3,7 +3,7 @@
 When the child exits it is restarted with exponential backoff, 5 s
 doubling to 5 min, and the backoff resets once a run has lasted
 STABLE_RUN_S. `restarts`, `last_exit_code` and `running_since` are
-exposed through `/v1/status`; the bot's deletion warmup (5c) reads
+exposed through `/v1/status`; the bot's deletion warmup (8c) reads
 `running_since`, so it is None whenever the child is not running.
 
 **The child's output never reaches a log.** Its stdout and stderr go

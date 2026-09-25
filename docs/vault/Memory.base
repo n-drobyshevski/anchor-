@@ -1,7 +1,7 @@
-# Anchor's facts as a table (phase-5 plan section 4.5).
+# Anchor's facts as a table (phase-8 plan section 4.5).
 # Copy this file anywhere in your vault. Anchor never writes it.
-# From 5c you can edit `fact`, `kind` and `pinned` right in the table;
-# in `mirror` mode (5b) edits here are not applied yet.
+# From 8c you can edit `fact`, `kind` and `pinned` right in the table;
+# in `mirror` mode (8b) edits here are not applied yet.
 filters:
   and:
     - file.inFolder("Anchor/Memory")

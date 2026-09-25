@@ -1,4 +1,4 @@
-"""Rendering the database into files (phase-5 plan sections 4.1 and 4.2).
+"""Rendering the database into files (phase-8 plan sections 4.1 and 4.2).
 
 Pure functions: rows in, text and a digest out. No session, no client.
 The sync pass (app/vault/sync.py) gathers the rows and does the I/O.
@@ -16,9 +16,9 @@ keeps a file from before a /delete from ever sharing a path with one
 after it.
 
 **The callout says what is true now.** In `mirror` -- the only mode
-5b implements; `sync` acts as mirror until 5c -- editing a file changes
+8b implements; `sync` acts as mirror until 8c -- editing a file changes
 nothing, so the fact callout says that instead of plan 4.1's text. The
-wording changes with 5c, and that one-time rewrite of every fact file
+wording changes with 8c, and that one-time rewrite of every fact file
 is paced by the write cap like any other.
 """
 

@@ -1,6 +1,6 @@
 """study_card status 'forgotten': /forget of an adopted technique
 
-Milestone 5b (phase-5 plan section 6), fixing a phase-4 bug.
+Milestone 8b (phase-8 plan section 6), fixing a phase-4 bug.
 `study_card.memory_id` has no ON DELETE rule, so deleting the memory an
 adopted card points at failed on the foreign key: /forget of an adopted
 technique raised. From here, `memory.hard_delete` first marks such a

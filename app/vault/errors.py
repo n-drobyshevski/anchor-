@@ -1,4 +1,4 @@
-"""The closed set of vault codes (phase-5 plan sections 6 and 10).
+"""The closed set of vault codes (phase-8 plan sections 6 and 10).
 
 Same rule as app/research/errors.py: every way a call to vaultd can
 fail resolves to one of these short codes, and a code is the only
@@ -6,7 +6,7 @@ detail of a failure that may reach a log line or the database. Never
 the URL, never a path, never a response body -- vaultd's bodies are
 codes too, but the bot does not trust that and does not relay them.
 
-5a has only the client's codes. 5c adds the quarantine reasons
+8a has only the client's codes. 8c adds the quarantine reasons
 (`vault_file.reason`) to this module, where the schema's
 `ck_vault_file_reason_code` expects them: short snake_case, never text.
 """

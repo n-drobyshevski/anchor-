@@ -1,16 +1,16 @@
-# Setting up the vault service (milestone 5a)
+# Setting up the vault service (milestone 8a)
 
 You do these steps once, by hand. Claude Code never does them: it may
 not read the vault or hold its credentials (CLAUDE.md). At the end,
-`/vault` in Telegram tells you the sync is running. Until 5b nothing
-appears in your vault: 5a only proves the pipe works.
+`/vault` in Telegram tells you the sync is running. Until 8b nothing
+appears in your vault: 8a only proves the pipe works.
 
 ## What you need
 
 - An Obsidian Sync subscription. Standard gives 1 synced vault, 1 GB,
   and one month of version history; Plus gives twelve months. The only
   thing that depends on which one you have is a line in `/delete`'s
-  confirmation, which arrives in 5b.
+  confirmation, which arrives in 8b.
 - Desktop Obsidian, to create the vault.
 - Node.js 22 or later on your own machine, for one login command.
 
@@ -141,7 +141,7 @@ It exits with a message that names a variable, never its value:
 | `VAULT_PATH is already linked to a different remote vault` | `OBSIDIAN_VAULT` changed after the first boot. If that is intended, delete `/data/config/obsidian-headless/sync/` on the volume and redeploy. |
 | `ob sync-setup failed (exit 2)` | `OBSIDIAN_E2EE_PASSWORD` is wrong. |
 
-## 6. Mirror: your facts in Obsidian (5b)
+## 6. Mirror: your facts in Obsidian (8b)
 
 Set `VAULT_MODE=mirror` on the bot. Within a minute, facts start to
 appear in `Anchor/Memory/` and days in `Anchor/Journal/`, 50 files a
@@ -150,7 +150,7 @@ minute until everything is there. `/vault` then says `· фактов N`.
 Copy `docs/vault/Memory.base` into the vault to get a table of your
 facts grouped by kind. Copy `docs/vault/Факт.md` into your templates
 folder for the Templates core plugin. In mirror, a file made from it
-does nothing yet (5c).
+does nothing yet (8c).
 
 In mirror, **edits you make in the vault are not applied**. Anchor
 records that a file changed, and the next change to that fact in

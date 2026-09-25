@@ -77,7 +77,7 @@ async def enqueue_job(
     conflict in a unique index, which is the correct reading of "this
     job is not deduplicated".
 
-    `commit=False` (5b) leaves the insert in the caller's transaction:
+    `commit=False` (8b) leaves the insert in the caller's transaction:
     /delete queues `vault_purge` inside its single wipe transaction, and
     a commit here would split it in two.
     """

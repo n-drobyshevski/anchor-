@@ -1,8 +1,8 @@
-"""The bot's HTTP client for vaultd (phase-5 plan section 5.4).
+"""The bot's HTTP client for vaultd (phase-8 plan section 5.4).
 
 One method per route, each returning plain data or raising VaultError
-with a code from app/vault/errors.py. 5a calls only `status()`; the
-rest exist because the API they mirror ships in 5a, and 5b-5d use them.
+with a code from app/vault/errors.py. 8a calls only `status()`; the
+rest exist because the API they mirror ships in 8a, and 8b-8d use them.
 
 **What the client refuses to do.** No redirects (a 3xx is a bad
 response, not a hop). No proxy or `.netrc` from the environment

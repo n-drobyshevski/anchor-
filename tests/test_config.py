@@ -250,7 +250,7 @@ def test_the_user_agent_names_us_and_no_browser():
         assert browser not in agent
 
 
-# --- 5a: the vault (phase-5 plan section 3) ------------------------------
+# --- 8a: the vault (phase-8 plan section 3) ------------------------------
 
 # Low-entropy on purpose, like the secrets above.
 _VAULT_TOKEN = "vault-token-" + "v" * 32
@@ -281,7 +281,7 @@ def test_a_vault_mode_needs_a_long_token_and_never_echoes_it(token):
 
 
 def test_a_short_token_is_refused_even_when_off():
-    """From 5b a set token alone makes /delete call the vault service."""
+    """From 8b a set token alone makes /delete call the vault service."""
     with pytest.raises(SystemExit, match="VAULT_API_TOKEN"):
         check_runtime_settings(_settings(VAULT_API_TOKEN="short-vault-token"))
 
