@@ -49,6 +49,7 @@ import logging
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, CallbackQuery, Message, ReplyKeyboardRemove, Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -94,6 +95,7 @@ from app.tg import orders as orders_ui
 from app.tg import planner as planner_ui
 from app.tg import proposals as proposals_ui
 from app.tg import research as research_ui
+from app.tg import state_view
 from app.tg import vault as vault_ui
 from app.tg import review as review_ui
 from app.tg import welfare as welfare_ui
@@ -227,14 +229,12 @@ TZ_SET = "Часовой пояс: {tz}. Сейчас у тебя {time}."
 TZ_UNKNOWN = "Не знаю такой пояс. Пример: Europe/Paris."
 TZ_USAGE = "Какой пояс? Пример: /tz Europe/Paris."
 
-# /state's outbound block (plan section 10).
-OUTBOUND_KIND_LABELS = {
-    "morning": "утро",
-    "evening_nag": "вечер",
-    "silence": "тишина",
-    "tick": "тик",
-}
-NOTHING = "—"
+# /state's outbound block (plan section 10). Defined once in
+# state_view.py (which the rich /state view also needs them for) and
+# aliased here rather than duplicated, so this module's _format_outbound
+# and state_view.render() can never disagree on either one.
+OUTBOUND_KIND_LABELS = state_view.OUTBOUND_KIND_LABELS
+NOTHING = state_view.NOTHING
 
 DUE_CLEARED = "Главное действие снято."
 DUE_SET = "Главное действие: «{text}»."
@@ -282,21 +282,17 @@ def _format_outbound(summary, tz: ZoneInfo, now_utc) -> list[str]:
     one block whose absence is meaningful: before 3b there was nothing
     to say, and a summary of None still renders, as three lines of
     "nothing yet", rather than silently disappearing.
+
+    The per-value work (what "quiet until" and "the next planned
+    message" actually say) is state_view.quiet_until_parts/
+    next_outbound_parts -- shared with the rich /state view below so the
+    two can never show a different answer to the same question.
     """
     if summary is None:
         return []
 
-    if summary.quiet_until is not None and summary.quiet_until > now_utc:
-        quiet = summary.quiet_until.astimezone(tz).strftime("%d.%m %H:%M")
-    else:
-        quiet = NOTHING
-
-    if summary.next_kind is None:
-        upcoming = NOTHING
-    else:
-        label = OUTBOUND_KIND_LABELS.get(summary.next_kind, summary.next_kind)
-        when = summary.next_planned_for.astimezone(tz).strftime("%H:%M")
-        upcoming = f"{label} в {when}"
+    quiet = state_view.quiet_until_parts(summary, tz, now_utc)[0]
+    upcoming = state_view.next_outbound_parts(summary, tz)[0]
 
     return [
         f"Тихо до: {quiet} · Без ответа подряд: {summary.ignored_in_row}",
@@ -341,109 +337,74 @@ def _format_state(
     can never show a mood the prompt itself would not have shown this
     turn. Plain -- no gloss here; the gloss is an instruction to the
     model, not information for the user.
+
+    Every value below is computed by a state_view helper shared with
+    the rich /state view (app/tg/state_view.py's render()) -- this
+    function only lays the same answers out as lines of text instead of
+    table rows, so the two can never disagree about what a line says.
     """
     tz = ZoneInfo(user_state.timezone)
     now = clock_module.now_local(clock, user_state.timezone)
     today = now.date()
     now_local = now.strftime("%Y-%m-%d %H:%M")
 
-    if user_state.last_checkin_at is None:
-        last_checkin = "давно"
-    else:
-        local = user_state.last_checkin_at.astimezone(tz)
-        days = (today - local.date()).days
-        when = "сегодня" if days <= 0 else "вчера" if days == 1 else f"{days} дн. назад"
-        last_checkin = f"{when} {local.strftime('%H:%M')}"
-
-    if user_state.due_action:
-        due = f"«{user_state.due_action}»"
-        if user_state.due_set_at:
-            days = (today - user_state.due_set_at.astimezone(tz).date()).days
-            due += " (задано сегодня)" if days <= 0 else f" (задано {days} дн. назад)"
-    else:
-        due = "нет"
+    last_checkin = state_view.last_checkin_parts(user_state, tz, today)[0]
+    due = state_view.due_text(user_state, tz, today)
 
     # H2. Its own line rather than part of _format_outbound's block:
     # that helper returns nothing at all when there is no summary, and
     # this is not a proactive-message line -- it answers "is the welfare
     # check actually running", which matters most on a quiet week when
     # the outbound block has nothing to say.
-    welfare_line = ""
-    if welfare_counts is not None:
-        ok, failures = welfare_counts
-        welfare_line = (
-            f"Проверка благополучия ({safety_events.WINDOW_DAYS} дн.): "
-            f"ok {ok} · сбои {failures}\n"
-        )
+    welfare = state_view.welfare_value(welfare_counts)
+    welfare_line = (
+        f"Проверка благополучия ({safety_events.WINDOW_DAYS} дн.): {welfare}\n"
+        if welfare is not None
+        else ""
+    )
 
     # 4d fixes. Shown only once there is something to show, unlike the
     # welfare line: the welfare check runs on ordinary turns and a line
     # of zeroes there means "it has stopped", while research only runs
     # when asked, so a permanent "0 · 0" would be noise for anyone who
     # does not use /study or /read.
-    #
     # The number that matters is the failures. A distiller returning
     # unparseable JSON makes `done` jobs with no cards, which reads as a
     # quiet week of unhelpful pages until this line says otherwise.
-    research_line = ""
-    if research_counts is not None:
-        distill_counts, search_counts = research_counts
-        if any(distill_counts) or any(search_counts):
-            research_line = (
-                f"Исследования ({safety_events.WINDOW_DAYS} дн.): "
-                f"разбор ok {distill_counts[0]} · сбои {distill_counts[1]} · "
-                f"поиск ok {search_counts[0]} · сбои {search_counts[1]}\n"
-            )
+    research = state_view.research_value(research_counts)
+    research_line = (
+        f"Исследования ({safety_events.WINDOW_DAYS} дн.): {research}\n"
+        if research is not None
+        else ""
+    )
 
-    breakdown = ""
-    if by_category:
-        breakdown = " · " + " · ".join(f"{name} {total:.2f}" for name, total in by_category.items())
+    breakdown = state_view.spend_breakdown_text(by_category)
 
     # 6a: "Фон: $x / $cap, задач N" (approved plan §5). `idle` is
     # (spend_today, usd_cap, jobs_today) or None -- optional the same
     # way `outbound`/`welfare_counts`/`research_counts` are, so tests
     # predating 6a that call _format_state directly keep working.
-    idle_line = ""
-    if idle is not None:
-        idle_spend, idle_cap, idle_jobs = idle
-        idle_line = f"Фон: {idle_spend:.2f} / {idle_cap:.2f}, задач {idle_jobs}\n"
+    idle_line = f"Фон: {state_view.idle_value(idle)}\n" if idle is not None else ""
 
     # 6c: "Канарейка: <дата> ок/⚠️" alongside the idle line -- `canary`
     # is `(local_date, passed)` from app/core/idle/facts.latest_canary_status,
     # or None if no canary has ever completed (nothing shown, same
     # "optional the same way idle/outbound/... is" posture idle_line
     # follows above).
-    canary_line = ""
-    if canary is not None:
-        canary_date, canary_passed = canary
-        mark = "ок" if canary_passed else "⚠️"
-        canary_line = f"Канарейка: {canary_date.isoformat()} {mark}\n"
+    canary_line = f"Канарейка: {state_view.canary_value(canary)}\n" if canary is not None else ""
 
     # 6e: "Бэкап: <дата время> ок" / "Бэкап: ⚠️ ошибка <дата>" (plan
     # section 9.1) -- `backup` is `(local_date, status)` from
     # app/ops/backup.latest_backup_status, or None if no backup has ever
-    # run. `pruned` counts as a healthy outcome here (the backup itself
-    # succeeded; pruning is what later happened to the object), so only
-    # `failed` gets the warning glyph.
-    backup_line = ""
-    if backup is not None:
-        backup_started_at, backup_status = backup
-        local_started = backup_started_at.astimezone(tz)
-        if backup_status == "failed":
-            backup_line = f"Бэкап: ⚠️ ошибка {local_started.date().isoformat()}\n"
-        else:
-            backup_line = f"Бэкап: {local_started.strftime('%Y-%m-%d %H:%M')} ок\n"
+    # run.
+    backup_line = (
+        f"Бэкап: {state_view.backup_parts(backup, tz)[0]}\n" if backup is not None else ""
+    )
 
-    debt_line = ""
-    if debts is not None and debts[0]:
-        overdue = f" (просрочено {debts[1]})" if debts[1] else ""
-        debt_line = f"Долг: {debts[0]}{overdue} · /paid\n"
-    attention_line = ""
-    attention_until = getattr(user_state, "attention_until", None)
-    if getattr(user_state, "attention", "present") == "short" and attention_until is not None:
-        if attention_until > clock.now_utc():
-            until_local = attention_until.astimezone(tz).strftime("%H:%M")
-            attention_line = f"Внимание: коротко до {until_local}\n"
+    debt = state_view.debt_value(debts)
+    debt_line = f"Долг: {debt}\n" if debt is not None else ""
+    attention = state_view.attention_parts(user_state, clock, tz)
+    attention_line = f"Внимание: {attention[0]}\n" if attention is not None else ""
 
     return (
         "Персона: {persona}\n"
@@ -588,8 +549,12 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/menu]"
         )
 
-    @router.message(Command("state"))
-    async def state(message: Message) -> None:
+    async def _state_inputs() -> dict:
+        """Everything `_format_state`/`state_view.render` take, gathered
+        once and shared by /state's send path and the `st:r` refresh
+        callback below -- so a refresh can never show a different set of
+        facts than a fresh /state would.
+        """
         async with sessionmaker() as session:
             user_state = await get_state(session)
             spend = await today_usd(session, clock, user_state.timezone)
@@ -638,30 +603,94 @@ def build_router(
             backup_status = await latest_backup_status(session)
             vault_health = await vault_status.probe(session, settings, clock)
             vault_purge_pending = await vault_status.purge_pending(session)
-        await message.answer(
-            _format_state(
-                user_state,
-                spend,
-                settings,
-                clock,
-                by_category=by_category,
-                idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
-                canary=canary_status,
-                backup=backup_status,
-                memories=memories,
-                outbound=outbound,
-                welfare_counts=welfare_counts,
-                research_counts=research_counts,
-                mood=current_mood,
-                debts=debt_counts,
-                # The short hash of the persona file actually served
-                # (PERSONA_FILE), the same sha persona_version rows use.
-                persona_version=load_persona(persona_path_for(settings))[1][:8],
-                vault_line=vault_ui.format_state_line(
-                    vault_health, clock, user_state.timezone, purge_pending=vault_purge_pending
-                ),
-            )
+        return dict(
+            user_state=user_state,
+            spend=spend,
+            settings=settings,
+            clock=clock,
+            by_category=by_category,
+            idle=(idle_spend, settings.IDLE_USD_CAP, idle_jobs),
+            canary=canary_status,
+            backup=backup_status,
+            memories=memories,
+            outbound=outbound,
+            welfare_counts=welfare_counts,
+            research_counts=research_counts,
+            mood=current_mood,
+            debts=debt_counts,
+            # The short hash of the persona file actually served
+            # (PERSONA_FILE), the same sha persona_version rows use.
+            persona_version=load_persona(persona_path_for(settings))[1][:8],
+            vault_line=vault_ui.format_state_line(
+                vault_health, clock, user_state.timezone, purge_pending=vault_purge_pending
+            ),
         )
+
+    @router.message(Command("state"))
+    async def state(message: Message) -> None:
+        kw = await _state_inputs()
+        # The web sink only ever understands SendMessage/EditMessageText
+        # text (app/web/sink.py) -- it must never be handed a rich
+        # message, so this is the one path left exactly as it was before
+        # 10.1's sendRichMessage existed.
+        if getattr(message.bot, "is_web_sink", False):
+            await message.answer(_format_state(**kw))
+            return
+        try:
+            await message.bot.send_rich_message(
+                chat_id=message.chat.id,
+                rich_message=state_view.render(**kw),
+                reply_markup=state_view.refresh_keyboard(),
+            )
+        except TelegramBadRequest as exc:
+            # A rich-message rejection must never leave /state silent --
+            # fall back to the plain text every version before 10.1 sent.
+            logger.warning(
+                "state rich message rejected: %s",
+                type(exc).__name__,
+                extra={"event": "state_rich_fallback"},
+            )
+            await message.answer(_format_state(**kw))
+
+    @router.callback_query(F.data == state_view.REFRESH_CALLBACK)
+    async def state_refresh(callback: CallbackQuery) -> None:
+        """`st:r` -- /state's own [🔄 Обновить], refreshing in place.
+
+        Always answers exactly once, whatever branch it takes below (the
+        same "an unanswered button spins until Telegram times it out"
+        convention every other callback here follows).
+        """
+        if not isinstance(callback.message, Message) or getattr(
+            callback.bot, "is_web_sink", False
+        ):
+            await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+            return
+
+        kw = await _state_inputs()
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                rich_message=state_view.render(**kw),
+                reply_markup=state_view.refresh_keyboard(),
+            )
+        except TelegramBadRequest as exc:
+            # Same substring app/tg/send.py's _NOT_MODIFIED matches --
+            # a replayed refresh (or one that lands on already-current
+            # data) is a no-op, not a failure.
+            if "message is not modified" in str(exc).lower():
+                await answer_callback(callback.bot, callback.id, "Обновлено")
+                return
+            # Same fallback the initial send uses: an edit that Telegram
+            # refuses for any other reason must not leave the button dead
+            # -- send a fresh plain message rather than nothing at all.
+            logger.warning(
+                "state rich message refresh rejected: %s",
+                type(exc).__name__,
+                extra={"event": "state_rich_fallback"},
+            )
+            await callback.bot.send_message(callback.message.chat.id, _format_state(**kw))
+        await answer_callback(callback.bot, callback.id, "Обновлено")
 
     @router.message(Command("vault"))
     async def vault(message: Message, command: CommandObject) -> None:

@@ -22,7 +22,7 @@ from app.config import Settings
 from app.db.models import Message, TelegramUpdate, UserState
 from app.tg import menu
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
-from conftest import FakeLLMProvider, FakeSession
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
@@ -420,4 +420,7 @@ async def test_state_action_sends_the_state_message(sessionmaker):
 
     await _feed(dp, bot, _callback_update(2, "mn:a:state", message_id=1))
 
-    assert any("Персона:" in m.text for m in fake.sent)
+    # /state now sends a rich message (app/tg/state_view.py), not a
+    # plain one -- flatten it back to text for this assertion.
+    assert len(fake.rich) == 1
+    assert "Персона:" in flatten_rich_message(fake.rich[0].rich_message)

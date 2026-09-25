@@ -23,7 +23,7 @@ from app.core import turn
 from app.core.state import get_state
 from app.db.models import SpendLedger, TelegramUpdate, UserState
 from app.tg.router import START_TEXT, build_router
-from conftest import FakeLLMProvider, FakeSession
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 
 TEST_CHAT_ID = 555
 
@@ -98,8 +98,11 @@ async def test_state_reflects_persona_intensity_model_and_timezone(sessionmaker)
     update = Update.model_validate(_command_update(2, "/state"), context={"bot": bot})
     await dp.feed_update(bot, update)
 
-    assert len(fake.sent) == 1
-    text = fake.sent[0].text
+    # /state now sends a rich message (app/tg/state_view.py), not a
+    # plain one -- flatten it back to text for these lifted assertions.
+    assert len(fake.sent) == 0
+    assert len(fake.rich) == 1
+    text = flatten_rich_message(fake.rich[0].rich_message)
 
     assert "вкл" in text
     assert "4/5" in text
@@ -108,13 +111,16 @@ async def test_state_reflects_persona_intensity_model_and_timezone(sessionmaker)
     assert "1.00" in text  # the cap
     assert "0.22" in text  # sum of the two ledger rows, formatted to 2dp
 
-    # The local time comes from user_state.timezone via zoneinfo, not the
-    # server's local time: allow the current or next minute to avoid a
-    # flaky boundary crossing.
+    # The footer's "Обновлено HH:MM" comes from user_state.timezone via
+    # zoneinfo, not the server's local time (app/tg/state_view.py drops
+    # the plain view's "Локальное время" line entirely -- a snapshot
+    # date+time would read stale in a message meant to be refreshed
+    # rather than re-sent; see docs/decisions.md). Allow the current or
+    # next minute to avoid a flaky boundary crossing.
     now = datetime.datetime.now(ZoneInfo(timezone))
     possible_times = {
-        now.strftime("%Y-%m-%d %H:%M"),
-        (now + datetime.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M"),
+        now.strftime("%H:%M"),
+        (now + datetime.timedelta(minutes=1)).strftime("%H:%M"),
     }
     assert any(t in text for t in possible_times)
 
@@ -139,10 +145,11 @@ async def test_state_shows_persona_off(sessionmaker):
     update = Update.model_validate(_command_update(3, "/state"), context={"bot": bot})
     await dp.feed_update(bot, update)
 
-    assert "выкл" in fake.sent[0].text
-    assert "1/5" in fake.sent[0].text
+    text = flatten_rich_message(fake.rich[0].rich_message)
+    assert "выкл" in text
+    assert "1/5" in text
     # No spend rows inserted: today's spend is zero.
-    assert "0.00" in fake.sent[0].text
+    assert "0.00" in text
 
     await bot.session.close()
 

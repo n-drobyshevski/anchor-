@@ -54,6 +54,7 @@ from aiogram.methods import (
     SendChatAction,
     SendDocument,
     SendMessage,
+    SendRichMessage,
     TelegramMethod,
 )
 from aiogram.types import Message as TgMessage
@@ -235,11 +236,17 @@ class FakeSession(BaseSession):
     records every answerCallbackQuery -- a button that is never answered
     spins in the real client until Telegram times it out, so "did we
     answer?" is a property worth asserting rather than assuming.
+
+    `rich` (10.1's sendRichMessage, for the rich /state view) mirrors
+    `sent` but for rich messages -- a real sendRichMessage response
+    carries no `.text` the way sendMessage's does, so the returned
+    TgMessage is built without one.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[SendMessage] = []
+        self.rich: list[SendRichMessage] = []
         self.chat_actions: list[SendChatAction] = []
         self.edits: list[EditMessageText] = []
         self.answered: list[AnswerCallbackQuery] = []
@@ -260,6 +267,18 @@ class FakeSession(BaseSession):
                     "date": 0,
                     "chat": {"id": method.chat_id, "type": "private"},
                     "text": method.text,
+                },
+                context={"bot": bot},
+            )
+        if isinstance(method, SendRichMessage):
+            self.rich.append(method)
+            message_id = self._next_message_id
+            self._next_message_id += 1
+            return TgMessage.model_validate(
+                {
+                    "message_id": message_id,
+                    "date": 0,
+                    "chat": {"id": method.chat_id, "type": "private"},
                 },
                 context={"bot": bot},
             )
@@ -318,6 +337,59 @@ def make_bot(token: str = "123456:TESTTOKEN") -> tuple[Bot, FakeSession]:
     session object directly (most do, to assert on .sent)."""
     fake_session = FakeSession()
     return Bot(token=token, session=fake_session), fake_session
+
+
+def _rich_text_of(node) -> str:
+    """The plain string a RichTextUnion node would read as -- str as-is,
+    a list concatenated, and a Bold/DateTime/... entity by its own
+    `text` field (a date_time entity's `text` is exactly the fallback
+    string the old plain /state would have printed -- see
+    app/tg/state_view.py)."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(_rich_text_of(item) for item in node)
+    if isinstance(node, dict):
+        return _rich_text_of(node.get("text"))
+    return str(node)
+
+
+def flatten_rich_message(rich_message) -> str:
+    """Flattens a sent/edited InputRichMessage back to newline-joined
+    text, so /state's existing plain-text assertions keep working
+    against the rich view. A table row's cells join with ": " (label,
+    value), reconstructing the same "Label: value" shape _format_state's
+    lines have; a details block's own table is walked too, after its
+    summary line.
+
+    Structure-aware rather than a fully generic walk: a naive "collect
+    every string" would scatter a row's label and value onto separate
+    fragments and break both `in` and `==` assertions lifted from the
+    plain-text tests.
+    """
+    lines: list[str] = []
+
+    def walk_block(block: dict) -> None:
+        kind = block["type"]
+        if kind in ("heading", "paragraph", "footer"):
+            lines.append(_rich_text_of(block["text"]))
+        elif kind == "table":
+            for row in block["cells"]:
+                lines.append(": ".join(_rich_text_of(cell.get("text")) for cell in row))
+            if block.get("caption"):
+                lines.append(_rich_text_of(block["caption"]))
+        elif kind == "details":
+            lines.append(_rich_text_of(block["summary"]))
+            for inner in block["blocks"]:
+                walk_block(inner)
+        # divider and anything else: nothing to collect.
+
+    dumped = rich_message.model_dump(mode="json", exclude_none=True)
+    for block in dumped["blocks"]:
+        walk_block(block)
+    return "\n".join(lines)
 
 
 class FakeLLMProvider:
