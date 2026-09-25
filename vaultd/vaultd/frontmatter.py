@@ -1,9 +1,8 @@
-"""Frontmatter and the opt-in rule (plan sections 4.3 and 4.4).
+"""Frontmatter and the note's own mark (8e plan section 3; phase-8 plan 4.4).
 
 **What counts as frontmatter.** A single leading `---` fence whose
-closing fence ends within the first 4 KB. Anything else -- no fence, an
-unclosed fence, a longer block, a byte-order mark, invalid UTF-8 --
-means "no frontmatter", and so "not opted in".
+closing fence ends within the first 4 KB. No fence at all means "no
+frontmatter".
 
 **The loader refuses two things plain `safe_load` accepts:**
 
@@ -11,23 +10,46 @@ means "no frontmatter", and so "not opted in".
   way 4 KB of YAML can still eat memory;
 - *duplicate keys*, because Obsidian Sync's merge can leave two
   `anchor:` lines behind, and `safe_load` silently keeps the last one.
-  A note whose opt-in depends on which of two lines wins is not opted
-  in.
 
-**Opting in** takes exactly `anchor: read`, as a string, at the top
-level of a mapping. Not a folder, not a tag, not `anchor: Read`, not
-`anchor: [read]`. The bot keeps its own copy of this loader (8b); the
+**The mark** is what the note itself says, before any folder rule
+(classes.py combines the two). Exactly `anchor: never`, `anchor:
+personal` or `anchor: knowledge`, as a string at the top level of a
+mapping. 8a's `anchor: read` is `legacy_read`, which classes.py counts
+as personal.
+
+**A note whose properties cannot be read is `unknown`, not `none`.**
+`none` lets a folder rule decide the class; `unknown` hides the note
+whatever the folders say. A leading fence that is unclosed, over 4 KB,
+behind a byte-order mark, or holds YAML the strict loader refuses might
+have said `anchor: never`, so a folder rule must not be able to reveal
+it (docs/decisions.md, "8e -- unreadable properties hide the note").
+The same goes for a file that is not UTF-8 throughout: the bot could
+not read it anyway. The bot keeps its own copy of this loader (8b); the
 two never share code, by the independence rule.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 import yaml
 
 from vaultd.config import FRONTMATTER_MAX_BYTES
 
-OPT_IN_KEY = "anchor"
-OPT_IN_VALUE = "read"
+MARK_KEY = "anchor"
+
+NoteMark = Literal["never", "personal", "knowledge", "legacy_read", "unknown", "none"]
+
+# The property values that classify a note, and 8a's opt-in, which now
+# reads as personal (classes.py).
+_MARKS: dict[str, NoteMark] = {
+    "never": "never",
+    "personal": "personal",
+    "knowledge": "knowledge",
+    "read": "legacy_read",
+}
+
+_BOM = b"\xef\xbb\xbf"
 
 
 class FrontmatterError(Exception):
@@ -99,19 +121,36 @@ def load(data: bytes) -> dict | None:
     return loaded
 
 
-def is_opted_in(data: bytes) -> bool:
-    """True iff the note says `anchor: read` and is readable text throughout.
+def _has_leading_fence(data: bytes) -> bool:
+    """True when the file opens with a `---` line, byte-order mark or not."""
+    if data.startswith(_BOM):
+        data = data[len(_BOM) :]
+    first = data.split(b"\n", 1)[0].rstrip(b"\r")
+    return first == b"---"
 
-    The whole file must be UTF-8: a note the bot could not decode is a
-    note it cannot read, and listing it would only produce a GET that
-    fails.
-    """
+
+def note_mark(data: bytes) -> NoteMark:
+    """What the note's own properties say about it (module docstring)."""
     try:
         data.decode("utf-8")
     except UnicodeDecodeError:
-        return False
-    meta = load(data)
-    if meta is None:
-        return False
-    value = meta.get(OPT_IN_KEY)
-    return isinstance(value, str) and value == OPT_IN_VALUE
+        return "unknown"
+    if not _has_leading_fence(data):
+        return "none"
+    block = split(data)
+    if block is None:
+        return "unknown"
+    try:
+        loaded = yaml.load(block.decode("utf-8"), Loader=StrictLoader)  # noqa: S506 - StrictLoader is a SafeLoader
+    except (UnicodeDecodeError, yaml.YAMLError, FrontmatterError, RecursionError, ValueError):
+        return "unknown"
+    if loaded is None:
+        return "none"
+    if not isinstance(loaded, dict):
+        return "unknown"
+    if MARK_KEY not in loaded:
+        return "none"
+    value = loaded[MARK_KEY]
+    if not isinstance(value, str):
+        return "unknown"
+    return _MARKS.get(value, "unknown")

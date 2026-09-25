@@ -163,6 +163,61 @@ records that a file changed, and the next change to that fact in
 Anchor overwrites your edit. Your own extra properties survive that
 rewrite. A journal day you edit by hand is never written again.
 
+## 7. Your notes: personal and knowledge (8e)
+
+Anchor sees a note outside `Anchor/` only if you have given it a class,
+and only after you say `/vault notes on`. Nothing is indexed or used in
+a conversation yet: that is 8d. 8e lets you classify your notes and
+check the classification.
+
+| Class | Meaning | Where it may go |
+|---|---|---|
+| *(none)* | The default. Invisible to Anchor. | nowhere |
+| `never` | Invisible, even inside a folder a rule would include. | nowhere |
+| `personal` | About you: your life, health, relationships, plans, feelings. | only the conversation with you |
+| `knowledge` | Generic, true whoever reads it: a note on CCRU, on GCP IAM. | the conversation, as reference material |
+
+Two things set a class:
+
+- **a property on the note:** `anchor: personal`, `anchor: knowledge`
+  or `anchor: never`, exactly, at the top level of its properties;
+- **a folder rule** in `Anchor/settings.md`. Copy
+  `docs/vault/settings.md` into the vault as `Anchor/settings.md` and
+  edit the three lists. A rule covers its folder and everything below
+  it.
+
+When the two disagree, **the stricter class wins**: `never` beats
+`personal`, which beats `knowledge`. A note marked `knowledge` inside a
+personal folder is personal, and `/vault` counts it as a conflict. A
+note that mixes both kinds is personal: split it if you want the
+generic part used as knowledge. Put a private aside inside a knowledge
+note in an Obsidian comment (`%% … %%`); 8d strips comments before
+indexing.
+
+Notes you marked `anchor: read` in 8a now count as personal. `/vault`
+counts them under «проверить» until you change them to `personal` or
+`knowledge`. Any other value (`anchor: Knowledge`, a typo) hides the
+note and is counted as «неизвестная метка». So is a note whose
+properties cannot be read, such as two `anchor:` lines left by a Sync
+merge.
+
+**A broken `Anchor/settings.md` hides every note** until it is fixed:
+invalid YAML, an unknown or misspelled key, a list that is not a list,
+a path with a leading `/` or a `..`, or a missing `anchor: settings`.
+Dropping only the broken rules would also drop `never_folders`. A
+missing file is fine: it just means there are no folder rules.
+
+Then, in Telegram:
+
+- `/vault notes on`: Anchor may read classified notes. The reply says
+  what that means.
+- `/vault`: one more line, for example
+  `Заметки: личные 12 · знания 40 · проверить: конфликт 2, anchor: read 3 · не прочитано: неизвестная метка 1`.
+  It holds counts only: Anchor never learns the names of notes it
+  cannot see.
+- `/vault notes off`: forget everything read from notes. `/delete` does
+  the same and turns notes off.
+
 ## Turning it off
 
 Set `VAULT_MODE=off` on the bot. The bot then makes no request to the

@@ -67,6 +67,11 @@ FORBIDDEN_IMPORTS = {
     "app.core.tick": "the proactive tick",
     "app.core.scheduler": "plans proactive sends",
     "app.startup": "loads persona.md at boot",
+    # 8e (8e plan sections 7-8): vault notes reach only the persona's
+    # turn. Personal note text never reaches a search provider or a research model, in any phase;
+    # knowledge note text does not in 8e either.
+    "app.vault.notes_personal": "personal vault notes reach only the persona's turn",
+    "app.vault.notes_knowledge": "knowledge vault notes reach only the persona's turn in 8e",
 }
 
 # Names that would mean the same thing even if the import were indirect.
@@ -77,6 +82,11 @@ FORBIDDEN_NAMES = (
     "build_messages",
     "persona_active",
     "PERSONA_PATH",
+    # 8e: the vault note modules in any import spelling, including
+    # `from app.vault import notes_personal`, which the import scan above
+    # reads as `app.vault` alone.
+    "notes_personal",
+    "notes_knowledge",
 )
 
 

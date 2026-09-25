@@ -61,6 +61,11 @@ FORBIDDEN_IMPORTS = {
     "app.core.pause": "the hard/soft pause-word state machine",
     "app.core.welfare": "the welfare classifier and its persona-off trigger",
     "app.core.quiet": "writes user_state.quiet_until",
+    # 8e (8e plan sections 7-8): vault notes reach only the persona's
+    # turn. Personal note text never reaches the notebook, the review or any other autonomy module, in any phase;
+    # knowledge note text does not in 8e either.
+    "app.vault.notes_personal": "personal vault notes reach only the persona's turn",
+    "app.vault.notes_knowledge": "knowledge vault notes reach only the persona's turn in 8e",
 }
 
 # Whole-package prefixes, not single modules: anything under app.tg is
@@ -617,3 +622,16 @@ def test_the_persona_write_scan_does_not_flag_a_read_or_an_unrelated_write(tmp_p
         "        fh.write('x')\n"
     )
     assert _persona_write_violations(sample) == []
+
+
+# 8e (8e plan section 8): the import scan above reads `from app.vault
+# import notes_personal` as `app.vault` alone, so the two note modules
+# are also refused by name, in docstring-stripped code.
+NOTE_MODULE_NAMES = ("notes_personal", "notes_knowledge")
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_no_autonomy_module_reaches_vault_notes(path):
+    code = _code_without_docstrings(path)
+    violations = [f"{path}: mentions {name}" for name in NOTE_MODULE_NAMES if name in code]
+    assert not violations, "\n".join(violations)

@@ -15,7 +15,7 @@ import re
 from typing import Callable
 
 from app.vault import errors
-from app.vault.client import FileContent, ManifestEntry, ServiceStatus
+from app.vault.client import FileContent, Manifest, ManifestEntry, NotesSummary, ServiceStatus
 from app.vault.errors import VaultError
 
 WRITABLE = re.compile(r"^Anchor/(Memory|Journal)/[^/]+\.md$")
@@ -32,6 +32,10 @@ class FakeVault:
         self.running = True
         self.down = False
         self.purged = 0
+        # 8e: notes vaultd would list, path -> (class, content), and the
+        # summary it would report. Synthetic; never a real vault.
+        self.notes: dict[str, tuple[str, str]] = {}
+        self.summary = NotesSummary(conflict=0, legacy_read=0, unknown_value=0, settings="absent")
         # Called with (path) just before a PUT lands: a test's chance to
         # "edit the file on the phone" after the manifest was read.
         self.before_put: Callable[[str], None] | None = None
@@ -57,14 +61,19 @@ class FakeVault:
             running_since=datetime.datetime(2026, 9, 25, 8, 0, tzinfo=datetime.timezone.utc),
         )
 
-    async def manifest(self) -> list[ManifestEntry]:
+    async def manifest(self) -> Manifest:
         self.calls.append(("manifest", ""))
         self._check()
-        return [
+        entries = [
             ManifestEntry(path, sha(content), len(content.encode()), "anchor")
             for path, content in sorted(self.files.items())
             if WRITABLE.match(path)
         ]
+        entries += [
+            ManifestEntry(path, sha(content), len(content.encode()), "note", note_class)
+            for path, (note_class, content) in sorted(self.notes.items())
+        ]
+        return Manifest(entries, self.summary)
 
     async def get_file(self, path: str) -> FileContent:
         self.calls.append(("get", path))

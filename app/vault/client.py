@@ -4,6 +4,13 @@ One method per route, each returning plain data or raising VaultError
 with a code from app/vault/errors.py. 8a calls only `status()`; the
 rest exist because the API they mirror ships in 8a, and 8b-8d use them.
 
+**8e: the bot trusts the class vaultd reports, and nothing looser.** A
+note entry must carry `class` `personal` or `knowledge`; a missing or
+foreign class is a protocol error, exactly like a bad scope, and an
+Anchor-scope entry must carry none. The manifest's `summary` holds
+counts and the settings file's state, never a path: the bot cannot know
+the names of notes it may not see.
+
 **What the client refuses to do.** No redirects (a 3xx is a bad
 response, not a hop). No proxy or `.netrc` from the environment
 (`trust_env=False`), so the bearer token only ever goes to VAULT_URL,
@@ -56,12 +63,34 @@ class ServiceStatus:
     running_since: datetime.datetime | None
 
 
+NOTE_CLASSES = ("personal", "knowledge")
+SETTINGS_STATES = ("ok", "absent", "invalid")
+
+
 @dataclass(frozen=True)
 class ManifestEntry:
     path: str
     sha256: str
     size: int
     scope: str
+    # `personal` or `knowledge` for a note; None for Anchor's own files.
+    note_class: str | None = None
+
+
+@dataclass(frozen=True)
+class NotesSummary:
+    """What vaultd says about notes it does not list. Counts only."""
+
+    conflict: int
+    legacy_read: int
+    unknown_value: int
+    settings: str
+
+
+@dataclass(frozen=True)
+class Manifest:
+    entries: list[ManifestEntry]
+    summary: NotesSummary
 
 
 @dataclass(frozen=True)
@@ -69,6 +98,34 @@ class FileContent:
     path: str
     sha256: str
     content: str
+    note_class: str | None = None
+
+
+def _count(value: Any) -> int:
+    _require(isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+    return value
+
+
+def _note_class(scope: str, item: dict) -> str | None:
+    """A note must say which class it is; Anchor's own files must not."""
+    if scope == "anchor":
+        _require("class" not in item)
+        return None
+    note_class = item.get("class")
+    _require(isinstance(note_class, str) and note_class in NOTE_CLASSES)
+    return note_class
+
+
+def _summary(raw: Any) -> NotesSummary:
+    _require(isinstance(raw, dict))
+    settings = raw.get("settings")
+    _require(isinstance(settings, str) and settings in SETTINGS_STATES)
+    return NotesSummary(
+        conflict=_count(raw.get("conflict")),
+        legacy_read=_count(raw.get("legacy_read")),
+        unknown_value=_count(raw.get("unknown_value")),
+        settings=settings,
+    )
 
 
 def _status_error(status: int) -> str:
@@ -160,7 +217,7 @@ class VaultClient:
             running_since=_parse_time(data.get("running_since")),
         )
 
-    async def manifest(self) -> list[ManifestEntry]:
+    async def manifest(self) -> Manifest:
         data = await self._request("GET", "/v1/manifest")
         files = data.get("files")
         _require(isinstance(files, list))
@@ -170,14 +227,18 @@ class VaultClient:
             path, sha, size, scope = (item.get(k) for k in ("path", "sha256", "size", "scope"))
             _require(isinstance(path, str) and isinstance(sha, str) and isinstance(size, int))
             _require(scope in ("anchor", "note"))
-            out.append(ManifestEntry(path=path, sha256=sha, size=size, scope=scope))
-        return out
+            out.append(
+                ManifestEntry(path=path, sha256=sha, size=size, scope=scope, note_class=_note_class(scope, item))
+            )
+        return Manifest(entries=out, summary=_summary(data.get("summary")))
 
     async def get_file(self, path: str) -> FileContent:
         data = await self._request("GET", "/v1/file", params={"path": path})
         content, sha = data.get("content"), data.get("sha256")
         _require(isinstance(content, str) and isinstance(sha, str) and data.get("path") == path)
-        return FileContent(path=path, sha256=sha, content=content)
+        note_class = data.get("class")
+        _require(note_class is None or note_class in NOTE_CLASSES)
+        return FileContent(path=path, sha256=sha, content=content, note_class=note_class)
 
     async def put_file(self, path: str, content: str, if_sha256: str | None) -> str:
         data = await self._request(

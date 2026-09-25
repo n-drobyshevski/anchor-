@@ -8,7 +8,8 @@ and 8a's `vault_file` and `vault_hold`, and they are here too -- see the comment
 What stays out is transport and queue plumbing -- telegram_update, job,
 pending_memory -- whose only real content is message text that
 `messages` already carries in full, plus persona_version, which is a
-hash of a file in this repo, and 8a's vault_chunk and vault_status. Including them would double the file with
+hash of a file in this repo, and the vault's note chunks (8e's
+note_chunk_personal and note_chunk_knowledge) and vault_status. Including them would double the file with
 Telegram's own envelope format and make it harder to read, not more
 complete. tests/test_export.py keeps that list honest: a table
 is exported or it is named there, and nothing may be neither.
@@ -140,9 +141,10 @@ EXPORTED_MODELS = (
     PlannerAction,
     # 8a (phase-8 plan section 10): which files in the vault were
     # Anchor's and what state each is in, and any change still waiting
-    # for a yes. vault_chunk (a derived copy of the user's own notes,
+    # for a yes; from 8e a note's row carries its class. The two note
+    # chunk tables (8e: derived copies of the user's own notes,
     # rebuildable from the vault) and vault_status (operational
-    # timestamps) are the two deliberate omissions, named in
+    # timestamps) are the deliberate omissions, named in
     # tests/test_export.py.
     VaultFile,
     VaultHold,

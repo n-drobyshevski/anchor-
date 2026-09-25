@@ -19,13 +19,14 @@ async def test_scopes(client, vault: Path) -> None:
     write(vault, "Anchor/Memory/x.base", "not md")
     write(vault, "Notes/Бег.md", "---\nanchor: read\n---\n")
     manifest = await (await client.get("/v1/manifest", headers=AUTH)).json()
-    assert [(f["path"], f["scope"]) for f in manifest["files"]] == [
-        ("Anchor/Journal/2026-09-25-abcdef.md", "anchor"),
-        ("Anchor/Memory/0001-abcdef.md", "anchor"),
-        ("Anchor/Memory/sub/x.md", "note"),
-        ("Anchor/Memory/Утро.md", "anchor"),
-        ("Notes/Бег.md", "note"),
+    assert [(f["path"], f["scope"], f.get("class")) for f in manifest["files"]] == [
+        ("Anchor/Journal/2026-09-25-abcdef.md", "anchor", None),
+        ("Anchor/Memory/0001-abcdef.md", "anchor", None),
+        ("Anchor/Memory/sub/x.md", "note", "personal"),
+        ("Anchor/Memory/Утро.md", "anchor", None),
+        ("Notes/Бег.md", "note", "personal"),
     ]
+    assert all("class" not in f for f in manifest["files"] if f["scope"] == "anchor")
     day = manifest["files"][0]
     assert day["sha256"] == hashlib.sha256(b"day").hexdigest()
     assert day["size"] == 3
@@ -44,14 +45,14 @@ def test_a_rewrite_with_the_same_size_and_mtime_is_rehashed(vault: Path) -> None
     """ob sets mtimes from the server, so mtime alone is not a safe key."""
     path = write(vault, "Anchor/Memory/a.md", "aaaa")
     manifest = Manifest(vault)
-    [before] = manifest.scan()
+    [before] = manifest.scan().entries
     st = path.stat()
 
     # A new inode: write elsewhere, rename over, restore size and mtime.
     replacement = write(vault, "Anchor/Memory/.tmp", "bbbb")
     os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
     os.replace(replacement, path)
-    [after] = manifest.scan()
+    [after] = manifest.scan().entries
     assert manifest.last_reads == 1
     assert after.sha256 == hashlib.sha256(b"bbbb").hexdigest() != before.sha256
 
@@ -59,7 +60,7 @@ def test_a_rewrite_with_the_same_size_and_mtime_is_rehashed(vault: Path) -> None
     st = path.stat()
     path.write_text("cccc")
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    [again] = manifest.scan()
+    [again] = manifest.scan().entries
     assert manifest.last_reads == 1
     assert again.sha256 == hashlib.sha256(b"cccc").hexdigest()
 
@@ -67,8 +68,8 @@ def test_a_rewrite_with_the_same_size_and_mtime_is_rehashed(vault: Path) -> None
 def test_losing_the_opt_in_drops_the_note(vault: Path) -> None:
     path = write(vault, "note.md", "---\nanchor: read\n---\n")
     manifest = Manifest(vault)
-    assert [e.path for e in manifest.scan()] == ["note.md"]
+    assert [e.path for e in manifest.scan().entries] == ["note.md"]
     path.write_text("---\nanchor: nope\n---\n")
-    assert manifest.scan() == []
+    assert manifest.scan().entries == []
     path.unlink()
-    assert manifest.scan() == []
+    assert manifest.scan().entries == []

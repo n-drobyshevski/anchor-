@@ -52,6 +52,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Float,
@@ -428,6 +429,14 @@ class UserState(Base):
     # Postgres cannot draw it from a CSPRNG without an extension, and
     # every insert of this row goes through SQLAlchemy.
     vault_epoch: Mapped[str] = mapped_column(String, nullable=False, default=new_epoch)
+    # 8e (8e plan section 5): whether Anchor may index and retrieve the
+    # user's classified vault notes at all. `/vault notes on|off` is its
+    # only writer (app/vault/consent.py); off also deletes everything
+    # derived from notes, and /delete resets it, so the next pass cannot
+    # rebuild an index from the same notes without a fresh yes.
+    notes_consent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
@@ -1842,6 +1851,12 @@ class VaultFile(Base):
     hold_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("vault_hold.id", ondelete="SET NULL")
     )
+    # 8e: a note's effective class as vaultd reported it, and nothing for
+    # a fact or a journal day. The chunk tables' composite foreign keys
+    # point at (id, note_class), so the database refuses a chunk filed
+    # under the other class, and refuses reclassifying a note while its
+    # old-class chunks exist (8e plan section 5).
+    note_class: Mapped[str | None] = mapped_column(String)
     disk_sha256: Mapped[str | None] = mapped_column(String)
     render_digest: Mapped[str | None] = mapped_column(String)
     missing_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1859,11 +1874,17 @@ class VaultFile(Base):
             name="ck_vault_file_state",
         ),
         CheckConstraint(
-            "(role = 'fact' and local_date is null)"
-            " or (role = 'journal' and memory_id is null and local_date is not null)"
-            " or (role = 'note' and memory_id is null and local_date is null)",
+            "(role = 'fact' and local_date is null and note_class is null)"
+            " or (role = 'journal' and memory_id is null and local_date is not null"
+            " and note_class is null)"
+            " or (role = 'note' and memory_id is null and local_date is null"
+            " and note_class is not null)",
             name="ck_vault_file_role_columns",
         ),
+        CheckConstraint(
+            "note_class in ('personal', 'knowledge')", name="ck_vault_file_note_class"
+        ),
+        UniqueConstraint("id", "note_class", name="uq_vault_file_id_note_class"),
         CheckConstraint(
             "(state = 'held') = (hold_id is not null)", name="ck_vault_file_held_has_hold"
         ),
@@ -1878,19 +1899,23 @@ class VaultFile(Base):
     )
 
 
-class VaultChunk(Base):
-    """A searchable piece of an opted-in note (plan section 9, milestone 8d).
+class _NoteChunk:
+    """The shape both chunk tables share (8e plan section 5, milestone 8d).
 
-    A derived copy of the user's own notes, rebuildable from the vault:
-    purged by /delete, omitted from /export.
+    A searchable piece of a classified note: a derived copy of the
+    user's own notes, rebuildable from the vault, purged by /delete and
+    by `/vault notes off`, omitted from /export.
+
+    **Personal and knowledge chunks never share a table.** Each table's
+    `note_class` is a constant pinned by a CHECK, and its foreign key is
+    `(file_id, note_class) -> vault_file(id, note_class)`, so a chunk
+    can only sit under a file of its own class. Only
+    app/vault/notes_personal.py and notes_knowledge.py name these
+    models (tests/test_vault_notes_isolation.py).
     """
 
-    __tablename__ = "vault_chunk"
-
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    file_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("vault_file.id", ondelete="CASCADE"), nullable=False
-    )
+    file_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     ord: Mapped[int] = mapped_column(Integer, nullable=False)
     heading: Mapped[str | None] = mapped_column(String)
     text: Mapped[str] = mapped_column(String, nullable=False)
@@ -1901,12 +1926,45 @@ class VaultChunk(Base):
         ),
     )
 
-    __table_args__ = (
-        CheckConstraint("char_length(heading) <= 200", name="ck_vault_chunk_heading_length"),
-        CheckConstraint('char_length("text") <= 1200', name="ck_vault_chunk_text_length"),
-        UniqueConstraint("file_id", "ord", name="uq_vault_chunk_file_ord"),
-        Index("ix_vault_chunk_tsv", "tsv", postgresql_using="gin"),
+
+def _note_chunk_args(table: str, note_class: str) -> tuple:
+    return (
+        CheckConstraint(f"note_class = '{note_class}'", name=f"ck_{table}_class"),
+        CheckConstraint("char_length(heading) <= 200", name=f"ck_{table}_heading_length"),
+        CheckConstraint('char_length("text") <= 1200', name=f"ck_{table}_text_length"),
+        ForeignKeyConstraint(
+            ["file_id", "note_class"],
+            ["vault_file.id", "vault_file.note_class"],
+            ondelete="CASCADE",
+            name=f"fk_{table}_file_class",
+        ),
+        UniqueConstraint("file_id", "ord", name=f"uq_{table}_file_ord"),
+        Index(f"ix_{table}_tsv", "tsv", postgresql_using="gin"),
     )
+
+
+class NoteChunkPersonal(_NoteChunk, Base):
+    """A chunk of a personal note. Its text reaches only the persona's turn."""
+
+    __tablename__ = "note_chunk_personal"
+
+    note_class: Mapped[str] = mapped_column(
+        String, nullable=False, default="personal", server_default=sa.text("'personal'")
+    )
+
+    __table_args__ = _note_chunk_args("note_chunk_personal", "personal")
+
+
+class NoteChunkKnowledge(_NoteChunk, Base):
+    """A chunk of a generic-knowledge note: reference material, not the user's view."""
+
+    __tablename__ = "note_chunk_knowledge"
+
+    note_class: Mapped[str] = mapped_column(
+        String, nullable=False, default="knowledge", server_default=sa.text("'knowledge'")
+    )
+
+    __table_args__ = _note_chunk_args("note_chunk_knowledge", "knowledge")
 
 
 class VaultStatus(Base):

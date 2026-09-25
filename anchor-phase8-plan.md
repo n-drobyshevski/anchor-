@@ -1,7 +1,9 @@
 # Anchor — Phase 8 Implementation Plan
 
 Version: 2026-09-25 (rev. 4: renumbered from "Phase 5" to Phase 8 when merged into `main`; rev. 3 was 8a's verification of §2 against the live sources, each change marked *8a*) · Scope: **the vault**, an Obsidian vault that is Anchor's second brain, persistent and editable, synced through Obsidian Sync.
-Parent docs: the Phase 1–6 plans and `docs/decisions.md`. For Phase 8 work, **this file wins**. Earlier invariants stay in force unless §13 amends them.
+Parent docs: the Phase 1–6 plans and `docs/decisions.md`. For Phase 8 work, **this file wins**.
+
+**rev. 5 (8e).** `anchor-phase8e-plan.md` supersedes, for notes: §4.3 (your notes), §5.4's note scope, §6's `vault_chunk`, §9 (indexing, retrieval, prompt block), §10's note-related `/delete` and `/export` lines, §12 (eval), and the note items in §13, §15, §16 and §17. Where the two disagree on those, the 8e plan wins. Facts and the journal are unchanged. Earlier invariants stay in force unless §13 amends them.
 
 **Numbering.** This plan was written as "Phase 5" against a branch that stopped at Phase 4. On `main`, Phase 5 is personality (notebook, `/mind`, weekly review, standing orders), Phase 6 is idle learning, and Phase 7 is reserved for tracker and device integrations. So the vault is Phase 8, and its milestones are 8a–8d throughout. Where this plan says a notebook or idle learning comes later, read "already on `main`": nothing here changes them, and anything they do to memory must keep the vault's invariants (docs/decisions.md, "8b on main").
 

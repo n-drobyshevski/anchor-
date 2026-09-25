@@ -19,6 +19,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 VAULT = ROOT / "app" / "vault"
 
@@ -120,3 +122,40 @@ def test_mirror_mode_applies_nothing_to_memory():
             if name in MEMORY_WRITERS:
                 offenders.append(f"{path.name}: {name}")
     assert offenders == []
+
+
+# 8e: notes consent is the one user_state column app/vault/ writes, and
+# consent.py is its only writer. Any other module here that so much as
+# builds an UPDATE of UserState fails.
+def _user_state_writes(tree: ast.AST) -> list[str]:
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "values"):
+            continue
+        # Any statement built on UserState, however `update` was imported
+        # or aliased: app/vault/ has no other reason to call .values on it.
+        receiver = ast.unparse(node.func.value)
+        if "UserState" in receiver:
+            found.extend(k.arg or "**" for k in node.keywords)
+    return found
+
+
+def test_only_consent_writes_user_state_and_only_notes_consent():
+    for path in _modules():
+        writes = _user_state_writes(ast.parse(path.read_text(encoding="utf-8")))
+        if path.name == "consent.py":
+            assert writes == ["notes_consent"]
+        else:
+            assert writes == [], f"{path.name} writes user_state: {writes}"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "update(UserState).where(UserState.id == 1).values(vault_epoch='x')\n",
+        "from sqlalchemy import update as _u\n_u(UserState).values(vault_epoch='x')\n",
+        "sa.update(models.UserState).values(vault_epoch='x')\n",
+    ],
+)
+def test_the_user_state_check_catches_a_write(code):
+    assert _user_state_writes(ast.parse(code)) == ["vault_epoch"]

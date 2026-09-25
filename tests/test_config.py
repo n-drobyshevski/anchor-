@@ -476,6 +476,23 @@ def test_the_vault_is_off_by_default_and_needs_nothing():
     settings = Settings(_env_file=None, **_COMPLETE)
     assert settings.VAULT_MODE == "off"
     check_runtime_settings(settings)
+    # 8e: both note classes are off by default, each with its own cap.
+    assert settings.VAULT_KNOWLEDGE_ENABLED is False
+    assert settings.VAULT_PERSONAL_ENABLED is False
+    assert (settings.VAULT_KNOWLEDGE_IN_PROMPT, settings.VAULT_PERSONAL_IN_PROMPT) == (2, 2)
+
+
+@pytest.mark.parametrize("name", ["VAULT_KNOWLEDGE_IN_PROMPT", "VAULT_PERSONAL_IN_PROMPT"])
+@pytest.mark.parametrize("value", [-1, 6, 100])
+def test_a_note_cap_outside_its_bounds_stops_the_boot(name, value):
+    """Checked in every mode: the cap is a ceiling a deploy cannot lift."""
+    with pytest.raises(SystemExit, match=name):
+        check_runtime_settings(_settings(**{name: value}))
+
+
+@pytest.mark.parametrize("value", [0, 5])
+def test_note_caps_at_their_bounds_pass(value):
+    check_runtime_settings(_settings(VAULT_KNOWLEDGE_IN_PROMPT=value, VAULT_PERSONAL_IN_PROMPT=value))
 
 
 @pytest.mark.parametrize("mode", ["status", "mirror", "sync"])

@@ -9,9 +9,11 @@ gets a bare 401.
 - 400: the path (or body) is malformed. Says nothing about the vault.
 - 403: a write, delete or purge on a path that is not writable, or one
   that crosses a symlink. The bot's code should never produce one.
-- 404: *every* read refusal. A note that is not opted in, a note that
-  does not exist, a dot-folder, a symlink, a folder: all the same 404
-  with the same body, so the bot cannot probe for what it may not see.
+- 404: *every* read refusal. A note that is unclassified or `never`,
+  any note while `Anchor/settings.md` is unusable, the settings file
+  itself, a note that does not exist, a dot-folder, a symlink, a
+  folder: all the same 404 with the same body, so the bot cannot probe
+  for what it may not see.
 - 412: compare-and-swap failed (see store.py).
 - 422: a file in Anchor's own folders that is not UTF-8. It is Anchor's
   scope, so it exists as far as the bot is concerned, but it cannot be
@@ -33,7 +35,7 @@ from typing import Any, Protocol
 
 from aiohttp import web
 
-from vaultd import frontmatter, paths
+from vaultd import classes, frontmatter, paths
 from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
 from vaultd.store import Conflict, Missing, Store
@@ -115,13 +117,20 @@ async def status(request: web.Request) -> web.Response:
 
 async def manifest(request: web.Request) -> web.Response:
     async with request.app[SCAN_LOCK_KEY]:
-        entries = await asyncio.to_thread(request.app[MANIFEST_KEY].scan)
-    return web.json_response({"files": [e.as_json() for e in entries]})
+        scan = await asyncio.to_thread(request.app[MANIFEST_KEY].scan)
+    return web.json_response(
+        {"files": [e.as_json() for e in scan.entries], "summary": scan.summary.as_json()}
+    )
 
 
-def _read_for_bot(store: Store, rel: str) -> tuple[str, bytes] | None:
-    """(scope, bytes) if the manifest would list this path, else None."""
-    if paths.has_dot_segment(rel) or not rel.endswith(".md"):
+def _read_for_bot(store: Store, rel: str) -> tuple[str, str | None, bytes] | None:
+    """(scope, class, bytes) if the manifest would list this path, else None.
+
+    The class is recomputed here, at read time, from the note's bytes and
+    the settings file as they are now, through the same
+    classes.effective_class the manifest uses.
+    """
+    if paths.has_dot_segment(rel) or not rel.endswith(".md") or classes.is_settings_file(rel):
         return None
     try:
         data = paths.read_file(store.vault_path, rel)
@@ -130,10 +139,14 @@ def _read_for_bot(store: Store, rel: str) -> tuple[str, bytes] | None:
     if data is None:
         return None
     if paths.is_writable(rel):
-        return "anchor", data
-    if len(data) <= NOTE_MAX_BYTES and frontmatter.is_opted_in(data):
-        return "note", data
-    return None
+        return "anchor", None, data
+    if len(data) > NOTE_MAX_BYTES:
+        return None
+    rules = classes.load_rules(store.vault_path)
+    resolved = classes.effective_class(rel, frontmatter.note_mark(data), rules)
+    if resolved.note_class is None:
+        return None
+    return "note", resolved.note_class, data
 
 
 async def get_file(request: web.Request) -> web.Response:
@@ -144,14 +157,15 @@ async def get_file(request: web.Request) -> web.Response:
     found = await asyncio.to_thread(_read_for_bot, request.app[STORE_KEY], rel)
     if found is None:
         return web.json_response(_NOT_FOUND, status=404)
-    _scope, data = found
+    scope, note_class, data = found
     try:
         content = data.decode("utf-8")
     except UnicodeDecodeError:
         return _json_error("not_utf8", 422)
-    return web.json_response(
-        {"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content}
-    )
+    body = {"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content}
+    if scope == "note":
+        body["class"] = note_class
+    return web.json_response(body)
 
 
 async def put_file(request: web.Request) -> web.Response:

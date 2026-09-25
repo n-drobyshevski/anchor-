@@ -1452,3 +1452,167 @@ private DNS in legacy (IPv6-only) environments. `tests/test_listen.py`
 fetches `/healthz` over `127.0.0.1`, and over `::1` where the host has
 IPv6. The API stays private either way: the service has no public
 domain or TCP proxy, which boot still refuses.
+
+## 8e — unreadable properties hide the note
+
+8a had two outcomes for a note's properties: opted in or not. 8e adds
+folder rules, and with them a third question: may a folder rule decide
+this note? vaultd's `note_mark` answers `none` (yes) only when the note
+plainly says nothing: no leading fence, an empty block, or a mapping
+with no `anchor` key. Everything that *might* have said something is
+`unknown`, which hides the note whatever its folder says: an unclosed
+fence, a block over 4 KB, a byte-order mark before the fence, an alias,
+a duplicate key, a non-mapping, a non-string `anchor`, or a file that is
+not UTF-8. So does any value other than the four Anchor knows
+(`never`, `personal`, `knowledge`, `read`), including `Knowledge`, a
+typo and `settings`.
+
+**Why:** a Sync merge that leaves `anchor: never` twice must not turn a
+note in a knowledge folder visible. Reading "I cannot tell" as "no
+opinion" would do exactly that.
+
+**This would be wrong if** people routinely kept broken YAML in notes
+they want read. `/vault` counts them as «неизвестная метка», so they are
+visible as a number, and fixing the note brings it back.
+
+## 8e — a conflict is a property looser than its folder
+
+The plan says `/vault` counts each disagreement. `effective_class`
+counts one only when the property is *looser* than the folder: a
+`knowledge` note in a personal or never folder, or a `personal` note in
+a never folder. That is the case where your own word was not followed.
+A stricter property, `anchor: never` on one note inside a knowledge
+folder, is the ordinary way to carve out an exception, and counting
+those would bury real conflicts. A legacy `anchor: read` in a never
+folder counts as a conflict too, since it reads as personal.
+
+## 8e — the settings file
+
+`Anchor/settings.md` fails closed, as the plan says, and 8e decides what
+"unusable" covers beyond the plan's list:
+
+- **An unknown key is invalid.** A typo like `never_folder:` would
+  otherwise silently drop every never-rule, which is the one failure
+  the fail-closed rule exists to prevent.
+- **A list that is `null`** (`never_folders:` with nothing after it) is
+  invalid, not empty. The template writes `[]`.
+- **A folder entry** must be a non-empty string with no leading or
+  trailing `/`, no backslash or NUL, no empty, `.`, `..` or dot-segment.
+  A trailing slash is refused rather than trimmed: every silent repair
+  of the file is a guess about what you meant.
+- **A symlink, a folder or a non-regular file** at that path is invalid,
+  not absent. The same goes for a read error.
+- **The file is never listed, never served and never writable.**
+  `GET /v1/file` refuses it by name, before reading it.
+
+The shipped template (`docs/vault/settings.md`) is parsed by a vaultd
+test, so its Russian comments cannot push it past the 4 KB frontmatter
+cap unnoticed.
+
+## 8e — never-rules match in any case
+
+Folder names are compared segment by segment after NFC. `never_folders`
+are also compared casefolded; `personal_folders` and `knowledge_folders`
+are not. A never-rule typed as `life/diary` for a folder named
+`Life/Diary` should still hide the diary, and one that matches too much
+only hides more. A readable rule that matched in any case could reveal
+a folder you did not name.
+
+## 8e — the migration refuses rather than guesses
+
+`c3e8f5a1d2b6` stops if `vault_chunk` has rows, as the plan asks, and
+also if any `vault_file` row has `role='note'`. The new CHECK requires
+every note row to carry a class, and 8e will not pick one. Nothing on
+`main` writes either (checked in code, not production data), so both
+refusals should never fire. If one does, the message names the table,
+and deleting the rows by hand is safe: both are derived from the vault,
+and 8d rebuilds them. `tests/test_vault_notes_migration.py` runs the
+migration on its own throwaway database and proves both refusals.
+
+The debug views follow the plan: `debug.note_chunk_personal` and
+`debug.note_chunk_knowledge` carry `id, file_id, ord` and the text's
+length, without the heading length `debug.vault_chunk` had, and
+`debug.vault_file` gains `note_class`. `debug.user_state` does not gain
+`notes_consent`: the plan did not ask for it, and that view never
+carried the vault's columns.
+
+## 8e — consent is checked inside the access modules
+
+The plan puts consent at the callers: 8d indexes and retrieves only
+while `notes_consent` is on. The access modules check it as well.
+`search` joins `user_state` and returns nothing without consent, in the
+same query. `replace_chunks` raises `NotesConsentOff`. 8d's callers will
+still check first. This is the floor under them, so a caller that
+forgets cannot read or write a note without consent.
+
+`/vault notes off` deletes the note file rows, which cascade to both
+chunk tables, and sets the flag, in one transaction. It never has to
+touch a chunk table by name.
+
+## 8e — `search` has no rank threshold yet
+
+`search` returns every match, best first, up to `limit`. The plan's
+per-class thresholds (`PERSONAL_MIN_RANK`, `KNOWLEDGE_MIN_RANK`) are to
+be measured in 8d, as 2b measured trigram retrieval. Inventing a number
+now would be a threshold nobody measured. Nothing calls `search` in 8e.
+
+## 8e — the per-class settings exist before anything reads them
+
+8a's rule was that no setting exists that does nothing.
+`VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` and the two
+`*_IN_PROMPT` caps break it, because the 8e plan asks for them to be
+declared and validated now. Both switches default to off. The caps are
+bounded by a constant (`NOTES_IN_PROMPT_MAX`, 5), checked at boot in
+every mode, so a pasted variable cannot flood a prompt.
+
+## 8e — `/vault` reads the manifest, in `status` mode too
+
+8a pinned that `status` mode makes one request, `GET /v1/status`. With
+notes consent on, `/vault` now also makes one `GET /v1/manifest` to
+count notes by class, in every mode but `off`. Without it you could not
+check your classification until mirroring. The paths in the response
+are counted and dropped in `app/vault/status.py`, and nothing is
+logged but an error code. With consent off, no manifest is requested.
+`/state` is unchanged. `tests/test_vault_commands.py` pins both cases
+for every mode.
+
+**This would be wrong if** a large manifest made `/vault` slow. It is
+one request under the client's 5 s timeout, and a failure only drops
+the notes line.
+
+## 8e — `/vault`'s labels are split
+
+The plan's line put conflicts, `anchor: read` and unknown values all
+under «не прочитано». Only an unknown value is actually unread: a
+conflicting note and a legacy note are both read, as personal. The line
+therefore says «проверить: конфликт N, anchor: read N» and «не
+прочитано: неизвестная метка N». Only nonzero parts are shown. The reply
+to `/vault notes on` is the plan's text without its Markdown backticks,
+since every reply is plain text.
+
+## 8e — an old vaultd behind a new bot fails closed
+
+The bot now requires `class` on every note entry and a valid `summary`
+on every manifest. If the bot deploys before the vault service, each
+manifest is a protocol error (`bad_response`) until vaultd redeploys:
+mirror passes fail and retry each minute, and `/vault` drops its notes
+line. That is the intended direction. The bot never falls back to
+treating an unclassified note as readable. Both deploy from the same
+merge, since the vault's watch path `/vaultd/**` matches.
+
+## 8e — the manifest cache kept only what it listed
+
+vaultd's manifest evicted from its cache every path it did not list, so
+a note that was not opted in was re-read and re-hashed on every scan.
+8e needs the opposite: a settings edit must reclassify notes without
+re-reading them. So every note the scan considered stays cached, listed
+or not. `test_editing_settings_reclassifies_without_rereading_notes`
+checks `last_reads == 0` across four settings changes.
+
+## 8e — `docs/privacy.md` was a line short
+
+The English privacy note had no line for the planner, which
+`PRIVACY_TEXT` has carried since P4. 8e adds that line along with the
+notes line, and `tests/test_privacy.py` now checks that the two have the
+same number of lines and that both mention Obsidian. `PRIVACY_TEXT` is
+at 10 lines, the ceiling its own test allows.

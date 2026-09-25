@@ -13,7 +13,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
-from app.db.models import Message, VaultChunk, VaultFile, VaultHold, VaultStatus
+from app.db.models import (
+    Message,
+    NoteChunkKnowledge,
+    NoteChunkPersonal,
+    VaultFile,
+    VaultHold,
+    VaultStatus,
+)
 
 # Free-text columns: what a user wrote, what the model wrote, or what was
 # derived from either. None may appear as a column of any debug view.
@@ -39,7 +46,8 @@ CONTENT_COLUMNS = {
     # content, and a hash of a short fact confirms a guess at its text.
     "vault_file": {"path", "disk_sha256", "render_digest"},
     "vault_hold": {"payload"},
-    "vault_chunk": {"heading", "text", "tsv"},
+    "note_chunk_personal": {"heading", "text", "tsv"},
+    "note_chunk_knowledge": {"heading", "text", "tsv"},
     # Timestamps only; forgets_window is a JSON array of them.
     "vault_status": set(),
 }
@@ -97,7 +105,7 @@ async def test_debug_role_reads_views_but_not_tables(sessionmaker):
                 await session.execute(text(f"select * from public.{table}"))
 
 
-VAULT_VIEWS = ("vault_file", "vault_hold", "vault_chunk", "vault_status")
+VAULT_VIEWS = ("vault_hold", "vault_status", "note_chunk_personal", "note_chunk_knowledge")
 
 
 async def test_debug_role_reads_the_vault_views_granted_by_their_own_migration(sessionmaker):
@@ -107,27 +115,36 @@ async def test_debug_role_reads_the_vault_views_granted_by_their_own_migration(s
         hold = VaultHold(kind="mass_delete", payload={"file_ids": [1, 2, 3]})
         session.add(hold)
         await session.flush()
-        note = VaultFile(path="Секретная заметка.md", role="note", disk_sha256="a" * 64)
-        session.add(note)
+        personal = VaultFile(
+            path="Секретная заметка.md", role="note", note_class="personal", disk_sha256="a" * 64
+        )
+        knowledge = VaultFile(path="Секрет CCRU.md", role="note", note_class="knowledge")
+        session.add_all([personal, knowledge])
         await session.flush()
-        session.add(VaultChunk(file_id=note.id, ord=0, heading="Секрет", text="очень личное"))
+        session.add(NoteChunkPersonal(file_id=personal.id, ord=0, heading="Секрет", text="очень личное"))
+        session.add(NoteChunkKnowledge(file_id=knowledge.id, ord=0, heading="Секрет", text="Land"))
         session.add(VaultStatus(id=1))
         await session.commit()
 
-    for view in VAULT_VIEWS:
+    # 8e: debug.vault_file is re-granted by c3e8f5a1d2b6's CREATE OR
+    # REPLACE, and carries both notes; each chunk view carries one.
+    for view in (*VAULT_VIEWS, "vault_file"):
         async with sessionmaker() as session:
             await session.execute(text("set local role anchor_debug"))
             rows = (await session.execute(text(f"select * from debug.{view}"))).all()
-            assert len(rows) == 1
+            assert len(rows) == (2 if view == "vault_file" else 1)
             assert "Секрет" not in repr(rows)
             assert "a" * 64 not in repr(rows)
+            assert ".md" not in repr(rows)
 
     async with sessionmaker() as session:
         await session.execute(text("set local role anchor_debug"))
         hold_row = (await session.execute(text("select file_count from debug.vault_hold"))).one()
         assert hold_row == (3,)
-        seen = (await session.execute(text("select seen from debug.vault_file"))).one()
-        assert seen == (True,)
+        seen = (
+            await session.execute(text("select seen, note_class from debug.vault_file order by id"))
+        ).all()
+        assert seen == [(True, "personal"), (False, "knowledge")]
 
     for table in VAULT_VIEWS:
         async with sessionmaker() as session:

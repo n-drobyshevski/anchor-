@@ -59,7 +59,8 @@ from app.db.models import (
     WebSession,
     WebUpdate,
     WeeklyReview,
-    VaultChunk,
+    NoteChunkKnowledge,
+    NoteChunkPersonal,
     VaultFile,
     VaultHold,
     VaultStatus,
@@ -337,10 +338,13 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 state="held", hold_id=hold.id,
             )
         )
-        note = VaultFile(path="Бег.md", role="note")
-        session.add(note)
+        # 8e: one note of each class, each with a chunk in its own table.
+        note = VaultFile(path="Бег.md", role="note", note_class="personal")
+        library = VaultFile(path="Library/CCRU.md", role="note", note_class="knowledge")
+        session.add_all([note, library])
         await session.flush()
-        session.add(VaultChunk(file_id=note.id, ord=0, heading="Бег", text="Бегаю по утрам в парке."))
+        session.add(NoteChunkPersonal(file_id=note.id, ord=0, heading="Бег", text="Бегаю по утрам в парке."))
+        session.add(NoteChunkKnowledge(file_id=library.id, ord=0, heading="CCRU", text="Hyperstition."))
         session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 

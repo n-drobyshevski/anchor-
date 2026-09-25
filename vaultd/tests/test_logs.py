@@ -97,3 +97,21 @@ def test_the_formatter_drops_keys_outside_the_allowlist() -> None:
     out = JsonFormatter().format(record)
     assert NOTE_TITLE not in out
     assert '"status": 200' in out
+
+
+async def test_classification_logs_no_folder_title_or_class_per_path(client, vault: Path, caplog) -> None:
+    folder = "Личная папка"
+    write(vault, "Anchor/settings.md", f"---\nanchor: settings\npersonal_folders: [{folder}]\n---\n")
+    write(vault, f"{folder}/{NOTE_TITLE}.md", f"---\nanchor: knowledge\n---\n{NOTE_BODY}\n")
+    write(vault, f"{NOTE_TITLE}-2.md", f"---\nanchor: knowlege\n---\n{NOTE_BODY}\n")
+    with caplog.at_level(logging.DEBUG):
+        await client.get("/v1/manifest", headers=AUTH)
+        await client.get("/v1/file", params={"path": f"{folder}/{NOTE_TITLE}.md"}, headers=AUTH)
+        write(vault, "Anchor/settings.md", f"---\nanchor: settings\npersonal_folders: [{folder}\n---\n")
+        await client.get("/v1/manifest", headers=AUTH)
+        write(vault, "Anchor/settings.md", f"---\nanchor: settings\npersonal_folders: [{folder}]\n---\n")
+        await client.get("/v1/manifest", headers=AUTH)
+    logged = _everything_logged(caplog)
+    assert "settings_invalid" in logged
+    for secret in (folder, NOTE_TITLE, NOTE_BODY, "personal", "knowledge", "knowlege", "settings.md"):
+        assert secret not in logged

@@ -8,7 +8,8 @@ data landed in; 4d adds the cancel step -- see `cancel_research_jobs`.
 into it: every foreign key in the schema either stays inside that list
 (message -> telegram_update, message -> scene, memory -> memory,
 study_card -> study_clip -> study_job, study_card -> memory,
-vault_chunk -> vault_file -> memory, vault_file -> vault_hold) or belongs
+note_chunk_personal / note_chunk_knowledge -> vault_file -> memory,
+vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
 not itself listed here, the statement fails loudly instead of silently
@@ -168,13 +169,20 @@ PURGED_TABLES = (
     "planner_snapshot",
     "planner_action",
     # 8a: the vault's four tables (phase-8 plan section 6), child-first.
-    # vault_chunk is a derived copy of the user's own opted-in notes,
-    # vault_file names their files, vault_hold carries fact text waiting
+    # The note chunks (8e: split by class, below) are derived copies of
+    # the user's own notes, vault_file names their files, vault_hold carries fact text waiting
     # for a yes, and vault_status is only timestamps -- but it records
     # when this user's vault was reachable, which is theirs too. The
     # files in the vault itself are 8b's vault_purge job; this empties
     # the database's record of them.
-    "vault_chunk",
+    # 8e (8e plan section 5): vault_chunk is split by class. Both chunk
+    # tables are derived copies of the user's own classified notes --
+    # personal ones are about the user by definition, and knowledge ones
+    # are still the user's own library -- so both go, before vault_file
+    # which their composite keys point at. /delete also resets
+    # notes_consent (reset_values), or the next pass would rebuild them.
+    "note_chunk_personal",
+    "note_chunk_knowledge",
     "vault_file",
     "vault_hold",
     "vault_status",
@@ -243,6 +251,10 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         # with a file rendered after it, and is deleted as an orphan
         # rather than imported (8b).
         "vault_epoch": new_epoch(),
+        # 8e (8e plan section 5): notes are read again only after a new
+        # `/vault notes on`. Without this, the next pass would rebuild
+        # the index /delete just wiped from the same classified notes.
+        "notes_consent": False,
         "updated_at": clock.now_utc(),
     }
 

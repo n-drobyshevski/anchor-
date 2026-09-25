@@ -19,6 +19,7 @@ no model call, no outbound).
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8; `status` and `mirror` so far) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
+| Vault notes: personal vs knowledge classes and consent (8e; nothing is indexed or used until 8d) | **off** | `/vault notes on`; later `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` (8d) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -49,7 +50,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
-| `/vault` | Vault status: is the sync running, how many facts are in Obsidian | `VAULT_MODE` |
+| `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class | `VAULT_MODE` |
+| `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them | — |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -1057,6 +1059,122 @@ sent as one burst.
   `checkin.note`.** The message is retagged; the note is not. The day
   file therefore leaves the note out on any day with a welfare message,
   or the day after, and a test proves no welfare text reaches any file.
+
+## Milestone 8e — personal notes and generic knowledge
+
+A note about CCRU and a note about your partner are both "notes", but
+they are not the same kind of data. 8e gives every note Anchor can see
+a class, before 8d indexes anything: `personal` (about you) or
+`knowledge` (generic, true whoever reads it). Anything unclassified
+stays invisible, exactly as an unopted note was in 8a. The spec is
+`anchor-phase8e-plan.md`; for the parts its section 1 lists, it wins
+over the phase-8 plan.
+
+### Who decides the class
+
+You do, always: no model and no heuristic ever assigns one. A note says
+`anchor: personal`, `anchor: knowledge` or `anchor: never`, or a folder
+rule in `Anchor/settings.md` covers it (`docs/vault/settings.md` is the
+template). When they disagree, the stricter class wins: `never` beats
+`personal` beats `knowledge`. 8a's `anchor: read` counts as personal,
+because personal is the stricter of the two readable classes.
+
+**vaultd decides, not the bot.** `classes.py` is the one place the rule
+lives, and both the manifest and `GET /v1/file` call it. Its failures
+all hide:
+
+- **A broken settings file hides every note.** Dropping only the folder
+  rules would also drop `never_folders`, and a diary note marked
+  `knowledge` would appear. An unknown key is fatal too, so a typo like
+  `never_folder:` cannot silently drop the never-rules.
+- **Unreadable properties hide the note.** Two `anchor:` lines left by
+  a Sync merge, an alias, an unclosed fence: any of these might have
+  said `never`, so a folder rule must not be able to reveal the note.
+- **An unknown value hides the note** whatever the folder says.
+- **Invisible notes are counts, never paths.** The manifest's `summary`
+  says how many notes conflict, still say `anchor: read`, or carry an
+  unknown value. A test asserts that no path is in the serialised JSON.
+
+Only a note's mark is cached, never its class, so an edit to the
+settings file reclassifies every note on the next scan without
+re-reading one of them. That took a fix: the cache used to evict every
+note it did not list, and so re-read them all on every scan.
+
+### Two tables the database will not let you mix up
+
+`vault_chunk`, still empty, becomes `note_chunk_personal` and
+`note_chunk_knowledge`. Each has a constant `note_class` pinned by a
+CHECK and a composite foreign key to `vault_file(id, note_class)`, so
+Postgres itself refuses a personal chunk under a knowledge file, and
+refuses reclassifying a note while chunks of its old class exist. The
+migration **refuses to run** if `vault_chunk` or a note file row has
+rows, rather than guess their class.
+
+Only `app/vault/notes_personal.py` and `notes_knowledge.py` touch
+those tables. Each has the same three functions, `replace_chunks`,
+`delete_for_file` and `search`, and `search` returns strings, never
+ids. Both check consent themselves: `search` finds nothing and
+`replace_chunks` refuses while it is off. 8d wires them in.
+
+### Consent
+
+`/vault notes on` sets `user_state.notes_consent`, and the reply says
+what it means. `/vault notes off` deletes every note file row, which
+takes both chunk tables with it, in one transaction. `/delete` resets
+consent, or the next pass would rebuild the index `/delete` just wiped
+from the same notes. `/vault` gains a line of counts:
+
+```
+Заметки: личные 12 · знания 40 · проверить: конфликт 2, anchor: read 3 · не прочитано: неизвестная метка 1
+```
+
+With consent on, that line costs one manifest request, in `status`
+mode too, so you can check the classification before mirroring. This
+is the only request 8e adds.
+
+### What each class may reach
+
+This is the contract. A later phase that adds a consumer of notes cites
+it, and extends the isolation tests.
+
+| Where | Personal notes | Knowledge notes |
+|---|---|---|
+| The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) |
+| The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never |
+| The notebook, `/mind` | never | never |
+| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never |
+| Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it |
+| `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e |
+| Web panels | not shown in 8e | not shown in 8e |
+| Becoming a memory fact | never automatically | never automatically |
+| Encrypted backups | included; deleted by `/delete` | same |
+| `/export` | left out (derived from the vault) | left out |
+| Claude Code | never: the vault is off-limits as a whole | never |
+
+If notes ever reach `/grok`, personal and knowledge will be separate
+scopes, both off by default.
+
+`tests/test_vault_notes_isolation.py` pins the imports. Only
+`app/core/turn.py` and `app/vault/` may import either note module, in
+any spelling, and the plan's forbidden list is named again beside the
+allowlist. Only each access module may name its own table, as a model
+or as SQL. The idle, research and autonomy isolation tests name both
+modules too, where each subsystem already looks. Each rule was checked
+by a deliberate edit that made it fail, then reverted.
+
+### What else changed
+
+- **Settings.** `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED`,
+  `VAULT_KNOWLEDGE_IN_PROMPT` and `VAULT_PERSONAL_IN_PROMPT` are declared
+  and bounded (0–5), and read by 8d. They replace the phase-8 plan's
+  `VAULT_NOTES_*`.
+- **`/privacy`** gains a line about notes, and `docs/privacy.md` gains
+  its English version, plus the planner line it had been missing. A
+  test now keeps the two the same length.
+- **The client refuses** a note entry with no class or a foreign class,
+  an Anchor entry that carries one, and a manifest without a valid
+  summary. An old vaultd behind a new bot therefore fails closed until
+  the vault service redeploys.
 
 ## Web UI
 
