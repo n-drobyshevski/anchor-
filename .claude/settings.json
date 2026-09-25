@@ -26,6 +26,8 @@
       "mcp__Railway__deploy-template",
       "mcp__Anchor",
       "mcp__claude_ai_Anchor",
+      "mcp__anc",
+      "mcp__claude_ai_anc",
       "Read(./.env)",
       "Read(./.env.local)",
       "Read(./.env.production)",

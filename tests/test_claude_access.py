@@ -323,3 +323,25 @@ async def test_delete_wipes_the_connection_and_the_pending_store(sessionmaker):
         )
         assert len(world.pending) == 0
         assert (await world.mcp(client, tokens["access_token"])).status == 401
+
+
+async def test_delete_also_voids_pending_web_login_codes(sessionmaker):
+    """A web login code issued just before /delete must not open a
+    session after it (the same wipe as Claude's pending requests)."""
+    from app.web import auth as web_auth
+
+    world = await _world(sessionmaker)
+    store = web_auth.CodeStore()
+    code = store.issue("pre-token", world.clock, ttl_s=300)
+    await data_ui.handle_delete_callback(
+        sessionmaker,
+        world.tg_bot,
+        world.settings,
+        world.clock,
+        callback_id="cb",
+        chat_id=CHAT_ID,
+        message_id=1,
+        data=f"d:yes:{int(time.time())}",
+        code_store=store,
+    )
+    assert store.verify("pre-token", code, world.clock) is False

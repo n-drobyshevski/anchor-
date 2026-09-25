@@ -1672,6 +1672,7 @@ def build_router(
             data=callback.data,
             hub=hub,
             claude_pending=claude_pending,
+            code_store=code_store,
         )
 
     @router.callback_query(F.data.startswith("w:"))

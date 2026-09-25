@@ -117,6 +117,11 @@ def test_hook_protocol_exit_code():
         # A connector renamed to something else is caught by its tools.
         "mcp__Renamed__get_dialogs",
         "mcp__claude_ai_My_Notes__search_library",
+        # The name the connector was actually given in claude.ai (C2's
+        # first contact): caught by tool name, and denied by name too.
+        "mcp__anc__get_journal",
+        "mcp__claude_ai_anc__get_memory",
+        "mcp__anc__get_state",
         # Any server whose name starts with "anchor": over-blocking an
         # unrelated one costs little, missing a renamed Anchor costs all.
         "mcp__anchorage__list",
@@ -174,5 +179,6 @@ def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook()
     settings = json.loads((HOOK.parent.parent / "settings.json").read_text())
     deny = settings["permissions"]["deny"]
     assert "mcp__Anchor" in deny and "mcp__claude_ai_Anchor" in deny
+    assert "mcp__anc" in deny and "mcp__claude_ai_anc" in deny
     matchers = [entry["matcher"] for entry in settings["hooks"]["PreToolUse"]]
     assert any("mcp__.*" in matcher.split("|") for matcher in matchers)

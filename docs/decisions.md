@@ -1852,3 +1852,28 @@ layout is otherwise unmatchable and counts toward the lockout. It is
 still one exact, constant-time match against a live code. A Cyrillic
 letter that is not a look-alike still matches nothing.
 
+## C2 — first contact: the connector surfaced in Claude Code
+
+The first real connection (connection #1, 2026-09-25) was named `anc`
+in claude.ai. Within seconds, the Claude Code session that built it was
+offered `mcp__anc__get_memory`, `get_journal`, `get_dialogs` and
+`get_state`: plan section 6.3's scenario, now observed rather than
+assumed. That session never called them.
+
+The guard hook was already the layer that caught them. It matches
+Anchor's tool names under any server name. `.claude/settings.json`
+denied only `mcp__Anchor` and `mcp__claude_ai_Anchor`, so it now also
+denies `mcp__anc` and `mcp__claude_ai_anc`, and `tests/test_claude_guard.py`
+pins those names. `docs/claude-connector.md` now says to name the
+connector `Anchor`: an unknown name is still caught, but only by the
+hook's tool-name rule. This also settles the rest of section 11.6: a
+cloud session shows a connector as `mcp__<its name>__<tool>`.
+
+## `/delete` voids pending web login codes too
+
+`/delete` truncated `web_session` and closed the web hub, but the web
+UI's in-memory `CodeStore` kept any pending login code. A code issued
+just before `/delete` could still open a fresh session after it. The
+handler now clears it, next to Claude's pending requests
+(`tests/test_claude_access.py`).
+
