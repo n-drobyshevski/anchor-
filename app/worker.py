@@ -87,6 +87,7 @@ from app.core.notebook import (
     run_notebook_reflect,
 )
 from app.core import orders as orders_module
+from app.core.obligations import OBLIGATION_SWEEP, sweep_missed_checkin
 from app.core.orders import ORDERS_EXPIRY
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
@@ -97,6 +98,7 @@ from app.core.scheduler import (
     heartbeat,
     maybe_enqueue_backup,
     maybe_enqueue_notebook_expiry,
+    maybe_enqueue_obligation_sweep,
     maybe_enqueue_orders_expiry,
     maybe_enqueue_planner_sync,
     maybe_enqueue_research_sweep,
@@ -377,6 +379,13 @@ async def _run_job(
         # expired (plan section 7's "Expiry") -- plain SQL housekeeping
         # like NOTEBOOK_EXPIRY above, needing neither provider nor a bot.
         await orders_module.expire_stale(session, clock=clock)
+        return ExtractOutcome()
+
+    if kind == OBLIGATION_SWEEP:
+        # Phase 5: opens yesterday's missed check-in as a debt -- plain
+        # SQL like ORDERS_EXPIRY above, idempotent by its unique index.
+        state = await get_state(session)
+        await sweep_missed_checkin(session, clock, state.timezone)
         return ExtractOutcome()
 
     if kind == REVIEW_EXPIRY:
@@ -769,6 +778,11 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_orders_expiry(session, clock, state.timezone)
+            # Phase 5: the debt queue's missed-check-in sweep, same
+            # cadence and reasoning.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_obligation_sweep(session, clock, state.timezone)
             # 5d: the weekly review's own daily sweep, same cadence and
             # same "not inside heartbeat()" reasoning as the three above.
             async with sessionmaker() as session:

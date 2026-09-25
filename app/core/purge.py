@@ -88,6 +88,8 @@ PURGED_TABLES = (
     "review_proposal",
     "weekly_review",
     "standing_order",
+    # Phase 5 (spec 2026-09-25): the debt queue.
+    "obligation",
     "proposal",
     "journal",
     "state_change",
@@ -218,6 +220,9 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         # a row that no longer exists, and the first persona turn after
         # a wipe should get to offer a callback again regardless.
         "callback_scene": None,
+        # Phase 5: back to full attention, as on a fresh deploy.
+        "attention": "present",
+        "attention_until": None,
         "updated_at": clock.now_utc(),
     }
 

@@ -131,12 +131,12 @@ from app.config import Settings
 from app.core import pause
 from app.core import clock as clock_module
 from app.core import boundaries, safety_events, welfare_terms
-from app.core import callbacks
+from app.core import attention, callbacks
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
 from app.core import checkin, memory, orders, welfare
 from app.core import persona_context as persona_context_module
-from app.core.prompt import build_messages, build_neutral_messages
+from app.core.prompt import build_messages, build_neutral_messages, persona_path_for
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
 from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
@@ -740,6 +740,8 @@ async def run_resume(
             # A pause word can never reach here: only /in and the
             # welfare button call this (plan sections 7 and 13).
             await update_state(session, "persona_active", True, source)
+            # Phase 5: coming back in is also back to full attention.
+            await attention.reset(session)
 
     await _send_canned_reply(
         sessionmaker,
@@ -946,6 +948,12 @@ async def run(
                 # (neither reaches this branch at all), and never an
                 # outbound send (app/core/outbound_send.py's own
                 # gather() calls leave this flag at its False default).
+                # Phase 5: Anchor's attention for this turn, before
+                # gather() so mood and the flags see it. Short mode only
+                # adds a flag; generation below always runs.
+                await attention.refresh(
+                    session, settings, clock, user_state, exclude_update_id=update_id
+                )
                 turn_persona_context = await persona_context_module.gather(
                     session,
                     settings,
@@ -956,6 +964,7 @@ async def run(
                     rng=NICKNAME_RNG,
                     user_text=user_text,
                     enable_callback=(kind == CHAT_KIND),
+                    soft_pause=(level == "soft"),
                 )
                 # 5e: dedupe -- a callback memory must never also appear
                 # under "## Может быть важно" for the same turn (both
@@ -1027,7 +1036,9 @@ async def run(
                     user_text=user_text,
                     update_id=update_id,
                     transcript_turns=settings.TRANSCRIPT_TURNS,
-                    flags=flags,
+                    # Phase 5: the context's flags first, so the turn's
+                    # own (check-in, yellow) and the retry flag stay last.
+                    flags=[*turn_persona_context.flags, *(flags or [])],
                     pinned=[row.text for row in pinned_rows],
                     retrieved=[row.text for row in retrieved_rows],
                     techniques=[row.text for row in technique_rows],
@@ -1046,6 +1057,8 @@ async def run(
                     amendments=list(turn_persona_context.amendments),
                     callback=turn_persona_context.callback,
                     planner=planner_lines,
+                    debts=list(turn_persona_context.debts),
+                    persona_path=persona_path_for(settings),
                 )
             else:
                 messages = await build_neutral_messages(
@@ -1206,7 +1219,11 @@ async def run(
                 user_text=user_text,
                 update_id=update_id,
                 transcript_turns=settings.TRANSCRIPT_TURNS,
-                flags=[*(flags or []), boundaries.RETRY_FLAG],
+                flags=[
+                    *turn_persona_context.flags,
+                    *(flags or []),
+                    boundaries.RETRY_FLAG,
+                ],
                 pinned=[],
                 retrieved=[],
                 summaries=await recent_summaries(session),
@@ -1226,6 +1243,8 @@ async def run(
                 amendments=list(turn_persona_context.amendments),
                 callback=turn_persona_context.callback,
                 planner=planner_lines,
+                debts=list(turn_persona_context.debts),
+                persona_path=persona_path_for(settings),
             )
         response = await _complete_with_retries(
             provider, retry_messages, update_id=update_id

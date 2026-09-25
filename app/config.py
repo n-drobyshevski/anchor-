@@ -224,6 +224,11 @@ class Settings(BaseSettings):
     # [0, 1].
     NICKNAME_RATE: float = 0.5
     VOICE_FILE: str = "persona/voice.md"
+    # Phase 5 (spec 2026-09-25): which persona file the system prompt is
+    # read from, relative to the repo root like VOICE_FILE. Swapping it
+    # by env keeps a private overlay out of the default branch; the code
+    # stays theme-agnostic either way.
+    PERSONA_FILE: str = "persona/persona.md"
     # How many lines of voice.md app/core/voice.py samples per scene.
     # Capped at the file's own length there, so this number is a
     # ceiling, not a promise.
@@ -282,6 +287,36 @@ class Settings(BaseSettings):
     # because the plan's config list does not name it.
     ORDERS_MAX_ACTIVE: int = 5
     ORDERS_IN_CHECKIN_MAX: int = 3
+
+    # Phase 5 (spec 2026-09-25): the debt queue (app/core/obligations.py,
+    # whose MAX_OPEN caps it at 5 open debts). DEBT_IN_PROMPT is how many
+    # of the oldest the "## Долг" section shows.
+    DEBT_IN_PROMPT: int = 3
+    # Scarce attention (app/core/attention.py): after this many
+    # in-character replies within a rolling hour, Anchor goes 'short'
+    # for a deterministic LOW..HIGH minutes.
+    MAX_SUBSTANTIVE_REPLIES: int = 12
+    ATTENTION_SHORT_MIN_LOW: int = 20
+    ATTENTION_SHORT_MIN_HIGH: int = 40
+
+    @field_validator(
+        "DEBT_IN_PROMPT",
+        "MAX_SUBSTANTIVE_REPLIES",
+        "ATTENTION_SHORT_MIN_LOW",
+    )
+    @classmethod
+    def _phase5_counts_at_least_one(cls, value: int, info) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("ATTENTION_SHORT_MIN_HIGH")
+    @classmethod
+    def _attention_high_not_below_low(cls, value: int, info) -> int:
+        low = info.data.get("ATTENTION_SHORT_MIN_LOW", 1)
+        if value < low:
+            raise ValueError(f"ATTENTION_SHORT_MIN_HIGH must be >= ATTENTION_SHORT_MIN_LOW ({low}), got {value}")
+        return value
 
     @field_validator("ORDERS_MAX_ACTIVE", "ORDERS_IN_CHECKIN_MAX")
     @classmethod

@@ -165,6 +165,8 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(
             models.CheckinOrderResult(checkin_id=checkin_row.id, order_id=order.id, result="no")
         )
+        # Phase 5: an open debt.
+        session.add(models.Obligation(text="прислать отчёт", kind="promised", source="user"))
         await session.commit()
 
     # 5d. A third flush -- weekly_review needs its id before

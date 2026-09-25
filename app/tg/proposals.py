@@ -17,7 +17,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.clock import Clock, SystemClock
-from app.core import proposal
+from app.core import obligations, proposal
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 
 logger = logging.getLogger(__name__)
@@ -28,12 +28,14 @@ REJECT = "Отклонить"
 ACCEPTED_TEXT = "✅ Принято"
 REJECTED_TEXT = "✖️ Отклонено"
 STALE = "Устарело."
+CAP_REACHED = "Долгов уже {max} — сначала закрой один (/paid)."
 
 # Plan section 8's example message, generalised over the three fields.
 FIELD_LABELS = {
     proposal.DUE_ACTION: "Главное действие",
     proposal.FOCUS_ON: "Фокус",
     proposal.RULE: "Правило",
+    proposal.OBLIGATION: "В долг",
 }
 CONFIRM_TEXT = "Записать? {label}: «{value}»"
 
@@ -150,13 +152,31 @@ async def handle_decision_callback(
     "If the proposal is not `pending`, just remove the buttons").
     """
     _, action, raw_id = data.split(":", 2)
-    await answer_callback(bot, callback_id)
 
     try:
         proposal_id = int(raw_id)
     except ValueError:
+        await answer_callback(bot, callback_id)
         await edit_keyboard(bot, chat_id, message_id, STALE, None)
         return
+
+    # Phase 5: accepting a debt at the cap would open nothing. Say so
+    # and leave the proposal pending, so it can be accepted once a debt
+    # is closed.
+    if action == "a":
+        async with sessionmaker() as session:
+            row = await session.get(proposal.Proposal, proposal_id)
+            full = (
+                row is not None
+                and row.field == proposal.OBLIGATION
+                and await obligations.open_count(session) >= obligations.MAX_OPEN
+            )
+        if full:
+            await answer_callback(
+                bot, callback_id, CAP_REACHED.format(max=obligations.MAX_OPEN)
+            )
+            return
+    await answer_callback(bot, callback_id)
 
     clock = clock or SystemClock()
     async with sessionmaker() as session:

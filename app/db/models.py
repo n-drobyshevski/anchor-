@@ -61,6 +61,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -409,9 +410,18 @@ class UserState(Base):
     # nulls this column on every `/delete`, which is what an ON DELETE
     # SET NULL would have bought anyway.
     callback_scene: Mapped[int | None] = mapped_column(BigInteger)
+    # Phase 5 (spec 2026-09-25): Anchor's own scarce attention, computed
+    # in code by app/core/attention.py (the only writer, a targeted
+    # UPDATE). 'short' adds a prompt flag and nothing else: an inbound
+    # turn is always answered.
+    attention: Mapped[str] = mapped_column(
+        String, nullable=False, default="present", server_default=text("'present'")
+    )
+    attention_until: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_user_state_id_singleton"),
+        CheckConstraint("attention in ('present', 'short')", name="ck_user_state_attention"),
         CheckConstraint("intensity between 1 and 5", name="ck_user_state_intensity_range"),
         CheckConstraint("ignored_in_row >= 0", name="ck_user_state_ignored_non_negative"),
     )
@@ -699,7 +709,7 @@ class Proposal(Base):
         # would then reject for a reason unrelated to the one enforced
         # in code.
         CheckConstraint(
-            "field in ('due_action', 'focus_on', 'rule', 'standing_order')",
+            "field in ('due_action', 'focus_on', 'rule', 'standing_order', 'obligation')",
             name="ck_proposal_field",
         ),
         CheckConstraint(
@@ -1336,6 +1346,63 @@ class StandingOrder(Base):
         ),
         CheckConstraint("counter_of is null or counter_of <> id", name="ck_standing_order_not_self_counter"),
         Index("ix_standing_order_status", "status"),
+    )
+
+
+class Obligation(Base):
+    """One thing the user still owes (phase 5, spec 2026-09-25: the debt queue).
+
+    Unlike `StandingOrder` (recurring), a debt is one-shot: it is opened,
+    then closed as `done` or `dropped`. `closed_at` is set exactly when
+    the row is no longer open (`ck_obligation_closed_iff_not_open`).
+
+    Writers live in app/core/obligations.py only, and every path to an
+    open row is a command, a button, or code: `/due` (kind='focus'), a
+    missed evening check-in (kind='checkin'), or an accepted extractor
+    proposal (kind='promised'). The extractor itself never inserts one.
+    At most `obligations.MAX_OPEN` rows are open; the cap is enforced in
+    code because a CHECK cannot count rows.
+    """
+
+    __tablename__ = "obligation"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    # A plain-string server_default: `text` is this class's own column
+    # name here, shadowing sqlalchemy's text() inside the class body.
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="open", server_default="open"
+    )
+    opened_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    due_local_date: Mapped[datetime.date | None] = mapped_column(Date)
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_mentioned_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint('char_length("text") <= 200', name="ck_obligation_text_length"),
+        CheckConstraint(
+            "kind in ('checkin', 'focus', 'promised', 'missed', 'custom')",
+            name="ck_obligation_kind",
+        ),
+        CheckConstraint(
+            "source in ('user', 'checkin', 'command', 'proposal')", name="ck_obligation_source"
+        ),
+        CheckConstraint("status in ('open', 'done', 'dropped')", name="ck_obligation_status"),
+        CheckConstraint(
+            "(status = 'open') = (closed_at is null)", name="ck_obligation_closed_iff_not_open"
+        ),
+        Index("ix_obligation_status_opened", "status", "opened_at"),
+        Index(
+            "uq_obligation_checkin_date",
+            "kind",
+            "due_local_date",
+            unique=True,
+            postgresql_where=sa_text("kind = 'checkin'"),
+        ),
     )
 
 

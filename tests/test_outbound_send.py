@@ -990,3 +990,36 @@ async def test_morning_gate_verdict_is_unaffected_by_a_brief_note(sessionmaker):
     with_note = await _verdict()
 
     assert without_note == with_note
+
+
+# --- Phase 5 (spec 2026-09-25): the morning names the oldest debt ------------
+
+
+def test_morning_flag_names_the_debt_and_is_unchanged_without_one():
+    from app.core.outbound_send import MORNING_DEBT_FLAG
+
+    plain = hidden_flag(MORNING)
+    assert hidden_flag(MORNING, debt=None) == plain
+    with_debt = hidden_flag(MORNING, debt="прислать отчёт")
+    assert MORNING_DEBT_FLAG.format(debt="прислать отчёт") in with_debt
+    assert with_debt.endswith(COMMON_FLAG)
+    # Only the morning message carries it.
+    assert hidden_flag(EVENING_NAG, debt="прислать отчёт") == hidden_flag(EVENING_NAG)
+
+
+async def test_build_outbound_messages_puts_the_oldest_debt_into_the_morning(sessionmaker):
+    from app.core import obligations
+    from app.core.outbound_send import build_outbound_messages
+
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        await obligations.open_(session, text="прислать отчёт", kind="promised", source="user")
+        await obligations.open_(session, text="позвонить маме", kind="promised", source="user")
+        state = await get_state(session)
+        messages = await build_outbound_messages(
+            session, Settings(), state, clock=FrozenClock(combine_local(DAY, datetime.time(9, 0), TIMEZONE)), kind=MORNING
+        )
+    assert "Старый долг: «прислать отчёт»" in messages[-1].content
+    now_block = messages[-2].content
+    assert prompt.DEBT_HEADER in now_block
+    assert "«позвонить маме»" in now_block

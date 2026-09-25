@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import obligations
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound
 from app.core.proposal import EXPIRED, get_pending
@@ -66,6 +67,9 @@ async def set_due(
     rather than by convention.
     """
     stripped = (text or "").strip()
+    # Phase 5: the main action is also the open 'focus' debt. The two
+    # move together here and in proposal.accept(), their only writers.
+    await obligations.replace_focus(session, clock, stripped or None)
     if stripped:
         await update_state(session, "due_action", stripped, source)
         return await update_state(session, "due_set_at", clock.now_utc(), source)

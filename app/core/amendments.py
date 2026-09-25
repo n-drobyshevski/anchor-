@@ -34,6 +34,8 @@ implementation plan's non-negotiable, enforced structurally by
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import dataclasses
 import logging
 
@@ -43,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core import review as review_module
 from app.core.clock import Clock
-from app.core.prompt import load_persona
+from app.core.prompt import PERSONA_PATH, load_persona, persona_path_for
 from app.core.scene import Deferred
 from app.core import clock as clock_module
 from app.core.spend import check_cap
@@ -112,7 +114,7 @@ async def adopt(
     if proposal is None:
         return AdoptResult(status="stale")
 
-    _, persona_sha = load_persona()
+    _, persona_sha = load_persona(persona_path_for(settings))
     # Constructed inline in the `session.add(...)` call itself, matching
     # app/core/orders.py's `create_active()` -- the shape
     # tests/test_autonomy_isolation.py's structural AST scan (a `Model(...)`
@@ -171,12 +173,14 @@ class DisplayRow:
     stale: bool
 
 
-async def list_for_display(session: AsyncSession) -> list[DisplayRow]:
+async def list_for_display(
+    session: AsyncSession, persona_path: Path = PERSONA_PATH
+) -> list[DisplayRow]:
     """`/amendments`' listing: active amendments, each flagged when
     `persona.md`'s current hash differs from the one it was adopted
     against -- persona.md is never rewritten to match, per the module
     docstring; the user is only told to check."""
-    _, current_sha = load_persona()
+    _, current_sha = load_persona(persona_path)
     rows = await active_amendments(session)
     return [DisplayRow(amendment=row, stale=row.persona_sha != current_sha) for row in rows]
 

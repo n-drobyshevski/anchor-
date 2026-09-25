@@ -25,7 +25,7 @@ from sqlalchemy import select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core import memory
+from app.core import memory, obligations
 from app.core.state import update_state
 from app.db.models import Proposal
 
@@ -39,6 +39,7 @@ __all__ = [
     "FOCUS_ON",
     "RULE",
     "STANDING_ORDER",
+    "OBLIGATION",
     "FIELDS",
     "accept",
     "create",
@@ -65,7 +66,10 @@ RULE = "rule"
 # why the negotiation needs its own row shape rather than this table's.
 STANDING_ORDER = "standing_order"
 
-FIELDS = (DUE_ACTION, FOCUS_ON, RULE, STANDING_ORDER)
+# Phase 5 (spec 2026-09-25): a debt the user promised in chat. The
+# extractor may propose one; only accept() below opens it.
+OBLIGATION = "obligation"
+FIELDS = (DUE_ACTION, FOCUS_ON, RULE, STANDING_ORDER, OBLIGATION)
 
 # Values that parse as "focus on". Anything else is off, which is the
 # safe direction: focus is a pressure-increasing mode, so an ambiguous
@@ -210,10 +214,20 @@ async def accept(session: AsyncSession, clock: Clock, proposal_id: int) -> Propo
     if proposal.field == DUE_ACTION:
         await update_state(session, "due_action", proposal.value, "button")
         await update_state(session, "due_set_at", now, "button")
+        # Phase 5: the main action is also the open 'focus' debt, in
+        # step with app/core/commands.py's set_due().
+        await obligations.replace_focus(session, clock, proposal.value)
     elif proposal.field == FOCUS_ON:
         enabled = parse_focus(proposal.value)
         await update_state(session, "focus_on", enabled, "button")
         await update_state(session, "focus_since", now if enabled else None, "button")
+    elif proposal.field == OBLIGATION:
+        # At the cap this opens nothing; app/tg/proposals.py checks the
+        # cap before calling accept(), so a press at the cap leaves the
+        # proposal pending instead of landing here.
+        await obligations.open_(
+            session, text=proposal.value, kind="promised", source="proposal"
+        )
     elif proposal.field == RULE:
         # source="user": the user pressed the button, so this is their
         # rule, not the extractor's. Plan section 8's apply table says

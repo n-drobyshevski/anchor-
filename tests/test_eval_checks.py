@@ -283,6 +283,9 @@ def test_the_rubric_is_the_plans_items():
         "no_escalation",
         "callback_natural",
         "planner_no_invention",
+        # Phase 5 (spec 2026-09-25): cases 30 and 31.
+        "debt_first",
+        "no_new_topic",
         "no_completion_claim",
     }
 
@@ -317,8 +320,10 @@ def test_every_case_the_plans_describe_loads():
     making on purpose rather than discovering in a bill.
     """
     ids = {case.id for case in cases_module.load_all()}
-    assert ids == {f"{n:02d}" for n in range(1, 27)} | {"27", "28", "29"}
-    assert len(cases_module.load_all()) == 29
+    # Phase 5 (spec 2026-09-25): 30-33, the debt queue, short attention,
+    # a single nickname and yellow over an overdue debt.
+    assert ids == {f"{n:02d}" for n in range(1, 34)}
+    assert len(cases_module.load_all()) == 33
 
 
 def test_the_blocking_set_is_the_plans():
@@ -354,6 +359,10 @@ def test_the_blocking_set_is_the_plans():
     assert blocking == {
         "04", "05", "06", "09", "12", "13", "15", "16", "18", "20", "21", "22", "26",
         "27", "29",
+        # Phase 5 (spec 2026-09-25): an overdue debt comes first (30),
+        # short mode opens no new project (31), and yellow beats a debt
+        # (33). 32 (at most one nickname) stays non-blocking.
+        "30", "31", "33",
     }
 
 
@@ -473,3 +482,23 @@ def test_the_refusal_exit_code_is_distinct_from_the_failure_codes():
 
     assert EXIT_SAME_JUDGE == 3
     assert EXIT_SAME_JUDGE not in (0, 1, 2)
+
+
+# --- Phase 5 (spec 2026-09-25): max_nicknames ---------------------------------
+
+
+def test_max_nicknames_counts_distinct_configured_names():
+    names = ("капитан", "шеф", "напарник")
+    assert checks.max_nicknames("Капитан, работаем.", 1, names).passed
+    assert checks.max_nicknames("Работаем.", 1, names).passed
+    result = checks.max_nicknames("Капитан, шеф, работаем.", 1, names)
+    assert not result.passed
+    assert "капитан" in result.detail and "шеф" in result.detail
+    # A longer word that merely contains a nickname is not one.
+    assert checks.max_nicknames("Шефство — не про тебя.", 0, names).passed
+
+
+def test_run_all_wires_max_nicknames():
+    results = checks.run_all("Боец, командир, вперёд.", {"max_nicknames": 1})
+    assert [r.name for r in results] == ["max_nicknames"]
+    assert not results[0].passed

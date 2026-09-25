@@ -42,8 +42,17 @@ def _facts(**overrides) -> MoodFacts:
 # --- MOODS / GLOSS -------------------------------------------------------
 
 
-def test_moods_is_exactly_the_plans_four_values():
-    assert MOODS == ("доволен", "ровный", "настороже", "ждёт")
+def test_moods_is_exactly_the_plans_values():
+    # 5a's four, then phase 5's (spec 2026-09-25) three.
+    assert MOODS == (
+        "доволен",
+        "ровный",
+        "настороже",
+        "ждёт",
+        "собирает",
+        "холоднее",
+        "занята",
+    )
 
 
 def test_gloss_covers_every_mood_with_the_plans_text():
@@ -375,3 +384,142 @@ async def test_no_user_message_at_all_gives_none(sessionmaker, frozen_clock):
         facts = await load_mood_facts(session, state, clock)
 
     assert facts.last_user_msg_before_now is None
+
+
+# --- Phase 5 (spec 2026-09-25): занята, собирает, холоднее ------------------
+
+
+@dataclasses.dataclass
+class _BusyState(_State):
+    attention: str = "present"
+    attention_until: datetime.datetime | None = None
+
+
+def _busy(**overrides) -> _BusyState:
+    return _BusyState(
+        attention="short", attention_until=NOW + datetime.timedelta(minutes=20), **overrides
+    )
+
+
+def test_short_attention_is_zanyata():
+    assert mood(_busy(), _facts(), NOW) == "занята"
+
+
+def test_expired_short_attention_is_not_zanyata():
+    state = _BusyState(attention="short", attention_until=NOW - datetime.timedelta(minutes=1))
+    assert mood(state, _facts(last_user_msg_before_now=NOW), NOW) == "ровный"
+
+
+def test_an_overdue_debt_is_sobiraet():
+    assert mood(_state(), _facts(overdue_debt=True, last_user_msg_before_now=NOW), NOW) == "собирает"
+
+
+def test_an_unanswered_outbound_is_kholodnee():
+    facts = _facts(ignored_outbound_since_user=1, last_user_msg_before_now=NOW)
+    assert mood(_state(), facts, NOW) == "холоднее"
+
+
+def test_precedence_of_the_new_rules():
+    welfare = NOW - datetime.timedelta(hours=1)
+    everything = _facts(
+        overdue_debt=True, ignored_outbound_since_user=2, due_results=("done",)
+    )
+    # Rule 1 beats all three: welfare, low intensity, or «жёлтый» this turn.
+    assert mood(_busy(welfare_at=welfare), everything, NOW) == "ровный"
+    assert mood(_busy(intensity=2), everything, NOW) == "ровный"
+    assert mood(_busy(), dataclasses.replace(everything, soft_now=True), NOW) == "ровный"
+    # Then busy, then the debt, then the silence, then 5a's rules.
+    assert mood(_busy(streak=5), everything, NOW) == "занята"
+    assert mood(_state(streak=5), everything, NOW) == "собирает"
+    assert (
+        mood(_state(streak=5), dataclasses.replace(everything, overdue_debt=False), NOW)
+        == "холоднее"
+    )
+
+
+def test_new_glosses_forbid_reproach():
+    assert "без упрёков" in GLOSS["собирает"]
+    assert "без обиды" in GLOSS["холоднее"]
+
+
+async def test_load_mood_facts_sees_an_overdue_debt(sessionmaker, frozen_clock):
+    from app.core import clock as clock_module
+    from app.db.models import Obligation
+
+    clock = frozen_clock(2026, 9, 22, 12, 0, tz=TIMEZONE)
+    state = await _seed_state(sessionmaker)
+    today = clock_module.local_date(clock, TIMEZONE)
+    async with sessionmaker() as session:
+        session.add(Obligation(text="сегодня", kind="promised", source="user", due_local_date=today))
+        await session.commit()
+        assert (await load_mood_facts(session, state, clock)).overdue_debt is False
+        session.add(
+            Obligation(
+                text="вчера",
+                kind="promised",
+                source="user",
+                due_local_date=today - datetime.timedelta(days=1),
+            )
+        )
+        await session.commit()
+        assert (await load_mood_facts(session, state, clock)).overdue_debt is True
+
+
+async def test_load_mood_facts_counts_outbound_since_the_last_user_message(
+    sessionmaker, frozen_clock
+):
+    clock = frozen_clock(2026, 9, 22, 12, 0, tz=TIMEZONE)
+    state = await _seed_state(sessionmaker)
+    now = clock.now_utc()
+    await _add_user_message(sessionmaker, update_id=1, created_at=now - datetime.timedelta(hours=10))
+    async with sessionmaker() as session:
+        for hours in (12, 8, 2):
+            row = Message(role="assistant", content="…", kind="outbound")
+            session.add(row)
+            await session.commit()
+            row.created_at = now - datetime.timedelta(hours=hours)
+            await session.commit()
+        facts = await load_mood_facts(session, state, clock)
+    assert facts.ignored_outbound_since_user == 2
+
+
+async def test_gather_suppresses_the_debt_flag_on_a_yellow_turn(sessionmaker, frozen_clock):
+    import random
+
+    from app.config import Settings
+    from app.core import clock as clock_module
+    from app.core import persona_context
+    from app.db.models import Obligation
+
+    clock = frozen_clock(2026, 9, 22, 12, 0, tz=TIMEZONE)
+    state = await _seed_state(sessionmaker)
+    today = clock_module.local_date(clock, TIMEZONE)
+    async with sessionmaker() as session:
+        session.add(
+            Obligation(
+                text="прислать отчёт",
+                kind="promised",
+                source="user",
+                due_local_date=today - datetime.timedelta(days=1),
+            )
+        )
+        await session.commit()
+
+    async def _gather(soft):
+        async with sessionmaker() as session:
+            return await persona_context.gather(
+                session, Settings(), state, clock,
+                scene_id=None, exclude_update_id=None, rng=random.Random(0),
+                soft_pause=soft,
+            )
+
+    normal = await _gather(False)
+    assert normal.debts and "прислать отчёт" in normal.debts[0]
+    assert normal.debt_overdue is True
+    assert persona_context.DEBT_FLAG in normal.flags
+    assert normal.mood == "собирает"
+
+    yellow = await _gather(True)
+    assert yellow.debts == normal.debts
+    assert persona_context.DEBT_FLAG not in yellow.flags
+    assert yellow.mood == "ровный"

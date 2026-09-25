@@ -45,6 +45,9 @@ MODULES = [
     pathlib.Path("app/core/amendments.py"),
     # 5e.
     pathlib.Path("app/core/callbacks.py"),
+    # Phase 5 (spec 2026-09-25): the debt queue and scarce attention.
+    pathlib.Path("app/core/obligations.py"),
+    pathlib.Path("app/core/attention.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -81,6 +84,9 @@ ALLOWED_USER_STATE_COLUMNS: dict[str, set[str]] = {
     # touch on UserState -- never `intensity`, `focus_on`, `due_action`,
     # `streak` or `persona_active`.
     "callbacks.py": {"callback_scene"},
+    # Phase 5: attention.py's refresh()/reset() touch exactly these two.
+    # obligations.py has no entry: it writes no user_state column.
+    "attention.py": {"attention", "attention_until"},
 }
 
 
@@ -357,6 +363,11 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     # (covered by ALLOWED_MEMORY_COLUMNS below) -- never a new Memory
     # row, never any other table.
     "callbacks.py": {"UserState", "Memory"},
+    # Phase 5 (spec 2026-09-25): obligations.py writes only its own
+    # Obligation table; attention.py only the two UserState columns
+    # ALLOWED_USER_STATE_COLUMNS["attention.py"] names.
+    "obligations.py": {"Obligation"},
+    "attention.py": {"UserState"},
 }
 
 # Names a write call might be imported under -- this repo's own
