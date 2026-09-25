@@ -1,4 +1,4 @@
-# Anchor — Phase 4 complete (the gated research loop)
+# Anchor — Phase 4 complete (the gated research loop), Phase 5 under way (the vault)
 
 A private, single-user Telegram bot.
 
@@ -826,10 +826,116 @@ OpenRouter's reported `usage.cost` — and tells you whether annotations
 arrive at all. Then `python -m eval.run`, which must pass cases 15 and
 16 or exit non-zero.
 
+## Milestone 5a — the vault service, and a bot that can only ask how it is
+
+Phase 5 connects Anchor to an Obsidian vault that you can open and edit
+on any device, synced by Obsidian Sync (`anchor-phase5-plan.md`):
+
+```
+Obsidian (phone, desktop)  ⇄  Obsidian Sync (end-to-end encrypted)  ⇄  vault service on Railway
+                                                                        ob sync --continuous → /data/vault
+                                                                        vaultd: small HTTP API, private network only
+                                                                              ⇅  bearer token
+                                                        anchor (bot + worker)  ⇄  Postgres
+```
+
+5a ships the vault service and the plumbing, and no behaviour. Nothing
+is written into the vault or read from it yet. `VAULT_MODE` defaults to
+`off`. `status` is the one mode with meaning so far: `/vault` and
+`/state` ask the vault service whether the sync is running. The setup
+is yours to do once, in [`docs/vault-setup.md`](docs/vault-setup.md).
+
+### vaultd refuses, whatever the bot asks
+
+`vaultd/` is a separate project, with its own `pyproject.toml`,
+lockfile, `Dockerfile` and tests. It imports nothing from `app`, and
+`app` imports nothing from it. Both directions are pinned by AST tests.
+It is the enforcement point in the same way the `anchor_debug` role is:
+whatever the bot's code does, the vault itself refuses
+
+- **a write anywhere except a `.md` directly inside `Anchor/Memory/` or
+  `Anchor/Journal/`.** Not a subfolder, not another extension, not a
+  dot-file;
+- **a read of any note that does not say `anchor: read`** in its
+  properties. The 404 for such a note is byte-for-byte the 404 for a
+  note that does not exist, so the bot cannot probe;
+- **a path that crosses a symlink.** Paths are walked one component at
+  a time with `O_NOFOLLOW`, so `ob` cannot swap a folder for a link
+  between a check and an open;
+- **a write whose expected hash is stale.** Create-only uses `os.link`,
+  which fails atomically if the file appeared meanwhile.
+
+`vaultd/tests` pins every one of these with a table of hostile inputs:
+`../`, `Anchor/../x.md`, a backslash, NUL, `.hidden.md`, an alias
+bomb, duplicate `anchor:` keys, frontmatter over 4 KB, and a symlink
+out of the vault. The tests use a temp directory and a fake `ob`, and
+never touch the network or Obsidian. One residual race is recorded
+rather than hidden: `ob` is another process, and it can write in the
+microseconds between the last hash check and the rename
+(`docs/decisions.md`).
+
+### Boot refuses before it syncs
+
+vaultd exits, naming a variable and never its value, if the service has
+a public domain **or a TCP proxy**, if the token is short, if an
+Obsidian credential is missing, or if `OBSIDIAN_VAULT` is a vault
+shared with you rather than your own (a collaborator could then write
+your facts). It also exits if the vault folder is already linked to a
+different vault. `sync-config` runs on every boot so the settings
+cannot drift, and settings sync stays off. `ob`'s output never reaches
+a log: its stdout and stderr go to `/dev/null`, and the log file `ob`
+writes on the volume is truncated unread before each start. `ob` never
+sees `VAULT_API_TOKEN`.
+
+### Three findings from checking the plan against the live sources
+
+The plan's facts about `obsidian-headless` and Railway held, with three
+exceptions. Each one changed the plan, as rev. 3:
+
+- **Railway has deprecated `railway.json`.** New services cannot use
+  it. The vault service is configured in the dashboard instead, like
+  the bot, and `docs/vault-setup.md` lists every setting.
+- **A TCP proxy is a second public endpoint** that
+  `RAILWAY_PUBLIC_DOMAIN` does not reveal. vaultd refuses it too.
+- **`ob sync` keeps its own unbounded log** of file names on the
+  volume, which vaultd now truncates.
+
+The table of what was checked, and what each finding changed, is in
+`docs/decisions.md`.
+
+### The bot's side
+
+- **Config.** `VAULT_MODE`, `VAULT_URL` and `VAULT_API_TOKEN`, and only
+  those. The plan's later settings arrive with the milestones that read
+  them. `VAULT_URL` must be `http://` to a `*.railway.internal` host
+  (or `127.0.0.1` locally), with no path and no credentials. The bearer
+  token rides on every request to it, so the boot check refuses
+  anything that could point it at the internet, and never prints the
+  value. `mirror` and `sync` are accepted, and act exactly like
+  `status` until 5b and 5c. A test pins that no mode requests anything
+  but `GET /v1/status`.
+- **Schema.** `vault_file`, `vault_hold`, `vault_chunk` and
+  `vault_status` exist and are empty, and every invariant the plan
+  writes as a comment is a CHECK. One of them was wrong until a test
+  caught it: a CHECK that evaluates to NULL *passes*. `/delete` purges
+  all four and draws a new `user_state.vault_epoch`. `/export` includes
+  `vault_file` and `vault_hold`, and names `vault_chunk` and
+  `vault_status` as deliberate omissions. The debug views expose no
+  path, no payload, no hash and no text, and they are granted by their
+  own migration: the first debug migration's grant covered only the
+  views that existed then.
+- **`may_report_now`** moved from `app/worker.py` to
+  `app/core/report.py`, unchanged, so that 5c's vault notices can use it
+  without `app/vault/` importing the worker.
+- **The guard hook** treats `VAULT_API_TOKEN` and both `OBSIDIAN_*`
+  secrets like the other credentials, and `CLAUDE.md` gains a rule:
+  never read the vault, and never connect Obsidian tools to it.
+
 ## Decisions
 
 The `## Hardening H*` sections that used to live here have moved to
-[`docs/decisions.md`](docs/decisions.md), along with 4a's decisions.
+[`docs/decisions.md`](docs/decisions.md), along with every decision
+since 4a.
 This file is how to run and understand Anchor; that one is why it is
 shaped the way it is.
 
@@ -861,7 +967,13 @@ uses. It is for local development only; production runs `MODE=webhook`.
 sudo scripts/setup-postgres.sh   # once, if you have no PostgreSQL 18
 export ANCHOR_ADMIN_DATABASE_URL="postgresql://anchor:anchor@127.0.0.1:5433/postgres"
 uv run pytest
+uv run --directory vaultd pytest   # the vault service: no database, no network
 ```
+
+The second command is the vault service's own suite (5a). It is a
+separate project with its own lockfile, and it runs against a temp
+directory and a fake `ob` script. Nothing in either suite talks to
+Obsidian.
 
 Tests use an already-running PostgreSQL cluster (`pg_isready`),
 creating and dropping a throwaway `anchor_test_<rand>` database per
@@ -911,6 +1023,9 @@ the extractor and welfare classifier depend on it.
    sets its own webhook on boot (`set_webhook` in `app/main.py`).
 5. Keep exactly one replica — the worker assumes single-consumer
    ordering.
+6. The vault service (5a) is a second service in the same project,
+   built from `vaultd/`, with a volume and **no** public domain. Its
+   one-time setup is [docs/vault-setup.md](docs/vault-setup.md).
 
 ## Privacy
 
@@ -923,6 +1038,10 @@ As of 4a the same rule covers the web: logs may carry a domain, an HTTP
 status, an error code, a count and a cost, and never a URL path or
 query, page text, card text, a quote or a topic. A path can carry
 personal information as easily as a message can.
+
+As of 5a the vault follows the same rule, in both services: never a
+vault path, a file name, a property value, a heading or note text.
+`ob`'s own output is discarded unread.
 
 ### Claude Code
 

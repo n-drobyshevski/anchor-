@@ -10,3 +10,6 @@ dist/
 
 # local Postgres data dir, if one is ever initdb'd for tests
 pgdata/
+
+# vaultd: obsidian-headless is installed from npm at build time, never vendored
+node_modules/

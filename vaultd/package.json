@@ -1,0 +1,9 @@
+{
+  "name": "anchor-vaultd",
+  "private": true,
+  "description": "Pins obsidian-headless for the vault service. Installed from npm, never vendored: its licence is UNLICENSED.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "obsidian-headless": "0.0.14"
+  }
+}

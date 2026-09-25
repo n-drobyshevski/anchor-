@@ -71,10 +71,11 @@ from aiogram.types import Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.core.clock import Clock, to_local, within_window
+from app.core.clock import Clock
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.outbound import record_inbound
 from app.core.outbound_send import SEND_OUTBOUND, run_send_outbound
+from app.core.report import may_report_now
 from app.core.scheduler import TICK_DECIDE, heartbeat, maybe_enqueue_research_sweep
 from app.core.tick import run_tick_decide
 from app.core.scene import SUMMARIZE_SCENE, Deferred, run_summarize_scene
@@ -320,33 +321,6 @@ async def process_one_job(
     return True
 
 
-def _may_report_now(settings: Settings, clock: Clock, user_state) -> bool:
-    """May the job-finished line be sent right now (plan section 9)?
-
-    Three checks, and deliberately not the outbound gate: a research
-    job's "done" line is a reply to a command the user typed, not an
-    unsolicited message. It does not touch the outbound counters, is
-    not counted by the gate, and is not subject to OUTBOUND_ENABLED or
-    the daily cap -- plan section 9 says so in as many words.
-
-    What it does respect is the three states that mean "not now" in the
-    user's own voice: a pause (/out, a pause word, a welfare trigger),
-    an explicit /quiet, and quiet hours. Same three the gate checks
-    second, third and fourth, for the same reasons, read the same way.
-
-    When the answer is no, nothing is sent and nothing is queued for
-    later: the cards are already in /notes, which is where the line
-    would have pointed.
-    """
-    if not user_state.persona_active:
-        return False
-    now = clock.now_utc()
-    if user_state.quiet_until is not None and user_state.quiet_until > now:
-        return False
-    local_now = to_local(now, user_state.timezone)
-    return not within_window(local_now.time(), settings.QUIET_START, settings.QUIET_END)
-
-
 async def _send_research_done(
     bot: Bot, settings: Settings, clock: Clock, user_state, outcome
 ) -> None:
@@ -355,7 +329,7 @@ async def _send_research_done(
     Out of character on purpose, like every other system reply: the
     bot reporting on a task, not Anchor talking.
     """
-    if not _may_report_now(settings, clock, user_state):
+    if not may_report_now(settings, clock, user_state):
         logger.info(
             "research completion not sent", extra={"job_id": outcome.job_id, "event": "quiet"}
         )
