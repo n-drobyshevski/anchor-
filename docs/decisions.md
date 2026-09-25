@@ -1435,3 +1435,20 @@ any other config file for it. Its settings are in the dashboard, as
 `docs/vault-setup.md` describes (8a's decision). The bot's own
 `railway.json` stops being read on 2026-12-01, and moving the bot off
 it is outside the vault's scope.
+
+## 8a fix — vaultd listens on IPv4 and IPv6
+
+The first deploy of the `vault` service booted cleanly (`boot done`,
+`ob sync started`) and then failed Railway's healthcheck for five
+minutes: "service unavailable" on every attempt. vaultd bound its API to
+`::` alone, on the belief that a Linux socket on `::` also accepts IPv4.
+A raw socket does, but asyncio's `create_server` sets `IPV6_V6ONLY` on
+every IPv6 listener, so the API was reachable over IPv6 only, and
+Railway's healthcheck connects over IPv4.
+
+**Decision:** bind with `host=None`, which gives one listener per
+address family the host has: `0.0.0.0` for the healthcheck, `::` for
+private DNS in legacy (IPv6-only) environments. `tests/test_listen.py`
+fetches `/healthz` over `127.0.0.1`, and over `::1` where the host has
+IPv6. The API stays private either way: the service has no public
+domain or TCP proxy, which boot still refuses.

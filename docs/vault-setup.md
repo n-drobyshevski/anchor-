@@ -142,6 +142,11 @@ It exits with a message that names a variable, never its value:
 | `VAULT_PATH is already linked to a different remote vault` | `OBSIDIAN_VAULT` changed after the first boot. If that is intended, delete `/data/config/obsidian-headless/sync/` on the volume and redeploy. |
 | `ob sync-setup failed (exit 2)` | `OBSIDIAN_E2EE_PASSWORD` is wrong. |
 
+If the logs reach `ob sync started` but the deploy fails with
+`Healthcheck failed!`, the image predates the fix that makes vaultd
+listen on IPv4 as well as IPv6 (docs/decisions.md). Redeploy from the
+latest `main`.
+
 ## 6. Mirror: your facts in Obsidian (8b)
 
 Set `VAULT_MODE=mirror` on the bot. Within a minute, facts start to
