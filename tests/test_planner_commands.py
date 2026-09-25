@@ -7,7 +7,6 @@ build_router()'s dispatcher.
 
 from __future__ import annotations
 
-import datetime
 
 import pytest
 from aiogram import Bot, Dispatcher
@@ -316,3 +315,49 @@ async def test_planner_link_sends_the_url_but_never_stores_it(
         assert "SECRET-STATE-VALUE" not in row.content
     assert any(row.content == "[/planner_link]" for row in rows)
     assert any(row.sent_at is not None for row in rows)
+
+
+# --- Package B: every planner path is dark while PLANNER_ENABLED is off ------
+
+
+@pytest.mark.parametrize("text", ["/plan", "/planner", "/planner_link"])
+async def test_read_commands_refuse_when_planner_disabled(sessionmaker, text):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, _settings(PLANNER_ENABLED=False))
+    await _feed(dp, bot, _command_update(1, text))
+    assert fake.sent[0].text.startswith(planner_ui.DISABLED.rstrip("."))
+
+
+async def test_a_stale_confirm_card_does_nothing_when_planner_disabled(sessionmaker, frozen_clock):
+    clock = _clock(frozen_clock)
+    await _seed(sessionmaker, 1)
+    async with sessionmaker() as session:
+        action = await planner_actions.create(
+            session, clock, kind=planner_actions.CREATE_TASK,
+            payload={"title": "Купить молоко", "due_date": None},
+        )
+
+    dp, bot, fake = _build_dp(sessionmaker, _settings(PLANNER_ENABLED=False), clock=clock)
+    await _feed(dp, bot, _callback_update(2, f"pa:y:{action.id}"))
+
+    assert fake.answered[-1].text == planner_ui.DISABLED
+    assert fake.edits[-1].text == planner_ui.DISABLED
+    async with sessionmaker() as session:
+        row = await session.get(planner_actions.PlannerAction, action.id)
+        jobs = (await session.execute(select(Job).where(Job.kind == PLANNER_WRITE))).scalars().all()
+    assert row.status == planner_actions.PENDING
+    assert jobs == []
+
+
+async def test_a_stale_done_button_does_nothing_when_planner_disabled(sessionmaker, frozen_clock):
+    clock = _clock(frozen_clock)
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, _settings(PLANNER_ENABLED=False), clock=clock)
+
+    await _feed(dp, bot, _callback_update(2, "pl:d:abc"))
+
+    assert fake.answered[-1].text == planner_ui.DISABLED
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(planner_actions.PlannerAction))).scalars().all()
+        jobs = (await session.execute(select(Job).where(Job.kind == PLANNER_WRITE))).scalars().all()
+    assert rows == [] and jobs == []
