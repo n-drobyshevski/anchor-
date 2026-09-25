@@ -63,8 +63,28 @@ class _FakeS3Client:
         buf.write(self.objects[key])
 
 
-async def test_restore_check_end_to_end(test_database_url, tmp_path, monkeypatch):
+async def test_restore_check_end_to_end(sessionmaker, test_database_url, tmp_path, monkeypatch):
+    from app.db.models import UserState
     from scripts import restore_check
+
+    # A pg_dump 18 archive sets transaction_timeout, which a pre-17
+    # server rejects on restore. CI and production run 18; a developer's
+    # local 16 cluster is a version mismatch, not a restore bug.
+    import asyncpg
+
+    user, password, host, port, _ = _libpq_target(test_database_url)
+    conn = await asyncpg.connect(user=user, password=password, host=host, port=port, database="postgres")
+    try:
+        server_major = int(await conn.fetchval("SHOW server_version_num")) // 10000
+    finally:
+        await conn.close()
+    if server_major < 18:
+        pytest.skip(f"restore target is Postgres {server_major}; a pg_dump 18 archive needs 18+")
+
+    # 0. The bot's singleton row: verify() requires exactly one.
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1, timezone="Europe/Paris"))
+        await session.commit()
 
     # 1. A real pg_dump of the test database.
     user, password, host, port, dbname = _libpq_target(test_database_url)
@@ -133,3 +153,27 @@ def test_find_latest_object_key_picks_the_lexicographically_greatest():
         restore_check._find_latest_object_key(client, "bucket")
         == "anchor/2026/01/03/anchor-20260103T040000Z.dump.age"
     )
+
+
+# --- verify(): what makes a restore pass --------------------------------
+
+
+def test_verify_passes_a_usable_restore():
+    from scripts import restore_check
+
+    assert restore_check.verify({"user_state": 1, "message": 3}, "abc", {"abc"}) == []
+
+
+def test_verify_names_every_problem():
+    from scripts import restore_check
+
+    problems = restore_check.verify({"message": 3}, "zzz", {"abc"})
+    assert any("user_state has 0 rows" in p for p in problems)
+    assert any("zzz is not a revision" in p for p in problems)
+    assert restore_check.verify({}, None, set())[0] == "the restore produced no tables at all"
+
+
+def test_known_revisions_include_the_repo_head():
+    from scripts import restore_check
+
+    assert "fa77c0b747fd" in restore_check.known_revisions()

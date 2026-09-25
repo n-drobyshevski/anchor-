@@ -105,6 +105,36 @@ is not a substitute for actually doing this once for real.
    a message, and confirm `/state` and `/memories` look right before
    switching the production bot over.
 
+## The automated check: `scripts/restore_check.py`
+
+Runs steps 1–5 against a fresh local throwaway database, reports row
+counts, then drops that database. It never connects to the live one.
+
+```bash
+uv run python scripts/restore_check.py --key key.txt
+uv run python scripts/restore_check.py --key key.txt \
+  --object-key anchor/2026/09/23/anchor-20260923T040000Z.dump.age
+```
+
+| Flag / variable | Meaning |
+|---|---|
+| `--key` (required) | Path to the age private key file (`age-keygen` output). |
+| `--object-key` | A specific backup object. Default: the newest key under `anchor/`. |
+| `--admin-url` | Admin connection the throwaway database is created on and dropped from. Default: `ANCHOR_ADMIN_DATABASE_URL`, else `postgresql://anchor:anchor@127.0.0.1:5433/postgres`. Its server must be Postgres 18 or newer: a dump from `pg_dump` 18 sets `transaction_timeout`, which Postgres 16 rejects. |
+| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`, `BACKUP_S3_REGION` | Read from the environment, same as the app. |
+
+`pg_restore` on `PATH` must be version 18 or newer.
+
+It exits 0 only when all of these hold:
+
+- `pg_restore` succeeded;
+- `user_state` has exactly one row;
+- `alembic_version` names a revision in this repo's `migrations/`, so
+  step 7 can bring it to head.
+
+Otherwise it prints a `FAIL:` line for each problem and exits 1. It
+does not compare counts with the live database; see docs/decisions.md.
+
 ## After a real recovery
 
 - Rotate the age keypair if you suspect the private key was exposed

@@ -49,6 +49,29 @@ from app.llm.provider import LLMProvider, LLMUsage
 logger = logging.getLogger(__name__)
 
 
+def failure_site(exc: BaseException) -> str:
+    """`module:function:line` of the innermost frame in this repo's code.
+
+    Code location only -- never `str(exc)`, which can carry model output
+    or user text (app/log.py: logs never carry message text). A bare
+    exception type (09-23's canary `AttributeError`) was not enough to
+    find the bug from logs alone. Frames in site-packages are skipped,
+    so the site is where our code called into the library.
+    """
+    import pathlib
+    import traceback
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    site = "unknown"
+    for frame in traceback.extract_tb(exc.__traceback__):
+        path = pathlib.Path(frame.filename).resolve()
+        if "site-packages" in path.parts or not path.is_relative_to(root):
+            continue
+        module = ".".join(path.relative_to(root).with_suffix("").parts)
+        site = f"{module}:{frame.name}:{frame.lineno}"
+    return site
+
+
 async def is_preempted(session: AsyncSession, clock: Clock, started_at: datetime.datetime) -> bool:
     """A user update since `started_at` -- see the module docstring."""
     result = await session.execute(
@@ -339,7 +362,10 @@ async def run_idle(
             session_factory, clock, run_id, status="failed",
             skip_reason=type(exc).__name__, usd_cost=usd_cost,
         )
-        logger.warning("idle run failed", extra={"run_id": run_id, "event": type(exc).__name__})
+        logger.warning(
+            "idle run failed",
+            extra={"run_id": run_id, "event": type(exc).__name__, "where": failure_site(exc)},
+        )
         return
 
     usd_cost = await spend_since(session_factory, started_at)

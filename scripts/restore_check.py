@@ -27,9 +27,14 @@ directly because that helper also runs alembic migrations, which a
 restored-from-pg_dump database does not need (the dump already carries
 the schema at whatever migration state it was backed up at).
 
-Exit code 0 on a successful restore with at least one table found and
-at least one table with rows; 1 otherwise. The first successful run
-should be logged in the 6e milestone report, per the plan.
+Exit code 0 only when the restored database passes `verify()`:
+pg_restore succeeded, `user_state` holds exactly one row (the bot's
+singleton -- a dump without it is not a usable Anchor database), and
+`alembic_version` names a revision this repo knows (so `alembic upgrade
+head` can bring it forward). 1 otherwise. Comparing the counts against
+the live database is deliberately out of scope: see docs/decisions.md.
+The first successful run should be logged in the 6e milestone report,
+per the plan.
 """
 
 from __future__ import annotations
@@ -191,6 +196,45 @@ async def _report_row_counts(dsn: str) -> dict[str, int]:
         await conn.close()
 
 
+def known_revisions() -> set[str]:
+    """Every revision id in this repo's migrations/ directory."""
+    import pathlib
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    return {script.revision for script in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
+def verify(counts: dict[str, int], alembic_version: str | None, known: set[str]) -> list[str]:
+    """The restore's pass/fail checks. Pure: returns what failed, [] if
+    nothing did."""
+    problems: list[str] = []
+    if not counts:
+        problems.append("the restore produced no tables at all")
+    if counts.get("user_state") != 1:
+        problems.append(f"user_state has {counts.get('user_state', 0)} rows, expected exactly 1")
+    if alembic_version is None:
+        problems.append("alembic_version is missing")
+    elif alembic_version not in known:
+        problems.append(f"alembic_version {alembic_version} is not a revision in this repo")
+    return problems
+
+
+async def _alembic_version(dsn: str) -> str | None:
+    conn = await asyncpg.connect(dsn)
+    try:
+        exists = await conn.fetchval("SELECT to_regclass('public.alembic_version') IS NOT NULL")
+        if not exists:
+            return None
+        return await conn.fetchval("SELECT version_num FROM alembic_version LIMIT 1")
+    finally:
+        await conn.close()
+
+
 async def main_async(args: argparse.Namespace) -> int:
     settings = Settings()
     if not (settings.BACKUP_S3_ENDPOINT and settings.BACKUP_S3_BUCKET
@@ -222,9 +266,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
         target_dsn = admin_dsn.rsplit("/", 1)[0] + f"/{db_name}"
         counts = await _report_row_counts(target_dsn)
-        if not counts:
-            print("Restore produced no tables at all.", file=sys.stderr)
-            return 1
+        version = await _alembic_version(target_dsn)
 
         print(f"Restored {len(counts)} tables:")
         for table in KEY_TABLES:
@@ -234,8 +276,12 @@ async def main_async(args: argparse.Namespace) -> int:
         if others:
             print(f"  (+{len(others)} more tables)")
 
-        if not any(counts.values()):
-            print("Warning: every table restored empty.", file=sys.stderr)
+        print(f"  alembic_version: {version}")
+        problems = verify(counts, version, known_revisions())
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        if problems:
+            return 1
         print(f"Restore check finished at {datetime.datetime.now(datetime.UTC).isoformat()}")
         return 0
     finally:

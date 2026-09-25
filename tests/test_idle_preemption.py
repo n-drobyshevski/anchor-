@@ -317,3 +317,149 @@ async def test_reflect_preempted_between_model_call_and_apply_writes_nothing(ses
         assert (await session.execute(select(NotebookEntry))).scalars().all() == []
         rows = (await session.execute(select(SpendLedger))).scalars().all()
         assert any(row.category == "idle:reflect" for row in rows)
+
+
+# --- Phase-6 package D: prebrief, critique and canary preempted mid-run -----
+
+
+def _update_after(provider, sessionmaker):
+    """Make `provider.complete` insert a telegram_update once it returns,
+    i.e. the user writes while the model call is in flight."""
+
+    async def _complete(*args, **kwargs):
+        result = await FakeLLMProvider.complete(provider, *args, **kwargs)
+        async with sessionmaker() as session:
+            if await session.get(TelegramUpdate, 1) is None:
+                session.add(TelegramUpdate(update_id=1, payload={}))
+                await session.commit()
+        return result
+
+    provider.complete = _complete
+
+
+async def _queued_run(sessionmaker, clock, kind) -> int:
+    async with sessionmaker() as session:
+        run = IdleRun(kind=kind, local_date=clock.now_utc().date(), status="queued")
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        return run.id
+
+
+async def test_prebrief_preempted_mid_run_stores_no_note(sessionmaker):
+    from app.core.idle.prebrief import run_prebrief
+    from app.db.models import BriefNote, StandingOrder
+
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(StandingOrder(text="выпить воды", cadence="daily", status="active", source="user"))
+        await session.commit()
+    run_id = await _queued_run(sessionmaker, clock, "prebrief")
+    provider = FakeLLMProvider(text='{"notes": ["Вчера был тяжёлый день."]}')
+    _update_after(provider, sessionmaker)
+
+    result = await run_prebrief(
+        sessionmaker, Settings(), provider, clock,
+        run_id=run_id, started_at=clock.now_utc(), timezone="Europe/Paris",
+    )
+
+    assert result.preempted is True
+    async with sessionmaker() as session:
+        assert (await session.execute(select(BriefNote))).scalars().all() == []
+
+
+async def test_critique_preempted_mid_run_reports_preempted(sessionmaker):
+    from app.core.idle.critique import run_critique
+
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _make_ended_scene(sessionmaker, clock, summary="Коротко.")
+    run_id = await _queued_run(sessionmaker, clock, "critique")
+    scores = '{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5}'
+    judge = FakeLLMProvider(text=scores)
+    _update_after(judge, sessionmaker)
+
+    result = await run_critique(
+        sessionmaker, Settings(CRITIQUE_SAMPLE=5), clock,
+        run_id=run_id, started_at=clock.now_utc(), timezone="Europe/Paris",
+        judge_provider=judge,
+    )
+
+    assert result.preempted is True
+    assert result.count == 0
+
+
+async def test_canary_preempted_mid_run_keeps_no_case_results(sessionmaker, monkeypatch):
+    from app.core.idle.canary import run_canary
+
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    run_id = await _queued_run(sessionmaker, clock, "canary")
+
+    async def _trial(settings, *, clock, amendments, on_case_done=None, **kwargs):
+        from eval.trial import TrialResult
+
+        async with sessionmaker() as session:
+            session.add(TelegramUpdate(update_id=1, payload={}))
+            await session.commit()
+        return TrialResult(cases={"04": True}, passed=True, usd_cost=0.01)
+
+    monkeypatch.setattr("eval.trial.run_blocking_subset", _trial)
+
+    result = await run_canary(
+        sessionmaker, Settings(), clock,
+        run_id=run_id, started_at=clock.now_utc(), timezone="Europe/Paris",
+    )
+
+    assert result.preempted is True
+    assert result.cases == {}
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(SpendLedger))).scalars().all()
+    assert any(row.category == "idle:canary" for row in rows)  # money spent stays ledgered
+
+
+# --- Phase-6 package D: a failed run says where, never what -----------------
+
+
+def test_failure_site_names_our_innermost_frame_not_the_message():
+    from app.core.idle.runner import failure_site
+
+    def _inner():
+        raise AttributeError("secret user text in the message")
+
+    try:
+        _inner()
+    except AttributeError as exc:
+        site = failure_site(exc)
+
+    assert site.startswith("tests.test_idle_preemption:_inner:")
+    assert "secret" not in site
+
+
+async def test_a_failed_run_logs_the_site(sessionmaker, monkeypatch):
+    import app.core.idle.runner as runner
+
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _make_ended_scene(sessionmaker, clock, summary=None)
+    run_id = await _queued_run(sessionmaker, clock, BACKFILL)
+
+    async def _boom(*args, **kwargs):
+        raise AttributeError("never logged")
+
+    monkeypatch.setattr("app.core.idle.backfill.run_backfill", _boom)
+    logged = []
+    monkeypatch.setattr(
+        runner.logger, "warning", lambda msg, *a, **kw: logged.append((msg, kw.get("extra", {})))
+    )
+
+    await run_idle(sessionmaker, Settings(), FakeLLMProvider(), FakeLLMProvider(), clock, run_id=run_id)
+
+    [(msg, extra)] = [entry for entry in logged if entry[0] == "idle run failed"]
+    assert extra["event"] == "AttributeError"
+    assert extra["where"].startswith("tests.test_idle_preemption:_boom:")
+    assert "never logged" not in str(extra)
+    async with sessionmaker() as session:
+        run = await session.get(IdleRun, run_id)
+    assert (run.status, run.skip_reason) == ("failed", "AttributeError")

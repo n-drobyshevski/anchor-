@@ -745,6 +745,15 @@ async def run_research_job(
             visible_cards=visible, hidden_cards=hidden,
         )
 
+    # The flag was on when this job was queued and may be off now. A job
+    # never outlives the switch: finish it as refused before any fetch,
+    # search or model call. Enqueue already refuses while it is off
+    # (enqueue_study/enqueue_read), so this only catches the gap between.
+    if not settings.RESEARCH_ENABLED:
+        return await _finish(
+            session, clock, job, status="failed", error_code=DISABLED, visible=0, hidden=0
+        )
+
     robots = make_robots_cache(
         timeout_s=settings.FETCH_TIMEOUT_S,
         max_redirects=settings.FETCH_MAX_REDIRECTS,

@@ -690,6 +690,16 @@ async def test_delete_purges_backup_objects_in_a_fake_s3(sessionmaker, monkeypat
     assert "unrelated/other-app/file" in fake_s3.objects
     assert fake.edits[-1].text == data_ui.DELETED_TEXT
 
+    # Plan section 9.3: logged as `purged`, after the wipe so it survives.
+    from app.db.models import BackupLog
+
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(BackupLog))).scalars().all()
+    assert sorted((row.status, row.object_key) for row in rows) == [
+        ("purged", "anchor/2026/01/01/anchor-20260101T040000Z.dump.age"),
+        ("purged", "anchor/2026/01/02/anchor-20260102T040000Z.dump.age"),
+    ]
+
 
 async def test_delete_proceeds_when_s3_is_not_configured(sessionmaker):
     """Plan section 9.3: "if S3 isn't configured, the wipe still
@@ -808,3 +818,75 @@ async def test_every_user_state_column_is_preserved_or_reset(clock):
     columns = {c.name for c in UserState.__table__.columns}
     handled = set(purge.PRESERVED_STATE_COLUMNS) | set(purge.reset_values(Settings(), clock))
     assert columns == handled, f"unhandled user_state columns: {columns ^ handled}"
+
+
+class _RefusingS3Client(_FakeS3Client):
+    """delete_objects answers 200 with a per-key error for one object."""
+
+    def delete_objects(self, *, Bucket, Delete):
+        keys = [entry["Key"] for entry in Delete["Objects"]]
+        refused = keys[0]
+        for key in keys[1:]:
+            self.objects.pop(key, None)
+        return {"Errors": [{"Key": refused, "Code": "AccessDenied"}]}
+
+
+async def _delete_with_s3(sessionmaker, monkeypatch, fake_s3):
+    from app.ops import backup as backup_module
+
+    monkeypatch.setattr(backup_module, "build_s3_client", lambda settings: fake_s3)
+    await _seed_everything(sessionmaker, 2, 3)
+    settings = Settings(
+        BACKUP_S3_ENDPOINT="https://fake.example",
+        BACKUP_S3_BUCKET="anchor-backups",
+        BACKUP_S3_ACCESS_KEY_ID="fake-key",
+        BACKUP_S3_SECRET_ACCESS_KEY="fake-secret",
+    )
+    fake = FakeSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    dp = Dispatcher()
+    dp.include_router(build_router(sessionmaker, settings, FakeLLMProvider(), FakeLLMProvider()))
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    issued = int(time.time())
+    await dp.feed_update(
+        bot,
+        Update.model_validate(_callback_update(3, f"d:yes:{issued}"), context={"bot": bot}),
+    )
+    return fake
+
+
+async def test_delete_says_so_when_a_backup_object_could_not_be_deleted(sessionmaker, monkeypatch):
+    fake_s3 = _RefusingS3Client(
+        {
+            "anchor/2026/01/01/anchor-20260101T040000Z.dump.age": b"1",
+            "anchor/2026/01/02/anchor-20260102T040000Z.dump.age": b"2",
+        }
+    )
+    fake = await _delete_with_s3(sessionmaker, monkeypatch, fake_s3)
+
+    assert fake.edits[-1].text == data_ui.DELETED_BACKUPS_FAILED_TEXT
+    from app.db.models import BackupLog
+
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(BackupLog))).scalars().all()
+    # Only the object that really went is logged as purged.
+    assert [(row.status, row.object_key) for row in rows] == [
+        ("purged", "anchor/2026/01/02/anchor-20260102T040000Z.dump.age")
+    ]
+    # The database wipe still happened.
+    counts = await _counts(sessionmaker)
+    assert counts["message"] == 0
+
+
+async def test_delete_says_so_when_the_bucket_cannot_be_listed(sessionmaker, monkeypatch):
+    class _Unreachable(_FakeS3Client):
+        def list_objects_v2(self, **kwargs):
+            from botocore.exceptions import EndpointConnectionError
+
+            raise EndpointConnectionError(endpoint_url="https://fake.example")
+
+    fake = await _delete_with_s3(sessionmaker, monkeypatch, _Unreachable({}))
+
+    assert fake.edits[-1].text == data_ui.DELETED_BACKUPS_FAILED_TEXT

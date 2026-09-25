@@ -63,7 +63,7 @@ from app.core import memory as memory_core
 from app.core import mood as mood_core
 from app.core import obligations as obligations_core
 from app.core import safety_events
-from app.core.prompt import persona_path_for
+from app.core.prompt import load_persona, persona_path_for
 from app.core import proposal as proposal_core
 from app.core.outbound import load_state_summary
 from app.core.quiet import OFF as QUIET_OFF
@@ -78,7 +78,7 @@ from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
 from app.planner import parse as planner_parse
 from app.planner import snapshot as planner_snapshot
-from app.tg.send import send_keyboard
+from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import data as data_ui
@@ -303,6 +303,7 @@ def _format_state(
     canary=None,
     backup=None,
     debts=None,
+    persona_version=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
 
@@ -443,7 +444,8 @@ def _format_state(
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
         "Модель: {model}"
     ).format(
-        persona="вкл" if user_state.persona_active else "выкл",
+        persona=("вкл" if user_state.persona_active else "выкл")
+        + (f" · v{persona_version}" if persona_version else ""),
         intensity=user_state.intensity,
         focus="вкл" if user_state.focus_on else "выкл",
         streak=user_state.streak,
@@ -589,6 +591,9 @@ def build_router(
                 research_counts=research_counts,
                 mood=current_mood,
                 debts=debt_counts,
+                # The short hash of the persona file actually served
+                # (PERSONA_FILE), the same sha persona_version rows use.
+                persona_version=load_persona(persona_path_for(settings))[1][:8],
             )
         )
 
@@ -1685,9 +1690,31 @@ def build_router(
             data=callback.data,
         )
 
+    async def _planner_button_off(callback: CallbackQuery) -> bool:
+        """True (and the button is retired) when the planner is off.
+
+        The commands refuse while PLANNER_ENABLED is false; a button left
+        on an older message must too. Without this a stale confirm card
+        or /done button created a planner_action and queued a
+        PLANNER_WRITE the worker cannot run with no planner client.
+        """
+        if settings.PLANNER_ENABLED:
+            return False
+        await answer_callback(callback.bot, callback.id, planner_ui.DISABLED)
+        await edit_keyboard(
+            callback.bot,
+            callback.message.chat.id,
+            callback.message.message_id,
+            planner_ui.DISABLED,
+            None,
+        )
+        return True
+
     @router.callback_query(F.data.startswith("pa:"))
     async def planner_action_decision(callback: CallbackQuery) -> None:
         """`pa:y:<id>` / `pa:n:<id>` -- the /task and /event confirm card."""
+        if await _planner_button_off(callback):
+            return
         async with sessionmaker() as session:
             user_state = await get_state(session)
         await planner_ui.handle_confirm_callback(
@@ -1705,6 +1732,8 @@ def build_router(
     @router.callback_query(F.data.startswith("pl:d:"))
     async def planner_done(callback: CallbackQuery) -> None:
         """`pl:d:<task id>` -- a /done list button."""
+        if await _planner_button_off(callback):
+            return
         async with sessionmaker() as session:
             user_state = await get_state(session)
         await planner_ui.handle_done_callback(

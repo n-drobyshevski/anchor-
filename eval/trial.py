@@ -59,6 +59,13 @@ def _resolve_admin_url(settings: Settings) -> str:
     override = os.environ.get("ANCHOR_ADMIN_DATABASE_URL")
     if override:
         return override
+    if not settings.DATABASE_URL:
+        # Neither is set (a bare local `pytest`): the same local default
+        # eval.db and tests/conftest.py use, instead of an empty string
+        # SQLAlchemy cannot parse.
+        from eval.db import REPO_ADMIN_URL
+
+        return REPO_ADMIN_URL
     parsed = urllib.parse.urlsplit(settings.DATABASE_URL)
     return urllib.parse.urlunsplit(parsed._replace(path="/postgres"))
 
@@ -98,7 +105,6 @@ async def run_blocking_subset(
                 max_tokens=settings.LLM_MAX_TOKENS,
                 temperature=settings.LLM_TEMPERATURE,
                 data_collection=settings.LLM_DATA_COLLECTION,
-                web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
                 client=client,
             )
         if judge_provider is None:
@@ -108,7 +114,6 @@ async def run_blocking_subset(
                 max_tokens=settings.LLM_CHEAP_MAX_TOKENS,
                 temperature=settings.LLM_CHEAP_TEMPERATURE,
                 data_collection=settings.LLM_DATA_COLLECTION,
-                web_search_max_results=settings.LLM_WEB_SEARCH_MAX_RESULTS,
                 client=client,
                 structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
             )

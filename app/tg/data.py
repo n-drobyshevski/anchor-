@@ -58,6 +58,13 @@ DELETED_TEXT = (
     "Удалено, включая бэкапы. Копии у провайдеров моделей удаляются по их "
     "правилам хранения."
 )
+# The bucket refused (or could not be reached) for some backup objects:
+# the database is wiped, the backups may not be.
+DELETED_BACKUPS_FAILED_TEXT = (
+    "Данные удалены, но часть резервных копий удалить не удалось — удали их "
+    "в бакете вручную (префикс anchor/). Копии у провайдеров моделей удаляются "
+    "по их правилам хранения."
+)
 CANCELLED_TEXT = "Отменено."
 STALE_TEXT = "Устарело."
 
@@ -172,8 +179,11 @@ async def handle_delete_callback(
     # than the reverse. A no-op, not a failure, when S3 isn't
     # configured: the database wipe still proceeds either way (backup.
     # purge_all_backups' own docstring).
-    deleted_objects = await backup.purge_all_backups(settings)
-    logger.info("backup objects purged", extra={"event": "delete", "count": deleted_objects})
+    purged = await backup.purge_all_backups(settings)
+    logger.info(
+        "backup objects purged",
+        extra={"event": "delete", "count": len(purged.deleted), "error_code": purged.failed or None},
+    )
 
     async with sessionmaker() as session:
         # 3b (plan section 6): /delete cancels first. The wipe
@@ -183,8 +193,13 @@ async def handle_delete_callback(
         # must not silently resurrect a scheduled message.
         await cancel_outbound(session, clock)
         await purge.delete_everything(session, settings, clock)
+        # After the wipe, which truncates backup_log: the record of which
+        # objects were purged is the one thing that must outlive it.
+        await backup.record_purged(session, clock, purged)
 
     if hub is not None:
         hub.close_all()
 
-    await edit_keyboard(bot, chat_id, message_id, DELETED_TEXT, None)
+    # Never claim the backups are gone when the bucket said otherwise.
+    final = DELETED_BACKUPS_FAILED_TEXT if purged.failed else DELETED_TEXT
+    await edit_keyboard(bot, chat_id, message_id, final, None)
