@@ -8,8 +8,9 @@ those files.
 **vaultd is the enforcement point, not the bot.** The same shape as the
 `anchor_debug` role: whatever the bot's code does, *this* process
 refuses a write outside `Anchor/Memory/` and `Anchor/Journal/`, and a
-read of any note the user did not opt in with `anchor: read`. The path
-rules live in `paths.py`, the opt-in rule in `frontmatter.py`, and
+read of any note the user has not classified `personal` or `knowledge`
+(8e). The path rules live in `paths.py`, a note's own mark in
+`frontmatter.py`, the folder rules and precedence in `classes.py`, and
 compare-and-swap in `store.py`; `tests/` pins each of them with hostile
 inputs, independently of anything the bot does.
 
