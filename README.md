@@ -19,7 +19,7 @@ no model call, no outbound).
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
 | Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https) |
-| The vault: an Obsidian vault synced through a separate `vault` service (phase 8; `status` and `mirror` so far) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
+| The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e; nothing is indexed or used until 8d) | **off** | `/vault notes on`; later `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` (8d) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
@@ -53,7 +53,7 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
-| `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class | `VAULT_MODE` |
+| `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them | — |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
@@ -1062,6 +1062,58 @@ sent as one burst.
   `checkin.note`.** The message is retagged; the note is not. The day
   file therefore leaves the note out on any day with a welfare message,
   or the day after, and a test proves no welfare text reaches any file.
+
+## Milestone 8c — back from the vault (`VAULT_MODE=sync`)
+
+In `sync`, the vault works in both directions for Anchor's own files.
+Your notes outside `Anchor/` are never facts, whatever they say.
+
+### What you can change from Obsidian
+
+- **Edit `fact`, `kind` or `pinned`** in a fact file, on your phone or
+  in the Bases table. The next pass (about a minute) applies it: a text
+  or kind change supersedes the memory, and the old text moves to the
+  file's `## Раньше`. Pinning obeys the same cap as `/pin`.
+- **Create a file** from the template in `Anchor/Memory/`. It becomes
+  a memory, keeps the name you gave it, and gains `anchor_id`.
+- **Delete a file.** Anchor forgets the whole fact, every earlier
+  version included, like `/forget` now does. It waits ten minutes
+  first, and longer if Obsidian Sync only just restarted, so a rename
+  that arrives as "delete, then create" forgets nothing.
+
+Anchor compares three versions of every field: the one the file was
+rendered from, the file now, and the database now. It applies only
+the fields you changed. A stale file therefore never undoes a
+correction made in chat. If you and the chat both changed the text,
+your edit wins and the chat's version stays in `## Раньше`.
+
+### What asks first
+
+- **Any change to a `rule`**: a new rule, an edited rule, or a kind
+  changed to or from `rule`. Telegram asks «Принять?» with
+  [Да] [Нет, вернуть]. «Нет» puts the file back from the database.
+- **More than three forgets within an hour.** One message asks about
+  all of them, and «Нет, вернуть» brings the files back.
+- An unanswered question resolves as «нет» after seven days. A button
+  from before a `/delete`, or one pressed twice, answers «Устарело».
+
+These limits are constants in `app/vault/limits.py`, not settings: a
+deploy cannot loosen them.
+
+### What is refused
+
+A file is quarantined, and the memory left unchanged, when its
+properties do not parse or have the wrong type (`fact: no` without
+quotes), its kind is unknown, its text is empty, longer than 300
+characters, looks like a secret or reads like an instruction to the
+bot. The same happens when it duplicates another file or fact, or
+creates or converts a technique. `/vault` lists up to five such files
+with the reason in plain Russian. After a pass that changed anything,
+one short notice goes out, respecting pause, quiet and welfare.
+
+Files from before a `/delete` carry the old epoch and are deleted,
+never imported. A journal page you edited by hand is never
+overwritten.
 
 ## Milestone 8e — personal notes and generic knowledge
 

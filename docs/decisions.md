@@ -1348,6 +1348,8 @@ read «до года».
 
 ## 8b — `/forget` of a corrected fact, pending §18.1
 
+*Superseded by "8c — `/forget` forgets the whole lineage" below.*
+
 8b keeps today's `/forget`: deleting a corrected fact's head
 reactivates its predecessor (`test_forget_the_head_of_a_chain_clears_the_pointer`).
 In the vault, the head's file is deleted and the predecessor gets a
@@ -1921,3 +1923,311 @@ what each line says, and `tests/test_state_view.py` checks every plain
 value appears in the rich view. The web chat keeps plain text, since
 its sink only understands text messages. A `TelegramBadRequest` on send
 or refresh falls back to the plain text, so `/state` is never silent.
+
+## 8c — `/forget` forgets the whole lineage (§18.1)
+
+Settled: `/forget` and deleting a fact file agree. `memory.forget`
+is now a thin wrapper over `memory.forget_lineage`, which resolves any
+id forward to the head, then deletes the head and every predecessor.
+It writes one `state_change` row (`old_value` = the head's id, no
+text). A corrected fact's old text no longer comes back when the
+correction is forgotten, whichever path forgot it.
+`test_forget_the_head_of_a_chain_clears_the_pointer` still pins
+`hard_delete`'s own single-row relink. `forget` no longer calls
+`hard_delete`, and the new behaviour is pinned by
+`test_forget_the_head_of_a_chain_forgets_the_whole_lineage` and
+`tests/test_forget_lineage.py`.
+
+The web panel's «Забыть» dialog used to warn that an earlier version
+«снова станет активной». It now says the earlier versions are
+forgotten with the record.
+
+## 8c — `FORGET_PROTECTED` covers the whole lineage
+
+"8b on main" kept `main`'s refusal to forget a fact behind an adopted
+technique. Before, only the row being deleted was checked, because
+`hard_delete` could relink a card to the successor. `forget_lineage`
+deletes the whole chain, so no successor is left to relink to. It
+refuses if an adopted card points at *any* row in the lineage, and
+nothing changes. This also closes a case that used to succeed: an
+adopted card on a predecessor was silently moved to the successor
+when the predecessor was forgotten. That forget is now refused.
+A non-adopted card pointing into the lineage has its pointer cleared,
+because `study_card.memory_id` has no `ON DELETE`. `cards.adopt` never
+produces such a card; the clear is defensive. No migration: the
+`forgotten` card status stays dropped, as "8b on main" decided.
+
+## 8c — the vault's safety limits are constants, not settings
+
+Plan §3 lists `VAULT_DELETE_GRACE_S`, `VAULT_SYNC_WARMUP_S`,
+`VAULT_MASS_DELETE_MAX` and `VAULT_HOLD_TTL_DAYS` as environment
+variables. Each is a floor or ceiling on forgetting facts or accepting
+a rule, and a deploy must not be able to loosen one. They are
+constants in `app/vault/limits.py`: 600 s, 300 s, 3 per rolling hour,
+7 days, plus the 300-character fact cap. This is the same call as
+"8a — limits that are constants, not settings".
+`tests/test_vault_limits.py` pins the values and that `Settings` has
+no such fields.
+
+## 8c phase B — identity resolution looks up a row by path first, then by lineage
+
+Plan §7.1's table resolves a-e in order, but only b-e need `anchor_id`
+at all: "a row exists for this path" is answered by `path`, not by
+`anchor_id`, so a corrupt or missing `anchor_id` never stops case (a)
+from applying. `app/vault/ingest._resolve_identity` therefore checks
+the path first. For b/c/d it walks `anchor_id` forward through
+`Memory.superseded_by` to the lineage's current head, then looks for a
+*tracked* `vault_file` row on that head. No Memory row at all with
+that id (forgotten, i.e. `/forget` or a vault delete already ran) is
+case (d), same as a Memory row that exists but has no tracked file yet
+(render hasn't caught up with the write cap) — both "ignore anchor_id,
+treat as new" the same way, since neither names a file this pass can
+claim. An `anchor_id` of the wrong YAML type (a string, a float) is
+folded into "no anchor_id" for identity purposes only; the type check
+itself still quarantines `bad_type` once a row is chosen, so a
+malformed id never corrupts a lineage, it just always resolves as a
+new fact that gets quarantined immediately.
+
+## 8c phase B — `technique` is parseable, refused only where the DB says so
+
+Plan §7.1 lists `technique` as a `bad_kind` case in the same breath as
+the four vault-writable kinds, but also requires "editing a
+technique's text is allowed" — which needs a *parsed* `ParsedFact`
+with `kind="technique"` to reach the three-way apply at all.
+`ingest.parse_fact` therefore accepts all five `memory.KINDS` values,
+including `technique`; the refusal ("the vault can neither create a
+technique nor convert to/from one") is enforced in `ingest_file`,
+which is the only place that knows whether a row already exists and
+what its current `kind` is. A brand-new file (case d/e) with
+`kind: technique` is refused there; an existing row's `kind` changing
+to or from `technique`, compared against the *head*'s kind (not the
+three-way base), is refused there too. Comparing against the head
+rather than the base means a stale file that still says `technique`
+from before a database-side kind change is not itself an error — only
+an actual attempted conversion in this pass is.
+
+## 8c phase B — the pin-cap exception to "quarantined rows are never rewritten"
+
+Plan §7.1 says a `pin_cap` refusal clears `render_digest` "so the next
+render puts the property back", and §7.3 separately says quarantined
+rows are never written except for exactly this case. The two render
+functions (`_render_facts`, `_write_fact`) therefore carry one
+deliberate carve-out: a row with `state="quarantined"`,
+`reason="pin_cap"` and `render_digest is None` is rendered like an
+`ok` row (the file is rewritten to put `pinned: false` back), but its
+`state` is left `quarantined` afterward — the rewrite is not a
+"fixed" event the way an sha-change re-ingest is. Every other
+quarantine reason is inert until the file changes again.
+
+## 8c phase B — a `mass_delete` revert's `restore` state resolves within the same pass
+
+Plan §8's table says a `mass_delete` revert puts rows into `restore`,
+"the files come back on the next render" — read literally as the
+*next pass*. In this build a hold is decided by a separate call
+(`holds.decide`, from the Telegram layer in phase C) between passes,
+so in practice the revert and the recreation are already two different
+events in time. But the deletions-vs-render ordering inside one pass
+(§7's step list has deletions before render) means a `FORGET_PROTECTED`
+refusal — which also produces a `restore` row, from inside the same
+pass that discovered the refusal — gets its file back before that
+pass even returns. `tests/test_vault_deletions.py`'s protected-forget
+test asserts the single-pass behaviour rather than assuming a second
+pass is needed; nothing stops a second no-op pass either, since
+`_render_facts`' restore branch is idempotent.
+
+## 8c phase B — a `pin_cap`/`duplicate_file`/`technique`/`bad_*` quarantined row is never swept as "forgotten"
+
+`_render_facts`' pre-existing "forgotten facts" loop (8b) deleted any
+`vault_file` row with `memory_id IS NULL` that was not `held`, on the
+assumption that the only way to reach that state was `/forget`'s
+`ON DELETE SET NULL`. 8c's ingest creates rows with `memory_id NULL`
+for a different reason — a quarantined file that never got a memory of
+its own (a duplicate, a new technique, a bad-kind file) — and the old
+loop deleted those too, silently discarding the quarantine and the
+file's row on the very next pass. The loop's skip condition now also
+excludes `state="quarantined"`; a proper "the memory this row pointed
+at is gone" cleanup only ever applies to a row that used to be `ok`.
+
+## 8c phase B — `MEMORY_WRITERS` in `tests/test_vault_isolation.py` narrows to the three, not zero
+
+8b's AST check failed closed by forbidding every memory-writing name
+anywhere in `app/vault/`, because nothing in 8b's mode dispatch called
+any of them. 8c's `ingest.py`, `deletions.py` and `holds.py` now call
+`write_memory`, `set_pinned` and `forget_lineage` by name — exactly the
+three plan §13 allows — regardless of which mode is configured at
+runtime; whether a given call site actually *executes* in `mirror`
+mode is a property of `run_vault_sync`'s dispatch, not of what names
+appear in the source, so it cannot be an AST check. The rewritten test
+keeps failing on the two names 8b forbade outright (`hard_delete`,
+`add_pending`) and leaves "mirror applies nothing" to
+`tests/test_vault_sync.py`'s own behavioural tests, which is what it
+was actually testing all along.
+
+## 8c phase B review — five bugs, fixed with their own tests
+
+A review of phase B found five real bugs, each fixed and each pinned by
+a new test proven against a deliberate breaking edit:
+
+1. **A new fact's `pinned: true` bypassed the pin cap.** `ingest_file`'s
+   new-fact branch called `write_memory(pinned=parsed.pinned)` directly,
+   which has no cap of its own -- only `set_pinned_capped` and 8c's own
+   pinned-edit path check `count_pinned`. Fixed: a brand-new file with
+   `pinned: true` past the cap is quarantined `pin_cap` and writes no
+   memory at all, same refusal shape as an edit that would cross the cap.
+2. **A quarantined new file could never recover.** A row created for a
+   first-sight quarantine (`bad_type`, `too_long`, `technique`,
+   `duplicate_fact`, `pin_cap`...) has `memory_id NULL` by construction --
+   there is no memory yet. The existing-row branch read `memory_id NULL`
+   as "forgotten" (`/forget`'s `ON DELETE SET NULL`) and skipped it
+   forever, so fixing the file on disk never did anything. Fixed:
+   `ingest_file` now recognises "quarantined and memory_id NULL" as a
+   distinct case and reuses that row as the new fact once validation
+   passes, rather than treating every `memory_id NULL` row as forgotten.
+3. **The three-way base trusted a hand-edited `anchor_id` from any
+   lineage.** If a file's `anchor_id` was edited (by hand, or by copying
+   another file's frontmatter) to name a row from an unrelated lineage,
+   every field read as "changed" relative to a stranger's text, and the
+   merge would supersede the head with content the user never wrote.
+   Fixed: the base is only trusted when it actually leads to this file's
+   head (`_head_of(base_id).id == head.id`); otherwise the merge falls
+   back to file-vs-head, the same degeneration already used when the
+   base row is gone outright.
+4. **A rule-hold confirm that duplicated another active fact discarded
+   the user's yes.** `write_memory` returning `None` (near-duplicate) was
+   not checked in `holds._apply_rule`: for an edit, the row went back to
+   `ok` with the old text kept silently; for a new file, the row's
+   `memory_id` stayed `NULL` and the render pass's normal "memory is
+   gone" cleanup deleted the file the user just confirmed. Fixed: both
+   paths quarantine the row `duplicate_fact` instead. The hold's own
+   `status` stays `confirmed` (the button press was real), but `decide`
+   reports a distinct outcome, `DUPLICATE_RESULT`, so a caller (phase C)
+   can tell the user why nothing changed.
+5. **`VaultHold.created_at` came from the database's `now()`, not the
+   `Clock` `expire_holds` compares it against.** A `FrozenClock` set far
+   from real wall-clock time (a test, or a resumed pass after a long
+   pause) could never open a hold `expire_holds` would ever find due.
+   Fixed: `open_rule_hold` and `open_mass_delete_hold` now take `clock`
+   and stamp `created_at` from it explicitly, threaded through from
+   `ingest.py` and `deletions.py`, both of which already carry a `Clock`.
+
+## 8c phase B review — every test proven by a breaking edit
+
+The review also asked for the breaking-edit proof (make it fail, then
+revert) on every test added in this phase, not just the ones from the
+first pass -- about 80 across `test_vault_ingest.py`,
+`test_vault_holds.py`, `test_vault_deletions.py` and
+`test_vault_privacy_logs.py`. All of them were proven; the full table is
+in the hand-back report for this round rather than here, since it is a
+one-time record of *how* each test was checked, not a design decision
+future readers need. Two things worth recording because they are
+decisions, not just checklist items:
+
+- **The journal hand-edit test needed a stronger breaking edit than
+  disabling the `diverged` state.** Simply skipping the `state =
+  "diverged"` assignment left the file protected anyway, because the
+  next write still had to pass compare-and-swap against the *stale*
+  `disk_sha256` recorded before the hand edit -- so it always got a 412
+  and never overwrote anything, accidentally. The breaking edit that
+  actually exercises the "never touch it again" guarantee is one that
+  also adopts the user's new hash (`row.disk_sha256 = entry.sha256`)
+  before falling through to write, which lets the CAS succeed. Recorded
+  here so the next person extending `_render_journal` does not "fix" a
+  false positive and quietly remove real protection.
+- **A crash between `write_memory` and the shared `vault_file` commit**
+  has no reachable code path to break inside `ingest.py` itself, because
+  the sharing *is* "don't call `session.commit()` in between" -- there
+  is no separate line to disable. Its test therefore proves the
+  invariant directly against `write_memory(commit=False)`'s own
+  contract (insert a memory, add a row, raise before the shared commit,
+  confirm both roll back), and the breaking edit is inserting an early
+  `commit()` into the *test* to show a real implementation bug would
+  have left the memory row behind.
+
+## 8c phase C — notices, holds' Telegram side, `v:`, and `/vault`'s problem list
+
+Everything the plan (§8) leaves to the bot rather than `app/vault/`:
+the at-most-one-per-pass notice, sending a pending hold's card, the
+`v:y:`/`v:n:` callback, and `/vault`'s "Требуют внимания" list.
+
+- **Where the notice/hold-send logic lives.** `holds.py` already had
+  `pending_unsent`/`mark_sent` from phase B (anticipating this), and
+  `app/core/report.may_report_now` already lived outside `app.worker`
+  (also phase B/8a) -- both moves the plan called for in §8 were
+  already done, so phase C only had to *use* them. The formatting
+  (notice text, hold card text, the keyboard, the `v:` parse and the
+  problem-list labels) all live in `app/tg/vault.py`, one module,
+  rather than being split by hold kind -- there is no test pinning
+  "app/vault/ must not import app.tg" that would force a split, and one
+  place to look is simpler than several.
+- **ExtractOutcome gained `vault_pass_result` (a `PassResult | None`)
+  rather than following `RESEARCH`'s inline pattern.** `RESEARCH` calls
+  its own `_send_research_done` *inside* `_run_job`, before the job is
+  marked done, on the session the job itself used. That pattern predates
+  the "send after, not inside" rule `process_one_job`'s own comment
+  states for `outcome.created`/`order_proposed`/`amendment_trial_id`:
+  a send that raises must not roll back or re-run the pass. A vault pass
+  can create holds and change counts that must not be re-computed on
+  a retry, so `VAULT_SYNC` follows the newer, safer pattern instead of
+  copying the older one: the worker only learns the pass finished
+  *after* the job is committed done, then hands the `PassResult` to
+  `app/tg/vault.send_pass_updates`, which opens its own fresh session.
+- **`may_report_now` is asked once, right when the send happens, not
+  captured from inside the pass.** The pass and the send can be minutes
+  apart in principle (a slow worker, a deferred retry); asking at send
+  time is what the plan's "only if `_may_report_now` allows it right
+  then" literally says, and it is also what makes "the hold waits" true
+  without any extra bookkeeping -- an unsent hold is just a `vault_hold`
+  row with `tg_message_id is null`, found again by `pending_unsent` on
+  the very next pass.
+- **The notice's exact punctuation** (a period before "Не принято" but
+  never before the trailing dash, and "Хранилище" alone with no colon
+  when every count is zero but a quarantine still happened) came
+  straight out of the task's own worked examples; `notice_text` is
+  written as one formatting function with no `may_report_now` awareness
+  at all, so it stays trivially testable without a database.
+- **The `v:` callback is refused from the web chat, at both layers.**
+  `app/web/ingress.py`'s `BLOCKED_CALLBACK_PREFIX` gains `v:`, and the
+  router's handler checks `is_web_sink` like `d:`/`g:`/`cl:`. Phase C
+  first followed the majority of prefixes (`m:`, `nb:`, `c:`), which
+  carry no guard. It was changed in review. A `v:` press accepts a
+  rule or forgets facts in bulk, and plan §8 exists because a rule
+  used to be creatable only from an authenticated Telegram chat. Hold
+  messages are never sent to the web chat, so a web press can only be
+  forged. Tests: `test_a_press_through_the_web_sink_is_refused_and_changes_nothing`,
+  `test_the_web_chat_cannot_press_a_vault_hold_button`.
+- **`EARLY_MODE_NOTE` removed, not just untriggered.** `VALID_VAULT_MODES`
+  (config validation) and `vault_status.IMPLEMENTED_MODES` have been the
+  same four-element tuple since 8b: `settings.VAULT_MODE not in
+  IMPLEMENTED_MODES` can never be true for a `Settings` object that
+  passed validation, so the branch, its string and its negative test
+  assertion were all unreachable dead code once `sync` (the last
+  "early" mode) shipped. `vault_status.IMPLEMENTED_MODES` itself is left
+  in place -- nothing else names it, but it still documents which modes
+  exist, and removing it was not asked for.
+- **`vault_problems`'s tie-break is `updated_at desc, id desc`.** The
+  task said "then id" without a direction; `id desc` was chosen so that,
+  among rows sharing one `updated_at` (a full second's resolution, or a
+  batch of writes stamped from the same `clock.now_utc()` inside one
+  pass), the most recently *created* row of that group sorts first too
+  -- consistent with "most recent first" rather than an arbitrary
+  ascending tiebreak.
+- **Problem list scope: mirror and sync only, decided at the router,
+  not inside `vault_problems`.** `status` mode never runs ingest or
+  holds, so its `vault_file` table has no `held`/`quarantined`/
+  `diverged` rows to find in practice -- but `/vault`'s handler skips
+  the query outright in that mode rather than relying on that always
+  being true, so the "status mode: first line only" contract holds even
+  if a row somehow existed (e.g. a mode switch after quarantining
+  something, without a delete in between).
+- **`app.tg` added to `test_vault_isolation.py`'s `FORBIDDEN_IMPORTS`.**
+  Not asked for explicitly by the plan text carried into this task, but
+  the HARD RULES for this task state "app/vault/ must not import
+  app.tg or app.worker" as a peer of the `app.worker` rule the AST guard
+  already enforced; leaving the newer half of that sentence unpinned
+  while phase C adds a batch of new `app/tg/vault.py` code (the exact
+  code app/vault/ must never reach for) seemed like an invitation to
+  regress it silently.
+- **Every new test proven by a breaking edit** -- the full table is in
+  this round's hand-back report, the same convention phase B used
+  above.
+

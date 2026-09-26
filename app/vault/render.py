@@ -39,6 +39,16 @@ FACT_CALLOUT_MIRROR = (
     "> Это копия факта из Anchor. Пока правки здесь не применяются: следующее\n"
     "> изменение факта в Anchor перезапишет файл.\n"
 )
+# sync mode (plan section 4.1): fact/kind/pinned are genuinely editable
+# here, so the callout says so instead of mirror's "not applied yet".
+# Swapping this in changes every fact file's digest, so the first sync
+# pass after enabling `sync` rewrites every file once -- paced by the
+# write budget like any other write (plan section 4.1's own note).
+FACT_CALLOUT_SYNC = (
+    "> [!note] Anchor\n"
+    "> Меняй `fact`, `kind` и `pinned`. Удали файл — Anchor забудет этот факт.\n"
+    "> Остальное ведёт Anchor.\n"
+)
 JOURNAL_CALLOUT = (
     "> [!note] Anchor\n"
     "> Этот файл пишет Anchor. Если изменишь или удалишь его, Anchor больше не будет его трогать.\n"
@@ -146,8 +156,8 @@ def fact_keys(view: FactView, epoch: str) -> dict:
     }
 
 
-def fact_body(view: FactView) -> str:
-    parts = [FACT_CALLOUT_MIRROR]
+def fact_body(view: FactView, callout: str = FACT_CALLOUT_MIRROR) -> str:
+    parts = [callout]
     if view.technique_source is not None:
         domain, quote = view.technique_source
         parts.append("\n" + SOURCE_LINE.format(domain=_one_line(domain)) + "\n")
@@ -158,9 +168,11 @@ def fact_body(view: FactView) -> str:
     return "".join(parts)
 
 
-def render_fact(view: FactView, epoch: str, extras: str = "") -> Rendered:
+def render_fact(
+    view: FactView, epoch: str, extras: str = "", callout: str = FACT_CALLOUT_MIRROR
+) -> Rendered:
     keys = fact_keys(view, epoch)
-    body = fact_body(view)
+    body = fact_body(view, callout)
     return Rendered(_assemble(keys, extras, body), _digest(keys, body))
 
 

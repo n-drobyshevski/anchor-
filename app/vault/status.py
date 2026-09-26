@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,9 +41,8 @@ STOPPED = "stopped"
 UNREACHABLE = "unreachable"
 UNAUTHORIZED = "unauthorized"
 
-# The modes this build implements. `sync` arrives in 8c; until then it
-# behaves exactly like `mirror` (docs/decisions.md).
-IMPLEMENTED_MODES = ("off", "status", "mirror")
+# The modes this build implements (8c adds `sync`: docs/decisions.md).
+IMPLEMENTED_MODES = ("off", "status", "mirror", "sync")
 
 ClientFactory = Callable[[Settings], VaultClient]
 
@@ -146,6 +145,51 @@ async def count_fact_files(session: AsyncSession) -> int:
         .where(VaultFile.role == "fact", VaultFile.disk_sha256.is_not(None))
     )
     return result.scalar_one()
+
+
+@dataclass(frozen=True)
+class ProblemRow:
+    """One row for `/vault`'s "Требуют внимания" list (8c, plan section 8).
+
+    `path` never leaves this dataclass into a log record -- app/tg/
+    vault.py is the only reader, and it goes straight into a Telegram
+    reply. `reason` is a code (app/vault/errors.py) for a quarantined
+    row, and None for `held` and `diverged`, whose label does not
+    depend on it.
+    """
+
+    path: str
+    state: str
+    reason: str | None
+
+
+async def vault_problems(session: AsyncSession) -> tuple[list[ProblemRow], int]:
+    """Every fact/journal row that needs a look, ordered and counted.
+
+    Held first, then quarantined, then diverged (journal only); within
+    each, most recently updated_at first, ties broken by id descending.
+    Returns the full ordered list plus its length -- app/tg/vault.py
+    slices the first 5 and reports how many more there are.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(VaultFile.path, VaultFile.state, VaultFile.reason, VaultFile.updated_at, VaultFile.id)
+                .where(
+                    VaultFile.role.in_(("fact", "journal")),
+                    or_(
+                        VaultFile.state.in_(("held", "quarantined")),
+                        and_(VaultFile.role == "journal", VaultFile.state == "diverged"),
+                    ),
+                )
+            )
+        )
+        .all()
+    )
+    order = {"held": 0, "quarantined": 1, "diverged": 2}
+    rows.sort(key=lambda row: (order[row.state], -row.updated_at.timestamp(), -row.id))
+    problems = [ProblemRow(path=row.path, state=row.state, reason=row.reason) for row in rows]
+    return problems, len(problems)
 
 
 async def purge_pending(session: AsyncSession) -> bool:

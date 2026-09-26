@@ -69,8 +69,11 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # ever fire on a forged press. `g:` is the /grok picker's prefix
 # (app/tg/grok.py) and `cl:` the /claude window picker's
 # (app/tg/claude.py), both blocked for the reasons BLOCKED_COMMANDS
-# gives. A tuple, because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:")
+# gives. `v:` is a vault hold's [Да]/[Нет, вернуть] (app/tg/vault.py):
+# accepting a rule or a mass forget is Telegram's alone (phase-8 plan
+# section 8), and hold messages are never sent to the web chat. A
+# tuple, because str.startswith takes one.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:")
 
 
 class BlockedCommand(Exception):

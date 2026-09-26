@@ -8,7 +8,6 @@ in-memory vault with vaultd's compare-and-swap semantics
 from __future__ import annotations
 
 import datetime
-import decimal
 
 import pytest
 from sqlalchemy import func, select, update
@@ -302,7 +301,10 @@ async def test_off_and_status_never_touch_the_vault(sessionmaker, vault, clock, 
     assert vault.calls == []
 
 
-async def test_sync_mode_acts_as_mirror(sessionmaker, vault, clock):
+async def test_sync_mode_applies_a_text_edit(sessionmaker, vault, clock):
+    # 8c: sync no longer acts as mirror -- see tests/test_vault_ingest.py
+    # for the full ingest behaviour. This just pins that run_vault_sync
+    # actually dispatches to ingest in sync mode.
     await _seed(sessionmaker)
     fact_id = await _fact(sessionmaker, "Любит кофе")
     await _pass(sessionmaker, vault, clock, _settings("sync"))
@@ -310,7 +312,8 @@ async def test_sync_mode_acts_as_mirror(sessionmaker, vault, clock):
     vault.files[path] = vault.files[path].replace("Любит кофе", "Любит чай")
     await _pass(sessionmaker, vault, clock, _settings("sync"))
     async with sessionmaker() as session:
-        assert (await session.get(Memory, fact_id)).text == "Любит кофе"
+        head = (await session.execute(select(Memory).where(Memory.superseded_by.is_(None)))).scalar_one()
+    assert head.text == "Любит чай"
 
 
 async def test_nothing_happens_while_a_purge_is_pending(sessionmaker, vault, clock):

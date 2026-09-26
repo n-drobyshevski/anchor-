@@ -386,7 +386,7 @@ function ForgetDialog({ target, busy, onCancel, onConfirm }) {
             <h2 id="forget-heading">Забыть навсегда?</h2>
             <p class="field-hint">«${target.item.text}»</p>
             ${target.item.has_predecessor
-              ? html`<p role="alert">У этой записи есть более ранняя версия — она снова станет активной.</p>`
+              ? html`<p role="alert">У этой записи есть более ранние версии — они забудутся вместе с ней.</p>`
               : null}
             <p>Это нельзя отменить.</p>
             <div class="btn-row">
