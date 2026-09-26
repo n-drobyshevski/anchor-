@@ -61,13 +61,15 @@ SLACK_TOKEN = re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}\b")
 # this from matching a version string or a file path with dots.
 JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
 
-# PEM private-key blocks, e.g. `-----BEGIN RSA PRIVATE KEY-----` ...
-# `-----END RSA PRIVATE KEY-----`, multi-line. DOTALL so the body
+# PEM private-key blocks: a five-dash BEGIN fence naming a PRIVATE KEY,
+# a base64 body, and the matching END fence, multi-line. The fences are
+# written as `-{5}` so this file never holds the literal fence text that
+# secret scanners (GitHub push protection, gitleaks) flag. DOTALL so the body
 # between the fences (which is itself base64, wrapped at 64 chars) is
 # consumed regardless of newlines. Non-greedy so two unrelated blocks in
 # one note are matched separately rather than swallowed as one span.
 PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    r"-{5}BEGIN [A-Z0-9 ]*PRIVATE KEY-{5}.*?-{5}END [A-Z0-9 ]*PRIVATE KEY-{5}",
     re.DOTALL,
 )
 

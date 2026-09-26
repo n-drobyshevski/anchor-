@@ -33,3 +33,18 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''^tests/test_config\.py$''']
 commits = ["b843fd251ae41623fa63719b3b8f00a262807594"]
+
+# --- 2. The private-key detector's own regex (8d) ---------------------------
+#
+# Commit 4b4e463 added app/vault/secrets.py, whose PRIVATE_KEY_BLOCK regex and
+# its comment spelled out the PEM fences literally. gitleaks' `private-key`
+# rule matched the pattern text itself: a detector, not a key. The file now
+# writes the fences as `-{5}`, so no later commit carries the shape. History
+# is not rewritten; as with entry 1, rule, path and commit must all match, so
+# a real key added to this file later is still reported.
+[[allowlists]]
+description = "PRIVATE_KEY_BLOCK regex text in app/vault/secrets.py (a detector, not a key)"
+condition = "AND"
+targetRules = ["private-key"]
+paths = ['''^app/vault/secrets\.py$''']
+commits = ["4b4e463f150998035f4d43033f16019c18266c6b"]
