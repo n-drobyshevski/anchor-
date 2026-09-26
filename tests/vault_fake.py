@@ -36,6 +36,11 @@ class FakeVault:
         # summary it would report. Synthetic; never a real vault.
         self.notes: dict[str, tuple[str, str]] = {}
         self.summary = NotesSummary(conflict=0, legacy_read=0, unknown_value=0, settings="absent")
+        # 8d: paths that 404 on a direct GET even though the manifest
+        # (already read this pass) still lists them -- vaultd
+        # recomputes the effective class at read time (8e plan section
+        # 4), so a note can become invisible between the two.
+        self.missing_notes: set[str] = set()
         # Called with (path) just before a PUT lands: a test's chance to
         # "edit the file on the phone" after the manifest was read.
         self.before_put: Callable[[str], None] | None = None
@@ -78,9 +83,14 @@ class FakeVault:
     async def get_file(self, path: str) -> FileContent:
         self.calls.append(("get", path))
         self._check()
-        if path not in self.files:
+        if path in self.missing_notes:
             raise VaultError(errors.NOT_FOUND)
-        return FileContent(path, sha(self.files[path]), self.files[path])
+        if path in self.files:
+            return FileContent(path, sha(self.files[path]), self.files[path])
+        if path in self.notes:
+            note_class, content = self.notes[path]
+            return FileContent(path, sha(content), content, note_class)
+        raise VaultError(errors.NOT_FOUND)
 
     async def put_file(self, path: str, content: str, if_sha256: str | None) -> str:
         self.calls.append(("put", path))

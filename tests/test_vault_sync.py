@@ -8,9 +8,10 @@ in-memory vault with vaultd's compare-and-swap semantics
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from app.config import Settings
 from app.core import memory
@@ -31,7 +32,7 @@ from app.db.models import (
 )
 from app.vault import frontmatter
 from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
-from app.vault.sync import maybe_enqueue_vault_sync, run_vault_sync
+from app.vault.sync import NOTES_MAX_PER_PASS, maybe_enqueue_vault_sync, run_vault_sync
 from vault_fake import FakeVault, sha
 
 EPOCH = "abcdef"
@@ -41,8 +42,13 @@ NOW = datetime.datetime(2026, 9, 25, 10, 0, tzinfo=datetime.timezone.utc)
 TODAY = datetime.date(2026, 9, 25)
 
 
-def _settings(mode: str = "mirror", cap: int = 50) -> Settings:
-    return Settings(VAULT_MODE=mode, VAULT_API_TOKEN=TOKEN, VAULT_MAX_WRITES_PER_PASS=cap)
+def _settings(mode: str = "mirror", cap: int = 50, *, knowledge: bool = False) -> Settings:
+    return Settings(
+        VAULT_MODE=mode,
+        VAULT_API_TOKEN=TOKEN,
+        VAULT_MAX_WRITES_PER_PASS=cap,
+        VAULT_KNOWLEDGE_ENABLED=knowledge,
+    )
 
 
 @pytest.fixture
@@ -55,9 +61,17 @@ def clock() -> FrozenClock:
     return FrozenClock(NOW)
 
 
-async def _seed(sessionmaker) -> None:
+async def _seed(sessionmaker, *, notes_consent: bool = False) -> None:
     async with sessionmaker() as session:
-        session.add(UserState(id=1, chat_id=555, timezone="Europe/Paris", vault_epoch=EPOCH))
+        session.add(
+            UserState(
+                id=1,
+                chat_id=555,
+                timezone="Europe/Paris",
+                vault_epoch=EPOCH,
+                notes_consent=notes_consent,
+            )
+        )
         await session.commit()
 
 
@@ -507,3 +521,212 @@ async def test_a_consolidation_merge_keeps_one_file_on_the_new_head(sessionmaker
     texts = sorted(frontmatter.load(content)["fact"] for content in vault.files.values())
     assert texts == ["Любит кофе по утрам", "Пьёт эспрессо после обеда"]
     assert len(await _rows(sessionmaker)) == 2
+
+
+# --- step 8: notes index (8d, this PR -- knowledge notes only) -------------
+
+
+async def _note_rows(sessionmaker) -> list[VaultFile]:
+    async with sessionmaker() as session:
+        return list(
+            (await session.execute(select(VaultFile).where(VaultFile.role == "note").order_by(VaultFile.path)))
+            .scalars()
+        )
+
+
+async def _chunk_texts(sessionmaker, table: str, file_id: int) -> list[str]:
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                text(f"select text from {table} where file_id = :fid order by ord"), {"fid": file_id}
+            )
+        ).scalars()
+        return list(rows)
+
+
+async def _chunk_count(sessionmaker, table: str) -> int:
+    async with sessionmaker() as session:
+        return (await session.execute(text(f"select count(*) from {table}"))).scalar_one()
+
+
+NOTES_LOGGER = "app.vault.sync"
+
+
+@pytest.fixture
+def live_notes_logger(monkeypatch):
+    """conftest's alembic run disables every logger that already
+    existed (alembic.ini's fileConfig); re-enable this one so caplog
+    can actually see records the way production would."""
+    monkeypatch.setattr(logging.getLogger(NOTES_LOGGER), "disabled", False)
+
+
+async def test_knowledge_note_is_indexed_with_masked_secret(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    aws_key = "AK" + "IAABCDEFGHIJ1234KL"  # built at runtime -- see CLAUDE.md
+    vault.notes["Library/CCRU.md"] = ("knowledge", f"# CCRU\n\nКлюч: {aws_key}, не теряй.")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 1
+    [row] = await _note_rows(sessionmaker)
+    assert row.path == "Library/CCRU.md"
+    assert row.note_class == "knowledge"
+    assert row.disk_sha256 == sha(vault.notes["Library/CCRU.md"][1])
+    [chunk] = await _chunk_texts(sessionmaker, "note_chunk_knowledge", row.id)
+    assert aws_key not in chunk
+    assert "[скрыто]" in chunk
+    assert await _chunk_count(sessionmaker, "note_chunk_personal") == 0
+
+
+async def test_personal_note_is_never_indexed(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Life/People.md"] = ("personal", "# People\n\nO партнёре.")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 0
+    assert await _note_rows(sessionmaker) == []
+    assert await _chunk_count(sessionmaker, "note_chunk_personal") == 0
+    assert await _chunk_count(sessionmaker, "note_chunk_knowledge") == 0
+
+
+async def test_unchanged_sha_is_not_refetched(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nБазовый текст.")
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    vault.calls.clear()
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 0
+    assert ("get", "Library/CCRU.md") not in vault.calls
+
+
+async def test_edited_note_is_reindexed_and_old_chunks_replaced(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nПервая версия.")
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    [row] = await _note_rows(sessionmaker)
+    assert await _chunk_texts(sessionmaker, "note_chunk_knowledge", row.id) == ["Первая версия."]
+
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nВторая версия, другой текст.")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 1
+    [row] = await _note_rows(sessionmaker)
+    chunks = await _chunk_texts(sessionmaker, "note_chunk_knowledge", row.id)
+    assert chunks == ["Вторая версия, другой текст."]
+    assert "Первая версия." not in chunks
+
+
+async def test_note_that_disappears_loses_its_row_and_chunks(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nТекст.")
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    [row] = await _note_rows(sessionmaker)
+    file_id = row.id
+    del vault.notes["Library/CCRU.md"]
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.removed == 1
+    assert await _note_rows(sessionmaker) == []
+    assert await _chunk_texts(sessionmaker, "note_chunk_knowledge", file_id) == []
+
+
+async def test_knowledge_to_personal_class_change_removes_chunks_and_row(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Life/Diary.md"] = ("knowledge", "# Diary\n\nТекст.")
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    [row] = await _note_rows(sessionmaker)
+    file_id = row.id
+
+    vault.notes["Life/Diary.md"] = ("personal", "# Diary\n\nТекст.")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.removed == 1
+    assert result.indexed == 0
+    assert await _note_rows(sessionmaker) == []  # no FK error, no personal row created
+    assert await _chunk_texts(sessionmaker, "note_chunk_knowledge", file_id) == []
+
+
+async def test_personal_to_knowledge_is_indexed(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Life/Diary.md"] = ("personal", "# Diary\n\nТекст.")
+    first = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert first.indexed == 0
+    assert await _note_rows(sessionmaker) == []
+
+    vault.notes["Life/Diary.md"] = ("knowledge", "# Diary\n\nТекст.")
+    second = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert second.indexed == 1
+    [row] = await _note_rows(sessionmaker)
+    assert row.note_class == "knowledge"
+
+
+async def test_consent_off_indexes_nothing(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=False)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nТекст.")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 0 and result.removed == 0
+    assert await _note_rows(sessionmaker) == []
+    # Without consent, the note's *content* is never even fetched --
+    # not merely refused after the fact.
+    assert ("get", "Library/CCRU.md") not in vault.calls
+
+
+async def test_knowledge_flag_off_indexes_nothing_and_removes_existing(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nТекст.")
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    [row] = await _note_rows(sessionmaker)
+    file_id = row.id
+    assert await _chunk_count(sessionmaker, "note_chunk_knowledge") > 0
+
+    # The flag turns off. The note is still there and still classified
+    # knowledge, but a stale index must not survive the flag flipping.
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=False))
+    assert result.indexed == 0
+    assert result.removed == 1
+    assert await _note_rows(sessionmaker) == []
+    assert await _chunk_texts(sessionmaker, "note_chunk_knowledge", file_id) == []
+
+
+async def test_status_mode_indexes_nothing(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/CCRU.md"] = ("knowledge", "# CCRU\n\nТекст.")
+    result = await _pass(sessionmaker, vault, clock, _settings(mode="status", knowledge=True))
+    assert result.ran is False
+    assert result.indexed == 0
+    assert await _note_rows(sessionmaker) == []
+
+
+async def test_per_pass_cap_is_respected_and_the_rest_indexed_next_pass(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    total = NOTES_MAX_PER_PASS + 3
+    for i in range(total):
+        vault.notes[f"Library/Note{i:03d}.md"] = ("knowledge", f"# Note {i}\n\nТекст {i}.")
+    first = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert first.indexed == NOTES_MAX_PER_PASS
+    assert len(await _note_rows(sessionmaker)) == NOTES_MAX_PER_PASS
+    second = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert second.indexed == 3
+    assert len(await _note_rows(sessionmaker)) == total
+
+
+async def test_a_vaultd_404_mid_pass_skips_only_that_note(sessionmaker, vault, clock):
+    await _seed(sessionmaker, notes_consent=True)
+    vault.notes["Library/A.md"] = ("knowledge", "# A\n\nТекст A.")
+    vault.notes["Library/B.md"] = ("knowledge", "# B\n\nТекст B.")
+    vault.missing_notes.add("Library/A.md")
+    result = await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    assert result.indexed == 1
+    assert result.skipped >= 1
+    rows = await _note_rows(sessionmaker)
+    assert [r.path for r in rows] == ["Library/B.md"]
+
+
+async def test_notes_index_logs_no_path_title_text_or_class(sessionmaker, vault, clock, caplog, live_notes_logger):
+    await _seed(sessionmaker, notes_consent=True)
+    aws_key = "AK" + "IAABCDEFGHIJ1234KL"
+    vault.notes["Library/Секретная тема.md"] = ("knowledge", f"# Секретная тема\n\n{aws_key} и текст.")
+    caplog.set_level(logging.DEBUG)
+    await _pass(sessionmaker, vault, clock, _settings(knowledge=True))
+    forbidden = ["Секретная тема", "Library/Секретная тема.md", aws_key, "knowledge", "personal", "note_class"]
+    for record in caplog.records:
+        # `extra={...}` fields land on the record's own attributes, not
+        # in `getMessage()` -- check the whole record, not just its
+        # formatted message, or a leak in `extra` would go unnoticed.
+        haystack = repr(vars(record))
+        for needle in forbidden:
+            assert needle not in haystack, (needle, haystack)

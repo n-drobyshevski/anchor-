@@ -20,7 +20,7 @@ no model call, no outbound).
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
 | Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https) |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
-| Vault notes: personal vs knowledge classes and consent (8e; nothing is indexed or used until 8d) | **off** | `/vault notes on`; later `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED` (8d) |
+| Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`

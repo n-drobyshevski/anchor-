@@ -2281,3 +2281,45 @@ the plan's §13 are open. Two of them change the brief's wording:
 
 W2 also waits on C3 and on knowledge indexing, neither of which exists
 yet (see "8d — full-text rank does not separate…").
+
+## Index knowledge notes only
+
+Your decision, before C3. The sync pass (step 8) indexes notes whose
+class is `knowledge`, only while `notes_consent` is on and
+`VAULT_KNOWLEDGE_ENABLED` is set. Personal notes get no row and no
+chunks: nothing reads them, because retrieval failed its gate ("8d —
+full-text rank does not separate…"), so indexing them would keep a
+derived copy with no use. `app/vault/sync.py` does not import
+`notes_personal`, and a test pins that.
+
+- **Modes:** `mirror` and `sync`. Indexing writes nothing to the vault,
+  so the record-vs-apply split that matters for facts does not apply.
+- **Leaving knowledge:** a note that disappears, becomes unclassified or
+  `never`, or turns personal loses its chunks and then its row. Nothing
+  is reclassified in place, so the composite FK's ordering never comes
+  up.
+- **Flag off:** with consent on and `VAULT_KNOWLEDGE_ENABLED` off, every
+  pass removes the existing knowledge index, so turning the flag off
+  leaves nothing stale. Consent off was already handled by
+  `/vault notes off`.
+- **Pacing:** at most `NOTES_MAX_PER_PASS` (50) note fetches per pass, a
+  constant, so a large vault bootstraps over several passes. Each note
+  is its own transaction. A note that 404s mid-pass, or fails to
+  decode, is skipped without failing the pass.
+- **Title:** the chunk heading's title is the file name without `.md`,
+  never taken from frontmatter.
+
+## C3 — `search_library` without the failed threshold
+
+Your decision: `search_library` returns the **top 6** knowledge chunks
+by `ts_rank_cd`, keeping only chunks that share **at least 2 distinct
+lexemes** with the query. On the frozen corpus that gate measured 0.84
+precision and 0.82 recall.
+
+The 8d threshold failed for *automatic* retrieval into the persona's
+prompt, where an irrelevant chunk steers the reply. `search_library`
+is an explicit search that Claude chooses to run, and Claude judges
+the results. What an irrelevant chunk costs there is knowledge text
+sent to Anthropic that the question did not need. The 2-lexeme floor
+cuts most single-word matches without claiming to separate relevance.
+Automatic persona retrieval stays unbuilt.

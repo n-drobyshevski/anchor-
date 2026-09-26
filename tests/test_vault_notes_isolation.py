@@ -191,6 +191,18 @@ def test_each_access_module_names_only_its_own_table():
         assert named == {table}, owner
 
 
+def test_sync_indexes_knowledge_only_and_never_imports_notes_personal():
+    """8d (this PR): only knowledge notes are indexed (docs/decisions.md,
+    "index knowledge notes only"). `app/vault/sync.py` is allowed to
+    import `notes_personal` (it is "the rest of app/vault/"), but this
+    PR must not actually reach for it -- personal indexing is later
+    work, and nothing reads a personal note until that plan lands."""
+    tree = ast.parse((ROOT / "app/vault/sync.py").read_text(encoding="utf-8"))
+    imported = _imported_modules(tree) | _attribute_uses(tree)
+    assert not _reaches(imported, "app.vault.notes_personal")
+    assert _reaches(imported, "app.vault.notes_knowledge")
+
+
 def test_the_forbidden_importers_exist():
     """A renamed module must not quietly drop out of the rule."""
     for entry in FORBIDDEN_IMPORTERS:

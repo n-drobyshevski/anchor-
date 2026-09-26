@@ -17,7 +17,11 @@
    fact file whose hash moved gets its new hash stored, and nothing
    else happens. The next database-side change to that fact overwrites
    the edit, which /vault says in as many words;
-5. renders facts, then 6. the journal.
+5. renders facts, then 6. the journal;
+7. **indexes knowledge notes** (phase-8 plan section 7 step 8, amended
+   by the 8e plan's section 9 and this PR's own decision -- see
+   `_index_notes`'s docstring for why personal notes are never
+   touched here).
 
 **Every write is compare-and-swap.** A create is create-only; an update
 names the hash Anchor last saw; a delete names it too. A 412 means the
@@ -70,7 +74,7 @@ from app.db.models import (
     UserState,
     VaultFile,
 )
-from app.vault import deletions, errors, frontmatter, holds, ingest, render
+from app.vault import deletions, errors, frontmatter, holds, ingest, notes_knowledge, notes_text, render
 from app.vault.client import ManifestEntry, VaultClient
 from app.vault.errors import VaultError
 from app.vault.kinds import SYNC_MODES, VAULT_SYNC, sync_dedup_key
@@ -81,6 +85,15 @@ FACT_PATH_RE = re.compile(r"^Anchor/Memory/[^/]+\.md$")
 logger = logging.getLogger(__name__)
 
 PRUNE_AFTER = datetime.timedelta(hours=1)
+
+NOTES_MAX_PER_PASS = 50
+"""Pacing for step 8 (notes index), independent of
+`VAULT_MAX_WRITES_PER_PASS`: a note costs a vaultd GET plus a database
+write, not a vaultd PUT, so it earns its own budget rather than
+competing with facts and the journal for the same one. A constant, not
+a Settings field -- the same call as `notes_text.NOTE_CHUNK_CHARS`: a
+deploy must not be able to widen how much of a big vault is read in one
+pass by pasting a bigger number into the environment."""
 
 # Quarantine codes are app/vault/errors.py's alone (8c: QUARANTINE_CODES
 # unifies what used to be a second copy here). Kept as local names for
@@ -108,6 +121,10 @@ class PassResult:
     held: int = 0
     new_hold_ids: list = field(default_factory=list)
     counts: dict = field(default_factory=dict)
+    # Step 8 (notes index): knowledge notes only (personal is out of
+    # scope for this PR). Not sent anywhere yet.
+    indexed: int = 0
+    removed: int = 0
 
     @property
     def writes(self) -> int:
@@ -221,6 +238,7 @@ async def run_vault_sync(
             await _record_edits(session, manifest, clock, result)
         await _render_facts(session, client, manifest, state, clock, budget, result, sync_mode=sync_mode)
         await _render_journal(session, client, manifest, state, clock, budget, result)
+        await _index_notes(session, client, manifest, state, settings, result)
         if sync_mode:
             expired = await holds.expire_holds(session, clock)
             result.new_hold_ids = [hid for hid in result.new_hold_ids if hid not in expired]
@@ -239,7 +257,7 @@ async def run_vault_sync(
                 f"orphans={result.orphans} recorded={result.recorded} skipped={result.skipped} "
                 f"quarantined={result.quarantined} created_facts={result.created_facts} "
                 f"changed_facts={result.changed_facts} forgotten_facts={result.forgotten_facts} "
-                f"held={result.held}"
+                f"held={result.held} indexed={result.indexed} removed={result.removed}"
             ),
         },
     )
@@ -811,3 +829,127 @@ async def _render_journal(
         _written(row, new_sha, rendered.digest, clock)
         await session.commit()
         result.updated += 1
+
+
+# --- step 8: notes index ----------------------------------------------------
+
+
+def _note_title(path: str) -> str:
+    """The file name without its directory or `.md` suffix (the plan's
+    own words: "title = file name without .md")."""
+    name = path.rsplit("/", 1)[-1]
+    return name[: -len(".md")] if name.endswith(".md") else name
+
+
+async def _remove_knowledge_note(session: AsyncSession, row: VaultFile) -> None:
+    """Chunks first, row second -- the 8e plan's FK order (section 9):
+    the composite foreign key refuses reclassifying a note while its
+    old-class chunks exist, and refuses nothing about deleting the row
+    outright, but doing it in this order keeps one rule for both
+    "the note left" and "the note changed class"."""
+    await notes_knowledge.delete_for_file(session, row.id)
+    await session.delete(row)
+    await session.commit()
+
+
+async def _index_notes(
+    session: AsyncSession,
+    client: VaultClient,
+    manifest: dict[str, ManifestEntry],
+    state: UserState,
+    settings: Settings,
+    result: PassResult,
+) -> None:
+    """Step 8 (phase-8 plan section 7; indexing amended by the 8e plan's
+    section 9). **Knowledge notes only.**
+
+    This PR indexes `note_class == "knowledge"` and nothing else.
+    Personal notes are read by nothing here -- `app/vault/notes_personal`
+    is not even imported by this module (tests/test_vault_sync.py pins
+    it, and tests/test_vault_notes_isolation.py's allowlist would let it
+    happen if it were ever added). A `personal` manifest entry is looked
+    at only to notice that it is *not* knowledge, so a note that changes
+    class from knowledge to personal is removed, never re-filed under a
+    row this PR does not create (docs/decisions.md: "index knowledge
+    notes only").
+
+    Runs in both `mirror` and `sync` -- the caller already returned
+    before this point for `off` and `status` -- because nothing here
+    writes to the vault. The mirror/sync split that matters for facts
+    (record vs. apply an edit) has no equivalent for a read-only index.
+
+    **Consent and the flag, checked here, not only by the caller
+    (docs/decisions.md, "8e -- consent is checked inside the access
+    modules", extended to this step and to the flag):**
+    - consent off: `/vault notes off` already deleted every note row
+      and both chunk tables' rows for it, synchronously
+      (app/vault/consent.py). Nothing to do here.
+    - consent on, `VAULT_KNOWLEDGE_ENABLED` off: a flag turned off must
+      not leave a stale index, so every existing knowledge row (and its
+      chunks) is removed, every pass, until the flag comes back on.
+    - both on: removals, then indexing, each capped and each note its
+      own transaction, so one bad note (invisible by the time it is
+      fetched, or text that cannot survive a round trip) is skipped
+      without failing the pass or any other note in it.
+    """
+    if not state.notes_consent:
+        return
+    tracked = (
+        (
+            await session.execute(
+                select(VaultFile).where(VaultFile.role == "note", VaultFile.note_class == "knowledge")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not settings.VAULT_KNOWLEDGE_ENABLED:
+        for row in tracked:
+            await _remove_knowledge_note(session, row)
+            result.removed += 1
+        return
+
+    tracked_by_path = {row.path: row for row in tracked}
+    for row in tracked:
+        entry = manifest.get(row.path)
+        if entry is None or entry.scope != "note" or entry.note_class != "knowledge":
+            # Gone from the manifest, or reclassified away from
+            # knowledge (including to `personal` -- this PR keeps no
+            # row for that class at all).
+            await _remove_knowledge_note(session, row)
+            result.removed += 1
+            del tracked_by_path[row.path]
+
+    budget = _Budget(NOTES_MAX_PER_PASS)
+    for path, entry in sorted(manifest.items()):
+        if entry.scope != "note" or entry.note_class != "knowledge":
+            continue
+        row = tracked_by_path.get(path)
+        if row is not None and row.disk_sha256 == entry.sha256:
+            continue
+        if not budget.take():
+            # A big vault bootstraps over several passes.
+            break
+        try:
+            current = await client.get_file(path)
+            chunks = notes_text.prepare(current.content, _note_title(path))
+        except (VaultError, UnicodeError):
+            # vaultd 404 (the note became invisible between this pass's
+            # manifest and this fetch) or text that cannot survive a
+            # round trip: skip this note, never the pass.
+            result.skipped += 1
+            continue
+        try:
+            if row is None:
+                row = VaultFile(path=path, role="note", note_class="knowledge")
+                session.add(row)
+                await session.flush()
+                tracked_by_path[path] = row
+            row.disk_sha256 = current.sha256
+            await notes_knowledge.replace_chunks(session, row.id, chunks)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            result.skipped += 1
+            continue
+        result.indexed += 1
