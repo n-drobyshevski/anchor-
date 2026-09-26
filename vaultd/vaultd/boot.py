@@ -9,7 +9,11 @@ vaultd exits non-zero before anything else runs if:
   it was found while verifying Railway's docs and is refused for the
   same reason (docs/decisions.md);
 - `VAULT_API_TOKEN` is shorter than 32 characters;
-- any `OBSIDIAN_*` variable is empty.
+- any `OBSIDIAN_*` variable is empty;
+- `VAULT_UNDO_ROOT` resolves inside `VAULT_PATH` (plan "Claude writes
+  knowledge notes" section 6.2, 13.9): the undo store holds pre-images
+  of what Claude wrote, and it must never be a folder `ob` syncs back
+  to your phone.
 
 **Then ob, in order, every command as an argv list and never through a
 shell:**
@@ -74,6 +78,21 @@ def check_env(env: Mapping[str, str], cfg: Config) -> None:
     empty = [name for name in OBSIDIAN_VARS if not env.get(name, "").strip()]
     if empty:
         raise BootRefused("Missing required environment variables: " + ", ".join(empty) + ".")
+    check_undo_root(cfg)
+
+
+def check_undo_root(cfg: Config) -> None:
+    vault_real = os.path.realpath(cfg.vault_path)
+    undo_real = os.path.realpath(cfg.undo_root)
+    try:
+        common = os.path.commonpath([vault_real, undo_real])
+    except ValueError:
+        common = None
+    if common == vault_real:
+        raise BootRefused(
+            "VAULT_UNDO_ROOT is inside VAULT_PATH: the undo store must live "
+            "outside the synced vault, never a folder ob syncs."
+        )
 
 
 def child_env(env: Mapping[str, str], cfg: Config) -> dict[str, str]:
