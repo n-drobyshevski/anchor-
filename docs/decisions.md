@@ -2350,3 +2350,21 @@ Automatic persona retrieval stays unbuilt.
 - **The two-lexeme floor is applied in SQL**, before the limit, so a
   pile of higher-ranked one-word matches cannot crowd out a real match
   (review fix).
+
+## W1 — decisions settled
+
+The write plan's §13 is settled (`anchor-claude-write-plan.md` rev. 2):
+- no delete; rename and move are allowed within knowledge folders, with backlinks rewritten and refused if any non-knowledge note links there;
+- its own write switch;
+- wikilinks only;
+- a changeset is a 10-minute idle window;
+- undo is kept 14 days;
+- a secret in written text refuses the write;
+- the write routes use the same `VAULT_API_TOKEN`;
+- Claude's nodes will be labelled once retrieval exists;
+- the undo store is on the vault volume, outside the vault root.
+
+One addition follows from the rename: while the write switch is on,
+`search_library` results carry the note's path and hash, and
+`get_note(path)` returns a whole knowledge note, so Claude can name the
+note it edits. With writing off, no path reaches Claude, as in C3.
