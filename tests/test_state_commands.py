@@ -30,7 +30,7 @@ from app.db.models import (
 )
 from app.tg import proposals as proposals_ui
 from app.tg.router import DUE_CLEARED, DUE_SET, FOCUS_OFF, FOCUS_ON, FOCUS_USAGE, build_router
-from conftest import FakeLLMProvider, FakeSession
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,6 +76,13 @@ async def _feed(dp, bot, payload: dict) -> None:
 async def _state(sessionmaker) -> UserState:
     async with sessionmaker() as session:
         return await session.get(UserState, 1)
+
+
+def _state_text(fake: FakeSession) -> str:
+    """/state now sends a rich message (app/tg/state_view.py) rather
+    than a plain one -- flatten it back to text so these assertions,
+    lifted from before that change, keep reading the same substrings."""
+    return flatten_rich_message(fake.rich[-1].rich_message)
 
 
 # --- /due ---
@@ -259,7 +266,7 @@ async def test_state_shows_every_phase_two_field(sessionmaker):
 
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    text = fake.sent[0].text
+    text = _state_text(fake)
 
     # Phase 1's fields still there -- tests/test_commands.py depends on these.
     assert "вкл" in text
@@ -299,7 +306,7 @@ async def test_state_shows_the_welfare_check_health(sessionmaker):
 
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    assert "Проверка благополучия (7 дн.): ok 3 · сбои 2" in fake.sent[0].text
+    assert "Проверка благополучия (7 дн.): ok 3 · сбои 2" in _state_text(fake)
 
 
 async def test_state_reads_zero_when_no_check_has_run(sessionmaker):
@@ -308,7 +315,7 @@ async def test_state_reads_zero_when_no_check_has_run(sessionmaker):
     await _seed(sessionmaker, 1)
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    assert "Проверка благополучия (7 дн.): ok 0 · сбои 0" in fake.sent[0].text
+    assert "Проверка благополучия (7 дн.): ok 0 · сбои 0" in _state_text(fake)
 
 
 async def test_state_with_nothing_set_reads_cleanly(sessionmaker):
@@ -316,7 +323,7 @@ async def test_state_with_nothing_set_reads_cleanly(sessionmaker):
     dp, bot, fake = _build_dp(sessionmaker)
 
     await _feed(dp, bot, _command_update(1, "/state"))
-    text = fake.sent[0].text
+    text = _state_text(fake)
 
     assert "Серия: 0 дн." in text
     assert "Последний чек-ин: давно" in text
@@ -365,7 +372,7 @@ async def test_state_has_no_research_line_before_any_research_ran(sessionmaker, 
 
     await _feed(dp, bot, _command_update(1, "/state"))
 
-    assert "Исследования" not in fake.sent[0].text
+    assert "Исследования" not in _state_text(fake)
 
 
 async def test_state_shows_the_research_line_once_there_is_something_to_show(
@@ -384,7 +391,7 @@ async def test_state_shows_the_research_line_once_there_is_something_to_show(
     await _feed(dp, bot, _command_update(1, "/state"))
 
     line = next(
-        row for row in fake.sent[0].text.splitlines() if row.startswith("Исследования")
+        row for row in _state_text(fake).splitlines() if row.startswith("Исследования")
     )
     assert "разбор ok 3 · сбои 2" in line
     assert "поиск ok 1 · сбои 4" in line
@@ -400,7 +407,7 @@ async def test_the_research_line_does_not_disturb_the_welfare_line(sessionmaker,
     await _feed(dp, bot, _command_update(1, "/state"))
 
     welfare = next(
-        row for row in fake.sent[0].text.splitlines()
+        row for row in _state_text(fake).splitlines()
         if row.startswith("Проверка благополучия")
     )
     assert "ok 0 · сбои 0" in welfare
@@ -413,7 +420,7 @@ async def test_state_shows_no_canary_line_before_any_canary_ran(sessionmaker):
     await _seed(sessionmaker, 1)
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    assert "Канарейка" not in fake.sent[0].text
+    assert "Канарейка" not in _state_text(fake)
 
 
 async def test_state_shows_the_latest_canary_ok(sessionmaker):
@@ -428,7 +435,7 @@ async def test_state_shows_the_latest_canary_ok(sessionmaker):
         await session.commit()
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    assert "Канарейка: 2026-09-23 ок" in fake.sent[0].text
+    assert "Канарейка: 2026-09-23 ок" in _state_text(fake)
 
 
 async def test_state_shows_the_latest_canary_regression(sessionmaker):
@@ -443,7 +450,7 @@ async def test_state_shows_the_latest_canary_regression(sessionmaker):
         await session.commit()
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    assert "Канарейка: 2026-09-23 ⚠️" in fake.sent[0].text
+    assert "Канарейка: 2026-09-23 ⚠️" in _state_text(fake)
 
 
 async def test_state_shows_persona_version_idle_and_backup(sessionmaker):
@@ -462,7 +469,7 @@ async def test_state_shows_persona_version_idle_and_backup(sessionmaker):
 
     dp, bot, fake = _build_dp(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/state"))
-    text = fake.sent[0].text
+    text = _state_text(fake)
 
     sha = load_persona(persona_path_for(Settings()))[1][:8]
     assert f"Персона: вкл · v{sha}" in text

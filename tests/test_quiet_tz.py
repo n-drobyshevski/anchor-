@@ -35,7 +35,7 @@ from app.tg.router import (
     TZ_USAGE,
     build_router,
 )
-from conftest import FakeLLMProvider, FakeSession
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
@@ -333,7 +333,9 @@ async def test_changing_the_zone_moves_the_fixed_intents(sessionmaker):
 async def _state_text(sessionmaker, clock) -> str:
     dp, bot, fake = _build(sessionmaker, clock)
     await _feed(dp, bot, _command_update(99, "/state"))
-    return fake.sent[-1].text
+    # /state now sends a rich message (app/tg/state_view.py); flatten it
+    # back to text for these lifted assertions.
+    return flatten_rich_message(fake.rich[-1].rich_message)
 
 
 async def test_state_shows_nothing_yet_when_nothing_is_planned(sessionmaker):
