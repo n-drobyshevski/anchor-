@@ -75,6 +75,16 @@ async def test_create_in_a_non_knowledge_folder_is_refused(client, vault: Path):
     assert not (vault / "Elsewhere" / "X.md").exists()
 
 
+async def test_create_needs_the_folders_own_rule_not_just_the_frontmatter(client, vault: Path):
+    """Two separate conditions (write-plan section 4.4): the folder's own
+    rule must be knowledge, AND the content's own class must resolve to
+    knowledge. Content alone saying `anchor: knowledge` must not smuggle
+    a file into a folder that carries no knowledge rule at all."""
+    resp = await _put(client, "Elsewhere/X.md", note("knowledge", "Hello.\n"), None)
+    assert resp.status == 403
+    assert not (vault / "Elsewhere" / "X.md").exists()
+
+
 async def test_create_in_a_folder_that_does_not_exist_is_refused(client, vault: Path):
     resp = await _put(client, "Library/Sub/X.md", "Hello.\n", None)
     assert resp.status == 403
@@ -122,7 +132,11 @@ async def test_a_knowledge_folder_note_marked_personal_is_refused(client, vault:
 async def test_invalid_settings_refuses_every_write(client, vault: Path):
     write(vault, "Anchor/settings.md", "---\nanchor: settings\nbogus: 1\n---\n")
     write(vault, "Library/CCRU.md", note("knowledge"))
-    resp = await _put(client, "Library/CCRU.md", "New.\n", sha(note("knowledge")))
+    # Content that KEEPS its own `anchor: knowledge` property, so the
+    # update is refused specifically because the settings state is
+    # invalid -- not incidentally, by the no-reclassify check (which
+    # would also refuse an update that drops the property).
+    resp = await _put(client, "Library/CCRU.md", note("knowledge", "New.\n"), sha(note("knowledge")))
     assert resp.status == 403
     resp2 = await _put(client, "Library/New.md", "x", None)
     assert resp2.status == 403

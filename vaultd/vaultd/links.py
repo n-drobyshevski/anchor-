@@ -36,8 +36,6 @@ _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 # a `#` or `|` inside a heading/label round-trips untouched.
 _LINK_RE = re.compile(r"(?P<bang>!)?\[\[(?P<inner>[^\[\]]+)\]\]")
 
-_EXCLUDED_TOP = "Anchor"
-
 
 def basename(rel: str) -> str:
     """The note's link-target name: the last path segment, minus `.md`, NFC."""
@@ -99,13 +97,21 @@ def rewrite(data: bytes, old_basename: str, new_basename: str) -> tuple[str, int
 
 
 def iter_notes(root: Path) -> Iterator[tuple[str, bytes]]:
-    """Every `.md` file's (rel path, bytes) outside Anchor's scope.
+    """Every `.md` file's (rel path, bytes) in the whole vault, `Anchor/` included.
 
-    Skips dot-folders/files, symlinks, and `Anchor/settings.md`, the
-    same set the manifest walks before classification. Personal and
-    `never` notes ARE included here -- rename must be able to tell that
-    one of them links to the note being renamed -- but their bytes
-    never leave this generator's caller (knowledge.py) in a response.
+    Rename must refuse when ANY non-knowledge file links to the note
+    being renamed, and the write-plan is explicit that this covers
+    `Anchor/`'s own fact and journal pages, not only ordinary notes: a
+    fact file that happens to hold `[[Old]]` is exactly the kind of
+    outside link a rename must not silently leave dangling, or rewrite
+    without the same scrutiny a personal note gets. `Anchor/settings.md`
+    is skipped (it is not a note Obsidian links to), and so are
+    dot-folders/files and symlinks, the same set the manifest walks.
+
+    Every file this yields, Anchor's own included, stays in-process:
+    `knowledge.plan_rename` reads it only to search for a link and to
+    compute its class, and neither its path nor its bytes are ever
+    returned from the API.
     """
     yield from _walk(root, "")
 
@@ -123,8 +129,6 @@ def _walk(directory: Path, prefix: str) -> Iterator[tuple[str, bytes]]:
             if entry.is_symlink():
                 continue
             if entry.is_dir(follow_symlinks=False):
-                if not prefix and entry.name == _EXCLUDED_TOP:
-                    continue
                 yield from _walk(Path(entry.path), rel + "/")
                 continue
             if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".md"):

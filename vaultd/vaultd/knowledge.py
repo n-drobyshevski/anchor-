@@ -47,8 +47,28 @@ class MidRenameFailure(Exception):
     """The new path was created but the old one could not be removed.
 
     Both paths are left in place with identical content -- a duplicate,
-    not a loss. Recovering means removing the old path once its own
-    hash is known again (a fresh read), or retrying the rename.
+    not a loss. The one thing that is certain to have happened --
+    creating `new_rel` -- is on `entries`, so the caller can still
+    record it in the changeset: undoing that changeset later deletes
+    the duplicate (compare-and-swap, like any other undo), which is
+    the recovery path. Recovering the old path otherwise means a fresh
+    read of it (its hash is no longer known here) or retrying the rename.
+    """
+
+    def __init__(self, new_rel: str, entries: list["undo.FileEntry"]) -> None:
+        super().__init__(new_rel)
+        self.new_rel = new_rel
+        self.entries = entries
+
+
+class RenameRaced(Exception):
+    """A backlink file changed between planning and writing it.
+
+    Everything this rename had already written in this request --
+    every backlink rewritten so far, and the move itself -- was rolled
+    back to its pre-image before this was raised. The vault is exactly
+    as it was before the request; the caller answers 412, the same as
+    any other compare-and-swap loss.
     """
 
 
@@ -188,8 +208,12 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
         raise Refused  # destination taken
     if classes._folder_class(new_rel, rules) != "knowledge":  # noqa: SLF001
         raise Refused
-    if classes.effective_class(new_rel, old_mark, rules).note_class != "knowledge":
-        raise Refused
+    # No separate check of the destination's resolved class: the guard
+    # above already proved `old_mark` is "knowledge" or "none" (nothing
+    # else can pass it), and combined with a folder rule of "knowledge"
+    # -- just proved too -- `effective_class` always resolves the pair
+    # to "knowledge" (stricter-wins can only raise the rank, and there
+    # is nothing above knowledge left to raise it to).
 
     old_base = links.basename(old_rel)
     new_base = links.basename(new_rel)
@@ -207,6 +231,8 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
             continue
         if count == 0:
             continue
+        if _first_segment(rel) == _ANCHOR_TOP:
+            raise Refused  # a fact/journal page (or any other Anchor file) links here
         note_class = _class_of(rel, data, rules)
         if note_class != "knowledge":
             raise Refused  # a personal/never/unclassified note links here
@@ -223,7 +249,14 @@ def perform_rename(store: Store, plan: RenamePlan, *, now: Callable[[], str] = _
     Create-only at the new path, then remove the old one -- the same
     shape as any other create-only write (store.py). If the removal
     fails after the link succeeded, both paths are left in place
-    (MidRenameFailure): a duplicate, never a loss.
+    (`MidRenameFailure`): a duplicate, never a loss.
+
+    Every backlink write after that is compare-and-swapped against the
+    hash `plan_rename` read. If one has changed since -- `ob` landed a
+    sync in the gap between planning and writing -- this does not leave
+    a half-renamed vault: every backlink already rewritten in this call,
+    and the move itself, are rolled back to their pre-images, and
+    `RenameRaced` is raised. The vault ends exactly where it started.
     """
     try:
         new_sha = store.put_unchecked(plan.new_rel, plan.old_data, None)
@@ -234,24 +267,52 @@ def perform_rename(store: Store, plan: RenamePlan, *, now: Callable[[], str] = _
     try:
         store.delete_unchecked(plan.old_rel, plan.old_sha256)
     except (Missing, Conflict, paths.Refused) as exc:
-        raise MidRenameFailure(plan.new_rel) from exc
+        raise MidRenameFailure(plan.new_rel, [undo.FileEntry(plan.new_rel, None, new_sha)]) from exc
 
     entries = [
         undo.FileEntry(plan.new_rel, None, new_sha),
         undo.FileEntry(plan.old_rel, plan.old_data, None),
     ]
     when = now()
+    written_backlinks: list[tuple[str, bytes, str]] = []
     for rel, old_content, new_text in plan.backlinks:
         stamped = provenance.apply(new_text.encode("utf-8"), when)
         try:
             written = store.put_unchecked(rel, stamped, sha256(old_content))
         except (Conflict, Missing, paths.Refused):
-            # That backlink file changed since the plan was read. Stop
-            # here rather than write over it; everything already done
-            # is still recorded, so it stays undoable.
-            break
+            _rollback_rename(store, plan, new_sha, written_backlinks)
+            raise RenameRaced from None
+        written_backlinks.append((rel, old_content, written))
         entries.append(undo.FileEntry(rel, old_content, written))
     return entries
+
+
+def _rollback_rename(
+    store: Store, plan: RenamePlan, new_sha: str, written_backlinks: list[tuple[str, bytes, str]]
+) -> None:
+    """Best-effort undo of everything `perform_rename` had already written.
+
+    Same shape as `undo_one`: each file is put back only by compare-
+    and-swap against what this call itself just wrote there, never
+    unconditionally. If one of these somehow also fails (another
+    concurrent write, vanishingly unlikely on top of the first race),
+    that one file is left as it is rather than raising a second time --
+    `RenameRaced` still fires, so the write is refused either way, and
+    the caller can `GET /v1/knowledge` to see exactly what is on disk.
+    """
+    for rel, old_content, written_hash in reversed(written_backlinks):
+        try:
+            store.put_unchecked(rel, old_content, written_hash)
+        except (Conflict, Missing, paths.Refused):
+            pass
+    try:
+        store.delete_unchecked(plan.new_rel, new_sha)
+    except (Missing, Conflict, paths.Refused):
+        pass
+    try:
+        store.put_unchecked(plan.old_rel, plan.old_data, None)
+    except (Conflict, paths.Refused):
+        pass
 
 
 def undo_one(store: Store, entry: undo.FileEntry) -> tuple[bool, undo.FileEntry | None]:

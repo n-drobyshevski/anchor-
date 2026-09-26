@@ -385,7 +385,13 @@ async def rename_knowledge(request: web.Request) -> web.Response:
             entries = await asyncio.to_thread(knowledge.perform_rename, store, plan, now=now)
         except knowledge.Refused:
             return _refused()
-        except knowledge.MidRenameFailure:
+        except knowledge.RenameRaced:
+            return _json_error("precondition_failed", 412)
+        except knowledge.MidRenameFailure as exc:
+            # The vault is left with a duplicate, not a loss; record what
+            # is certain (the new path was created) so undoing this
+            # changeset can still remove it.
+            await asyncio.to_thread(undo_store.append, changeset, "write", exc.entries)
             return _json_error("io_error", 500)
         await asyncio.to_thread(undo_store.append, changeset, "write", entries)
     logger.info("knowledge_rename", extra={"event": "knowledge_rename", "count": len(entries)})
