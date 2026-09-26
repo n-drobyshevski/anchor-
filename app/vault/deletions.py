@@ -96,7 +96,9 @@ async def process_deletions(
         return
 
     if len(forgets_window) + len(candidates) > limits.MASS_DELETE_MAX:
-        hold = await holds.open_mass_delete_hold(session, file_ids=[row.id for row in candidates])
+        hold = await holds.open_mass_delete_hold(
+            session, file_ids=[row.id for row in candidates], clock=clock
+        )
         for row in candidates:
             row.state, row.hold_id = "held", hold.id
         result.held += len(candidates)

@@ -2018,3 +2018,83 @@ keeps failing on the two names 8b forbade outright (`hard_delete`,
 `tests/test_vault_sync.py`'s own behavioural tests, which is what it
 was actually testing all along.
 
+## 8c phase B review — five bugs, fixed with their own tests
+
+A review of phase B found five real bugs, each fixed and each pinned by
+a new test proven against a deliberate breaking edit:
+
+1. **A new fact's `pinned: true` bypassed the pin cap.** `ingest_file`'s
+   new-fact branch called `write_memory(pinned=parsed.pinned)` directly,
+   which has no cap of its own -- only `set_pinned_capped` and 8c's own
+   pinned-edit path check `count_pinned`. Fixed: a brand-new file with
+   `pinned: true` past the cap is quarantined `pin_cap` and writes no
+   memory at all, same refusal shape as an edit that would cross the cap.
+2. **A quarantined new file could never recover.** A row created for a
+   first-sight quarantine (`bad_type`, `too_long`, `technique`,
+   `duplicate_fact`, `pin_cap`...) has `memory_id NULL` by construction --
+   there is no memory yet. The existing-row branch read `memory_id NULL`
+   as "forgotten" (`/forget`'s `ON DELETE SET NULL`) and skipped it
+   forever, so fixing the file on disk never did anything. Fixed:
+   `ingest_file` now recognises "quarantined and memory_id NULL" as a
+   distinct case and reuses that row as the new fact once validation
+   passes, rather than treating every `memory_id NULL` row as forgotten.
+3. **The three-way base trusted a hand-edited `anchor_id` from any
+   lineage.** If a file's `anchor_id` was edited (by hand, or by copying
+   another file's frontmatter) to name a row from an unrelated lineage,
+   every field read as "changed" relative to a stranger's text, and the
+   merge would supersede the head with content the user never wrote.
+   Fixed: the base is only trusted when it actually leads to this file's
+   head (`_head_of(base_id).id == head.id`); otherwise the merge falls
+   back to file-vs-head, the same degeneration already used when the
+   base row is gone outright.
+4. **A rule-hold confirm that duplicated another active fact discarded
+   the user's yes.** `write_memory` returning `None` (near-duplicate) was
+   not checked in `holds._apply_rule`: for an edit, the row went back to
+   `ok` with the old text kept silently; for a new file, the row's
+   `memory_id` stayed `NULL` and the render pass's normal "memory is
+   gone" cleanup deleted the file the user just confirmed. Fixed: both
+   paths quarantine the row `duplicate_fact` instead. The hold's own
+   `status` stays `confirmed` (the button press was real), but `decide`
+   reports a distinct outcome, `DUPLICATE_RESULT`, so a caller (phase C)
+   can tell the user why nothing changed.
+5. **`VaultHold.created_at` came from the database's `now()`, not the
+   `Clock` `expire_holds` compares it against.** A `FrozenClock` set far
+   from real wall-clock time (a test, or a resumed pass after a long
+   pause) could never open a hold `expire_holds` would ever find due.
+   Fixed: `open_rule_hold` and `open_mass_delete_hold` now take `clock`
+   and stamp `created_at` from it explicitly, threaded through from
+   `ingest.py` and `deletions.py`, both of which already carry a `Clock`.
+
+## 8c phase B review — every test proven by a breaking edit
+
+The review also asked for the breaking-edit proof (make it fail, then
+revert) on every test added in this phase, not just the ones from the
+first pass -- about 80 across `test_vault_ingest.py`,
+`test_vault_holds.py`, `test_vault_deletions.py` and
+`test_vault_privacy_logs.py`. All of them were proven; the full table is
+in the hand-back report for this round rather than here, since it is a
+one-time record of *how* each test was checked, not a design decision
+future readers need. Two things worth recording because they are
+decisions, not just checklist items:
+
+- **The journal hand-edit test needed a stronger breaking edit than
+  disabling the `diverged` state.** Simply skipping the `state =
+  "diverged"` assignment left the file protected anyway, because the
+  next write still had to pass compare-and-swap against the *stale*
+  `disk_sha256` recorded before the hand edit -- so it always got a 412
+  and never overwrote anything, accidentally. The breaking edit that
+  actually exercises the "never touch it again" guarantee is one that
+  also adopts the user's new hash (`row.disk_sha256 = entry.sha256`)
+  before falling through to write, which lets the CAS succeed. Recorded
+  here so the next person extending `_render_journal` does not "fix" a
+  false positive and quietly remove real protection.
+- **A crash between `write_memory` and the shared `vault_file` commit**
+  has no reachable code path to break inside `ingest.py` itself, because
+  the sharing *is* "don't call `session.commit()` in between" -- there
+  is no separate line to disable. Its test therefore proves the
+  invariant directly against `write_memory(commit=False)`'s own
+  contract (insert a memory, add a row, raise before the shared commit,
+  confirm both roll back), and the breaking edit is inserting an early
+  `commit()` into the *test* to show a real implementation bug would
+  have left the memory row behind.
+

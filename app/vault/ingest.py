@@ -269,53 +269,76 @@ async def _ingest_file(
         row.missing_since = None
         renamed_id = row.id
 
+    reuse_row: VaultFile | None = None
+    if row is not None and row.memory_id is None and row.state == "quarantined":
+        # Bug fix: a row quarantined on first sight (bad_type, too_long,
+        # technique, duplicate_fact, pin_cap...) never got a memory of
+        # its own. Left as "an existing row with memory_id None", the
+        # existing-row branch below would read it as *forgotten* and
+        # skip it forever. Reuse it as the new fact's row instead, so
+        # fixing the file on disk is enough to bring it in.
+        reuse_row = row
+        row = None
+
     parsed = parse_fact(content)
     if isinstance(parsed, Ignored):
         return IngestOutcome("ignored")
 
     if row is None:
-        # New fact (cases d, e). Quarantine attaches to a fresh row.
+
+        def _quarantine(code: str) -> VaultFile:
+            target = reuse_row or VaultFile(path=path, role="fact")
+            target.state, target.reason = "quarantined", code
+            target.memory_id, target.render_digest = None, None
+            target.disk_sha256 = disk_sha256
+            session.add(target)
+            return target
+
+        # New fact (cases d, e), or a previously-quarantined row whose
+        # file is being retried. Quarantine attaches to that row.
         if isinstance(parsed, Quarantined):
-            fresh = VaultFile(
-                path=path, role="fact", state="quarantined", reason=parsed.code, disk_sha256=disk_sha256
-            )
-            session.add(fresh)
+            _quarantine(parsed.code)
             await session.commit()
             return IngestOutcome("quarantined", parsed.code)
         if parsed.kind == "technique":
-            fresh = VaultFile(
-                path=path, role="fact", state="quarantined", reason=errors.TECHNIQUE, disk_sha256=disk_sha256
-            )
-            session.add(fresh)
+            _quarantine(errors.TECHNIQUE)
             await session.commit()
             return IngestOutcome("quarantined", errors.TECHNIQUE)
         if parsed.kind == "rule":
-            fresh = VaultFile(path=path, role="fact", disk_sha256=disk_sha256)
+            fresh = reuse_row or VaultFile(path=path, role="fact")
+            fresh.memory_id = None
+            fresh.disk_sha256 = disk_sha256
             session.add(fresh)
             await session.flush()
             hold = await holds.open_rule_hold(
-                session, file_id=fresh.id, kind=parsed.kind, text=parsed.fact, supersedes_id=None
+                session,
+                file_id=fresh.id,
+                kind=parsed.kind,
+                text=parsed.fact,
+                supersedes_id=None,
+                clock=clock,
             )
-            fresh.state, fresh.hold_id = "held", hold.id
+            fresh.state, fresh.reason, fresh.hold_id = "held", None, hold.id
             await session.commit()
             return IngestOutcome("held", hold_id=hold.id)
+        if parsed.pinned and await memory.count_pinned(session) >= max_pinned:
+            # Bug fix: a brand-new pinned fact must respect the cap too,
+            # rather than silently writing it unpinned.
+            _quarantine(errors.PIN_CAP)
+            await session.commit()
+            return IngestOutcome("quarantined", errors.PIN_CAP)
         if budget.left <= 0 or not budget.take():
             return IngestOutcome("skipped")
         written = await memory.write_memory(
             session, kind=parsed.kind, text=parsed.fact, source="vault", pinned=parsed.pinned, commit=False
         )
         if written is None:
-            fresh = VaultFile(
-                path=path,
-                role="fact",
-                state="quarantined",
-                reason=errors.DUPLICATE_FACT,
-                disk_sha256=disk_sha256,
-            )
-            session.add(fresh)
+            _quarantine(errors.DUPLICATE_FACT)
             await session.commit()
             return IngestOutcome("quarantined", errors.DUPLICATE_FACT)
-        fresh = VaultFile(path=path, role="fact", memory_id=written.id, disk_sha256=disk_sha256)
+        fresh = reuse_row or VaultFile(path=path, role="fact")
+        fresh.state, fresh.reason = "ok", None
+        fresh.memory_id, fresh.disk_sha256, fresh.render_digest = written.id, disk_sha256, None
         session.add(fresh)
         await session.commit()
         view = render.FactView(
@@ -338,9 +361,12 @@ async def _ingest_file(
         await session.commit()
         return IngestOutcome("created")
 
-    # Existing row: cases a and b.
+    # Existing row: cases a and b. A row with memory_id None and
+    # state="quarantined" was already diverted to reuse_row above, so
+    # reaching here with memory_id None means the memory was actually
+    # forgotten (/forget's ON DELETE SET NULL) between passes; the next
+    # render cleans up the file.
     if row.memory_id is None:
-        # Forgotten between passes; the next render cleans up the file.
         return IngestOutcome("skipped")
     head = await session.get(MemoryModel, row.memory_id)
     if head is None:
@@ -360,6 +386,17 @@ async def _ingest_file(
 
     base_id = parsed.anchor_id if parsed.anchor_id is not None else head.id
     base = await session.get(MemoryModel, base_id) if base_id is not None else None
+    if base is not None:
+        # Bug fix: a hand-edited anchor_id can name a row from a
+        # *different* lineage. Only trust it as the three-way base when
+        # it actually leads to this file's head; otherwise every field
+        # reads as "changed" relative to a stranger's text, which would
+        # supersede the head with nonsense. Fall back to the head, which
+        # degenerates the merge to file-vs-head, same as when base_id's
+        # row is gone outright.
+        base_head = await _head_of(session, base_id)
+        if base_head is None or base_head.id != head.id:
+            base = None
     if base is None:
         base = head
 
@@ -375,6 +412,7 @@ async def _ingest_file(
             kind=parsed.kind,
             text=parsed.fact,
             supersedes_id=head.id,
+            clock=clock,
         )
         row.state, row.reason, row.hold_id = "held", None, hold.id
         row.disk_sha256 = disk_sha256

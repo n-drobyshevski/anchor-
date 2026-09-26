@@ -59,7 +59,7 @@ async def test_confirming_a_new_rule_writes_the_memory_and_unheld_the_row(sessio
         session.add(row)
         await session.flush()
         hold = await holds.open_rule_hold(
-            session, file_id=row.id, kind="rule", text="Не звонить после десяти.", supersedes_id=None
+            session, file_id=row.id, kind="rule", text="Не звонить после десяти.", supersedes_id=None, clock=clock
         )
         session.add(hold)
         await session.commit()
@@ -106,7 +106,7 @@ async def test_confirming_a_rule_edit_supersedes_the_head(sessionmaker, clock):
         session.add(row)
         await session.flush()
         hold = await holds.open_rule_hold(
-            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id
+            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id, clock=clock
         )
         session.add(hold)
         await session.commit()
@@ -132,7 +132,7 @@ async def test_reverting_a_rule_edit_clears_render_digest(sessionmaker, clock):
         session.add(row)
         await session.flush()
         hold = await holds.open_rule_hold(
-            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id
+            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id, clock=clock
         )
         session.add(hold)
         await session.commit()
@@ -156,7 +156,9 @@ async def test_a_stale_press_answers_unknown_id_not_pending_and_wrong_epoch(sess
         row = VaultFile(path="Anchor/Memory/Правило.md", role="fact")
         session.add(row)
         await session.flush()
-        hold = await holds.open_rule_hold(session, file_id=row.id, kind="rule", text="x", supersedes_id=None)
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="x", supersedes_id=None, clock=clock
+        )
         session.add(hold)
         await session.commit()
         hold_id = hold.id
@@ -186,7 +188,7 @@ async def test_a_rule_confirm_whose_head_moved_becomes_stale(sessionmaker, clock
         session.add(row)
         await session.flush()
         hold = await holds.open_rule_hold(
-            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id
+            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id, clock=clock
         )
         row.state, row.hold_id = "held", hold.id
         await session.commit()
@@ -223,7 +225,7 @@ async def test_expiry_reverts_a_rule_edit(sessionmaker, clock):
         session.add(row)
         await session.flush()
         hold = await holds.open_rule_hold(
-            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id
+            session, file_id=row.id, kind="rule", text="Не звонить после девяти.", supersedes_id=old_id, clock=clock
         )
         session.add(hold)
         await session.commit()
@@ -246,7 +248,9 @@ async def test_a_hold_within_the_ttl_does_not_expire(sessionmaker, clock):
         row = VaultFile(path="Anchor/Memory/Правило.md", role="fact")
         session.add(row)
         await session.flush()
-        hold = await holds.open_rule_hold(session, file_id=row.id, kind="rule", text="x", supersedes_id=None)
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="x", supersedes_id=None, clock=clock
+        )
         session.add(hold)
         await session.commit()
         hold_id = hold.id
@@ -264,7 +268,9 @@ async def test_pending_unsent_and_mark_sent(sessionmaker, clock):
         row = VaultFile(path="Anchor/Memory/Правило.md", role="fact")
         session.add(row)
         await session.flush()
-        hold = await holds.open_rule_hold(session, file_id=row.id, kind="rule", text="x", supersedes_id=None)
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="x", supersedes_id=None, clock=clock
+        )
         session.add(hold)
         await session.commit()
         hold_id = hold.id
@@ -278,3 +284,92 @@ async def test_pending_unsent_and_mark_sent(sessionmaker, clock):
     async with sessionmaker() as session:
         assert await holds.pending_unsent(session) == []
         assert (await session.get(VaultHold, hold_id)).tg_message_id == 4242
+
+
+# --- bug fixes (review of phase B) ------------------------------------------
+
+
+async def test_confirming_a_rule_edit_that_duplicates_another_fact_is_quarantined_not_lost(
+    sessionmaker, clock
+):
+    """Bug 4: write_memory returning None (near-duplicate) used to leave
+    the row `ok` with the old text silently kept. Nothing may vanish
+    without a trace, so it must quarantine instead."""
+    async with sessionmaker() as session:
+        old = await memory.write_memory(session, kind="rule", text="Не звонить после десяти.", source="user")
+        old_id = old.id
+        await memory.write_memory(session, kind="rule", text="Совсем не звонить.", source="user")
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        row = VaultFile(path="Anchor/Memory/0001-abcdef.md", role="fact", memory_id=old_id)
+        session.add(row)
+        await session.flush()
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="Совсем не звонить.", supersedes_id=old_id, clock=clock
+        )
+        session.add(hold)
+        await session.commit()
+        hold_id, row_id = hold.id, row.id
+
+    async with sessionmaker() as session:
+        result = await holds.decide(session, hold_id, EPOCH, True, clock)
+    assert result.outcome == holds.DUPLICATE_RESULT
+    async with sessionmaker() as session:
+        hold = await session.get(VaultHold, hold_id)
+        row = await session.get(VaultFile, row_id)
+        untouched = await session.get(Memory, old_id)
+    assert hold.status == "confirmed"  # the yes was real; only the write was refused
+    assert row.state == "quarantined" and row.reason == "duplicate_fact"
+    assert untouched.text == "Не звонить после десяти."  # nothing deleted, nothing changed
+
+
+async def test_confirming_a_new_rule_that_duplicates_another_fact_deletes_nothing(sessionmaker, clock):
+    async with sessionmaker() as session:
+        await memory.write_memory(session, kind="rule", text="Не звонить после десяти.", source="user")
+    await _seed(sessionmaker)
+    async with sessionmaker() as session:
+        row = VaultFile(path="Anchor/Memory/Правило.md", role="fact")
+        session.add(row)
+        await session.flush()
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="Не звонить после десяти.", supersedes_id=None, clock=clock
+        )
+        session.add(hold)
+        await session.commit()
+        hold_id, row_id = hold.id, row.id
+
+    async with sessionmaker() as session:
+        result = await holds.decide(session, hold_id, EPOCH, True, clock)
+    assert result.outcome == holds.DUPLICATE_RESULT
+    async with sessionmaker() as session:
+        row = await session.get(VaultFile, row_id)
+        count = (await session.execute(select(Memory))).scalars().all()
+    assert row is not None and row.state == "quarantined" and row.reason == "duplicate_fact"
+    assert len(count) == 1  # only the pre-existing rule; nothing new, nothing lost
+
+
+async def test_expiry_does_not_depend_on_the_real_wall_clock(sessionmaker):
+    """Bug 5: VaultHold.created_at used to come from the DB server's
+    now(), which a FrozenClock far from real wall-clock time could never
+    satisfy. open_rule_hold now stamps created_at from the same Clock
+    expire_holds compares against."""
+    far_past = FrozenClock(datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc))
+    async with sessionmaker() as session:
+        row = VaultFile(path="Anchor/Memory/Правило.md", role="fact")
+        session.add(row)
+        await session.flush()
+        hold = await holds.open_rule_hold(
+            session, file_id=row.id, kind="rule", text="x", supersedes_id=None, clock=far_past
+        )
+        session.add(hold)
+        await session.commit()
+        hold_id = hold.id
+
+    far_past.advance(datetime.timedelta(days=limits.HOLD_TTL_DAYS + 1))
+    async with sessionmaker() as session:
+        expired = await holds.expire_holds(session, far_past)
+    assert expired == [hold_id]
+    async with sessionmaker() as session:
+        hold = await session.get(VaultHold, hold_id)
+    assert hold.status == "expired"
+    assert hold.decided_at == far_past.now_utc()

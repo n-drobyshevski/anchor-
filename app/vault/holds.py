@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import memory
 from app.core.clock import Clock
 from app.db.models import UserState, VaultFile, VaultHold
-from app.vault import limits
+from app.vault import errors, limits
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +43,45 @@ CONFIRMED = "confirmed"
 REVERTED = "reverted"
 EXPIRED = "expired"
 STALE = "stale"
+# Internal to _apply_rule only -- never written to vault_hold.status,
+# whose CHECK constraint does not know this value. A rule-edit confirm
+# that turns out to duplicate another active fact is *accepted*
+# (hold.status stays "confirmed": the user's yes was real), but nothing
+# is written to memory and the row is quarantined instead of applied or
+# deleted.
+_DUPLICATE = "duplicate"
 
 # decide()'s outcomes.
 CONFIRMED_RESULT = "confirmed"
 REVERTED_RESULT = "reverted"
 STALE_PRESS = "stale_press"  # the button itself: unknown id, not pending, wrong epoch
 STALE_APPLY = "stale_apply"  # a fresh, pending rule-edit hold whose head moved
+DUPLICATE_RESULT = "duplicate_fact"  # confirmed, but it duplicated another active fact
 
 
 async def open_rule_hold(
-    session: AsyncSession, *, file_id: int, kind: str, text: str, supersedes_id: int | None
+    session: AsyncSession,
+    *,
+    file_id: int,
+    kind: str,
+    text: str,
+    supersedes_id: int | None,
+    clock: Clock,
 ) -> VaultHold:
     hold = VaultHold(
         kind=RULE,
         payload={"file_id": file_id, "kind": kind, "text": text, "supersedes_id": supersedes_id},
+        created_at=clock.now_utc(),
     )
     session.add(hold)
     await session.flush()
     return hold
 
 
-async def open_mass_delete_hold(session: AsyncSession, *, file_ids: list[int]) -> VaultHold:
-    hold = VaultHold(kind=MASS_DELETE, payload={"file_ids": list(file_ids)})
+async def open_mass_delete_hold(
+    session: AsyncSession, *, file_ids: list[int], clock: Clock
+) -> VaultHold:
+    hold = VaultHold(kind=MASS_DELETE, payload={"file_ids": list(file_ids)}, created_at=clock.now_utc())
     session.add(hold)
     await session.flush()
     return hold
@@ -127,13 +144,26 @@ async def _apply_rule(session: AsyncSession, hold: VaultHold, *, confirm: bool) 
             supersedes_id=supersedes_id,
             commit=False,
         )
-        if written is not None and row is not None:
+        if written is None:
+            # Bug fix: silently keeping the old text (or, for a new
+            # file, deleting it via the render pass's "memory is gone"
+            # cleanup) both discard the user's confirmed edit without a
+            # trace. Quarantine instead: nothing is deleted, and /vault
+            # can say why.
+            if row is not None:
+                row.state, row.reason, row.hold_id = "quarantined", errors.DUPLICATE_FACT, None
+            return _DUPLICATE
+        if row is not None:
             row.memory_id = written.id
     else:
         written = await memory.write_memory(
             session, kind=payload["kind"], text=payload["text"], source="vault", commit=False
         )
-        if written is not None and row is not None:
+        if written is None:
+            if row is not None:
+                row.state, row.reason, row.hold_id = "quarantined", errors.DUPLICATE_FACT, None
+            return _DUPLICATE
+        if row is not None:
             row.memory_id = written.id
     if row is not None:
         row.state, row.hold_id = "ok", None
@@ -160,10 +190,15 @@ async def decide(
         return DecideResult(hold.status, hold)
 
     status = await _apply_rule(session, hold, confirm=confirm)
-    hold.status = status
+    hold.status = CONFIRMED if status == _DUPLICATE else status
     hold.decided_at = clock.now_utc()
     await session.commit()
-    outcome = {CONFIRMED: CONFIRMED_RESULT, REVERTED: REVERTED_RESULT, STALE: STALE_APPLY}[status]
+    outcome = {
+        CONFIRMED: CONFIRMED_RESULT,
+        REVERTED: REVERTED_RESULT,
+        STALE: STALE_APPLY,
+        _DUPLICATE: DUPLICATE_RESULT,
+    }[status]
     logger.info("vault hold decided", extra={"hold_id": hold_id, "event": outcome})
     return DecideResult(outcome, hold)
 
