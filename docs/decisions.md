@@ -2323,3 +2323,30 @@ the results. What an irrelevant chunk costs there is knowledge text
 sent to Anthropic that the question did not need. The 2-lexeme floor
 cuts most single-word matches without claiming to separate relevance.
 Automatic persona retrieval stays unbuilt.
+
+## C3 — the library switch, and what it does not do
+
+- **A standing switch, not a window.** `oauth_connection.library_read`
+  (default false) gates `search_library`. It is not a scope in a
+  window. `notes_knowledge` joins `ck_access_grant_scopes` as the
+  connector plan asks, but no code puts it into a grant today: the
+  CHECK is widened so it can never be `notes_personal`, and a migration
+  test pins that.
+- **What turns it off.** A new connection starts off. `/claude
+  disconnect`, a replaced connection and a turned-off
+  `CLAUDE_ACCESS_ENABLED` all clear it with the connection. `/revoke`
+  clears it but keeps the connection. `/delete` truncates both.
+- **What counts as a read.** Only a successful search. A refusal (switch
+  off, notes off) is not counted. The count is stored per local date in
+  `claude_library_read(local_date, count)`, with no query and no text.
+  It is omitted from `/export` as a derived counter and truncated by
+  `/delete`.
+- **The digest** is one job a day at 21:00 local (a constant), with
+  `dedup_key` per local date. It sends nothing on a day with zero
+  searches. Inside a quiet period (`may_report_now`) it defers by 15
+  minutes and sends on the first allowed tick.
+- **The result shape** is `«heading»: text`, the same as the other
+  notes readers. It never carries a chunk id or a path.
+- **The two-lexeme floor is applied in SQL**, before the limit, so a
+  pile of higher-ranked one-word matches cannot crowd out a real match
+  (review fix).

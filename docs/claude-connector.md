@@ -48,11 +48,35 @@ There are two things, and you control both:
    - `/claude disconnect` ends the connection itself;
    - `/delete` wipes everything, connections included.
 
+## The library: `/claude library on`
+
+Your **knowledge** notes (8e) can be searched by Claude without a
+window:
+
+1. Turn on notes (`/vault notes on`) and `VAULT_KNOWLEDGE_ENABLED`, so
+   knowledge notes are indexed.
+2. Send `/claude library on`. `/claude` then shows «Библиотека:
+   включена».
+3. Ask Claude about a topic from your notes. Its `search_library` tool
+   returns at most **6** chunks, each sharing **at least 2** words with
+   the query. There is no relevance threshold: full-text rank does not
+   separate relevance (docs/decisions.md), so Claude judges what it
+   gets. A switch that is off answers «Библиотека закрыта. Включи в
+   Telegram: /claude library on».
+4. Searches are counted, not announced one by one. One message a day,
+   only on a day with searches: «Claude за сутки: библиотека — N
+   запросов».
+
+**Personal notes are never searchable**, whatever you switch on (8e
+§10). Grok never gets the library. `/revoke`, `/claude disconnect` and a
+new connection all turn the switch off. `/delete` wipes it with the
+connection.
+
 ## What leaves, and what doesn't
 
 - **Anything Claude reads goes to Anthropic** and stays in that claude.ai conversation, under your claude.ai privacy settings (including whether chats may be used to improve models). **Closing a window stops further reads. It cannot recall what was already read.**
 - **Text Claude reads can carry instructions.** If other connectors that can *write* (Drive, a planner, email) are enabled in the same chat, read Anchor in a chat without them.
-- **Claude can only read.** None of the tools write, and none reach the queue, raw Telegram updates, pending memories, research data or vault notes.
+- **Claude can only read.** None of the tools write, and none reach the queue, raw Telegram updates, pending memories, research data or personal vault notes. Knowledge notes are reachable only through `search_library`, and only while `/claude library on`.
 - **Stored, and never exported:** only hashes of codes and tokens, plus ids and timestamps.
   - Pending requests live only in memory, for up to 10 minutes.
   - Logs carry ids, routes and outcomes. Never a token, code, `state`, confirmation code, cookie or client id.

@@ -18,7 +18,7 @@ no model call, no outbound).
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
-| Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https) |
+| Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows; knowledge notes through a standing `/claude library on` switch (C3) | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https); the library also needs `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED` |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
 
@@ -51,6 +51,7 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
 | `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
+| `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
@@ -1476,3 +1477,12 @@ together. What Claude has already read stays with Anthropic. Claude
 Code sessions can see your claude.ai connectors too; this repo's guard
 hook refuses Anchor's tools, and the rest is short windows and the
 read notices. See [docs/claude-connector.md](docs/claude-connector.md).
+
+**The library (C3).** `/claude library on` lets Claude call
+`search_library` on your *knowledge* notes with no window, for as long
+as the connection lives. It returns at most six chunks, each sharing at
+least two words with the query. Personal notes are never reachable,
+and Grok never gets the tool. Searches are not announced one by one:
+one digest a day, «Claude за сутки: библиотека — N запросов», and only
+on a day with searches. `/revoke`, `/claude disconnect` and a new
+connection all turn the switch off.
