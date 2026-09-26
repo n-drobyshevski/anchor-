@@ -34,9 +34,17 @@ SCANNED = ("app", "eval", "scripts")
 NOTE_MODULES = ("app.vault.notes_personal", "app.vault.notes_knowledge")
 
 # module -> the paths that may import it. Nothing else.
+#
+# `scripts/measure_note_rank.py` (milestone 8d, phase 1) is the one
+# addition beyond the plan's own two: it is the measurement the
+# phase-8 plan's section 9 asks for ("measure before fixing
+# NOTES_MIN_RANK", per class per the 8e plan's section 9), it is a
+# human-run offline tool rather than a runtime consumer, and it must
+# exercise the real access modules -- including their consent check --
+# to measure the same ranking `app/core/turn.py` will eventually use.
 ALLOWED_IMPORTERS = {
-    "app.vault.notes_personal": ("app/core/turn.py", "app/vault/"),
-    "app.vault.notes_knowledge": ("app/core/turn.py", "app/vault/"),
+    "app.vault.notes_personal": ("app/core/turn.py", "app/vault/", "scripts/measure_note_rank.py"),
+    "app.vault.notes_knowledge": ("app/core/turn.py", "app/vault/", "scripts/measure_note_rank.py"),
 }
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
@@ -62,8 +70,16 @@ TABLES = {
 }
 # Named by the list, each for a reason: the models define the tables,
 # purge truncates them (/delete), export's comments explain why they
-# are left out (/export). Migrations live outside app/.
-TABLE_NAME_EXEMPT = ("app/db/models.py", "app/core/purge.py", "app/core/export.py")
+# are left out (/export), and the measurement script (milestone 8d,
+# phase 1) is the one place outside the access modules themselves that
+# legitimately spans both classes at once, by the same reasoning as
+# ALLOWED_IMPORTERS above. Migrations live outside app/.
+TABLE_NAME_EXEMPT = (
+    "app/db/models.py",
+    "app/core/purge.py",
+    "app/core/export.py",
+    "scripts/measure_note_rank.py",
+)
 
 
 def _sources() -> list[Path]:

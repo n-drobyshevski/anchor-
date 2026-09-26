@@ -2231,3 +2231,40 @@ the at-most-one-per-pass notice, sending a pending hold's card, the
   this round's hand-back report, the same convention phase B used
   above.
 
+
+## 8d — full-text rank does not separate notes from noise; retrieval not built
+
+Plan §9: measure `PERSONAL_MIN_RANK` and `KNOWLEDGE_MIN_RANK` before
+fixing them, and stop if true positives and noise do not separate. They
+did not, twice. No threshold was set and nothing reads notes into a
+prompt.
+
+**Run 1** (`ts_rank_cd(tsv, q, 32)`, 30 notes, 40 messages): true hits
+ranked 0.09–0.47, noise up to 0.29. The top hit was right for 22 of 28.
+A single shared word («парк», «parc») scored like a real match.
+
+**Run 2** (your choice: a stricter lexical gate, requiring at least N
+distinct shared lexemes plus a rank floor). The corpus is in
+`scripts/note_rank_corpus.py`: 60 notes, 100 messages (60 true
+positives, 40 noise). It was frozen before the first run and no label
+was changed afterwards. The pass criterion was fixed in advance:
+precision ≥ 0.95, recall ≥ 0.6, and no language below 0.4.
+
+| Gate | Floor | tp | fp | fn | tn | Precision | Recall | ru | fr | en |
+|---|---|---|---|---|---|---|---|---|---|---|
+| matched ≥ 1 | 0.0909 | 59 | 25 | 1 | 15 | 0.70 | 0.98 | 0.96 | 1.00 | 1.00 |
+| matched ≥ 2 | 0.1667 | 49 | 9 | 11 | 31 | 0.84 | 0.82 | 0.68 | 1.00 | 0.85 |
+| matched ≥ 3 | 0.1667 | 37 | 5 | 23 | 35 | 0.88 | 0.62 | 0.48 | 0.87 | 0.60 |
+
+No rank floor meets the criterion for any gate. Personal and knowledge
+give identical numbers, because the same corpus goes into two tables
+with the same `tsvector` formula. Requiring more shared lexemes loses
+real matches faster than it removes noise: a one- or two-word overlap
+looks the same whether or not the note is relevant.
+
+Kept from 8d: chunking (`app/vault/notes_text.py`), secret masking
+(`app/vault/secrets.py`, `redact.secret_spans`), `_chunks.search_ranked`
+with no caller in `app/`, and the measurement script. Plan §9 names
+this result as the trigger for reconsidering retrieval (pgvector), not
+for lowering a threshold. Any embedding model must run locally: 8e §10
+forbids personal note text from leaving the system.

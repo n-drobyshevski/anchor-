@@ -101,3 +101,61 @@ async def search(session: AsyncSession, model: type, user_text: str, limit: int)
         )
     ).all()
     return [f"«{heading}»: {body}" if heading else body for heading, body in rows]
+
+
+async def search_ranked(
+    session: AsyncSession, model: type, user_text: str, limit: int
+) -> list[tuple[str | None, str, float, int]]:
+    """Like `search`, but `(heading, text, rank, matched)` instead of a formatted string.
+
+    Exists only for milestone 8d's measurement (scripts/measure_note_rank.py):
+    picking `PERSONAL_MIN_RANK`/`KNOWLEDGE_MIN_RANK` needs the raw
+    `ts_rank_cd` score, which `search` deliberately never exposes to a
+    caller (its own callers get strings only, never a score or an id --
+    see the module docstring). No caller in `app/` uses this; it is not
+    a caller-facing API and consent is still enforced the same way.
+
+    `matched` is the count of *distinct* query lexemes the chunk's tsv
+    actually contains -- a lexical gate candidate alongside the rank
+    floor (a chunk can rank respectably on `ts_rank_cd` off a single
+    rare, heavily-weighted lexeme; `matched` tells the caller how many
+    of the query's own words it is really about). Computed in the same
+    statement as the rank and the consent check, not a second query.
+    """
+    if limit <= 0 or not user_text.strip():
+        return []
+    table = model.__tablename__
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                WITH q AS (
+                    SELECT
+                        to_tsquery('russian', (
+                            SELECT string_agg(quote_literal(lexeme), ' | ')
+                            FROM unnest(to_tsvector('russian', :user_text))
+                        )) AS query,
+                        (
+                            SELECT array_agg(DISTINCT lexeme)
+                            FROM unnest(to_tsvector('russian', :user_text))
+                        ) AS lexemes
+                )
+                SELECT
+                    c.heading,
+                    c.text,
+                    ts_rank_cd(c.tsv, q.query, 32) AS rank,
+                    (
+                        SELECT count(*)
+                        FROM unnest(tsvector_to_array(c.tsv)) AS w
+                        WHERE w = ANY (q.lexemes)
+                    ) AS matched
+                FROM {table} AS c, q, user_state AS s
+                WHERE s.id = 1 AND s.notes_consent AND c.tsv @@ q.query
+                ORDER BY rank DESC, c.id
+                LIMIT :limit
+                """
+            ),
+            {"user_text": user_text, "limit": limit},
+        )
+    ).all()
+    return [(heading, body, float(rank), int(matched)) for heading, body, rank, matched in rows]
