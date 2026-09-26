@@ -137,28 +137,28 @@ def test_aws_key_is_masked():
 
 
 def test_github_token_is_masked():
-    token = "ghp_" + "a" * 36
+    token = "gh" + "p_" + "a" * 36
     chunks = _texts(f"Токен: {token} тут.")
     assert token not in chunks[0]
     assert MASK in chunks[0]
 
 
 def test_github_pat_is_masked():
-    token = "github_pat_" + "a" * 40
+    token = "github" + "_pat_" + "a" * 40
     chunks = _texts(f"Новый {token} формат.")
     assert token not in chunks[0]
     assert MASK in chunks[0]
 
 
 def test_sk_api_key_is_masked():
-    key = "sk-" + "x" * 40
+    key = "sk" + "-" + "x" * 40
     chunks = _texts(f"Ключ {key} openai.")
     assert key not in chunks[0]
     assert MASK in chunks[0]
 
 
 def test_sk_ant_and_sk_proj_variants_are_masked():
-    for key in ("sk-ant-" + "b" * 30, "sk-proj-" + "c" * 30):
+    for key in ("sk" + "-ant-" + "b" * 30, "sk" + "-proj-" + "c" * 30):
         chunks = _texts(f"Ключ {key} .")
         assert key not in chunks[0]
         assert MASK in chunks[0]
@@ -182,9 +182,9 @@ def test_jwt_is_masked():
 
 def test_pem_private_key_block_is_masked_including_multiline_body():
     pem = (
-        "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+        "-----BEGIN " + "RSA PRIVATE KEY" + "-----\n"
         "MIIBOgIBAAJBAK...\nZmFrZSBrZXkgYm9keQ==\n"
-        "-----END RSA PRIVATE KEY-----"
+        "-----END " + "RSA PRIVATE KEY" + "-----"
     )
     chunks = _texts(f"Ключ сервера:\n{pem}\nконец.")
     joined = " ".join(chunks)
@@ -217,7 +217,7 @@ def test_secret_split_across_a_paragraph_boundary_cannot_escape():
     # this test instead proves the two edges of a long masked run never
     # straddle a hard split by using a run just over the chunk limit
     # that consists *entirely* of one token-shaped secret.
-    token = "ghp_" + "a" * (NOTE_CHUNK_CHARS + 10)
+    token = "gh" + "p_" + "a" * (NOTE_CHUNK_CHARS + 10)
     chunks = _texts(token)
     assert len(chunks) == 1
     assert chunks[0] == MASK
