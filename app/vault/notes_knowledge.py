@@ -41,15 +41,6 @@ __all__ = [
 LIBRARY_MAX_CHUNKS = 6
 LIBRARY_MIN_MATCHED = 2
 
-# How many rank-ordered candidates search_library pulls from the
-# database before filtering by `matched` in Python. Must exceed
-# LIBRARY_MAX_CHUNKS: filtering candidates 1..6 by rank and only then
-# dropping the ones under LIBRARY_MIN_MATCHED could hand back fewer
-# than 6 chunks even when a 7th, lower-ranked candidate would have
-# cleared the matched floor -- this is "the top 6 *among those that
-# clear the floor*", not "the top 6, minus whichever fail the floor".
-_CANDIDATE_POOL = 50
-
 
 async def replace_chunks(session: AsyncSession, file_id: int, chunks: Sequence[Chunk]) -> None:
     await _chunks.replace_chunks(session, NoteChunkKnowledge, file_id, chunks)
@@ -76,15 +67,24 @@ async def search_library(
     `min_matched` distinct lexemes with the query. No rank threshold --
     the user's decision was matched-lexeme count, not a score.
 
-    Consent is enforced inside `search_ranked`'s own SQL statement, the
-    same floor every other reader of this table stands on. Never
+    The floor is applied inside `search_ranked`'s own SQL, in the
+    `WHERE` over its `scored` CTE, *before* `ORDER BY ... LIMIT` --
+    not by asking for a fixed-size pool of top-ranked candidates and
+    filtering by `matched` afterwards in Python. That shape shipped
+    once and was a real bug: if the top-of-pool rows by rank all fail
+    the floor, a valid, lower-ranked chunk that clears it can fall
+    outside the pool and never be seen at all, regardless of how large
+    the pool is made -- there is always a query that defeats a fixed
+    pool size. Filtering in the same statement, before the limit, has
+    no such ceiling.
+
+    Consent is enforced inside `search_ranked`'s own SQL statement too,
+    the same floor every other reader of this table stands on. Never
     exposes a chunk id or a file path -- only `search_ranked`'s
     `(heading, text)`, formatted as a string, exactly like `search`
     above.
     """
-    rows = await _chunks.search_ranked(session, NoteChunkKnowledge, user_text, _CANDIDATE_POOL)
-    matched_enough = [row for row in rows if row[3] >= min_matched]
-    return [
-        f"«{heading}»: {body}" if heading else body
-        for heading, body, _rank, _matched in matched_enough[:limit]
-    ]
+    rows = await _chunks.search_ranked(
+        session, NoteChunkKnowledge, user_text, limit, min_matched=min_matched
+    )
+    return [f"«{heading}»: {body}" if heading else body for heading, body, _rank, _matched in rows]

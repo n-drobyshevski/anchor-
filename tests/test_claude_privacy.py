@@ -138,7 +138,10 @@ async def test_search_library_is_logged_with_no_query_or_chunk_text(sessionmaker
     events = {getattr(r, "event", None) for r in caplog.records}
     assert "mcp" in events or "search_library" in events  # not vacuous: the flow was logged
     for record in caplog.records:
-        rendered = record.getMessage() + json.dumps(record.__dict__, default=str)
+        # ensure_ascii=False: the secrets here are Cyrillic, and the
+        # default True would \uXXXX-escape them, making `query not in
+        # rendered` pass vacuously no matter what the record carries.
+        rendered = record.getMessage() + json.dumps(record.__dict__, default=str, ensure_ascii=False)
         assert query not in rendered, (record.name, record.getMessage())
         assert heading not in rendered, (record.name, record.getMessage())
         assert body not in rendered, (record.name, record.getMessage())

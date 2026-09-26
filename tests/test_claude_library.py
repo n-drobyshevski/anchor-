@@ -17,6 +17,7 @@ from app.db.models import NoteChunkKnowledge, UserState, VaultFile
 from app.tg import claude as claude_ui
 from app.vault import notes_knowledge
 from app.vault._chunks import Chunk
+from app.web import ingress
 from claude_helpers import World, settings
 
 pytestmark = pytest.mark.asyncio
@@ -66,6 +67,24 @@ async def test_a_new_connection_starts_with_the_library_off(sessionmaker):
         await world.connect(client)
     reply = await world.command("/claude")
     assert "Библиотека: выключена." in reply
+    async with sessionmaker() as session:
+        from app.db.models import OauthConnection
+
+        row = (await session.execute(select(OauthConnection))).scalar_one()
+    assert row.library_read is False
+
+
+async def test_a_replaced_connection_also_starts_with_the_library_off(sessionmaker):
+    """A second connection revokes the first (connector plan section 5)
+    -- and the fresh one it replaces it with starts off too, exactly
+    like the very first connection ever made."""
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        await world.connect(client)
+        await world.command("/claude library on")
+        await world.connect(client)  # a second connection, replacing the first
+    reply = await world.command("/claude")
+    assert "Библиотека: выключена." in reply
 
 
 async def test_claude_library_with_no_connection(sessionmaker):
@@ -103,6 +122,12 @@ async def test_disconnect_turns_the_library_off(sessionmaker):
     await world.command("/claude library on")
     await world.command("/claude disconnect")
     assert (await world.command("/claude")).startswith("Нет подключения.")
+    async with sessionmaker() as session:
+        from app.db.models import OauthConnection
+
+        row = (await session.execute(select(OauthConnection))).scalar_one()
+    assert row.revoked_at is not None
+    assert row.library_read is False
 
 
 # --- search_library through the MCP endpoint ---
@@ -161,20 +186,28 @@ async def test_search_library_empty_result_is_not_an_error(sessionmaker):
 
 
 async def test_search_library_carries_no_id_or_path(sessionmaker):
+    """The strongest form of this check: the whole JSON-RPC response
+    (not just the one text field, so an id or path smuggled into a
+    different key would still be caught) equals exactly the known-good
+    heading-and-text string -- there is no room in an exact-equality
+    assertion for a chunk id, a file id or the file's path to sneak in
+    anywhere, including as an extra field or a different formatting."""
     world = await _world(sessionmaker)
     async with TestClient(TestServer(world.app)) as client:
         tokens = await world.connect(client)
         await world.command("/claude library on")
         await _seed_knowledge(sessionmaker, [Chunk("CCRU", "Гиперстишн и ускорение.")])
         async with sessionmaker() as session:
-            chunk_id = (await session.execute(select(NoteChunkKnowledge.id))).scalar_one()
-            file_id = (await session.execute(select(VaultFile.id))).scalar_one()
+            # Sanity: there really is an id and a path behind this chunk,
+            # so "never appears" below is a real claim, not vacuous.
+            assert (await session.execute(select(NoteChunkKnowledge.id))).scalar_one() >= 1
+            assert (await session.execute(select(VaultFile.path))).scalar_one() == "Library/CCRU.md"
         result = await _search(world, client, tokens["access_token"])
-    text = result["content"][0]["text"]
-    assert "Library/CCRU.md" not in text
-    assert str(chunk_id) not in text or str(chunk_id) in "Гиперстишн"  # id never leaks as itself
-    assert str(file_id) not in text
-    assert json.dumps(result)  # plain strings only -- never a bare id/path field
+    assert result == {
+        "content": [{"type": "text", "text": "«CCRU»: Гиперстишн и ускорение."}],
+        "isError": False,
+    }
+    assert "Library/CCRU.md" not in json.dumps(result, ensure_ascii=False)
 
 
 async def test_search_library_never_returns_personal_chunks(sessionmaker):
@@ -221,3 +254,65 @@ async def test_search_library_is_always_listed_but_grok_never_gets_it(sessionmak
             },
         )).json()
     assert grok_call.get("error", {}).get("code") == -32602
+
+
+def test_the_web_chat_cannot_run_claude_library_on():
+    """/claude library on|off is still just the /claude command as far
+    as app/web/ingress.py's blocklist sees it -- it checks the command
+    word only, never the arguments -- so it is blocked by the same
+    entry that blocks plain /claude and /claude connect."""
+    assert ingress.is_blocked_command("/claude library on")
+    assert ingress.is_blocked_command("/claude library off")
+    assert ingress.is_blocked_command("/CLAUDE@anchor_bot library on")
+
+
+# --- read counting ---
+
+
+async def test_a_refused_call_does_not_count_a_read(sessionmaker):
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        tokens = await world.connect(client)
+        await _search(world, client, tokens["access_token"])  # switch off: refused
+        await world.command("/claude library on")
+        await _search(world, client, tokens["access_token"])  # notes off: refused
+    async with sessionmaker() as session:
+        assert await grants.library_read_count(session, world.clock.now_utc().date()) == 0
+
+
+async def test_a_successful_call_counts_and_the_row_holds_no_text(sessionmaker):
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        tokens = await world.connect(client)
+        await world.command("/claude library on")
+        await _seed_knowledge(sessionmaker, [Chunk("CCRU", "Гиперстишн и ускорение.")])
+        await _search(world, client, tokens["access_token"])
+        await _search(world, client, tokens["access_token"], query="ничего похожего тут нет")
+    async with sessionmaker() as session:
+        from app.db.models import ClaudeLibraryRead
+
+        row = (await session.execute(select(ClaudeLibraryRead))).scalar_one()
+    assert row.count == 2
+    assert not hasattr(row, "query") and not hasattr(row, "text") and not hasattr(row, "heading")
+
+
+# --- /delete ---
+
+
+async def test_delete_wipes_the_switch_and_the_counter(sessionmaker):
+    from app.config import Settings
+    from app.core import purge
+    from app.db.models import ClaudeLibraryRead, OauthConnection
+
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        await world.connect(client)
+        await world.command("/claude library on")
+    async with sessionmaker() as session:
+        await grants.record_library_read(session, world.clock.now_utc().date())
+        connection = (await session.execute(select(OauthConnection))).scalar_one()
+        assert connection.library_read is True
+        await purge.delete_everything(session, Settings(), world.clock)
+    async with sessionmaker() as session:
+        assert (await session.execute(select(OauthConnection))).first() is None
+        assert (await session.execute(select(ClaudeLibraryRead))).first() is None

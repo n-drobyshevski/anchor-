@@ -131,6 +131,26 @@ async def test_search_library_top6_with_a_matched_floor(sessionmaker):
     assert all("Only" not in r and "большой" not in r for r in results)
 
 
+async def test_search_library_floor_survives_a_pool_larger_than_any_fixed_size(sessionmaker):
+    """The floor is applied in SQL before ORDER BY ... LIMIT, not by
+    pulling a fixed-size, rank-ordered pool and filtering by `matched`
+    in Python. 60 decoy chunks each share only one query lexeme
+    ("запрос") but rank far above the one chunk that shares two
+    ("запрос" and "дан") -- a pool of any fixed size N < 61 ordered by
+    rank would never even see the valid chunk, so if the floor were
+    applied after such a pool (rather than in the same SQL statement,
+    before the limit), this would come back empty. It must not."""
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        decoys = [Chunk(f"D{i}", "запрос " * 20 + str(i)) for i in range(60)]
+        valid = Chunk("V", "запрос данные один раз")
+        await notes_knowledge.replace_chunks(session, files["knowledge"], decoys + [valid])
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "запрос данные")
+    assert results == ["«V»: запрос данные один раз"]
+
+
 async def test_search_library_is_content_free_like_search(sessionmaker):
     files = await _seed(sessionmaker, consent=True)
     async with sessionmaker() as session:

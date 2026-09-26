@@ -135,7 +135,9 @@ async def test_activity_sends_the_plural_correct_digest(sessionmaker):
     assert bot.sent == [(555, "Claude за сутки: библиотека — 3 запроса.")]
 
 
-@pytest.mark.parametrize("n, word", [(1, "запрос"), (2, "запроса"), (5, "запросов"), (11, "запросов")])
+@pytest.mark.parametrize(
+    "n, word", [(1, "запрос"), (2, "запроса"), (5, "запросов"), (11, "запросов"), (21, "запрос")]
+)
 async def test_reads_use_the_right_russian_plural(sessionmaker, n, word):
     await _seed_state(sessionmaker)
     day = datetime.date(2026, 9, 26)
