@@ -1,9 +1,9 @@
 # Anchor — Claude writes knowledge notes (plan)
 
-Version: 2026-09-26 (rev. 1, W1: plan only) · Scope: Claude, through the Anchor connector, updates, creates and links **knowledge** notes in the Obsidian vault.
+Version: 2026-09-26 (rev. 2, decisions settled) · Scope: Claude, through the Anchor connector, updates, creates and links **knowledge** notes in the Obsidian vault.
 Parent docs: `anchor-claude-connector-plan.md`, `anchor-phase8-plan.md`, `anchor-phase8e-plan.md` §3, §7, §10. For this feature, **this file wins**. Every earlier invariant stays in force; nothing here loosens one.
 
-Milestones are **W2a–W2b** (§10). **Nothing is built until you approve this plan and settle §13.**
+Milestones are **W2a–W2b** (§10). §13's decisions are settled (rev. 2); the plan below already follows them.
 
 ---
 
@@ -25,12 +25,12 @@ In place of that press, the plan uses hard limits:
 
 | Needs | Why | State today |
 |---|---|---|
-| **C3: the standing library switch** (`/claude library on\|off`) | Writing rides on the read switch (§5) | **Not built** |
-| **C3: `search_library`** | Claude has to find the nodes it edits | **Not built** |
-| **Knowledge indexing in the sync pass** | Edited notes must be reindexed (§9) | **Not built.** 8d shipped chunking and secret masking only: full-text rank failed its gate twice (decisions.md, "8d — full-text rank does not separate…") |
-| 8d's prompt-time retrieval | Not needed for writing | Not built |
+| **C3: the standing library switch** (`/claude library on\|off`) | Writing rides on the read switch (§5) | Built (#38) |
+| **C3: `search_library`** | Claude has to find the nodes it edits | Built (#38): top 6, at least 2 shared lexemes |
+| **Knowledge indexing in the sync pass** | Edited notes must be reindexed (§9) | Built (#37) |
+| 8d's prompt-time retrieval | Not needed for writing | Not built (full-text rank failed its gate) |
 
-So **W2 cannot start before C3 and knowledge indexing exist.** C3 as specified uses `notes_knowledge.search`. Whether an explicit, Claude-initiated search can ship without the rank threshold that failed for automatic prompt injection is a C3 question, and §13 lists it.
+The prerequisites exist, so W2 can be built.
 
 The instruction filter on written text (§6.5) matters even though retrieval is not built. Claude's writes are knowledge notes, and the moment knowledge retrieval exists they reach the persona's prompt. An injected instruction must not be able to persist through a write and wait for that day.
 
@@ -38,7 +38,7 @@ The instruction filter on written text (§6.5) matters even though retrieval is 
 
 ## 2. Out of scope (do not build)
 
-- **Delete, rename and move** of any note. Decision for you (§13.1).
+- **Delete** of any note (§13.1). Rename and move within knowledge folders are in scope (§3).
 - Attachments, `.canvas`, `.base`, and any file that is not `.md`.
 - **Personal notes**, in any mode (8e §10). `never`, unclassified, and settings-invalid notes stay invisible and unwritable.
 - Anything under `Anchor/`, including `Anchor/settings.md`, fact files and journal pages.
@@ -50,18 +50,19 @@ The instruction filter on written text (§6.5) matters even though retrieval is 
 
 ## 3. Tools
 
-All five live in `app/web/mcp_core.py` behind the Claude connection (C2's OAuth), and never on Grok's route. Each carries MCP annotations: `readOnlyHint: false`, `destructiveHint: true` for `update_note` and `undo_changeset`, and `idempotentHint: false`. What claude.ai does with those is in §12.
+All of them live in `app/web/mcp_core.py` behind the Claude connection (C2's OAuth), and never on Grok's route. Each carries MCP annotations: `readOnlyHint: false`, `destructiveHint: true` for `update_note`, `rename_note` and `undo_changeset`, and `idempotentHint: false`. What claude.ai does with those is in §12.
 
 | Tool | Arguments | Does | Returns |
 |---|---|---|---|
 | `update_note` | `path`, `new_body`, `base_hash` | Replaces the note's body (a full edit: rewrite and restructure allowed). Frontmatter is Anchor's to manage (§6.6). | `{path, hash, changeset_id}` |
 | `create_note` | `folder`, `title`, `body` | Creates `<folder>/<title>.md`. The title is sanitised; an existing name is refused, never overwritten. | `{path, hash, changeset_id}` |
-| `link_notes` | `a`, `b` | Optional helper (§13.3): appends `[[b]]` under a `## Связи` heading in `a`. The same checks as `update_note` apply. | same |
+| `rename_note` | `path`, `new_path`, `base_hash` | Renames or moves a knowledge note to a free name in a knowledge folder, and rewrites `[[old]]` → `[[new]]` in every knowledge note linking to it, in the same changeset (§4) | `{path, hash, changeset_id, relinked}` |
+| `get_note` | `path` | Read-only: the full body and hash of one knowledge note. Only while the write switch is on. | `{path, hash, body}` |
 | `list_changes` | — | Recent changesets: id, time, the files' titles, and whether each is undone | a list, at most 20 |
 | `undo_changeset` | `id` | Restores every file in that changeset from its stored pre-image (§6.2) | `{restored, refused}` counts |
 
-- **Reading before writing.** `update_note` needs a `base_hash`, which Claude gets from `search_library` results (C3 adds the file hash to each result) or from a new read-only `get_note(path)`. Whether `get_note` exists is a C3 detail; either way the hash comes from a read, never from a guess.
-- **Links** are ordinary `[[wikilinks]]` inside bodies. Nothing else is needed for Obsidian's graph.
+- **Reading before writing.** `update_note` and `rename_note` need a `base_hash`, which always comes from a read, never from a guess. C3's `search_library` returns text only. **While the write switch is on**, each result also carries the note's `path` and `hash`, and `get_note(path)` returns a whole note. With writing off, nothing about paths reaches Claude, exactly as in C3.
+- **Links** are ordinary `[[wikilinks]]` inside bodies; there is no `link_notes` helper (§13.3).
 - **One refusal text.** Every refusal returns `isError: true` with the same text:
   > Запись отклонена.
 
@@ -80,6 +81,7 @@ The bot passes writes through, and vaultd decides. Whatever the bot's code does,
 |---|---|
 | `PUT /v1/knowledge?path=` body `{content, if_sha256, changeset}` | Update (`if_sha256` required) or create (`if_sha256: null`, create-only via `os.link`, as for Anchor files) |
 | `GET /v1/changes` | The undo store's index: changeset ids, times, paths, hashes (paths go to the bot for the digest's titles and to Claude through `list_changes`) |
+| `POST /v1/knowledge/rename` body `{path, new_path, if_sha256, changeset}` | Rename or move, with backlinks (below) |
 | `POST /v1/undo?changeset=` | Restore that changeset's pre-images (§6.2) |
 
 **What vaultd accepts, all checked at write time, inside the store's lock:**
@@ -98,7 +100,14 @@ The bot passes writes through, and vaultd decides. Whatever the bot's code does,
 
 **Same lock, same residual race.** Knowledge writes take the store's single `asyncio.Lock`, like Anchor writes. The one race 8a documents also applies: `ob` can replace a file between vaultd's re-check and `os.replace`. It is closed the same way: the next read sees the new hash, and Claude's next write fails CAS.
 
-**The token.** One option is to keep `VAULT_API_TOKEN`. The other is a second token that only the write routes accept, so a leak of the read/sync token cannot write. Decision for you (§13.7). The plan proposes **a second token**: it costs one Railway variable on each service.
+**Rename and backlinks.** `rename_note` goes through these checks:
+- **Source and destination:** the source must pass 1–4 above. The destination must be a free `.md` name in an existing knowledge folder.
+- **Finding the links:** vaultd resolves links the way Obsidian does, by basename: `[[old]]`, `[[old|label]]`, `[[old#heading]]` and `![[old]]`.
+- **Refusals:** the rename is refused if the old basename is ambiguous (two notes share it), if **any** note outside knowledge links to it (a personal note is never read back to Claude and never written), or if the files touched would exceed the per-changeset cap (§6.4).
+- **Recording:** the rename, and every rewritten backlink, are recorded in one changeset, so one undo restores all of them.
+- vaultd reads non-knowledge notes only to answer "does it link here", inside the process. Their content never leaves vaultd.
+
+**The token.** The write routes take the same `VAULT_API_TOKEN` as the rest of vaultd (§13.7). One variable fewer; a leaked token could write knowledge notes, which the class boundary, the caps and undo still bound.
 
 ---
 
@@ -111,7 +120,7 @@ There are no windows for the library, only standing switches on the current conn
 | `library_read` (C3) | off | `/claude library on\|off` | `/claude library off`, `/revoke`, `/claude disconnect`; wiped by `/delete`; a new connection starts off |
 | `library_write` (this plan) | off | `/claude library write on\|off` | the same, and also **turning read off** |
 
-- **Proposal: writing has its own switch**, off by default, and requires the read switch. Decision §13.2.
+- **Writing has its own switch**, off by default, and requires the read switch (§13.2).
 - `/claude` shows both: «Библиотека: чтение вкл · запись выкл».
 - **Grok never writes.** No grant, scope or switch reaches `/grok`.
 - The switch lives on `oauth_connection` (two booleans), not on `access_grant`. It follows the connection's 30-day life and dies with it.
@@ -139,15 +148,16 @@ It is kept for **`UNDO_TTL_DAYS = 14`**, a constant. The argument is in §8.5.
 **`undo_changeset(id)` and `/claude undo`:**
 - Restore, per file, only if the file on disk still hashes to what Claude wrote (compare-and-swap). If you edited it since, that file is refused and counted, and the rest are restored.
 - A created file is undone by deleting it, and only if it is unchanged.
+- A rename is undone file by file: the new path back to absent, the old path back to its pre-image, and each rewritten backlink back to its pre-image. Each file is compare-and-swap checked like any other.
 - **Undo writes only stored pre-images.** It takes no content argument. There is no code path by which it writes anything else, and vaultd's tests pin that.
 - An undo is recorded as its own changeset (so the digest shows it). **An undo cannot itself be undone**: that would write Claude's text back without any of §6.5's checks.
 - `/claude undo` in Telegram undoes the most recent changeset. `/claude undo all` undoes the last 24 hours. The digest's button does the same.
 
 ### 6.3 What a changeset is
 
-**Proposal:** a changeset is all writes made by one connection within a **10-minute idle window**. A new one starts after 10 minutes without a write. That groups a burst like "extend two nodes and create a linked third" into one undoable unit.
+A changeset is all writes made by one connection within a **10-minute idle window**. A new one starts after 10 minutes without a write. That groups a burst like "extend two nodes and create a linked third" into one undoable unit.
 
-The alternative is one changeset per tool call, which gives finer undo but many more rows. Decision §13.4.
+Settled (§13.4); the alternative, one changeset per tool call, was not chosen.
 
 ### 6.4 Caps, as constants
 
@@ -182,7 +192,7 @@ anchor_edited_at: "2026-09-26T10:14:00Z"
 - vaultd strips any `anchor_edited_*` keys Claude put in the body and writes its own.
 - Your other properties are kept byte for byte, with 8b's line-mark method.
 - An undo restores the pre-image exactly, so the properties vanish again if the file had none.
-- Whether retrieval later treats these nodes differently (a lower cap, a label in the prompt) is a decision for you (§13.8).
+- When knowledge retrieval exists, these nodes keep their rank but the prompt labels them «(записано Claude)» (§13.8).
 
 ### 6.7 Notices: one daily digest
 
@@ -241,7 +251,7 @@ What remains: a subtle, instruction-free falsehood written into knowledge notes.
 ### 8.2 Claude Code sessions seeing the write tools
 
 A claude.ai connector reaches Claude Code cloud sessions (connector plan §6.3), and a write tool is worse there than a read.
-- The guard hook's `ANCHOR_TOOLS` gains `update_note`, `create_note`, `link_notes`, `list_changes` and `undo_changeset`.
+- The guard hook's `ANCHOR_TOOLS` gains `update_note`, `create_note`, `rename_note`, `get_note`, `list_changes` and `undo_changeset`.
 - This matters in practice. This very session's connector is named `anc`, which the server-name pattern `anchor\w*?` does not match, so only the tool-name list catches it.
 - `.claude/settings.json`'s deny list stays as is.
 - `CLAUDE.md` already forbids calling the connector, and gains the write tools by name.
@@ -262,7 +272,7 @@ This matters more because no write is announced on its own.
 - **Cadence:** the digest is daily, so every write is named within about 24 hours.
 - **TTL 14 days** covers a digest you miss for a week plus a week to act.
 - The last net is Obsidian Sync Standard's version history, 1 month (§18.3 of the Phase 8 plan). It sits outside Anchor and stays reachable after undo has expired.
-- A longer TTL keeps more copies of your knowledge text on the vault volume, which is the cost. 14 days is proposed (§13.5).
+- A longer TTL keeps more copies of your knowledge text on the vault volume, which is the cost. 14 days (§13.5).
 
 ### 8.6 Injected text telling Claude to call `undo_changeset`, or to write in a loop
 
@@ -318,6 +328,11 @@ This matters more because no write is announced on its own.
   - a CAS miss;
   - each vaultd cap;
   - every refusal body is byte-identical.
+- **Rename:**
+  - it moves the file and rewrites every backlink form (`[[x]]`, `[[x|l]]`, `[[x#h]]`, `![[x]]`) in knowledge notes;
+  - it is refused when a personal, `never` or unclassified note links to the note, and that note is left byte-identical;
+  - it is refused when the basename is ambiguous, when the destination is taken or not knowledge, and when the files touched exceed the cap;
+  - one undo restores the file and all its backlinks byte for byte.
 - **Undo:**
   - restores byte for byte;
   - writes only stored pre-images (no route accepts content);
@@ -355,15 +370,19 @@ Each test is proven by a deliberate breaking edit, then reverted, and listed in 
 
 ---
 
-## 13. Decisions for you
+## 13. Decisions (settled, rev. 2)
 
-1. **No delete and no rename in v1.** Claude can create, update and link, but cannot remove or move a note. You delete in Obsidian.
-2. **Its own write switch** (`/claude library write on`, off by default, requires read) **or** one switch for read and write. Proposed: its own.
-3. **`link_notes` helper or wikilinks only.** Proposed: wikilinks only. `link_notes` saves Claude a read-modify-write, but it is a second write path.
-4. **Changeset grouping:** a 10-minute idle window (proposed) or one per tool call.
-5. **Undo TTL:** 14 days (proposed). Longer keeps more of your text on the vault volume.
-6. **A secret in written text:** refuse the write (proposed) or mask it.
-7. **A second vaultd token** for write routes (proposed) or the existing one.
-8. **Retrieval and Claude's nodes:** treat `anchor_edited_by: claude` notes like any knowledge note, or label them in the prompt, or rank them lower.
-9. **The undo store on the vault volume**, outside the vault root, because Railway allows one volume per service.
-10. **C3 without the failed threshold:** may `search_library`, an explicit search Claude chooses to run, ship ranked top-6 without the rank threshold that failed for automatic retrieval? That unblocks C3, and with it W2.
+| § | Decision |
+|---|---|
+| 13.1 | No delete. **Rename and move are allowed** within knowledge folders, with backlinks rewritten (§3, §4). |
+| 13.2 | **Its own write switch**, `/claude library write on\|off`: off by default, needs the read switch, and turning read off turns write off |
+| 13.3 | **Wikilinks only**, no `link_notes` |
+| 13.4 | A changeset is a **10-minute idle window** |
+| 13.5 | Undo TTL **14 days** |
+| 13.6 | A secret in written text **refuses** the write |
+| 13.7 | The **same token** (`VAULT_API_TOKEN`) for the write routes |
+| 13.8 | Retrieval, when it exists, **labels** Claude's nodes «(записано Claude)» |
+| 13.9 | The undo store is on the **vault volume, outside the vault root** (`/data/anchor-undo/`) |
+| 13.10 | C3 shipped `search_library` as top 6 with at least 2 shared lexemes, with no rank threshold (#38) |
+
+One addition follows from 13.1: `get_note(path)`, and paths plus hashes in `search_library` results, **only while the write switch is on** (§3). Otherwise Claude could not name the note it edits.
