@@ -1,31 +1,38 @@
-"""Measure `ts_rank_cd` separation for note retrieval (milestone 8d, phase 1).
+"""Measure note retrieval separation, with a lexical gate (milestone 8d, phase 2).
 
 Phase-8 plan section 9 says to measure `NOTES_MIN_RANK` before fixing
-it, "exactly as 2b did for trigram retrieval" (see app/core/memory.py's
-module docstring for that precedent). The 8e plan's section 9 amends
-this to two thresholds, `PERSONAL_MIN_RANK` and `KNOWLEDGE_MIN_RANK`,
-measured separately because personal and knowledge notes now live in
-separate tables.
+it, "exactly as 2b did for trigram retrieval". The 8e plan's section 9
+amends this to two thresholds, `PERSONAL_MIN_RANK` and
+`KNOWLEDGE_MIN_RANK`, measured separately.
+
+**Phase 1** measured `ts_rank_cd` alone and found it did not cleanly
+separate true positives from noise: a single shared content word could
+outscore a genuine but short true positive. **Phase 2** adds a second
+signal, `matched` -- the count of distinct query lexemes a chunk's own
+`tsv` actually contains, returned by `search_ranked` alongside `rank` --
+and measures whether *gating* on both (`matched >= N` and `rank >=` a
+floor) separates where rank alone did not.
 
 **What this script does, and does not, do.**
 
-- It builds a throwaway Postgres database (never the session one, never
-  production -- see `_create_database`/`_drop_database`, which mirror
-  tests/conftest.py's fixture), runs `alembic upgrade head` against it,
-  inserts ~30 synthetic notes in Russian, French and English across
-  varied topics, chunks them with `app.vault.notes_text.prepare`, and
-  writes the chunks into *both* `note_chunk_personal` and
-  `note_chunk_knowledge` through their access modules, with
-  `notes_consent` on.
-- It runs ~40 synthetic user messages against
-  `app.vault._chunks.search_ranked` (the rank-returning variant added
-  for this measurement) for both tables, and prints a table plus
-  summary statistics: the distribution of top ranks for true positives
-  vs. the best noise rank, per language, and the best separating
-  threshold with its precision/recall.
-- **It does not pick `NOTES_MIN_RANK`/`PERSONAL_MIN_RANK`/
-  `KNOWLEDGE_MIN_RANK` in code**, and it does not touch `app/core/turn.py`.
-  Reading its output and deciding a number is a separate, human step.
+- Builds a throwaway Postgres database (never the session one, never
+  production), runs `alembic upgrade head`, indexes the frozen corpus
+  in `scripts/note_rank_corpus.py` (~60 notes, ~100 messages) with
+  `app.vault.notes_text.prepare` through the real access modules
+  (consent on), into both `note_chunk_personal` and
+  `note_chunk_knowledge`.
+- For every message, fetches every chunk `search_ranked` finds (no
+  `LIMIT` cutoff that would hide a correct-but-lower-ranked chunk from
+  the gate analysis), then evaluates three candidate gates
+  (`matched >= 1`, `>= 2`, `>= 3`), each at its own best rank floor,
+  and reports tp/fp/fn/tn, precision, recall (overall and per
+  language), and gated top-hit accuracy for each.
+- Reports which gate (if any) meets the fixed acceptance criterion
+  (precision >= 0.95 on noise, recall >= 0.6 overall, no language
+  below recall 0.4), and says plainly if none does.
+- **Does not pick a final constant in code**, and does not touch
+  `app/core/turn.py`. Reading this output and deciding is a separate,
+  human step.
 
 Run it with:
 
@@ -41,13 +48,25 @@ import asyncio
 import os
 import random
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncpg
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from scripts.note_rank_corpus import MESSAGES, NOTES
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+MIN_MATCHED_CANDIDATES = (1, 2, 3)
+
+# The acceptance criterion, fixed before any gate is scored (per the
+# task): precision on noise >= 0.95 (so at most 2 of the corpus's 40
+# noise messages ever surface a chunk), recall overall >= 0.6, and no
+# single language's recall below 0.4.
+MIN_NOISE_PRECISION = 0.95
+MIN_OVERALL_RECALL = 0.6
+MIN_PER_LANGUAGE_RECALL = 0.4
 
 
 def _admin_dsn() -> str:
@@ -103,146 +122,31 @@ async def _drop_database(db_name: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# The synthetic corpus.
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Note:
-    title: str
-    lang: str  # "ru" | "fr" | "en"
-    text: str  # markdown body, as if already stripped of frontmatter
-
-
-NOTES: list[Note] = [
-    Note("Бег", "ru", "## Утренние пробежки\nБегаю по утрам в парке, обычно пять километров.\n\n## Обувь\nКупил новые кроссовки для бега на длинные дистанции."),
-    Note("Растяжка", "ru", "После пробежки всегда делаю растяжку минут десять, чтобы не болели мышцы."),
-    Note("Сон", "ru", "## Режим\nСтараюсь ложиться до полуночи и спать не меньше семи часов.\n\n## Будильник\nПросыпаюсь без будильника, если легла вовремя."),
-    Note("Готовка", "ru", "## Борщ\nВарю борщ по бабушкиному рецепту: свёкла, капуста, немного сахара в конце.\n\n## Плов\nПлов получается лучше в казане, а не в кастрюле."),
-    Note("День рождения партнёра", "ru", "У партнёра день рождения в октябре. Хочу заказать столик в том ресторане у канала и подарить книгу."),
-    Note("CCRU", "ru", "## История\nCCRU — Cybernetic Culture Research Unit, группа при Уорикском университете в девяностых.\n\n## Гиперстишн\nГиперстишн — вымысел, который делает себя реальным через собственное распространение."),
-    Note("GCP IAM", "ru", "## Роли\nВ GCP IAM роль привязывается к участнику через политику на уровне проекта, папки или организации.\n\n## Сервисные аккаунты\nСервисный аккаунт — это тоже участник, и ему можно выдать отдельную роль."),
-    Note("Kubernetes на русском", "ru", "## Поды\nПод — минимальная единица развёртывания в Kubernetes, обычно один или несколько контейнеров.\n\n## Деплойменты\nДеплоймент управляет репликами подов и обновляет их постепенно."),
-    Note("Погода", "ru", "Осенью в этом городе часто идёт дождь, а зимой почти не бывает снега."),
-    Note("Кофе", "ru", "Люблю заваривать кофе через пуровер, но иногда просто беру эспрессо-машину."),
-
-    Note("La Course", "fr", "## Le matin\nJe cours dans le parc tous les matins, environ cinq kilomètres.\n\n## Les chaussures\nJ'ai acheté de nouvelles chaussures pour les longues distances."),
-    Note("Le sommeil", "fr", "J'essaie de me coucher avant minuit et de dormir au moins sept heures."),
-    Note("La cuisine", "fr", "## Le pot-au-feu\nJe fais un pot-au-feu le dimanche, avec des poireaux et des carottes.\n\n## Le pain\nLe pain est meilleur le lendemain, légèrement grillé."),
-    Note("Deleuze", "fr", "## Différence et répétition\nDeleuze développe une ontologie de la différence, opposée à la logique de l'identité.\n\n## Le rhizome\nAvec Guattari, il propose le rhizome comme figure d'une pensée non hiérarchique."),
-    Note("L'anniversaire du partenaire", "fr", "L'anniversaire de mon partenaire est en octobre, je pense réserver le restaurant près du canal."),
-    Note("Le café", "fr", "Je prépare mon café avec une cafetière italienne, le matin avant de partir."),
-    Note("La météo", "fr", "En automne il pleut souvent dans cette ville, et il neige rarement en hiver."),
-
-    Note("Running", "en", "## Morning runs\nI run in the park every morning, usually five kilometres.\n\n## Shoes\nI bought new running shoes for long distances."),
-    Note("Sleep", "en", "I try to go to bed before midnight and sleep at least seven hours."),
-    Note("Cooking", "en", "## Soup\nI make a big pot of soup on Sundays, mostly vegetables and lentils.\n\n## Bread\nHomemade bread is better the next day, lightly toasted."),
-    Note("Kubernetes", "en", "## Pods\nA pod is the smallest deployable unit in Kubernetes, usually one or a few containers.\n\n## Deployments\nA deployment manages pod replicas and rolls out updates gradually."),
-    Note("Hyperstition", "en", "## Origins\nThe term comes from the CCRU, the Cybernetic Culture Research Unit at Warwick in the 1990s.\n\n## Definition\nHyperstition is fiction that makes itself real through its own transmission."),
-    Note("Partner's birthday", "en", "My partner's birthday is in October. I want to book the restaurant by the canal and get them a book."),
-    Note("Coffee", "en", "I brew coffee with a pour-over most mornings, sometimes an espresso machine on weekends."),
-    Note("Weather", "en", "It rains a lot here in autumn, and it rarely snows in winter."),
-    Note("GCP IAM notes", "en", "## Roles\nIn GCP IAM a role is bound to a principal through a policy at the project, folder, or organization level.\n\n## Service accounts\nA service account is itself a principal and can be granted its own role."),
-    Note("Stretching", "en", "I stretch for about ten minutes after every run so my legs don't get sore."),
-    Note("Interior plants", "en", "I keep a few succulents on the windowsill; they need almost no watering."),
-    Note("Cycling", "en", "On weekends I sometimes cycle along the river instead of running."),
-    Note("Reading list", "en", "Currently reading a history of the printing press, slowly, a few pages a night."),
-]
-
-
-@dataclass(frozen=True)
-class Message:
-    text: str
-    lang: str
-    expected: str | None  # a Note.title, or None for noise
-
-
-MESSAGES: list[Message] = [
-    # --- Russian: true positives -----------------------------------------
-    Message("сегодня утром бегала в парке, ноги немного устали", "ru", "Бег"),
-    Message("не могу заснуть, ложусь слишком поздно", "ru", "Сон"),
-    Message("хочу сварить борщ на выходных", "ru", "Готовка"),
-    Message("надо придумать подарок партнёру на день рождения", "ru", "День рождения партнёра"),
-    Message("расскажи про гиперстишн и CCRU ещё раз", "ru", "CCRU"),
-    Message("как назначить роль сервисному аккаунту в IAM", "ru", "GCP IAM"),
-    Message("что такое деплоймент и под в кубернетес", "ru", "Kubernetes на русском"),
-    Message("после бега надо не забыть растянуться", "ru", "Растяжка"),
-    # --- Russian: noise ----------------------------------------------------
-    Message("привет как дела", "ru", None),  # small talk
-    Message("сколько будет два плюс два", "ru", None),  # unrelated
-    Message("и в на с у", "ru", None),  # all stopwords
-    Message("а", "ru", None),  # all stopwords, tiny
-    Message("парк", "ru", None),  # single common word (shared with "Бег")
-    Message("кофе хороший сегодня", "ru", "Кофе"),  # true positive, distinct topic
-
-    # --- French: true positives --------------------------------------------
-    Message("j'ai couru dans le parc ce matin", "fr", "La Course"),
-    Message("je n'arrive pas à dormir, je me couche trop tard", "fr", "Le sommeil"),
-    Message("je vais préparer un pot-au-feu ce dimanche", "fr", "La cuisine"),
-    Message("il faut trouver un cadeau pour l'anniversaire de mon partenaire", "fr", "L'anniversaire du partenaire"),
-    Message("parle-moi encore du rhizome chez Deleuze", "fr", "Deleuze"),
-    Message("je prends un café avant de partir", "fr", "Le café"),
-    # --- French: noise -------------------------------------------------------
-    Message("bonjour, comment ça va", "fr", None),
-    Message("quelle heure est-il", "fr", None),
-    Message("de la le les", "fr", None),  # stopwords
-    Message("parc", "fr", None),  # single common word
-
-    # --- English: true positives ---------------------------------------------
-    Message("went for a run in the park this morning", "en", "Running"),
-    Message("can't sleep, going to bed too late again", "en", "Sleep"),
-    Message("thinking about making soup this weekend", "en", "Cooking"),
-    Message("need to figure out a gift for my partner's birthday", "en", "Partner's birthday"),
-    Message("what's a kubernetes deployment again", "en", "Kubernetes"),
-    Message("explain hyperstition and the CCRU one more time", "en", "Hyperstition"),
-    Message("how do IAM roles work for service accounts on GCP", "en", "GCP IAM notes"),
-    Message("my legs are sore, forgot to stretch after the run", "en", "Stretching"),
-    Message("thinking about getting a bike for weekend rides", "en", "Cycling"),
-    Message("started a new book about the history of printing", "en", "Reading list"),
-    Message("watering the succulents on the windowsill again", "en", "Interior plants"),
-    Message("making coffee with the pour-over this morning", "en", "Coffee"),
-    # --- English: noise --------------------------------------------------------
-    Message("hey what's up", "en", None),
-    Message("what time is it right now", "en", None),
-    Message("the a of to", "en", None),  # all stopwords
-    Message("park", "en", None),  # single common word, shared with "Running"
-    Message("it rained a bit today, nothing unusual", "en", "Weather"),  # true positive
-]
-
-
-# --------------------------------------------------------------------------
-# The measurement itself.
+# Indexing.
 # --------------------------------------------------------------------------
 
 
 async def _index_all(
     session: AsyncSession, note_class: str, path_prefix: str, replace_chunks
-) -> dict[int, str]:
-    """Insert every NOTES entry as a `vault_file` row plus its chunks.
+) -> None:
+    """Insert every corpus note as a `vault_file` row plus its chunks.
 
     `note_class` and `path_prefix` are passed in by the caller rather
-    than derived from the model here, so this function never has to
-    name a chunk table itself (tests/test_vault_notes_isolation.py
-    scans scripts/ too, and only the access module each `replace_chunks`
+    than derived from a model here, so this function never has to name
+    a chunk table itself (tests/test_vault_notes_isolation.py scans
+    scripts/ too, and only the access module each `replace_chunks`
     belongs to may name its table).
-
-    Returns file_id -> title, so a chunk's heading (which starts with
-    the title, per notes_text._heading_path) can be mapped back for
-    reporting without keeping a second table of ids.
     """
     from app.db.models import VaultFile
     from app.vault.notes_text import prepare
 
-    file_by_title: dict[int, str] = {}
     for note in NOTES:
         row = VaultFile(path=f"{path_prefix}/{note.title}.md", role="note", note_class=note_class)
         session.add(row)
         await session.flush()
         chunks = prepare(note.text, note.title)
         await replace_chunks(session, row.id, chunks)
-        file_by_title[row.id] = note.title
     await session.commit()
-    return file_by_title
 
 
 def _note_for_heading(heading: str | None) -> str | None:
@@ -252,95 +156,148 @@ def _note_for_heading(heading: str | None) -> str | None:
     return heading.split(" › ", 1)[0]
 
 
+# --------------------------------------------------------------------------
+# Collection: every candidate chunk for every message, unfiltered.
+# --------------------------------------------------------------------------
+
+
 @dataclass
-class Row:
-    message: str
+class MessageResult:
+    text: str
     lang: str
     expected: str | None
-    top_rank: float | None
-    top_note: str | None
-    hit: bool | None  # None when expected is None (no "hit" concept for noise)
+    # (note title, rank, matched), best rank first (as search_ranked orders).
+    candidates: list[tuple[str | None, float, int]] = field(default_factory=list)
 
 
-async def _measure(session: AsyncSession, model: type, search_ranked) -> list[Row]:
-    rows: list[Row] = []
+async def _collect(session: AsyncSession, model: type, search_ranked) -> list[MessageResult]:
+    results: list[MessageResult] = []
+    # A limit generously above the corpus's total chunk count, so no
+    # correct-but-lower-ranked chunk is cut off before the gate analysis
+    # even sees it.
+    limit = 2000
     for msg in MESSAGES:
-        results = await search_ranked(session, model, msg.text, 50)
-        if results:
-            heading, _text, rank = results[0]
+        rows = await search_ranked(session, model, msg.text, limit)
+        candidates = [(_note_for_heading(heading), rank, matched) for heading, _text, rank, matched in rows]
+        results.append(MessageResult(msg.text, msg.lang, msg.expected, candidates))
+    return results
+
+
+def _print_top1_table(class_name: str, results: list[MessageResult]) -> None:
+    print(f"\n=== {class_name}: top-1 candidate per message (ungated) ===")
+    print(f"{'lang':4} {'expected':28} {'top_note':28} {'rank':>7} {'matched':>7}  hit")
+    for r in results:
+        if r.candidates:
+            top_note, rank, matched = r.candidates[0]
+            rank_str, matched_str = f"{rank:.4f}", str(matched)
         else:
-            heading, rank = None, None
-        top_note = _note_for_heading(heading)
-        hit = (top_note == msg.expected) if msg.expected is not None else None
-        rows.append(Row(msg.text, msg.lang, msg.expected, rank, top_note, hit))
-    return rows
+            top_note, rank_str, matched_str = None, "  -   ", " -"
+        hit = "-" if r.expected is None else ("YES" if top_note == r.expected else "no")
+        print(
+            f"{r.lang:4} {(r.expected or '(none)'):28} {(top_note or '(none)'):28} "
+            f"{rank_str:>7} {matched_str:>7}  {hit}"
+        )
 
 
-def _print_table(class_name: str, rows: list[Row]) -> None:
-    print(f"\n=== {class_name} ===")
-    print(f"{'lang':4} {'expected':28} {'top_note':28} {'rank':>8}  hit")
-    for r in rows:
-        rank_str = f"{r.top_rank:.4f}" if r.top_rank is not None else "   -   "
-        hit_str = "-" if r.hit is None else ("YES" if r.hit else "no")
-        expected = r.expected or "(none)"
-        top_note = r.top_note or "(none)"
-        print(f"{r.lang:4} {expected:28} {top_note:28} {rank_str:>8}  {hit_str}")
+# --------------------------------------------------------------------------
+# Gate analysis: matched >= N and rank >= a floor.
+# --------------------------------------------------------------------------
 
 
-def _summary(class_name: str, rows: list[Row]) -> None:
-    tp_ranks = [r.top_rank or 0.0 for r in rows if r.expected is not None]
-    tp_hit_ranks = [r.top_rank or 0.0 for r in rows if r.expected is not None and r.hit]
-    noise_ranks = [r.top_rank or 0.0 for r in rows if r.expected is None]
+@dataclass
+class GateStats:
+    min_matched: int
+    floor: float
+    tp: int
+    fp: int
+    fn: int
+    tn: int
+    precision: float
+    recall: float
+    per_lang: dict[str, tuple[int, int]]  # lang -> (hits, total)
+    gated_top_hit: tuple[int, int]  # (correct, total) among tp messages with >=1 gated candidate
 
-    print(f"\n--- {class_name}: summary ---")
-    print(f"true positives (expected != None): {len(tp_ranks)}")
-    if tp_ranks:
-        print(f"  rank range: {min(tp_ranks):.4f} .. {max(tp_ranks):.4f}")
-    print(f"  of which top hit matched expected: {sum(1 for r in rows if r.hit)} / {len(tp_ranks)}")
-    if tp_hit_ranks:
-        print(f"  rank range when the top hit *was* correct: {min(tp_hit_ranks):.4f} .. {max(tp_hit_ranks):.4f}")
-    print(f"noise (expected == None): {len(noise_ranks)}")
-    if noise_ranks:
-        print(f"  best (highest) noise rank: {max(noise_ranks):.4f}")
-        print(f"  noise rank range: {min(noise_ranks):.4f} .. {max(noise_ranks):.4f}")
 
-    print("  per-language true-positive-hit rank range:")
-    for lang in ("ru", "fr", "en"):
-        lang_hits = [r.top_rank or 0.0 for r in rows if r.lang == lang and r.expected is not None and r.hit]
-        lang_tp = [r for r in rows if r.lang == lang and r.expected is not None]
-        n_hit = sum(1 for r in lang_tp if r.hit)
-        if lang_hits:
-            print(f"    {lang}: {n_hit}/{len(lang_tp)} correct, rank {min(lang_hits):.4f} .. {max(lang_hits):.4f}")
-        else:
-            print(f"    {lang}: {n_hit}/{len(lang_tp)} correct, no correct-hit ranks to show")
+def _best_gate(results: list[MessageResult], min_matched: int) -> GateStats | None:
+    tp_rows = [r for r in results if r.expected is not None]
+    noise_rows = [r for r in results if r.expected is None]
 
-    if not (tp_hit_ranks and noise_ranks):
-        print("  -> not enough data on one side to compute a threshold.")
-        return
+    def _best_rank_for_note(r: MessageResult, note: str | None) -> float | None:
+        matches = [
+            rank
+            for candidate_note, rank, matched in r.candidates
+            if matched >= min_matched and (note is None or candidate_note == note)
+        ]
+        return max(matches) if matches else None
 
-    # Best separating threshold: the value of a candidate that maximises
-    # precision+recall (equivalently minimises misclassifications) over
-    # this fixed set, treating "hit" (correct top note) as the positive
-    # class and every noise row as negative. This is exhaustive over the
-    # observed ranks, not a formula -- there are only ~40 of them.
-    candidates = sorted(set(tp_hit_ranks) | set(noise_ranks))
-    best = None
-    for threshold in candidates:
-        tp = sum(1 for r in tp_hit_ranks if r >= threshold)
-        fn = len(tp_hit_ranks) - tp
-        fp = sum(1 for r in noise_ranks if r >= threshold)
-        tn = len(noise_ranks) - fp
+    tp_best = [_best_rank_for_note(r, r.expected) for r in tp_rows]
+    noise_best = [_best_rank_for_note(r, None) for r in noise_rows]
+
+    floors = sorted({v for v in tp_best if v is not None} | {v for v in noise_best if v is not None})
+    if not floors:
+        return None
+
+    best: GateStats | None = None
+    for floor in floors:
+        tp = sum(1 for v in tp_best if v is not None and v >= floor)
+        fn = len(tp_best) - tp
+        fp = sum(1 for v in noise_best if v is not None and v >= floor)
+        tn = len(noise_best) - fp
         precision = tp / (tp + fp) if (tp + fp) else 1.0
-        recall = tp / (tp + fn) if (tp + fn) else 1.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
         score = precision + recall
-        if best is None or score > best[0]:
-            best = (score, threshold, precision, recall, tp, fp, fn, tn)
-    _, threshold, precision, recall, tp, fp, fn, tn = best
+        if best is None or score > (best.precision + best.recall):
+            per_lang: dict[str, tuple[int, int]] = {}
+            for r, v in zip(tp_rows, tp_best):
+                hits, total = per_lang.get(r.lang, (0, 0))
+                total += 1
+                if v is not None and v >= floor:
+                    hits += 1
+                per_lang[r.lang] = (hits, total)
+            gated_correct = 0
+            gated_total = 0
+            for r in tp_rows:
+                gated_total += 1
+                gated = [
+                    (note, rank)
+                    for note, rank, matched in r.candidates
+                    if matched >= min_matched and rank >= floor
+                ]
+                if gated and max(gated, key=lambda pair: pair[1])[0] == r.expected:
+                    gated_correct += 1
+            best = GateStats(
+                min_matched, floor, tp, fp, fn, tn, precision, recall, per_lang, (gated_correct, gated_total)
+            )
+    return best
+
+
+def _print_gate(class_name: str, stats: GateStats | None, min_matched: int) -> None:
+    print(f"\n--- {class_name}: gate matched >= {min_matched} ---")
+    if stats is None:
+        print("  no candidate cleared this matched threshold at all -- no data to gate on.")
+        return
     print(
-        f"  best separating threshold: {threshold:.4f} "
-        f"(precision={precision:.2f}, recall={recall:.2f}, "
-        f"tp={tp} fp={fp} fn={fn} tn={tn})"
+        f"  best rank floor: {stats.floor:.4f}  "
+        f"tp={stats.tp} fp={stats.fp} fn={stats.fn} tn={stats.tn}  "
+        f"precision={stats.precision:.2f} recall={stats.recall:.2f}"
     )
+    print("  per-language recall:")
+    for lang in ("ru", "fr", "en"):
+        hits, total = stats.per_lang.get(lang, (0, 0))
+        recall = hits / total if total else 0.0
+        print(f"    {lang}: {hits}/{total} = {recall:.2f}")
+    correct, total = stats.gated_top_hit
+    accuracy = correct / total if total else 0.0
+    print(f"  gated top-hit accuracy: {correct}/{total} = {accuracy:.2f}")
+    meets = (
+        stats.precision >= MIN_NOISE_PRECISION
+        and stats.recall >= MIN_OVERALL_RECALL
+        and all(
+            (hits / total if total else 0.0) >= MIN_PER_LANGUAGE_RECALL
+            for hits, total in stats.per_lang.values()
+        )
+    )
+    print(f"  meets the acceptance criterion (precision>=0.95, recall>=0.6, per-lang>=0.4): {meets}")
 
 
 async def _index_and_measure(asyncpg_url: str) -> None:
@@ -348,6 +305,10 @@ async def _index_and_measure(asyncpg_url: str) -> None:
     from app.db.session import create_engine_and_sessionmaker
     from app.vault import notes_knowledge, notes_personal
     from app.vault._chunks import search_ranked
+
+    n_tp = sum(1 for m in MESSAGES if m.expected is not None)
+    n_noise = len(MESSAGES) - n_tp
+    print(f"corpus: {len(NOTES)} notes, {len(MESSAGES)} messages ({n_tp} true positives, {n_noise} noise)")
 
     engine, sessionmaker = create_engine_and_sessionmaker(asyncpg_url)
     try:
@@ -362,14 +323,31 @@ async def _index_and_measure(asyncpg_url: str) -> None:
             print(f"indexing {len(NOTES)} synthetic notes as knowledge notes ...")
             await _index_all(session, "knowledge", "Library", notes_knowledge.replace_chunks)
 
+        any_gate_passed = False
         for model, class_name in (
             (NoteChunkPersonal, "personal (PERSONAL_MIN_RANK)"),
             (NoteChunkKnowledge, "knowledge (KNOWLEDGE_MIN_RANK)"),
         ):
             async with sessionmaker() as session:
-                rows = await _measure(session, model, search_ranked)
-            _print_table(class_name, rows)
-            _summary(class_name, rows)
+                results = await _collect(session, model, search_ranked)
+            _print_top1_table(class_name, results)
+            for min_matched in MIN_MATCHED_CANDIDATES:
+                stats = _best_gate(results, min_matched)
+                _print_gate(class_name, stats, min_matched)
+                if stats is not None and (
+                    stats.precision >= MIN_NOISE_PRECISION
+                    and stats.recall >= MIN_OVERALL_RECALL
+                    and all(
+                        (hits / total if total else 0.0) >= MIN_PER_LANGUAGE_RECALL
+                        for hits, total in stats.per_lang.values()
+                    )
+                ):
+                    any_gate_passed = True
+
+        print(
+            "\n=== overall: at least one gate meets the acceptance criterion: "
+            f"{any_gate_passed} ==="
+        )
     finally:
         await engine.dispose()
 
