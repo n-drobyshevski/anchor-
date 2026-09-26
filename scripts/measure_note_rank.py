@@ -218,7 +218,19 @@ class GateStats:
     gated_top_hit: tuple[int, int]  # (correct, total) among tp messages with >=1 gated candidate
 
 
-def _best_gate(results: list[MessageResult], min_matched: int) -> GateStats | None:
+def _meets_criterion(stats: GateStats) -> bool:
+    return (
+        stats.precision >= MIN_NOISE_PRECISION
+        and stats.recall >= MIN_OVERALL_RECALL
+        and all(
+            (hits / total if total else 0.0) >= MIN_PER_LANGUAGE_RECALL
+            for hits, total in stats.per_lang.values()
+        )
+    )
+
+
+def _all_gates(results: list[MessageResult], min_matched: int) -> list[GateStats]:
+    """`GateStats` for every observed rank floor at this `min_matched`, worst to best floor."""
     tp_rows = [r for r in results if r.expected is not None]
     noise_rows = [r for r in results if r.expected is None]
 
@@ -234,10 +246,7 @@ def _best_gate(results: list[MessageResult], min_matched: int) -> GateStats | No
     noise_best = [_best_rank_for_note(r, None) for r in noise_rows]
 
     floors = sorted({v for v in tp_best if v is not None} | {v for v in noise_best if v is not None})
-    if not floors:
-        return None
-
-    best: GateStats | None = None
+    stats_by_floor: list[GateStats] = []
     for floor in floors:
         tp = sum(1 for v in tp_best if v is not None and v >= floor)
         fn = len(tp_best) - tp
@@ -245,59 +254,75 @@ def _best_gate(results: list[MessageResult], min_matched: int) -> GateStats | No
         tn = len(noise_best) - fp
         precision = tp / (tp + fp) if (tp + fp) else 1.0
         recall = tp / (tp + fn) if (tp + fn) else 0.0
-        score = precision + recall
-        if best is None or score > (best.precision + best.recall):
-            per_lang: dict[str, tuple[int, int]] = {}
-            for r, v in zip(tp_rows, tp_best):
-                hits, total = per_lang.get(r.lang, (0, 0))
-                total += 1
-                if v is not None and v >= floor:
-                    hits += 1
-                per_lang[r.lang] = (hits, total)
-            gated_correct = 0
-            gated_total = 0
-            for r in tp_rows:
-                gated_total += 1
-                gated = [
-                    (note, rank)
-                    for note, rank, matched in r.candidates
-                    if matched >= min_matched and rank >= floor
-                ]
-                if gated and max(gated, key=lambda pair: pair[1])[0] == r.expected:
-                    gated_correct += 1
-            best = GateStats(
-                min_matched, floor, tp, fp, fn, tn, precision, recall, per_lang, (gated_correct, gated_total)
-            )
-    return best
+        per_lang: dict[str, tuple[int, int]] = {}
+        for r, v in zip(tp_rows, tp_best):
+            hits, total = per_lang.get(r.lang, (0, 0))
+            total += 1
+            if v is not None and v >= floor:
+                hits += 1
+            per_lang[r.lang] = (hits, total)
+        gated_correct = 0
+        gated_total = 0
+        for r in tp_rows:
+            gated_total += 1
+            gated = [
+                (note, rank) for note, rank, matched in r.candidates if matched >= min_matched and rank >= floor
+            ]
+            if gated and max(gated, key=lambda pair: pair[1])[0] == r.expected:
+                gated_correct += 1
+        stats_by_floor.append(
+            GateStats(min_matched, floor, tp, fp, fn, tn, precision, recall, per_lang, (gated_correct, gated_total))
+        )
+    return stats_by_floor
 
 
-def _print_gate(class_name: str, stats: GateStats | None, min_matched: int) -> None:
-    print(f"\n--- {class_name}: gate matched >= {min_matched} ---")
-    if stats is None:
-        print("  no candidate cleared this matched threshold at all -- no data to gate on.")
-        return
+def _best_by_score(all_gates: list[GateStats]) -> GateStats | None:
+    """The floor maximising precision+recall -- the "best separating floor" report."""
+    if not all_gates:
+        return None
+    return max(all_gates, key=lambda s: s.precision + s.recall)
+
+
+def _best_meeting_criterion(all_gates: list[GateStats]) -> GateStats | None:
+    """Among floors that meet the fixed acceptance criterion, the one with the highest recall."""
+    passing = [s for s in all_gates if _meets_criterion(s)]
+    if not passing:
+        return None
+    return max(passing, key=lambda s: s.recall)
+
+
+def _print_stats_block(label: str, stats: GateStats) -> None:
     print(
-        f"  best rank floor: {stats.floor:.4f}  "
+        f"  {label} floor: {stats.floor:.4f}  "
         f"tp={stats.tp} fp={stats.fp} fn={stats.fn} tn={stats.tn}  "
         f"precision={stats.precision:.2f} recall={stats.recall:.2f}"
     )
-    print("  per-language recall:")
+    print("    per-language recall:")
     for lang in ("ru", "fr", "en"):
         hits, total = stats.per_lang.get(lang, (0, 0))
         recall = hits / total if total else 0.0
-        print(f"    {lang}: {hits}/{total} = {recall:.2f}")
+        print(f"      {lang}: {hits}/{total} = {recall:.2f}")
     correct, total = stats.gated_top_hit
     accuracy = correct / total if total else 0.0
-    print(f"  gated top-hit accuracy: {correct}/{total} = {accuracy:.2f}")
-    meets = (
-        stats.precision >= MIN_NOISE_PRECISION
-        and stats.recall >= MIN_OVERALL_RECALL
-        and all(
-            (hits / total if total else 0.0) >= MIN_PER_LANGUAGE_RECALL
-            for hits, total in stats.per_lang.values()
-        )
-    )
-    print(f"  meets the acceptance criterion (precision>=0.95, recall>=0.6, per-lang>=0.4): {meets}")
+    print(f"    gated top-hit accuracy: {correct}/{total} = {accuracy:.2f}")
+    print(f"    meets the acceptance criterion (precision>=0.95, recall>=0.6, per-lang>=0.4): {_meets_criterion(stats)}")
+
+
+def _print_gate(class_name: str, all_gates: list[GateStats], min_matched: int) -> bool:
+    """Prints both the best-scoring floor and, if different, the best floor that
+    actually meets the fixed criterion. Returns whether any floor at this
+    `min_matched` meets the criterion."""
+    print(f"\n--- {class_name}: gate matched >= {min_matched} ---")
+    if not all_gates:
+        print("  no candidate cleared this matched threshold at all -- no data to gate on.")
+        return False
+    best = _best_by_score(all_gates)
+    _print_stats_block("best-scoring (precision+recall) rank", best)
+    passing = _best_meeting_criterion(all_gates)
+    if passing is not None and passing.floor != best.floor:
+        print("  highest-recall floor that meets the criterion, if any:")
+        _print_stats_block("criterion-meeting rank", passing)
+    return passing is not None
 
 
 async def _index_and_measure(asyncpg_url: str) -> None:

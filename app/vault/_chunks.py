@@ -158,4 +158,4 @@ async def search_ranked(
             {"user_text": user_text, "limit": limit},
         )
     ).all()
-    return [(heading, body, float(rank)) for heading, body, rank in rows]
+    return [(heading, body, float(rank), int(matched)) for heading, body, rank, matched in rows]
