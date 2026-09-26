@@ -106,6 +106,87 @@ async def test_a_module_cannot_file_a_chunk_under_the_other_class(sessionmaker):
             await notes_knowledge.replace_chunks(session, files["personal"], [Chunk(None, "CCRU")])
 
 
+async def test_search_library_top6_with_a_matched_floor(sessionmaker):
+    """Connector plan section 9 (C3): search_library's own decision --
+    top LIBRARY_MAX_CHUNKS (6) by rank, keeping only chunks sharing at
+    least LIBRARY_MIN_MATCHED (2) distinct lexemes with the query. A
+    chunk sharing only one lexeme is dropped even though it still
+    matches the tsquery (an OR of the query's lexemes) and *outranks*
+    every chunk that clears the floor (repeating "парк" six times gives
+    it a higher ts_rank_cd than any single "H{i}" chunk below, so a
+    version of search_library that forgot the floor and only sorted by
+    rank would put it first, not drop it) -- proving the floor is
+    applied, not just coincidentally satisfied by rank order. 7 chunks
+    that do clear the floor still give back only 6."""
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        chunks = [Chunk(f"H{i}", f"бегаю утром {i} парке") for i in range(7)]
+        # matched=1 (парк alone), but ranked above every H{i} above.
+        chunks.append(Chunk("Only", "парк парк парк парк парк парк большой"))
+        await notes_knowledge.replace_chunks(session, files["knowledge"], chunks)
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "бегаю по утрам в парке")
+    assert len(results) == notes_knowledge.LIBRARY_MAX_CHUNKS
+    assert all("Only" not in r and "большой" not in r for r in results)
+
+
+async def test_search_library_floor_survives_a_pool_larger_than_any_fixed_size(sessionmaker):
+    """The floor is applied in SQL before ORDER BY ... LIMIT, not by
+    pulling a fixed-size, rank-ordered pool and filtering by `matched`
+    in Python. 60 decoy chunks each share only one query lexeme
+    ("запрос") but rank far above the one chunk that shares two
+    ("запрос" and "дан") -- a pool of any fixed size N < 61 ordered by
+    rank would never even see the valid chunk, so if the floor were
+    applied after such a pool (rather than in the same SQL statement,
+    before the limit), this would come back empty. It must not."""
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        decoys = [Chunk(f"D{i}", "запрос " * 20 + str(i)) for i in range(60)]
+        valid = Chunk("V", "запрос данные один раз")
+        await notes_knowledge.replace_chunks(session, files["knowledge"], decoys + [valid])
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "запрос данные")
+    assert results == ["«V»: запрос данные один раз"]
+
+
+async def test_search_library_is_content_free_like_search(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_knowledge.replace_chunks(
+            session, files["knowledge"], [Chunk("CCRU", "Гиперстишн и ускорение.")]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "гиперстишн ускорение")
+    assert results == ["«CCRU»: Гиперстишн и ускорение."]
+    assert all(isinstance(item, str) for item in results)
+
+
+async def test_search_library_never_reads_personal_chunks(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_personal.replace_chunks(
+            session, files["personal"], [Chunk("Бег", "Бегаю утром в парке.")]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        assert await notes_knowledge.search_library(session, "бегаю утром в парке") == []
+
+
+async def test_search_library_without_consent_finds_nothing(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_knowledge.replace_chunks(
+            session, files["knowledge"], [Chunk("CCRU", "Гиперстишн и ускорение.")]
+        )
+        await session.commit()
+    await _set_consent(sessionmaker, False)
+    async with sessionmaker() as session:
+        assert await notes_knowledge.search_library(session, "гиперстишн ускорение") == []
+
+
 @pytest.mark.parametrize("note_class", sorted(MODULES))
 async def test_delete_for_file(sessionmaker, note_class):
     files = await _seed(sessionmaker, consent=True)

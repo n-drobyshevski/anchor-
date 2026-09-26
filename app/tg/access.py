@@ -17,6 +17,7 @@ import logging
 
 from app.core import grants
 from app.core.clock import Clock
+from app.web import oauth_store
 
 logger = logging.getLogger(__name__)
 
@@ -41,5 +42,10 @@ def revoked_text(counts: dict[str, int]) -> str:
 async def revoke(sessionmaker, clock: Clock) -> str:
     async with sessionmaker() as session:
         counts = await grants.revoke_all_by_client(session, clock)
+        # C3: /revoke also closes the library's standing switch -- the
+        # connection itself survives (that is /claude disconnect's job),
+        # but "closed" must mean closed, not "closed except the one
+        # door that was never a window in the first place".
+        await oauth_store.disable_library_if_connected(session, clock)
     logger.info("grants revoked", extra={"event": "revoke", "count": sum(counts.values())})
     return revoked_text(counts)

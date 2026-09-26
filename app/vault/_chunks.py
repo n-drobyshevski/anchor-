@@ -104,23 +104,29 @@ async def search(session: AsyncSession, model: type, user_text: str, limit: int)
 
 
 async def search_ranked(
-    session: AsyncSession, model: type, user_text: str, limit: int
+    session: AsyncSession, model: type, user_text: str, limit: int, *, min_matched: int = 0
 ) -> list[tuple[str | None, str, float, int]]:
     """Like `search`, but `(heading, text, rank, matched)` instead of a formatted string.
 
-    Exists only for milestone 8d's measurement (scripts/measure_note_rank.py):
-    picking `PERSONAL_MIN_RANK`/`KNOWLEDGE_MIN_RANK` needs the raw
-    `ts_rank_cd` score, which `search` deliberately never exposes to a
-    caller (its own callers get strings only, never a score or an id --
-    see the module docstring). No caller in `app/` uses this; it is not
-    a caller-facing API and consent is still enforced the same way.
+    Exists for milestone 8d's measurement (scripts/measure_note_rank.py,
+    called with `min_matched` left at its default of 0) and, from C3,
+    for `notes_knowledge.search_library`'s own floor. Picking
+    `PERSONAL_MIN_RANK`/`KNOWLEDGE_MIN_RANK` needs the raw `ts_rank_cd`
+    score, which `search` deliberately never exposes to a caller (its
+    own callers get strings only, never a score or an id -- see the
+    module docstring); consent is still enforced the same way.
 
     `matched` is the count of *distinct* query lexemes the chunk's tsv
     actually contains -- a lexical gate candidate alongside the rank
     floor (a chunk can rank respectably on `ts_rank_cd` off a single
     rare, heavily-weighted lexeme; `matched` tells the caller how many
-    of the query's own words it is really about). Computed in the same
-    statement as the rank and the consent check, not a second query.
+    of the query's own words it is really about). `min_matched > 0`
+    applies that floor inside this same statement, in the `WHERE` of
+    the outer query over the `scored` CTE, *before* `ORDER BY ...
+    LIMIT` -- not by asking for more rows and filtering in Python
+    afterwards, which would silently drop a chunk that clears the floor
+    but ranks below `limit` other chunks that do not (a real bug this
+    project shipped once and fixed: see notes_knowledge.py's C3 note).
     """
     if limit <= 0 or not user_text.strip():
         return []
@@ -139,23 +145,29 @@ async def search_ranked(
                             SELECT array_agg(DISTINCT lexeme)
                             FROM unnest(to_tsvector('russian', :user_text))
                         ) AS lexemes
+                ),
+                scored AS (
+                    SELECT
+                        c.id,
+                        c.heading,
+                        c.text,
+                        ts_rank_cd(c.tsv, q.query, 32) AS rank,
+                        (
+                            SELECT count(*)
+                            FROM unnest(tsvector_to_array(c.tsv)) AS w
+                            WHERE w = ANY (q.lexemes)
+                        ) AS matched
+                    FROM {table} AS c, q, user_state AS s
+                    WHERE s.id = 1 AND s.notes_consent AND c.tsv @@ q.query
                 )
-                SELECT
-                    c.heading,
-                    c.text,
-                    ts_rank_cd(c.tsv, q.query, 32) AS rank,
-                    (
-                        SELECT count(*)
-                        FROM unnest(tsvector_to_array(c.tsv)) AS w
-                        WHERE w = ANY (q.lexemes)
-                    ) AS matched
-                FROM {table} AS c, q, user_state AS s
-                WHERE s.id = 1 AND s.notes_consent AND c.tsv @@ q.query
-                ORDER BY rank DESC, c.id
+                SELECT heading, text, rank, matched
+                FROM scored
+                WHERE matched >= :min_matched
+                ORDER BY rank DESC, id
                 LIMIT :limit
                 """
             ),
-            {"user_text": user_text, "limit": limit},
+            {"user_text": user_text, "limit": limit, "min_matched": min_matched},
         )
     ).all()
     return [(heading, body, float(rank), int(matched)) for heading, body, rank, matched in rows]

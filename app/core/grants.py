@@ -34,6 +34,7 @@ import hashlib
 import secrets
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
@@ -41,6 +42,7 @@ from app.core.export import encode
 from app.db.models import (
     AccessGrant,
     Checkin,
+    ClaudeLibraryRead,
     Journal,
     Memory,
     Message,
@@ -50,6 +52,12 @@ from app.db.models import (
 )
 
 SCOPES = ("memory", "journal", "dialogs", "state")
+# Connector plan section 9 (C3): a standing switch on the connection
+# (OauthConnection.library_read), never a window scope -- see
+# app/db/models.py's AccessGrant docstring for why this name still
+# exists in the database's ck_access_grant_scopes CHECK. Kept out of
+# SCOPES above so no /claude window can ever carry it.
+LIBRARY_SCOPE = "notes_knowledge"
 # Message kinds an outside assistant may read. Not 'welfare' (see the
 # module docstring), not 'canned'/'system' (bot plumbing, not dialog).
 DIALOG_KINDS = ("chat", "checkin", "outbound")
@@ -341,3 +349,24 @@ async def read_state(session: AsyncSession, today: datetime.date) -> dict:
             }
         )
     return out
+
+
+# --- the library counter (connector plan section 9, C3) ---
+
+
+async def record_library_read(session: AsyncSession, local_date: datetime.date) -> None:
+    """Count one `search_library` call. Content-free: a date and a
+    count, never the query, a heading or a chunk. Feeds
+    app/tg/claude.py's once-a-day digest; not called on a refusal."""
+    stmt = pg_insert(ClaudeLibraryRead).values(local_date=local_date, count=1)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ClaudeLibraryRead.local_date],
+        set_={"count": ClaudeLibraryRead.count + 1},
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+
+async def library_read_count(session: AsyncSession, local_date: datetime.date) -> int:
+    row = await session.get(ClaudeLibraryRead, local_date)
+    return row.count if row is not None else 0

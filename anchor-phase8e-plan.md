@@ -190,6 +190,7 @@ This table is the contract. Any later phase that adds a consumer of vault notes 
 | Idle: consolidate, reflect, prebrief, critique, canary, backfill | never | never |
 | Idle research, `/study`, `/read`, distill, search, any query that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it (for example, suggesting `/interests` topics from knowledge notes) |
 | Grok access (`/grok`, `app/core/grants.py`, `app/web/mcp.py`, which is read by xAI) | not grantable in 8e | not grantable in 8e |
+| Claude connector (C3, `search_library`, `app/web/mcp_core.py`; `anchor-claude-connector-plan.md` §9) | never, in any milestone | yes, only while `/claude library on` and the connection is alive, and only `notes_consent`/`VAULT_KNOWLEDGE_ENABLED` also on -- gated by a standing switch on the OAuth connection, never a window scope |
 | Web panels | not shown in 8e | not shown in 8e |
 | Becoming a memory fact | never automatically | never automatically |
 | Encrypted backups | included; deleted by `/delete` | same |

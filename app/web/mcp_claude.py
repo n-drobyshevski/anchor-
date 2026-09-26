@@ -20,6 +20,13 @@
   прочитал: журнал (14)», on a window's first read and then at most
   every grants.NOTIFY_EVERY.
 - Its own rate limiter, keyed by connection, apart from Grok's.
+- **`search_library` (C3) needs no window.** It is gated by the
+  connection's own standing switch, `library_read` -- `/claude library
+  on|off` in Telegram (app/tg/claude.py) -- checked here and passed to
+  the shared core as `Reader.library`, never through `grant.scopes`
+  like the four scopes above. Off: «Библиотека закрыта...». On but
+  notes off: «Заметки выключены...». See app/web/mcp_core.py's
+  `_serve_search_library`.
 
 Logs carry the connection id, the grant id, the tool and a count.
 """
@@ -64,14 +71,18 @@ async def handle(request: web.Request) -> web.StreamResponse:
         if connection is None:
             return _unauthorized(settings)
         window = await grants.find_open_window(session, clock, connection.id)
+        library_read = connection.library_read
 
     reader = mcp_core.Reader(
-        listed=grants.SCOPES,
+        listed=grants.SCOPES + (grants.LIBRARY_SCOPE,),
         grant=window,
         limit_key=connection.id,
         notice=NOTIFY_TEXT.format(connection=connection.id),
         refusal=mcp_core.Refusal(CLOSED_TEXT),
         instructions=INSTRUCTIONS,
+        library=mcp_core.LibraryAccess(
+            open=library_read, closed=mcp_core.Refusal(mcp_core.LIBRARY_CLOSED_TEXT)
+        ),
     )
     return await mcp_core.serve(request, reader, request.app["claude_limiter"])
 

@@ -43,6 +43,7 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core import grants
 from app.db.models import AccessGrant, UserState
+from app.vault import notes_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,16 @@ TOOL_LABELS = {
 }
 
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+
+# C3, connector plan section 9: refusal texts for search_library that
+# do not fit the shared Refusal/Reader shape above, because the library
+# is a standing switch (OauthConnection.library_read), not a window
+# scope -- see the LibraryAccess/serve() handling below. Fixed strings,
+# the user's own decision (docs/decisions.md, "C3 -- search_library
+# without the failed threshold"), never a Settings field.
+LIBRARY_CLOSED_TEXT = "Библиотека закрыта. Включи в Telegram: /claude library on"
+LIBRARY_NOTES_OFF_TEXT = "Заметки выключены. Включи в Telegram: /vault notes on"
+LIBRARY_EMPTY_TEXT = "В библиотеке ничего не нашлось."
 
 TOOLS = {
     "get_memory": {
@@ -115,6 +126,20 @@ TOOLS = {
             "additionalProperties": False,
         },
     },
+    "search_library": {
+        "scope": grants.LIBRARY_SCOPE,
+        "description": (
+            "Search the user's knowledge notes (reference material, not the user's own "
+            "view) and return the best-matching excerpts, up to "
+            f"{notes_knowledge.LIBRARY_MAX_CHUNKS}. Claude only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 500}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 NOT_PERMITTED = "Unknown or not permitted tool"
@@ -139,6 +164,26 @@ RPC_REFUSAL = Refusal()
 
 
 @dataclasses.dataclass(frozen=True)
+class LibraryAccess:
+    """`search_library`'s own gate (connector plan section 9, C3): a
+    standing switch, not a window, so it cannot be expressed as
+    `spec["scope"] in grant.scopes` like the four scopes above.
+
+    `open=False` (Grok's default, always) answers with `closed`, the
+    same Refusal shape the four scopes use -- Grok's stays the plain
+    `RPC_REFUSAL` (`-32602`, "not listed"), never the Claude-specific
+    "Библиотека закрыта" text, which would be nonsensical coming from
+    Grok's endpoint.
+    """
+
+    open: bool = False
+    closed: Refusal = RPC_REFUSAL
+
+
+LIBRARY_CLOSED = LibraryAccess()
+
+
+@dataclasses.dataclass(frozen=True)
 class Reader:
     """An authenticated caller, as the dispatcher needs to see it.
 
@@ -151,6 +196,8 @@ class Reader:
     - `limit_key`: what the endpoint's limiter counts calls against.
     - `notice`: the Telegram text for a read, with `{what}` for
       "журнал (14)".
+    - `library`: `search_library`'s own gate (see LibraryAccess), never
+      `grant`/`refusal` -- the switch is standing, not a window.
     """
 
     listed: tuple[str, ...]
@@ -159,6 +206,7 @@ class Reader:
     notice: str
     refusal: Refusal = RPC_REFUSAL
     instructions: str = SERVER_INSTRUCTIONS
+    library: LibraryAccess = LIBRARY_CLOSED
 
 
 class RateLimiter:
@@ -259,6 +307,63 @@ async def _notify(request: web.Request, notice: str, tool: str, count: int) -> N
         logger.warning("grant notice failed", extra={"event": type(exc).__name__})
 
 
+async def _serve_search_library(
+    request: web.Request, request_id, reader: Reader, arguments: dict
+) -> web.Response:
+    """`search_library`'s own path (connector plan section 9, C3):
+    standing-switch gate, then a live notes-off check, then the search.
+
+    Deliberately not `_call_tool`/the generic scope-check block above:
+    the library is gated by `reader.library` (a connection's standing
+    switch), never `reader.grant.scopes` (a window). Reads are counted
+    (`grants.record_library_read`, for app/tg/claude.py's daily digest)
+    but never announced one by one -- no `_notify` call here, unlike
+    every scope above.
+    """
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return _rpc_error(request_id, -32602, "Invalid arguments")
+
+    if not reader.library.open:
+        refusal = reader.library.closed
+        if refusal.text is None:
+            return _rpc_error(request_id, -32602, NOT_PERMITTED)
+        return _tool_text(request_id, refusal.text, is_error=True)
+
+    settings: Settings = request.app["settings"]
+    sessionmaker = request.app["sessionmaker"]
+    clock = request.app["clock"]
+    try:
+        async with sessionmaker() as session:
+            state = await session.get(UserState, 1)
+            timezone = state.timezone if state is not None else "UTC"
+            notes_on = settings.VAULT_KNOWLEDGE_ENABLED and bool(
+                state is not None and state.notes_consent
+            )
+            if not notes_on:
+                logger.info(
+                    "search_library refused",
+                    extra={"event": "search_library", "reason": "notes_off"},
+                )
+                return _tool_text(request_id, LIBRARY_NOTES_OFF_TEXT, is_error=True)
+            results = await notes_knowledge.search_library(session, query)
+            await grants.record_library_read(
+                session, clock_module.local_date(clock, timezone)
+            )
+    except Exception as exc:  # noqa: BLE001 - never echo internals to the client
+        logger.warning(
+            "mcp tool failed", extra={"event": type(exc).__name__, "kind": "search_library"}
+        )
+        return _rpc_error(request_id, -32603, "Internal error")
+
+    logger.info(
+        "mcp tool call",
+        extra={"event": "mcp", "kind": "search_library", "count": len(results)},
+    )
+    text = "\n\n".join(results) if results else LIBRARY_EMPTY_TEXT
+    return _tool_text(request_id, text, is_error=False)
+
+
 async def serve(
     request: web.Request, reader: Reader, limiter: RateLimiter
 ) -> web.StreamResponse:
@@ -314,6 +419,10 @@ async def serve(
     spec = TOOLS.get(name) if isinstance(name, str) else None
     if spec is None or not isinstance(arguments, dict):
         return _rpc_error(request_id, -32602, NOT_PERMITTED)
+
+    if name == "search_library":
+        return await _serve_search_library(request, request_id, reader, arguments)
+
     grant = reader.grant
     if grant is None or spec["scope"] not in grant.scopes:
         if reader.refusal.text is None:

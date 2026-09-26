@@ -1176,6 +1176,16 @@ class AccessGrant(Base):
     grant has a token hash and no connection; a `claude` grant is a
     *window* on an OAuth connection (app/tg/claude.py) and has no token
     of its own. The two pairing checks keep each shape exclusive.
+
+    `scopes` also allows `notes_knowledge` (C3), reserved for a future
+    window-scoped shape of the library. No writer here ever sets it
+    today: `search_library` is a standing switch on the connection
+    (`OauthConnection.library_read`), never a scope in a window's
+    `scopes` array (connector plan section 9's "C3 -- search_library
+    without the failed threshold"; docs/decisions.md, "Index knowledge
+    notes only"). `notes_personal` is refused by the same CHECK: a
+    personal note must never become reachable through a grant, window
+    or scope of any kind.
     """
 
     __tablename__ = "access_grant"
@@ -1203,8 +1213,8 @@ class AccessGrant(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "scopes <@ array['memory', 'journal', 'dialogs', 'state']::varchar[] "
-            "and cardinality(scopes) > 0",
+            "scopes <@ array['memory', 'journal', 'dialogs', 'state', 'notes_knowledge']"
+            "::varchar[] and cardinality(scopes) > 0",
             name="ck_access_grant_scopes",
         ),
         CheckConstraint("expires_at > created_at", name="ck_access_grant_expiry"),
@@ -1233,6 +1243,13 @@ class OauthConnection(Base):
     app/web/oauth_store.py revokes the old one in the same transaction
     that inserts the new. `expires_at` is absolute (30 days); refreshing
     never moves it. Only app/web/oauth_store.py writes this table.
+
+    `library_read` (C3, connector plan sections 6 and 9) is a standing
+    switch, not a window: while true and the connection is alive,
+    `search_library` works with no `/claude` window open at all. A new
+    connection starts with it off; app/tg/claude.py's `/claude library
+    on|off` is the only writer besides the disconnect/revoke paths that
+    zero every column here.
     """
 
     __tablename__ = "oauth_connection"
@@ -1243,6 +1260,9 @@ class OauthConnection(Base):
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    library_read: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         CheckConstraint("expires_at > created_at", name="ck_oauth_connection_expiry"),
@@ -1253,6 +1273,27 @@ class OauthConnection(Base):
             postgresql_where=text("revoked_at is null"),
         ),
     )
+
+
+class ClaudeLibraryRead(Base):
+    """One row per local date `search_library` was actually read (C3).
+
+    Content-free by construction: a date and a count, never the query,
+    a heading or a chunk. Written only by app/core/grants.py's
+    `record_library_read`, on every call that reaches the notes engine
+    (not on a refusal). Read only by app/tg/claude.py's once-a-day
+    digest job, which reports the count and never the rows behind it.
+    /delete truncates the table like every other Claude table.
+    """
+
+    __tablename__ = "claude_library_read"
+
+    local_date: Mapped[datetime.date] = mapped_column(Date, primary_key=True)
+    count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+    __table_args__ = (CheckConstraint("count >= 0", name="ck_claude_library_read_count"),)
 
 
 class OauthRequest(Base):

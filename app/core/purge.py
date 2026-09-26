@@ -136,6 +136,11 @@ PURGED_TABLES = (
     "oauth_token",
     "oauth_request",
     "oauth_connection",
+    # C3 (connector plan section 9): the library's daily read counter.
+    # Content-free (a date and a count), but it is still a record tied
+    # to this user's Claude reads, and oauth_connection above -- the
+    # standing switch it counts -- is purged the same way.
+    "claude_library_read",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a
