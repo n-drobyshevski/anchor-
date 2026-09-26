@@ -111,12 +111,18 @@ async def test_search_library_top6_with_a_matched_floor(sessionmaker):
     top LIBRARY_MAX_CHUNKS (6) by rank, keeping only chunks sharing at
     least LIBRARY_MIN_MATCHED (2) distinct lexemes with the query. A
     chunk sharing only one lexeme is dropped even though it still
-    matches the tsquery (an OR of the query's lexemes); 7 chunks that
-    clear the floor still give back only 6."""
+    matches the tsquery (an OR of the query's lexemes) and *outranks*
+    every chunk that clears the floor (repeating "парк" six times gives
+    it a higher ts_rank_cd than any single "H{i}" chunk below, so a
+    version of search_library that forgot the floor and only sorted by
+    rank would put it first, not drop it) -- proving the floor is
+    applied, not just coincidentally satisfied by rank order. 7 chunks
+    that do clear the floor still give back only 6."""
     files = await _seed(sessionmaker, consent=True)
     async with sessionmaker() as session:
         chunks = [Chunk(f"H{i}", f"бегаю утром {i} парке") for i in range(7)]
-        chunks.append(Chunk("Only", "парк большой"))  # matched=1: парк alone
+        # matched=1 (парк alone), but ranked above every H{i} above.
+        chunks.append(Chunk("Only", "парк парк парк парк парк парк большой"))
         await notes_knowledge.replace_chunks(session, files["knowledge"], chunks)
         await session.commit()
     async with sessionmaker() as session:
