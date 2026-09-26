@@ -26,7 +26,8 @@ and that both name Obsidian (8e).
   -- the cards and links themselves stay.
 - Obsidian notes are read only when you have marked them: personal ones
   only for the conversation with you, never for search or research;
-  knowledge ones as reference material.
+  knowledge ones as reference material. In `sync` mode, editing or
+  deleting a fact file in Anchor's folder changes Anchor's memory.
 - Server logs hold only codes, counts and cost -- never text.
 - `/export` downloads all of your own data as one file.
 - `/delete` deletes all data and all backups, irreversibly.
