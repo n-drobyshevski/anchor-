@@ -58,9 +58,18 @@ class Store:
     # -- writes --------------------------------------------------------
 
     def put(self, rel: str, data: bytes, if_sha256: str | None) -> str:
-        """Create-only or compare-and-swap write. Returns the new hash."""
+        """Create-only or compare-and-swap write to Anchor's own scope. Returns the new hash."""
         if not paths.is_writable(rel):
             raise paths.Refused
+        return self.put_unchecked(rel, data, if_sha256)
+
+    def put_unchecked(self, rel: str, data: bytes, if_sha256: str | None) -> str:
+        """The same create-only/CAS write, without the Anchor-scope gate.
+
+        For knowledge writes and undo restores, whose caller has already
+        decided the path is writable by its own rules (classes.py, or a
+        stored pre-image being put back exactly where it came from).
+        """
         folder, name = rel.rsplit("/", 1)
         with paths.open_root(self.vault_path) as root_fd, paths.open_root(self.tmp_path) as tmp_fd:
             dir_fd = paths.open_dir(root_fd, folder.split("/"), create=True)
@@ -90,6 +99,10 @@ class Store:
     def delete(self, rel: str, if_sha256: str) -> None:
         if not paths.is_writable(rel):
             raise paths.Refused
+        self.delete_unchecked(rel, if_sha256)
+
+    def delete_unchecked(self, rel: str, if_sha256: str) -> None:
+        """The same compare-and-swap delete, without the Anchor-scope gate."""
         folder, name = rel.rsplit("/", 1)
         with paths.open_root(self.vault_path) as root_fd:
             dir_fd = paths.open_dir(root_fd, folder.split("/"))

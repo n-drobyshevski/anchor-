@@ -31,18 +31,21 @@ import hmac
 import logging
 import re
 import time
-from typing import Any, Protocol
+from datetime import datetime, timezone
+from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, frontmatter, paths
-from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES
+from vaultd import classes, frontmatter, knowledge, paths
+from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES, UNDOS_PER_HOUR
 from vaultd.manifest import Manifest
 from vaultd.store import Conflict, Missing, Store
+from vaultd.undo import CapExceeded, FileEntry, UndoStore
 
 logger = logging.getLogger("vaultd.api")
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_CHANGESET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _NOT_FOUND = {"error": "not_found"}
 
 
@@ -56,6 +59,17 @@ LOCK_KEY = web.AppKey("write_lock", asyncio.Lock)
 SCAN_LOCK_KEY = web.AppKey("scan_lock", asyncio.Lock)
 STATUS_KEY = web.AppKey("status", object)
 TOKEN_KEY = web.AppKey("token", bytes)
+UNDO_KEY = web.AppKey("undo_store", UndoStore)
+CLOCK_KEY = web.AppKey("clock", object)
+
+
+def _refused() -> web.Response:
+    """The one 403, empty body, every knowledge-write acceptance failure gets."""
+    return web.Response(status=403)
+
+
+def _now_iso(clock: Callable[[], datetime]) -> str:
+    return clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _route_template(request: web.Request) -> str:
@@ -232,6 +246,7 @@ async def delete_file(request: web.Request) -> web.Response:
 
 async def purge(request: web.Request) -> web.Response:
     store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
     async with request.app[LOCK_KEY]:
         try:
             count = await asyncio.to_thread(store.purge)
@@ -239,11 +254,201 @@ async def purge(request: web.Request) -> web.Response:
             return _json_error("not_writable", 403)
         except OSError:
             return _json_error("io_error", 500)
+        await asyncio.to_thread(undo_store.purge)
     logger.info("purge", extra={"count": count})
     return web.json_response({"deleted": count})
 
 
-def make_app(*, token: str, store: Store, manifest_: Manifest, status_source: StatusSource) -> web.Application:
+# -- knowledge: the class boundary Claude cannot cross ----------------------
+
+
+async def get_knowledge(request: web.Request) -> web.Response:
+    try:
+        rel = _rel_from_query(request)
+    except paths.Malformed:
+        return _json_error("malformed_path", 400)
+    data = await asyncio.to_thread(_read_knowledge, request.app[STORE_KEY], rel)
+    if data is None:
+        return web.json_response(_NOT_FOUND, status=404)
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return web.json_response(_NOT_FOUND, status=404)
+    return web.json_response({"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content})
+
+
+def _read_knowledge(store: Store, rel: str) -> bytes | None:
+    if not knowledge.is_candidate_path(rel):
+        return None
+    try:
+        data = paths.read_file(store.vault_path, rel)
+    except paths.Refused:
+        return None
+    if data is None or len(data) > NOTE_MAX_BYTES:
+        return None
+    rules = classes.load_rules(store.vault_path)
+    if knowledge._class_of(rel, data, rules) != "knowledge":  # noqa: SLF001 - same package
+        return None
+    return data
+
+
+def _parse_json_body(body: Any, keys: frozenset[str]) -> dict | None:
+    if not isinstance(body, dict) or set(body) != keys:
+        return None
+    return body
+
+
+async def put_knowledge(request: web.Request) -> web.Response:
+    try:
+        rel = _rel_from_query(request)
+    except paths.Malformed:
+        return _json_error("malformed_path", 400)
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"content", "if_sha256", "changeset"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    content, if_sha, changeset = body["content"], body["if_sha256"], body["changeset"]
+    if not isinstance(content, str):
+        return _json_error("bad_body", 400)
+    if if_sha is not None and not (isinstance(if_sha, str) and _SHA_RE.match(if_sha)):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            await asyncio.to_thread(undo_store.precheck, changeset, "write", 1)
+        except CapExceeded:
+            return _refused()
+        try:
+            new_sha, pre_image = await asyncio.to_thread(
+                knowledge.perform_put, store, rel, content, if_sha, now=now
+            )
+        except knowledge.Refused:
+            return _refused()
+        except Missing:
+            return web.json_response(_NOT_FOUND, status=404)
+        except Conflict:
+            return _json_error("precondition_failed", 412)
+        except OSError:
+            return _json_error("io_error", 500)
+        await asyncio.to_thread(undo_store.append, changeset, "write", [FileEntry(rel, pre_image, new_sha)])
+    logger.info("knowledge_write", extra={"event": "knowledge_put"})
+    return web.json_response({"sha256": new_sha})
+
+
+async def rename_knowledge(request: web.Request) -> web.Response:
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"path", "new_path", "if_sha256", "changeset"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    try:
+        old_rel = paths.parse_rel(body["path"]) if isinstance(body["path"], str) else None
+        new_rel = paths.parse_rel(body["new_path"]) if isinstance(body["new_path"], str) else None
+    except paths.Malformed:
+        return _json_error("malformed_path", 400)
+    if old_rel is None or new_rel is None:
+        return _json_error("bad_body", 400)
+    if_sha, changeset = body["if_sha256"], body["changeset"]
+    if not (isinstance(if_sha, str) and _SHA_RE.match(if_sha)):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            plan = await asyncio.to_thread(knowledge.plan_rename, store.vault_path, old_rel, new_rel, if_sha)
+        except knowledge.Refused:
+            return _refused()
+        except Missing:
+            return web.json_response(_NOT_FOUND, status=404)
+        except Conflict:
+            return _json_error("precondition_failed", 412)
+        n_files = 1 + len(plan.backlinks)
+        try:
+            await asyncio.to_thread(undo_store.precheck, changeset, "write", n_files)
+        except CapExceeded:
+            return _refused()
+        try:
+            entries = await asyncio.to_thread(knowledge.perform_rename, store, plan, now=now)
+        except knowledge.Refused:
+            return _refused()
+        except knowledge.RenameRaced:
+            return _json_error("precondition_failed", 412)
+        except knowledge.MidRenameFailure as exc:
+            # The vault is left with a duplicate, not a loss; record what
+            # is certain (the new path was created) so undoing this
+            # changeset can still remove it.
+            await asyncio.to_thread(undo_store.append, changeset, "write", exc.entries)
+            return _json_error("io_error", 500)
+        await asyncio.to_thread(undo_store.append, changeset, "write", entries)
+    logger.info("knowledge_rename", extra={"event": "knowledge_rename", "count": len(entries)})
+    return web.json_response({"path": entries[0].path, "sha256": entries[0].written_sha256, "relinked": len(entries) - 2})
+
+
+async def get_changes(request: web.Request) -> web.Response:
+    changes = await asyncio.to_thread(request.app[UNDO_KEY].list_changes)
+    return web.json_response({"changes": changes})
+
+
+async def undo_changeset(request: web.Request) -> web.Response:
+    changeset = request.query.get("changeset", "")
+    if not _CHANGESET_RE.match(changeset):
+        return _json_error("bad_body", 400)
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    async with request.app[LOCK_KEY]:
+        kind = await asyncio.to_thread(undo_store.kind_of, changeset)
+        if kind is None:
+            return web.json_response(_NOT_FOUND, status=404)
+        if kind == "undo":
+            return _refused()
+        if await asyncio.to_thread(undo_store.count_recent, "undo") >= UNDOS_PER_HOUR:
+            return _refused()
+        entries = await asyncio.to_thread(undo_store.files_of, changeset)
+        restored = 0
+        refused = 0
+        recorded: list[FileEntry] = []
+        # Reverse chronological: a file written twice in one changeset
+        # must have its later write undone first, so each step's CAS
+        # check lines up with what the step before it just restored.
+        for entry in reversed(entries):
+            ok, record = await asyncio.to_thread(knowledge.undo_one, store, entry)
+            if ok:
+                restored += 1
+                if record is not None:
+                    recorded.append(record)
+            else:
+                refused += 1
+        if recorded:
+            undo_id = undo_store.new_undo_id()
+            await asyncio.to_thread(undo_store.append, undo_id, "undo", recorded)
+            await asyncio.to_thread(undo_store.mark_undone, changeset)
+    logger.info("knowledge_undo", extra={"event": "knowledge_undo", "count": restored})
+    return web.json_response({"restored": restored, "refused": refused})
+
+
+def make_app(
+    *,
+    token: str,
+    store: Store,
+    manifest_: Manifest,
+    status_source: StatusSource,
+    undo_store: UndoStore,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> web.Application:
     app = web.Application(
         middlewares=[log_requests, require_token],
         client_max_size=BODY_MAX_BYTES + 4096,
@@ -254,6 +459,8 @@ def make_app(*, token: str, store: Store, manifest_: Manifest, status_source: St
     app[LOCK_KEY] = asyncio.Lock()
     app[SCAN_LOCK_KEY] = asyncio.Lock()
     app[STATUS_KEY] = status_source
+    app[UNDO_KEY] = undo_store
+    app[CLOCK_KEY] = clock
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/v1/status", status)
     app.router.add_get("/v1/manifest", manifest)
@@ -261,4 +468,9 @@ def make_app(*, token: str, store: Store, manifest_: Manifest, status_source: St
     app.router.add_put("/v1/file", put_file)
     app.router.add_delete("/v1/file", delete_file)
     app.router.add_post("/v1/purge", purge)
+    app.router.add_get("/v1/knowledge", get_knowledge)
+    app.router.add_put("/v1/knowledge", put_knowledge)
+    app.router.add_post("/v1/knowledge/rename", rename_knowledge)
+    app.router.add_get("/v1/changes", get_changes)
+    app.router.add_post("/v1/undo", undo_changeset)
     return app
