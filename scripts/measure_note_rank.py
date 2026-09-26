@@ -357,16 +357,8 @@ async def _index_and_measure(asyncpg_url: str) -> None:
                 results = await _collect(session, model, search_ranked)
             _print_top1_table(class_name, results)
             for min_matched in MIN_MATCHED_CANDIDATES:
-                stats = _best_gate(results, min_matched)
-                _print_gate(class_name, stats, min_matched)
-                if stats is not None and (
-                    stats.precision >= MIN_NOISE_PRECISION
-                    and stats.recall >= MIN_OVERALL_RECALL
-                    and all(
-                        (hits / total if total else 0.0) >= MIN_PER_LANGUAGE_RECALL
-                        for hits, total in stats.per_lang.values()
-                    )
-                ):
+                all_gates = _all_gates(results, min_matched)
+                if _print_gate(class_name, all_gates, min_matched):
                     any_gate_passed = True
 
         print(
