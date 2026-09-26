@@ -61,3 +61,29 @@ def find_secret(text: str) -> str | None:
 
 def is_safe_to_store(text: str) -> bool:
     return find_secret(text) is None
+
+
+def secret_spans(text: str) -> list[tuple[int, int]]:
+    """Every `(start, end)` span this module's own patterns matched.
+
+    `find_secret` returns a label because that is all a log line may
+    ever carry; the vault's note masking (app/vault/notes_text.py) needs
+    the *position* instead, so it can replace the match with
+    `[скрыто]` rather than dropping the whole chunk. Spans are not
+    merged here -- the caller merges these with app/vault/secrets.py's
+    token-shape spans before masking, since either set alone can
+    overlap.
+
+    Unordered and possibly overlapping (a card-shaped run inside what
+    is also, incidentally, IBAN-shaped text). The caller sorts and
+    merges.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in _EMAIL.finditer(text):
+        spans.append(match.span())
+    for match in _IBAN.finditer(text):
+        spans.append(match.span())
+    for match in _CARD.finditer(text):
+        if 13 <= len(_digits(match.group())) <= 19:
+            spans.append(match.span())
+    return spans
