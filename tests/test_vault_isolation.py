@@ -107,21 +107,38 @@ def test_the_bot_never_imports_vaultd():
     assert offenders == []
 
 
-# 8b: mirror records the vault's edits and applies none of them. Until
-# 8c, nothing in app/vault/ may so much as name a function that changes
-# memory. 8c replaces this with the narrower rule of plan section 13
-# (only write_memory, set_pinned and forget_lineage).
-MEMORY_WRITERS = {"write_memory", "set_pinned", "hard_delete", "forget_lineage", "add_pending"}
+# 8c: the vault may change memory only through these three (plan
+# section 13). Nothing in app/vault/ may name any other memory writer --
+# hard_delete and add_pending in particular, which 8b's rule forbade
+# outright. Whether a given call actually *runs* in mirror mode is a
+# runtime question, not a static one: mirror's "applies nothing" is
+# pinned by tests/test_vault_sync.py's own behavioural tests (an edit
+# in the vault changes disk_sha256 and nothing else), which this AST
+# scan cannot see.
+MEMORY_WRITERS = {"write_memory", "set_pinned", "forget_lineage"}
+FORBIDDEN_MEMORY_WRITERS = {"hard_delete", "add_pending"}
 
 
-def test_mirror_mode_applies_nothing_to_memory():
+def test_only_the_three_memory_writers_are_ever_named():
     offenders = []
     for path in _modules():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
-            if name in MEMORY_WRITERS:
+            if name in FORBIDDEN_MEMORY_WRITERS:
                 offenders.append(f"{path.name}: {name}")
     assert offenders == []
+
+
+def test_the_check_catches_a_forbidden_writer(tmp_path):
+    path = tmp_path / "z.py"
+    path.write_text("from app.core.memory import hard_delete\nhard_delete(1)\n")
+    tree = ast.parse(path.read_text())
+    found = [
+        node.id if isinstance(node, ast.Name) else node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Name, ast.Attribute))
+    ]
+    assert "hard_delete" in found
 
 
 # 8e: notes consent is the one user_state column app/vault/ writes, and

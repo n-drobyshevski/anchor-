@@ -41,9 +41,8 @@ STOPPED = "stopped"
 UNREACHABLE = "unreachable"
 UNAUTHORIZED = "unauthorized"
 
-# The modes this build implements. `sync` arrives in 8c; until then it
-# behaves exactly like `mirror` (docs/decisions.md).
-IMPLEMENTED_MODES = ("off", "status", "mirror")
+# The modes this build implements (8c adds `sync`: docs/decisions.md).
+IMPLEMENTED_MODES = ("off", "status", "mirror", "sync")
 
 ClientFactory = Callable[[Settings], VaultClient]
 

@@ -1924,3 +1924,97 @@ constants in `app/vault/limits.py`: 600 s, 300 s, 3 per rolling hour,
 `tests/test_vault_limits.py` pins the values and that `Settings` has
 no such fields.
 
+## 8c phase B — identity resolution looks up a row by path first, then by lineage
+
+Plan §7.1's table resolves a-e in order, but only b-e need `anchor_id`
+at all: "a row exists for this path" is answered by `path`, not by
+`anchor_id`, so a corrupt or missing `anchor_id` never stops case (a)
+from applying. `app/vault/ingest._resolve_identity` therefore checks
+the path first. For b/c/d it walks `anchor_id` forward through
+`Memory.superseded_by` to the lineage's current head, then looks for a
+*tracked* `vault_file` row on that head. No Memory row at all with
+that id (forgotten, i.e. `/forget` or a vault delete already ran) is
+case (d), same as a Memory row that exists but has no tracked file yet
+(render hasn't caught up with the write cap) — both "ignore anchor_id,
+treat as new" the same way, since neither names a file this pass can
+claim. An `anchor_id` of the wrong YAML type (a string, a float) is
+folded into "no anchor_id" for identity purposes only; the type check
+itself still quarantines `bad_type` once a row is chosen, so a
+malformed id never corrupts a lineage, it just always resolves as a
+new fact that gets quarantined immediately.
+
+## 8c phase B — `technique` is parseable, refused only where the DB says so
+
+Plan §7.1 lists `technique` as a `bad_kind` case in the same breath as
+the four vault-writable kinds, but also requires "editing a
+technique's text is allowed" — which needs a *parsed* `ParsedFact`
+with `kind="technique"` to reach the three-way apply at all.
+`ingest.parse_fact` therefore accepts all five `memory.KINDS` values,
+including `technique`; the refusal ("the vault can neither create a
+technique nor convert to/from one") is enforced in `ingest_file`,
+which is the only place that knows whether a row already exists and
+what its current `kind` is. A brand-new file (case d/e) with
+`kind: technique` is refused there; an existing row's `kind` changing
+to or from `technique`, compared against the *head*'s kind (not the
+three-way base), is refused there too. Comparing against the head
+rather than the base means a stale file that still says `technique`
+from before a database-side kind change is not itself an error — only
+an actual attempted conversion in this pass is.
+
+## 8c phase B — the pin-cap exception to "quarantined rows are never rewritten"
+
+Plan §7.1 says a `pin_cap` refusal clears `render_digest` "so the next
+render puts the property back", and §7.3 separately says quarantined
+rows are never written except for exactly this case. The two render
+functions (`_render_facts`, `_write_fact`) therefore carry one
+deliberate carve-out: a row with `state="quarantined"`,
+`reason="pin_cap"` and `render_digest is None` is rendered like an
+`ok` row (the file is rewritten to put `pinned: false` back), but its
+`state` is left `quarantined` afterward — the rewrite is not a
+"fixed" event the way an sha-change re-ingest is. Every other
+quarantine reason is inert until the file changes again.
+
+## 8c phase B — a `mass_delete` revert's `restore` state resolves within the same pass
+
+Plan §8's table says a `mass_delete` revert puts rows into `restore`,
+"the files come back on the next render" — read literally as the
+*next pass*. In this build a hold is decided by a separate call
+(`holds.decide`, from the Telegram layer in phase C) between passes,
+so in practice the revert and the recreation are already two different
+events in time. But the deletions-vs-render ordering inside one pass
+(§7's step list has deletions before render) means a `FORGET_PROTECTED`
+refusal — which also produces a `restore` row, from inside the same
+pass that discovered the refusal — gets its file back before that
+pass even returns. `tests/test_vault_deletions.py`'s protected-forget
+test asserts the single-pass behaviour rather than assuming a second
+pass is needed; nothing stops a second no-op pass either, since
+`_render_facts`' restore branch is idempotent.
+
+## 8c phase B — a `pin_cap`/`duplicate_file`/`technique`/`bad_*` quarantined row is never swept as "forgotten"
+
+`_render_facts`' pre-existing "forgotten facts" loop (8b) deleted any
+`vault_file` row with `memory_id IS NULL` that was not `held`, on the
+assumption that the only way to reach that state was `/forget`'s
+`ON DELETE SET NULL`. 8c's ingest creates rows with `memory_id NULL`
+for a different reason — a quarantined file that never got a memory of
+its own (a duplicate, a new technique, a bad-kind file) — and the old
+loop deleted those too, silently discarding the quarantine and the
+file's row on the very next pass. The loop's skip condition now also
+excludes `state="quarantined"`; a proper "the memory this row pointed
+at is gone" cleanup only ever applies to a row that used to be `ok`.
+
+## 8c phase B — `MEMORY_WRITERS` in `tests/test_vault_isolation.py` narrows to the three, not zero
+
+8b's AST check failed closed by forbidding every memory-writing name
+anywhere in `app/vault/`, because nothing in 8b's mode dispatch called
+any of them. 8c's `ingest.py`, `deletions.py` and `holds.py` now call
+`write_memory`, `set_pinned` and `forget_lineage` by name — exactly the
+three plan §13 allows — regardless of which mode is configured at
+runtime; whether a given call site actually *executes* in `mirror`
+mode is a property of `run_vault_sync`'s dispatch, not of what names
+appear in the source, so it cannot be an AST check. The rewritten test
+keeps failing on the two names 8b forbade outright (`hard_delete`,
+`add_pending`) and leaves "mirror applies nothing" to
+`tests/test_vault_sync.py`'s own behavioural tests, which is what it
+was actually testing all along.
+

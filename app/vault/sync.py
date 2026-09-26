@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy import delete, select
@@ -69,11 +70,13 @@ from app.db.models import (
     UserState,
     VaultFile,
 )
-from app.vault import errors, frontmatter, render
+from app.vault import deletions, errors, frontmatter, holds, ingest, render
 from app.vault.client import ManifestEntry, VaultClient
 from app.vault.errors import VaultError
 from app.vault.kinds import SYNC_MODES, VAULT_SYNC, sync_dedup_key
 from app.vault.status import ClientFactory, purge_pending, record_status
+
+FACT_PATH_RE = re.compile(r"^Anchor/Memory/[^/]+\.md$")
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,12 @@ class PassResult:
     recorded: int = 0
     skipped: int = 0
     quarantined: int = 0
+    # 8c: sync mode's ingest and deletions (mirror leaves all of these 0).
+    created_facts: int = 0
+    changed_facts: int = 0
+    forgotten_facts: int = 0
+    held: int = 0
+    new_hold_ids: list = field(default_factory=list)
     counts: dict = field(default_factory=dict)
 
     @property
@@ -180,14 +189,41 @@ async def run_vault_sync(
     await record_status(session, last_ok_at=now, ob_running_since=service.running_since)
 
     result.ran = True
+    sync_mode = settings.VAULT_MODE == "sync"
     try:
         manifest = {entry.path: entry for entry in (await client.manifest()).entries}
         state = (await session.execute(select(UserState))).scalar_one()
         budget = _Budget(settings.VAULT_MAX_WRITES_PER_PASS)
+
+        # Step 2: snapshot `absent` *before* ingest, so a rename that
+        # arrives in a single manifest is recognised (plan 7.1 case b).
+        tracked = (
+            (await session.execute(select(VaultFile).where(VaultFile.role.in_(("fact", "journal")))))
+            .scalars()
+            .all()
+        )
+        absent = [row for row in tracked if row.path not in manifest]
+
         await _delete_orphans(session, client, manifest, state.vault_epoch, budget, result)
-        await _record_edits(session, manifest, clock, result)
-        await _render_facts(session, client, manifest, state, clock, budget, result)
+        if sync_mode:
+            claimed = await _ingest_facts(
+                session, client, manifest, state, settings, clock, budget, result
+            )
+            absent = [row for row in absent if row.id not in claimed]
+            await deletions.process_deletions(
+                session,
+                absent=absent,
+                clock=clock,
+                ob_running_since=service.running_since,
+                result=result,
+            )
+        else:
+            await _record_edits(session, manifest, clock, result)
+        await _render_facts(session, client, manifest, state, clock, budget, result, sync_mode=sync_mode)
         await _render_journal(session, client, manifest, state, clock, budget, result)
+        if sync_mode:
+            expired = await holds.expire_holds(session, clock)
+            result.new_hold_ids = [hid for hid in result.new_hold_ids if hid not in expired]
     except VaultError as exc:
         await session.rollback()
         if exc.code == errors.UNAVAILABLE:
@@ -201,11 +237,91 @@ async def run_vault_sync(
             "event": (
                 f"created={result.created} updated={result.updated} deleted={result.deleted} "
                 f"orphans={result.orphans} recorded={result.recorded} skipped={result.skipped} "
-                f"quarantined={result.quarantined}"
+                f"quarantined={result.quarantined} created_facts={result.created_facts} "
+                f"changed_facts={result.changed_facts} forgotten_facts={result.forgotten_facts} "
+                f"held={result.held}"
             ),
         },
     )
     return result
+
+
+# --- step 4 (sync only): ingest -----------------------------------------
+
+
+async def _ingest_facts(
+    session: AsyncSession,
+    client: VaultClient,
+    manifest: dict[str, ManifestEntry],
+    state: UserState,
+    settings: Settings,
+    clock: Clock,
+    budget: _Budget,
+    result: PassResult,
+) -> set[int]:
+    """Ingests every changed Anchor/Memory/ file. Returns the ids of rows
+    a rename claimed this pass, so the caller excludes them from deletions."""
+    tracked_by_path = {
+        row.path: row
+        for row in (
+            await session.execute(select(VaultFile).where(VaultFile.role == "fact"))
+        ).scalars()
+    }
+    absent_paths = {
+        row.path
+        for row in (
+            await session.execute(
+                select(VaultFile).where(VaultFile.role.in_(("fact", "journal")))
+            )
+        ).scalars()
+        if row.path not in manifest
+    }
+    claimed: set[int] = set()
+    for path, entry in sorted(manifest.items()):
+        if entry.scope != "anchor" or not FACT_PATH_RE.match(path):
+            continue
+        row = tracked_by_path.get(path)
+        if row is not None and row.state == "held":
+            continue
+        if row is not None and row.disk_sha256 == entry.sha256:
+            continue
+        try:
+            current = await client.get_file(path)
+        except VaultError as exc:
+            if exc.code in (errors.NOT_FOUND, errors.REFUSED):
+                continue
+            raise
+        if current.sha256 != entry.sha256:
+            # Changed again since the manifest was read; next pass.
+            continue
+        outcome = await ingest.ingest_file(
+            session,
+            client,
+            path=path,
+            content=current.content,
+            disk_sha256=current.sha256,
+            epoch=state.vault_epoch,
+            absent_paths=absent_paths,
+            clock=clock,
+            budget=budget,
+            max_pinned=settings.MEMORY_PINNED_MAX,
+            timezone=state.timezone,
+        )
+        if outcome.renamed_row_id is not None:
+            claimed.add(outcome.renamed_row_id)
+        if outcome.kind == "created":
+            result.created_facts += 1
+        elif outcome.kind == "changed":
+            result.changed_facts += 1
+        elif outcome.kind == "quarantined":
+            result.quarantined += 1
+        elif outcome.kind == "held":
+            result.held += 1
+            if outcome.hold_id is not None:
+                result.new_hold_ids.append(outcome.hold_id)
+        elif outcome.kind == "skipped":
+            result.skipped += 1
+    return claimed
 
 
 # --- step 3: epoch orphans -------------------------------------------------
@@ -357,8 +473,11 @@ async def _render_facts(
     clock: Clock,
     budget: _Budget,
     result: PassResult,
+    *,
+    sync_mode: bool = False,
 ) -> None:
     epoch = state.vault_epoch
+    callout = render.FACT_CALLOUT_SYNC if sync_mode else render.FACT_CALLOUT_MIRROR
     rows = (
         (await session.execute(select(VaultFile).where(VaultFile.role == "fact").order_by(VaultFile.id)))
         .scalars()
@@ -366,9 +485,13 @@ async def _render_facts(
     )
     await _follow_heads(session, rows)
 
-    # Forgotten facts: the memory is gone (on delete set null), so is the file.
+    # Forgotten facts: the memory is gone (on delete set null), so is the
+    # file. A quarantined row also has memory_id=None -- e.g. a
+    # duplicate_file/duplicate_fact/technique that never got a memory of
+    # its own -- and must not be swept up here: 8c's quarantined rows
+    # are re-evaluated when their sha changes, not deleted.
     for row in rows:
-        if row.memory_id is not None or row.state == "held":
+        if row.memory_id is not None or row.state in ("held", "quarantined"):
             continue
         entry = manifest.get(row.path)
         if entry is not None:
@@ -409,11 +532,51 @@ async def _render_facts(
             # Committed before the PUT (plan 7.3): a crash between the two
             # leaves a row to reconcile, never an untracked file.
             await session.commit()
-        if row.state != "ok":
+        elif row.state == "restore":
+            await _restore_fact(session, client, row, view, epoch, clock, budget, result, callout)
+            if budget.left <= 0:
+                return
             continue
-        await _write_fact(session, client, manifest, row, view, epoch, clock, budget, result)
+        elif row.state == "quarantined" and row.reason == errors.PIN_CAP and row.render_digest is None:
+            # 8c (plan 7.3): the one exception -- a pin_cap refusal
+            # clears render_digest so the property is put back, even
+            # though the row stays quarantined (for /vault to list).
+            pass
+        elif row.state != "ok":
+            continue
+        await _write_fact(session, client, manifest, row, view, epoch, clock, budget, result, callout)
         if budget.left <= 0:
             return
+
+
+async def _restore_fact(
+    session: AsyncSession,
+    client: VaultClient,
+    row: VaultFile,
+    view: render.FactView,
+    epoch: str,
+    clock: Clock,
+    budget: _Budget,
+    result: PassResult,
+    callout: str,
+) -> None:
+    """State `restore` (plan 7.3): a reverted mass-delete hold. The file
+    is absent, so this is a create-only PUT, then the row goes back to
+    `ok` -- exactly like a brand-new fact's first render."""
+    if not budget.take():
+        return
+    rendered = render.render_fact(view, epoch, callout=callout)
+    try:
+        new_sha = await client.put_file(row.path, rendered.content, None)
+    except VaultError as exc:
+        if exc.code != errors.CONFLICT:
+            raise
+        result.skipped += 1
+        return
+    row.state, row.reason = "ok", None
+    _written(row, new_sha, rendered.digest, clock)
+    await session.commit()
+    result.created += 1
 
 
 
@@ -461,8 +624,9 @@ async def _write_fact(
     clock: Clock,
     budget: _Budget,
     result: PassResult,
+    callout: str = render.FACT_CALLOUT_MIRROR,
 ) -> None:
-    plain = render.render_fact(view, epoch)
+    plain = render.render_fact(view, epoch, callout=callout)
     if row.render_digest == plain.digest:
         return
     entry = manifest.get(row.path)
@@ -499,7 +663,7 @@ async def _write_fact(
         await session.commit()
         result.quarantined += 1
         return
-    rendered = render.render_fact(view, epoch, extras)
+    rendered = render.render_fact(view, epoch, extras, callout)
     if rendered.sha256 == row.disk_sha256:
         # Already on disk (e.g. a crash after the PUT): adopt it.
         row.render_digest = rendered.digest

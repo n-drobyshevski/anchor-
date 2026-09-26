@@ -135,7 +135,10 @@ def format_vault(
         line = line.rstrip(".") + FACTS_SUFFIX.format(count=facts)
     if settings.VAULT_MODE not in vault_status.IMPLEMENTED_MODES:
         line += "\n" + EARLY_MODE_NOTE.format(mode=settings.VAULT_MODE)
-    if mirroring:
+    if settings.VAULT_MODE == "mirror":
+        # sync (8c) applies fact/kind/pinned edits, so it no longer says
+        # edits go nowhere -- the file listing (8c's own /vault work,
+        # phase C) is what will explain quarantines and holds there.
         line += "\n" + MIRROR_NOTE
     if notes_line is not None:
         line += "\n" + notes_line

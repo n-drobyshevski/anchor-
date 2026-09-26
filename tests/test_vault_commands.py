@@ -179,12 +179,15 @@ async def test_mirror_counts_facts_and_says_edits_are_not_applied(sessionmaker, 
     assert lines[1] == vault_ui.MIRROR_NOTE
 
 
-async def test_sync_says_it_acts_as_mirror_until_5c(sessionmaker, stub):
+async def test_sync_counts_facts_and_says_nothing_about_mirroring(sessionmaker, stub):
+    # 8c: sync applies fact/kind/pinned edits, so /vault no longer claims
+    # they go nowhere, and the mode is no longer "early" (implemented).
     await _seed(sessionmaker)
     reply = await _run(sessionmaker, _settings("sync", stub.url), "/vault")
     lines = reply.splitlines()
-    assert lines[1] == vault_ui.EARLY_MODE_NOTE.format(mode="sync")
-    assert lines[2] == vault_ui.MIRROR_NOTE
+    assert lines[0] == "Хранилище: синхронизация ок (работает с 10:00, перезапусков 0) · фактов 0"
+    assert vault_ui.EARLY_MODE_NOTE.format(mode="sync") not in reply
+    assert vault_ui.MIRROR_NOTE not in reply
 
 
 # --- /state ---
