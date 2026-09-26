@@ -44,8 +44,22 @@ NOTE_MODULES = ("app.vault.notes_personal", "app.vault.notes_knowledge")
 # to measure the same ranking `app/core/turn.py` will eventually use.
 ALLOWED_IMPORTERS = {
     "app.vault.notes_personal": ("app/core/turn.py", "app/vault/", "scripts/measure_note_rank.py"),
-    "app.vault.notes_knowledge": ("app/core/turn.py", "app/vault/", "scripts/measure_note_rank.py"),
+    # app/web/mcp_core.py (connector milestone C3,
+    # anchor-claude-connector-plan.md section 9): the Claude connector's
+    # `search_library` tool reads knowledge chunks straight from
+    # notes_knowledge.search_library -- knowledge only, never
+    # notes_personal, which stays off this list.
+    "app.vault.notes_knowledge": (
+        "app/core/turn.py",
+        "app/vault/",
+        "scripts/measure_note_rank.py",
+        "app/web/mcp_core.py",
+    ),
 }
+
+# The one exception to FORBIDDEN_IMPORTERS' "app/web/" below, and only
+# for notes_knowledge -- see the ALLOWED_IMPORTERS comment above.
+FORBIDDEN_EXCEPTIONS = {"app.vault.notes_knowledge": ("app/web/mcp_core.py",)}
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
 FORBIDDEN_IMPORTERS = (
@@ -132,7 +146,7 @@ def _import_violations(path: Path, rel: str) -> list[str]:
             continue
         if not rel.startswith(ALLOWED_IMPORTERS[module]):
             found.append(f"{rel}: imports {module}, which only {ALLOWED_IMPORTERS[module]} may")
-        if rel.startswith(FORBIDDEN_IMPORTERS):
+        if rel.startswith(FORBIDDEN_IMPORTERS) and rel not in FORBIDDEN_EXCEPTIONS.get(module, ()):
             found.append(f"{rel}: imports {module} (8e plan section 8 forbids it here)")
     return found
 
@@ -245,6 +259,23 @@ def test_the_allowed_importers_pass(tmp_path, rel):
     path = tmp_path / "sample.py"
     path.write_text("from app.vault import notes_personal, notes_knowledge\n")
     assert _import_violations(path, rel) == []
+
+
+def test_mcp_core_may_import_notes_knowledge_only(tmp_path):
+    """Connector milestone C3: app/web/mcp_core.py is the one app/web/
+    module allowed to reach notes_knowledge (search_library), and it
+    still may not reach notes_personal -- app/web/ stays forbidden
+    there, with no exception."""
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import notes_knowledge\n")
+    assert _import_violations(path, "app/web/mcp_core.py") == []
+
+    path.write_text("from app.vault import notes_personal\n")
+    assert _import_violations(path, "app/web/mcp_core.py")
+
+    # No other app/web/ module gets the exception.
+    path.write_text("from app.vault import notes_knowledge\n")
+    assert _import_violations(path, "app/web/mcp_claude.py")
 
 
 TABLE_SAMPLES = [

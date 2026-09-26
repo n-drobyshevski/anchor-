@@ -101,9 +101,11 @@ from app.core.report import may_report_now
 from app.core import review as review_module
 from app.core.review import REVIEW_EXPIRY
 from app.core.scheduler import (
+    CLAUDE_LIBRARY_DIGEST,
     TICK_DECIDE,
     heartbeat,
     maybe_enqueue_backup,
+    maybe_enqueue_library_digest,
     maybe_enqueue_notebook_expiry,
     maybe_enqueue_obligation_sweep,
     maybe_enqueue_orders_expiry,
@@ -141,6 +143,7 @@ from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
 from app.tg import vault as vault_ui
+from app.tg import claude as claude_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
 from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
@@ -527,6 +530,16 @@ async def _run_job(
             raise Deferred(clock.now_utc() + VAULT_PURGE_RETRY)
         return ExtractOutcome()
 
+    if kind == CLAUDE_LIBRARY_DIGEST:
+        # C3: the library's once-a-day digest (connector plan section
+        # 9). No provider, like RESEARCH_SWEEP/BACKUP above -- plain SQL
+        # plus one Telegram send, gated by may_report_now inside
+        # run_library_digest itself (which raises Deferred, not an
+        # exception, when it is not allowed to send right now).
+        if bot is not None:
+            await claude_ui.run_library_digest(session, settings, clock, bot, payload)
+        return ExtractOutcome()
+
     raise ValueError(f"unknown job kind: {kind}")
 
 
@@ -826,6 +839,14 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_retention_sweep(session, clock, state.timezone)
+            # C3: the library's once-a-day digest, same cadence and same
+            # "not inside heartbeat()" reasoning as every sweep above --
+            # see app/core/scheduler.py's maybe_enqueue_library_digest
+            # for the extra gate (CLAUDE_ACCESS_ENABLED,
+            # CLAUDE_LIBRARY_DIGEST_TIME) this one alone checks.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_library_digest(session, settings, clock, state.timezone)
             # 6a: idle planning, same cadence and same "not inside
             # heartbeat()" reasoning as the four sweeps above -- see
             # app/core/scheduler.py's module docstring. plan_idle opens

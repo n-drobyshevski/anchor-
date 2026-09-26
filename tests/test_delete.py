@@ -31,6 +31,7 @@ from app.db.models import (
     Base,
     BriefNote,
     Checkin,
+    ClaudeLibraryRead,
     CheckinOrderResult,
     IdleChange,
     IdleRun,
@@ -329,8 +330,12 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
             client_id="https://claude.ai/oauth/mcp-oauth-client-metadata",
             created_at=now,
             expires_at=now + datetime.timedelta(days=30),
+            library_read=True,
         )
         session.add(connection)
+        # C3: the library's daily read counter -- content-free, but
+        # still a record of this user's Claude reads.
+        session.add(ClaudeLibraryRead(local_date=today, count=3))
         await session.flush()
         request = OauthRequest(
             client_id=connection.client_id,

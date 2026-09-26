@@ -25,6 +25,7 @@ app/web/oauth_store.py; this module asks it.
 
 from __future__ import annotations
 
+import datetime
 import logging
 
 from aiogram import Bot
@@ -34,9 +35,12 @@ from app.config import Settings
 from app.core import grants
 from app.core.clock import Clock
 from app.core.clock import zone as zone_of
+from app.core.report import may_report_now
+from app.core.scene import Deferred
 from app.core.state import get_state
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
+from app.tg.vault import _ru_plural
 from app.web import oauth, oauth_store
 
 logger = logging.getLogger(__name__)
@@ -50,7 +54,8 @@ DISABLED = "Доступ для Claude выключен в настройках 
 USAGE = (
     "/claude — подключение и окно для чтения\n"
     "/claude connect КОД — подтвердить подключение кодом со страницы claude.ai\n"
-    "/claude disconnect — закрыть подключение"
+    "/claude disconnect — закрыть подключение\n"
+    "/claude library on|off — включить или выключить библиотеку"
 )
 NO_CONNECTION = (
     "Нет подключения.\n\n"
@@ -61,6 +66,16 @@ NO_CONNECTION = (
     "4. Отправь сюда: /claude connect КОД"
 )
 STATUS = "Подключение #{id} от {created}, до {expires}."
+# C3: the library's standing switch, shown as one more status line, and
+# also the answer to a no-connection `/claude library on|off` -- reuses
+# NO_CONNECTION's own wording style rather than a new string.
+LIBRARY_LINE = "Библиотека: {state}."
+LIBRARY_ON = "включена"
+LIBRARY_OFF = "выключена"
+LIBRARY_NO_CONNECTION = "Нет подключения. Сначала подключи Claude: /claude"
+LIBRARY_USAGE = "/claude library on|off"
+LIBRARY_SET_ON = "Библиотека включена. Читать её Claude может без окна, пока подключение живо."
+LIBRARY_SET_OFF = "Библиотека выключена."
 WINDOW_TEXT = (
     "{status}\n\n"
     "Окно для чтения, только чтение. Всё, что Claude прочитает, уйдёт в "
@@ -87,6 +102,14 @@ APPROVED = (
 )
 DISCONNECTED = "Подключение закрыто. Коннектор в claude.ai можно удалить."
 NOTHING_CONNECTED = "Подключения нет."
+
+# C3: the once-a-day library digest (connector plan section 9).
+DIGEST_TEXT = "Claude за сутки: библиотека — {n} {noun}."
+DIGEST_FORMS = ("запрос", "запроса", "запросов")
+# A digest deferred by quiet hours/pause/quiet retries this soon --
+# short enough that "the first allowed tick that day or the next"
+# reads as "shortly after the block lifts", not "sometime tomorrow".
+DIGEST_RETRY = datetime.timedelta(minutes=15)
 
 
 def available(settings: Settings) -> str | None:
@@ -139,13 +162,17 @@ def _local(moment, timezone: str) -> str:
     return f"{moment.astimezone(zone_of(timezone)):%d.%m}"
 
 
+def _library_line(connection) -> str:
+    return LIBRARY_LINE.format(state=LIBRARY_ON if connection.library_read else LIBRARY_OFF)
+
+
 async def _window_text(session, clock: Clock, connection, period: int, ttl: int) -> str:
     timezone = (await get_state(session)).timezone
     status = STATUS.format(
         id=connection.id,
         created=_local(connection.created_at, timezone),
         expires=_local(connection.expires_at, timezone),
-    )
+    ) + "\n" + _library_line(connection)
     text = WINDOW_TEXT.format(status=status, days=PERIOD_DAYS[period], ttl=TTL_LABELS[ttl])
     window = await grants.find_open_window(session, clock, connection.id)
     if window is not None:
@@ -188,6 +215,17 @@ async def disconnect(sessionmaker, clock: Clock) -> str:
     return DISCONNECTED if count else NOTHING_CONNECTED
 
 
+async def library(sessionmaker, clock: Clock, word: str) -> str:
+    """`/claude library on|off` (C3): the standing switch, not a window."""
+    if word not in ("on", "off"):
+        return LIBRARY_USAGE
+    async with sessionmaker() as session:
+        connection = await oauth_store.set_library(session, clock, word == "on")
+    if connection is None:
+        return LIBRARY_NO_CONNECTION
+    return LIBRARY_SET_ON if connection.library_read else LIBRARY_SET_OFF
+
+
 async def command(
     sessionmaker,
     settings: Settings,
@@ -202,6 +240,8 @@ async def command(
         return await connect(sessionmaker, clock, pending, words[1]), None
     if words == ["disconnect"]:
         return await disconnect(sessionmaker, clock), None
+    if words[0] == "library" and len(words) == 2:
+        return await library(sessionmaker, clock, words[1]), None
     return USAGE, None
 
 
@@ -285,3 +325,34 @@ async def handle_callback(
             return
         text = await _window_text(session, clock, connection, period, ttl)
     await edit_keyboard(bot, chat_id, message_id, text, window_keyboard(mask, period, ttl, issued_at))
+
+
+async def run_library_digest(
+    session, settings: Settings, clock: Clock, bot: Bot, payload: dict
+) -> None:
+    """The once-a-day library digest job (connector plan section 9, C3;
+    app/core/scheduler.py's `maybe_enqueue_library_digest` queues it,
+    app/worker.py runs it).
+
+    Content-free by construction: reads only `grants.library_read_count`
+    (a date and a count, app/db/models.py's ClaudeLibraryRead), never a
+    query or a chunk. Zero reads that day -- nothing is sent, and
+    nothing is deferred either: there is nothing to retry.
+
+    `may_report_now` is asked here, not at enqueue time, and a "no"
+    raises `Deferred` (app/core/scene.Deferred) rather than giving up --
+    app/worker.py turns that into `jobs.defer_job`, which re-runs this
+    same job at `DIGEST_RETRY` without spending a retry attempt, so a
+    digest blocked by quiet hours or a pause goes out on the first
+    allowed tick afterwards, that day or (if the block outlives
+    midnight) early the next, rather than being silently dropped.
+    """
+    local_date = datetime.date.fromisoformat(payload["local_date"])
+    count = await grants.library_read_count(session, local_date)
+    if count == 0:
+        return
+    state = await get_state(session)
+    if not may_report_now(settings, clock, state):
+        raise Deferred(clock.now_utc() + DIGEST_RETRY)
+    text = DIGEST_TEXT.format(n=count, noun=_ru_plural(count, DIGEST_FORMS))
+    await bot.send_message(chat_id=state.chat_id, text=text)

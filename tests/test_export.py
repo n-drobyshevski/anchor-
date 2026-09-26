@@ -449,6 +449,10 @@ NOT_EXPORTED = {
     "oauth_connection": "credentials and approval plumbing; hashes only, no content",
     "oauth_request": "credentials and approval plumbing; hashes only, no content",
     "oauth_token": "credentials and approval plumbing; hashes only, no content",
+    # C3 (connector plan section 9): a derived, content-free daily
+    # counter (a date and a count), not user-authored data -- omitted
+    # like the other derived tables just below, rather than exported.
+    "claude_library_read": "a derived daily read counter, no query or chunk text",
     # 8a (phase-8 plan section 6).
     # 8e (8e plan section 5): vault_chunk split by class, same reason.
     "note_chunk_personal": "a derived copy of the user's own personal notes, rebuildable from the vault",

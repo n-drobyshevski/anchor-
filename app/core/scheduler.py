@@ -580,6 +580,53 @@ async def maybe_enqueue_retention_sweep(
     return enqueued
 
 
+# --- C3: the library's once-a-day digest (connector plan section 9) ---
+
+CLAUDE_LIBRARY_DIGEST = "claude_library_digest"
+# Fixed, not a Settings field: the digest is a report on a day already
+# mostly over, same reasoning as BACKUP_TIME being the one exception
+# among these sweeps that does gate on the wall clock, but this one is
+# not a setting at all -- there is nothing here a deploy should be able
+# to move earlier.
+CLAUDE_LIBRARY_DIGEST_TIME = datetime.time(21, 0)
+
+
+def library_digest_dedup_key(local_date: datetime.date) -> str:
+    """One digest job per local date, ever -- mirrors `backup_dedup_key`."""
+    return f"{CLAUDE_LIBRARY_DIGEST}:{local_date.isoformat()}"
+
+
+async def maybe_enqueue_library_digest(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue today's library digest, at most once per local day (C3).
+
+    Modelled on `maybe_enqueue_backup`: gated on `CLAUDE_ACCESS_ENABLED`
+    (the connector's own kill switch) and on the local wall clock
+    reaching `CLAUDE_LIBRARY_DIGEST_TIME`, so the report reflects a day
+    that is (almost) over rather than "so far today". The job itself
+    (app/tg/claude.py's `run_library_digest`) is what decides whether
+    there was any activity to report and whether `may_report_now`
+    allows sending it right now -- deferring, not failing, if not; see
+    that function's own docstring.
+    """
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        return False
+    local_date = clock_module.local_date(clock, timezone)
+    target = clock_module.combine_local(local_date, CLAUDE_LIBRARY_DIGEST_TIME, timezone)
+    if clock.now_utc() < target:
+        return False
+    enqueued = await enqueue_job(
+        session,
+        CLAUDE_LIBRARY_DIGEST,
+        {"local_date": local_date.isoformat()},
+        dedup_key=library_digest_dedup_key(local_date),
+    )
+    if enqueued:
+        logger.info("library digest queued", extra={"event": CLAUDE_LIBRARY_DIGEST})
+    return enqueued
+
+
 def planner_sync_dedup_key(local_date: datetime.date, hour: int, bucket: int) -> str:
     """One planner sync per (local date, hour, bucket) -- mirrors tick_dedup_key.
 

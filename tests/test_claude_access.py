@@ -68,7 +68,10 @@ async def test_tools_are_listed_but_nothing_is_readable_without_a_window(session
         tokens = await world.connect(client)
         listed = await (await world.mcp(client, tokens["access_token"])).json()
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"get_memory", "get_journal", "get_dialogs", "get_state"}
+        # search_library (C3) is always listed for Claude -- it is gated
+        # by the connection's standing switch, not by whether a window
+        # happens to be open, unlike the four scopes above.
+        assert names == {"get_memory", "get_journal", "get_dialogs", "get_state", "search_library"}
         body = await _call(world, client, tokens["access_token"], "get_journal")
     assert body["result"] == {"content": [{"type": "text", "text": CLOSED}], "isError": True}
     assert world.tg_fake.sent[-1].text.startswith("Подтверждено")  # no read notice

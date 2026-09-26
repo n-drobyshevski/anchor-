@@ -106,6 +106,61 @@ async def test_a_module_cannot_file_a_chunk_under_the_other_class(sessionmaker):
             await notes_knowledge.replace_chunks(session, files["personal"], [Chunk(None, "CCRU")])
 
 
+async def test_search_library_top6_with_a_matched_floor(sessionmaker):
+    """Connector plan section 9 (C3): search_library's own decision --
+    top LIBRARY_MAX_CHUNKS (6) by rank, keeping only chunks sharing at
+    least LIBRARY_MIN_MATCHED (2) distinct lexemes with the query. A
+    chunk sharing only one lexeme is dropped even though it still
+    matches the tsquery (an OR of the query's lexemes); 7 chunks that
+    clear the floor still give back only 6."""
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        chunks = [Chunk(f"H{i}", f"бегаю утром {i} парке") for i in range(7)]
+        chunks.append(Chunk("Only", "парк большой"))  # matched=1: парк alone
+        await notes_knowledge.replace_chunks(session, files["knowledge"], chunks)
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "бегаю по утрам в парке")
+    assert len(results) == notes_knowledge.LIBRARY_MAX_CHUNKS
+    assert all("Only" not in r and "большой" not in r for r in results)
+
+
+async def test_search_library_is_content_free_like_search(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_knowledge.replace_chunks(
+            session, files["knowledge"], [Chunk("CCRU", "Гиперстишн и ускорение.")]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        results = await notes_knowledge.search_library(session, "гиперстишн ускорение")
+    assert results == ["«CCRU»: Гиперстишн и ускорение."]
+    assert all(isinstance(item, str) for item in results)
+
+
+async def test_search_library_never_reads_personal_chunks(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_personal.replace_chunks(
+            session, files["personal"], [Chunk("Бег", "Бегаю утром в парке.")]
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        assert await notes_knowledge.search_library(session, "бегаю утром в парке") == []
+
+
+async def test_search_library_without_consent_finds_nothing(sessionmaker):
+    files = await _seed(sessionmaker, consent=True)
+    async with sessionmaker() as session:
+        await notes_knowledge.replace_chunks(
+            session, files["knowledge"], [Chunk("CCRU", "Гиперстишн и ускорение.")]
+        )
+        await session.commit()
+    await _set_consent(sessionmaker, False)
+    async with sessionmaker() as session:
+        assert await notes_knowledge.search_library(session, "гиперстишн ускорение") == []
+
+
 @pytest.mark.parametrize("note_class", sorted(MODULES))
 async def test_delete_for_file(sessionmaker, note_class):
     files = await _seed(sessionmaker, consent=True)

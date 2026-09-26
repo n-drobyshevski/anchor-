@@ -306,13 +306,20 @@ async def _issue(
 async def _revoke_connections(
     session: AsyncSession, now: datetime.datetime, connection_ids: list[int]
 ) -> None:
-    """Revoke connections, their unrevoked tokens and their open windows. No commit."""
+    """Revoke connections, their unrevoked tokens and their open windows. No commit.
+
+    Also zeroes `library_read` (C3): a revoked connection can never be
+    read through again regardless, but a stale `true` left behind would
+    be exactly the kind of thing a later bug could trip over, and
+    "/revoke and /claude disconnect turn it off" is the user's own
+    decision for every path that ends a connection, not only /revoke's.
+    """
     if not connection_ids:
         return
     await session.execute(
         update(OauthConnection)
         .where(OauthConnection.id.in_(connection_ids), OauthConnection.revoked_at.is_(None))
-        .values(revoked_at=now)
+        .values(revoked_at=now, library_read=False)
     )
     await session.execute(
         update(OauthToken)
@@ -527,6 +534,29 @@ async def current_connection(session: AsyncSession, clock: Clock) -> OauthConnec
             OauthConnection.revoked_at.is_(None), OauthConnection.expires_at > clock.now_utc()
         )
     )
+
+
+async def set_library(session: AsyncSession, clock: Clock, on: bool) -> OauthConnection | None:
+    """`/claude library on|off` (C3): flip the standing switch on the
+    live connection. None with no connection -- the caller (/claude
+    library) answers "Нет подключения" itself, the same text /claude's
+    own status uses for no connection at all."""
+    connection = await current_connection(session, clock)
+    if connection is None:
+        return None
+    connection.library_read = on
+    await session.commit()
+    logger.info(
+        "claude library switch",
+        extra={"event": "claude_library", "connection_id": connection.id, "on": on},
+    )
+    return connection
+
+
+async def disable_library_if_connected(session: AsyncSession, clock: Clock) -> None:
+    """/revoke (app/tg/access.py): turn the switch off without ending the
+    connection itself -- /revoke closes windows, it does not disconnect."""
+    await set_library(session, clock, False)
 
 
 async def disconnect(session: AsyncSession, clock: Clock) -> int:

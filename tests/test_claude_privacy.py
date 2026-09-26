@@ -104,6 +104,47 @@ async def test_no_secret_reaches_any_log_record(sessionmaker, caplog, live_logge
             assert secret not in rendered, (record.name, record.getMessage())
 
 
+async def test_search_library_is_logged_with_no_query_or_chunk_text(sessionmaker, caplog, live_loggers):
+    """C3: the search flow WAS logged (not vacuous), but never the
+    query, a heading or a chunk's text -- only ids, counts and codes,
+    like every other tool's log line."""
+    from sqlalchemy import update as sql_update
+
+    from app.db.models import UserState, VaultFile
+    from app.vault import notes_knowledge
+    from app.vault._chunks import Chunk
+
+    world = World(sessionmaker, settings(VAULT_KNOWLEDGE_ENABLED=True))
+    await world.seed()
+    query = "гиперстишн ускорение"
+    heading, body = "CCRU", "Гиперстишн и ускорение навсегда."
+    async with sessionmaker() as session:
+        await session.execute(sql_update(UserState).values(notes_consent=True))
+        vault_file = VaultFile(path="Library/CCRU.md", role="note", note_class="knowledge")
+        session.add(vault_file)
+        await session.commit()
+        await notes_knowledge.replace_chunks(session, vault_file.id, [Chunk(heading, body)])
+        await session.commit()
+
+    caplog.set_level(logging.DEBUG)
+    async with TestClient(TestServer(world.app)) as client:
+        tokens = await world.connect(client)
+        await world.command("/claude library on")
+        await world.mcp(
+            client, tokens["access_token"], "tools/call",
+            {"name": "search_library", "arguments": {"query": query}},
+        )
+
+    events = {getattr(r, "event", None) for r in caplog.records}
+    assert "mcp" in events or "search_library" in events  # not vacuous: the flow was logged
+    for record in caplog.records:
+        rendered = record.getMessage() + json.dumps(record.__dict__, default=str)
+        assert query not in rendered, (record.name, record.getMessage())
+        assert heading not in rendered, (record.name, record.getMessage())
+        assert body not in rendered, (record.name, record.getMessage())
+        assert "CCRU.md" not in rendered
+
+
 async def test_security_headers_on_every_oauth_response(sessionmaker):
     world = World(sessionmaker)
     await world.seed()
@@ -163,7 +204,7 @@ async def test_the_debug_views_show_no_secret_column(sessionmaker):
         for table, column in rows.all():
             columns.setdefault(table, set()).add(column)
     assert columns["oauth_connection"] == {
-        "id", "created_at", "expires_at", "last_used_at", "revoked_at"
+        "id", "created_at", "expires_at", "last_used_at", "revoked_at", "library_read"
     }
     assert columns["oauth_request"] == {
         "id", "status", "code_expires_at", "connection_id", "created_at"
