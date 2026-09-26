@@ -2140,13 +2140,16 @@ the at-most-one-per-pass notice, sending a pending hold's card, the
   straight out of the task's own worked examples; `notice_text` is
   written as one formatting function with no `may_report_now` awareness
   at all, so it stays trivially testable without a database.
-- **No `is_web_sink` guard on the `v:` callback**, unlike `d:`/`g:`/`cl:`.
-  Those three are blocked at `app/web/ingress.py`'s
-  `BLOCKED_CALLBACK_PREFIX` for reasons specific to them (delete's blast
-  radius, Grok/Claude access tokens); most other callback prefixes
-  (`m:`, `nb:`, `c:`, `so:`, `ob:`) carry no such guard either, and `v:`
-  follows that majority pattern rather than being treated as a fourth
-  special case with no stated reason to be one.
+- **The `v:` callback is refused from the web chat, at both layers.**
+  `app/web/ingress.py`'s `BLOCKED_CALLBACK_PREFIX` gains `v:`, and the
+  router's handler checks `is_web_sink` like `d:`/`g:`/`cl:`. Phase C
+  first followed the majority of prefixes (`m:`, `nb:`, `c:`), which
+  carry no guard. It was changed in review. A `v:` press accepts a
+  rule or forgets facts in bulk, and plan §8 exists because a rule
+  used to be creatable only from an authenticated Telegram chat. Hold
+  messages are never sent to the web chat, so a web press can only be
+  forged. Tests: `test_a_press_through_the_web_sink_is_refused_and_changes_nothing`,
+  `test_the_web_chat_cannot_press_a_vault_hold_button`.
 - **`EARLY_MODE_NOTE` removed, not just untriggered.** `VALID_VAULT_MODES`
   (config validation) and `vault_status.IMPLEMENTED_MODES` have been the
   same four-element tuple since 8b: `settings.VAULT_MODE not in

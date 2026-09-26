@@ -140,7 +140,8 @@ PRIVACY_TEXT = (
     "Текст страниц, найденных при поиске, хранится 30 дней, потом "
     "стирается — карточки и ссылки остаются.\n"
     "Заметки из Obsidian Anchor читает только с твоей меткой: личные — только для "
-    "разговора с тобой, никогда для поиска или исследований; знания — как справка.\n"
+    "разговора с тобой, никогда для поиска или исследований; знания — как справка. "
+    "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
     "/delete — удалить все данные и все резервные копии, безвозвратно."
@@ -1958,7 +1959,17 @@ def build_router(
 
     @router.callback_query(F.data.startswith("v:"))
     async def vault_decision(callback: CallbackQuery) -> None:
-        """`v:y:<hold_id>:<epoch>` / `v:n:<hold_id>:<epoch>` -- a hold's own [Да]/[Нет, вернуть]."""
+        """`v:y:<hold_id>:<epoch>` / `v:n:<hold_id>:<epoch>` -- a hold's own [Да]/[Нет, вернуть].
+
+        Refused from the web chat, like `d:`, `g:` and `cl:`: a rule is
+        the user instructing Anchor, and until 8c only an authenticated
+        Telegram chat could create one (phase-8 plan section 8). Hold
+        messages are only ever sent to Telegram, so a press arriving
+        through the web sink is not one the user made on that message.
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
         await vault_ui.handle_callback(
             sessionmaker,
             callback.bot,

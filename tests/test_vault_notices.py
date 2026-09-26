@@ -262,6 +262,24 @@ async def test_confirm_writes_and_answers_and_removes_the_keyboard(sessionmaker)
     assert fake.edits[-1].reply_markup is None
 
 
+async def test_a_press_through_the_web_sink_is_refused_and_changes_nothing(sessionmaker):
+    """A rule may only be accepted from Telegram (plan section 8); the
+    web chat's sink bot gets the same refusal as `d:`/`g:`/`cl:`."""
+    await _seed(sessionmaker)
+    hold_id = await _open_rule_hold(sessionmaker, text="Не звонить.")
+    dp, bot, fake = _dispatcher(sessionmaker, _settings(), _clock())
+    bot.is_web_sink = True
+    update = Update.model_validate(
+        _callback_update(1, f"v:y:{hold_id}:{EPOCH}"), context={"bot": bot}
+    )
+    await dp.feed_update(bot, update)
+    assert fake.answered[-1].text == "Эта команда доступна только в Telegram."
+    assert fake.edits == []
+    async with sessionmaker() as session:
+        hold = await session.get(VaultHold, hold_id)
+        assert hold.status == "pending"
+
+
 async def test_revert_answers_and_removes_the_keyboard(sessionmaker):
     await _seed(sessionmaker)
     hold_id = await _open_rule_hold(sessionmaker, text="Не звонить.")
@@ -665,3 +683,11 @@ async def test_a_vault_sync_job_sends_its_own_notice_through_the_worker(sessionm
     )
     assert claimed
     assert fake.sent[-1].text == "Хранилище: новых 1 — /vault"
+
+
+def test_the_web_chat_cannot_press_a_vault_hold_button():
+    """Layer one, before the router's own is_web_sink guard."""
+    from app.web import ingress
+
+    assert "v:y:1:k3f9qa".startswith(ingress.BLOCKED_CALLBACK_PREFIX)
+    assert "v:n:1:k3f9qa".startswith(ingress.BLOCKED_CALLBACK_PREFIX)
