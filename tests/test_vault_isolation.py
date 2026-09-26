@@ -38,6 +38,7 @@ FORBIDDEN_IMPORTS = {
     "app.core.tick": "the sync path runs no tick",
     "app.core.extract": "the sync path runs no extractor",
     "app.worker": "plan section 8: app/vault/ must not import app.worker",
+    "app.tg": "plan section 8: app/vault/ must not import app.tg",
 }
 # Names that must not appear in app/vault/ code, imported from anywhere.
 FORBIDDEN_NAMES = {"update_state", "load_persona", "run_turn"}
@@ -63,7 +64,7 @@ def _violations(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     found = []
     for module, names in _imports(tree):
-        if module in FORBIDDEN_IMPORTS or module.startswith("app.llm"):
+        if module in FORBIDDEN_IMPORTS or module.startswith("app.llm") or module.startswith("app.tg"):
             found.append(f"{path.name}: imports {module}")
         for name in names:
             if name in FORBIDDEN_NAMES:
@@ -91,6 +92,7 @@ def test_the_check_catches_each_kind_of_violation(tmp_path):
         "c.py": "import app.llm.openrouter\n",
         "d.py": "from app.core import state\nstate.update_state(None, 'x', 1, 'vault')\n",
         "e.py": "from app.core import proposal\n",
+        "f.py": "from app.tg import vault\n",
     }
     for name, code in samples.items():
         path = tmp_path / name

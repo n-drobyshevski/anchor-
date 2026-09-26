@@ -2098,3 +2098,88 @@ decisions, not just checklist items:
   `commit()` into the *test* to show a real implementation bug would
   have left the memory row behind.
 
+## 8c phase C — notices, holds' Telegram side, `v:`, and `/vault`'s problem list
+
+Everything the plan (§8) leaves to the bot rather than `app/vault/`:
+the at-most-one-per-pass notice, sending a pending hold's card, the
+`v:y:`/`v:n:` callback, and `/vault`'s "Требуют внимания" list.
+
+- **Where the notice/hold-send logic lives.** `holds.py` already had
+  `pending_unsent`/`mark_sent` from phase B (anticipating this), and
+  `app/core/report.may_report_now` already lived outside `app.worker`
+  (also phase B/8a) -- both moves the plan called for in §8 were
+  already done, so phase C only had to *use* them. The formatting
+  (notice text, hold card text, the keyboard, the `v:` parse and the
+  problem-list labels) all live in `app/tg/vault.py`, one module,
+  rather than being split by hold kind -- there is no test pinning
+  "app/vault/ must not import app.tg" that would force a split, and one
+  place to look is simpler than several.
+- **ExtractOutcome gained `vault_pass_result` (a `PassResult | None`)
+  rather than following `RESEARCH`'s inline pattern.** `RESEARCH` calls
+  its own `_send_research_done` *inside* `_run_job`, before the job is
+  marked done, on the session the job itself used. That pattern predates
+  the "send after, not inside" rule `process_one_job`'s own comment
+  states for `outcome.created`/`order_proposed`/`amendment_trial_id`:
+  a send that raises must not roll back or re-run the pass. A vault pass
+  can create holds and change counts that must not be re-computed on
+  a retry, so `VAULT_SYNC` follows the newer, safer pattern instead of
+  copying the older one: the worker only learns the pass finished
+  *after* the job is committed done, then hands the `PassResult` to
+  `app/tg/vault.send_pass_updates`, which opens its own fresh session.
+- **`may_report_now` is asked once, right when the send happens, not
+  captured from inside the pass.** The pass and the send can be minutes
+  apart in principle (a slow worker, a deferred retry); asking at send
+  time is what the plan's "only if `_may_report_now` allows it right
+  then" literally says, and it is also what makes "the hold waits" true
+  without any extra bookkeeping -- an unsent hold is just a `vault_hold`
+  row with `tg_message_id is null`, found again by `pending_unsent` on
+  the very next pass.
+- **The notice's exact punctuation** (a period before "Не принято" but
+  never before the trailing dash, and "Хранилище" alone with no colon
+  when every count is zero but a quarantine still happened) came
+  straight out of the task's own worked examples; `notice_text` is
+  written as one formatting function with no `may_report_now` awareness
+  at all, so it stays trivially testable without a database.
+- **No `is_web_sink` guard on the `v:` callback**, unlike `d:`/`g:`/`cl:`.
+  Those three are blocked at `app/web/ingress.py`'s
+  `BLOCKED_CALLBACK_PREFIX` for reasons specific to them (delete's blast
+  radius, Grok/Claude access tokens); most other callback prefixes
+  (`m:`, `nb:`, `c:`, `so:`, `ob:`) carry no such guard either, and `v:`
+  follows that majority pattern rather than being treated as a fourth
+  special case with no stated reason to be one.
+- **`EARLY_MODE_NOTE` removed, not just untriggered.** `VALID_VAULT_MODES`
+  (config validation) and `vault_status.IMPLEMENTED_MODES` have been the
+  same four-element tuple since 8b: `settings.VAULT_MODE not in
+  IMPLEMENTED_MODES` can never be true for a `Settings` object that
+  passed validation, so the branch, its string and its negative test
+  assertion were all unreachable dead code once `sync` (the last
+  "early" mode) shipped. `vault_status.IMPLEMENTED_MODES` itself is left
+  in place -- nothing else names it, but it still documents which modes
+  exist, and removing it was not asked for.
+- **`vault_problems`'s tie-break is `updated_at desc, id desc`.** The
+  task said "then id" without a direction; `id desc` was chosen so that,
+  among rows sharing one `updated_at` (a full second's resolution, or a
+  batch of writes stamped from the same `clock.now_utc()` inside one
+  pass), the most recently *created* row of that group sorts first too
+  -- consistent with "most recent first" rather than an arbitrary
+  ascending tiebreak.
+- **Problem list scope: mirror and sync only, decided at the router,
+  not inside `vault_problems`.** `status` mode never runs ingest or
+  holds, so its `vault_file` table has no `held`/`quarantined`/
+  `diverged` rows to find in practice -- but `/vault`'s handler skips
+  the query outright in that mode rather than relying on that always
+  being true, so the "status mode: first line only" contract holds even
+  if a row somehow existed (e.g. a mode switch after quarantining
+  something, without a delete in between).
+- **`app.tg` added to `test_vault_isolation.py`'s `FORBIDDEN_IMPORTS`.**
+  Not asked for explicitly by the plan text carried into this task, but
+  the HARD RULES for this task state "app/vault/ must not import
+  app.tg or app.worker" as a peer of the `app.worker` rule the AST guard
+  already enforced; leaving the newer half of that sentence unpinned
+  while phase C adds a batch of new `app/tg/vault.py` code (the exact
+  code app/vault/ must never reach for) seemed like an invitation to
+  regress it silently.
+- **Every new test proven by a breaking edit** -- the full table is in
+  this round's hand-back report, the same convention phase B used
+  above.
+

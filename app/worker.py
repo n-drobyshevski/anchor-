@@ -140,6 +140,7 @@ from app.planner.jobs import (
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
+from app.tg import vault as vault_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
 from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
@@ -507,9 +508,16 @@ async def _run_job(
     if kind == VAULT_SYNC:
         # 8b: one sync pass (phase-8 plan section 7). No model call, no
         # bot: an unreachable vault completes the job normally, and the
-        # next minute's pass tries again.
-        await run_vault_sync(session, settings, clock)
-        return ExtractOutcome()
+        # next minute's pass tries again. 8c hands the PassResult back
+        # on `outcome.vault_pass_result` -- process_one_job sends the
+        # notice and any newly-sendable hold messages through
+        # app/tg/vault.py *after* the job is marked done, the same
+        # "send after, not inside" rule outcome.order_proposed and
+        # outcome.amendment_trial_id already follow.
+        result = await run_vault_sync(session, settings, clock)
+        outcome = ExtractOutcome()
+        outcome.vault_pass_result = result
+        return outcome
 
     if kind == VAULT_PURGE:
         # 8b: /delete's reach into the vault (phase-8 plan section 10).
@@ -609,6 +617,10 @@ async def process_one_job(
         # gives: this is not a Proposal row either.
         if outcome.amendment_trial_id is not None and bot is not None:
             await _send_amendment_result(sessionmaker, bot, outcome.amendment_trial_id)
+        # 8c: the vault notice and any pending hold messages (plan
+        # section 8), through app/tg/vault.py.
+        if outcome.vault_pass_result is not None and bot is not None:
+            await _send_vault_pass_updates(sessionmaker, bot, settings, clock, outcome.vault_pass_result)
 
     return True
 
@@ -680,6 +692,20 @@ async def _send_order_proposal(
             "order proposal send failed",
             extra={"order_id": order_id, "event": type(exc).__name__},
         )
+
+
+async def _send_vault_pass_updates(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+    result,
+) -> None:
+    """The vault notice and any newly-sendable hold messages (8c)."""
+    try:
+        await vault_ui.send_pass_updates(sessionmaker, bot, settings, clock, result)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning("vault pass send failed", extra={"event": type(exc).__name__})
 
 
 async def _send_amendment_result(

@@ -645,6 +645,12 @@ def build_router(
             user_state = await get_state(session)
             health = await vault_status.probe(session, settings, clock)
             facts = await vault_status.count_fact_files(session)
+            # 8c: the problem list is mirror/sync's own (quarantines and
+            # holds only ever come from ingest, which status never
+            # runs) -- status mode shows the first line only.
+            problems = None
+            if settings.VAULT_MODE in ("mirror", "sync"):
+                problems = await vault_status.vault_problems(session)
         notes_line = None
         if health.state != vault_status.OFF:
             overview = None
@@ -653,7 +659,13 @@ def build_router(
             notes_line = vault_ui.format_notes_line(user_state.notes_consent, overview)
         await message.answer(
             vault_ui.format_vault(
-                health, settings, clock, user_state.timezone, facts=facts, notes_line=notes_line
+                health,
+                settings,
+                clock,
+                user_state.timezone,
+                facts=facts,
+                notes_line=notes_line,
+                problems=problems,
             )
         )
 
@@ -1942,6 +1954,20 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("v:"))
+    async def vault_decision(callback: CallbackQuery) -> None:
+        """`v:y:<hold_id>:<epoch>` / `v:n:<hold_id>:<epoch>` -- a hold's own [Да]/[Нет, вернуть]."""
+        await vault_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            message_text=callback.message.text,
         )
 
     @router.callback_query()

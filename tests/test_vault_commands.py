@@ -186,8 +186,8 @@ async def test_sync_counts_facts_and_says_nothing_about_mirroring(sessionmaker, 
     reply = await _run(sessionmaker, _settings("sync", stub.url), "/vault")
     lines = reply.splitlines()
     assert lines[0] == "Хранилище: синхронизация ок (работает с 10:00, перезапусков 0) · фактов 0"
-    assert vault_ui.EARLY_MODE_NOTE.format(mode="sync") not in reply
     assert vault_ui.MIRROR_NOTE not in reply
+    assert not hasattr(vault_ui, "EARLY_MODE_NOTE")
 
 
 # --- /state ---

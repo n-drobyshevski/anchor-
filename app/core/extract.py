@@ -364,7 +364,14 @@ class ExtractOutcome:
     app/tg/proposals.send_proposal.
     """
 
-    __slots__ = ("memories", "created", "expired", "order_proposed", "amendment_trial_id")
+    __slots__ = (
+        "memories",
+        "created",
+        "expired",
+        "order_proposed",
+        "amendment_trial_id",
+        "vault_pass_result",
+    )
 
     def __init__(self) -> None:
         self.memories: list[int] = []
@@ -378,6 +385,12 @@ class ExtractOutcome:
         # app/tg/amendments.py rather than app/tg/proposals.py -- an
         # amendment_trial outcome is not a Proposal row either.
         self.amendment_trial_id: int | None = None
+        # 8c: a VAULT_SYNC job's own PassResult (app/vault/sync.py), or
+        # None. Read the same way as the two fields above -- the
+        # worker's VAULT_SYNC branch is the only kind that ever sets it,
+        # and process_one_job hands it to app/tg/vault.py's own sender
+        # after the job is marked done, never inside it.
+        self.vault_pass_result = None
 
 
 async def _apply(
