@@ -36,7 +36,7 @@ from app.db.models import (
 )
 from app.tg import vault as vault_ui
 from app.tg.router import BOT_COMMANDS, build_router
-from conftest import FakeLLMProvider, FakeSession
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 from vault_stub import TOKEN, start_stub
 
 CHAT_ID = 555
@@ -87,6 +87,12 @@ async def _seed(sessionmaker) -> None:
 
 
 async def _run(sessionmaker, settings: Settings, text: str, *, update_id: int = 1, clock=None) -> str:
+    """Runs a command and returns the reply as text.
+
+    /state (unlike /vault) now sends a rich message
+    (app/tg/state_view.py), so it is flattened back to text here rather
+    than read off `fake.sent`, which /state no longer touches.
+    """
     fake = FakeSession()
     bot = Bot(token="123456:TESTTOKEN", session=fake)
     dp = Dispatcher()
@@ -96,6 +102,8 @@ async def _run(sessionmaker, settings: Settings, text: str, *, update_id: int = 
     await dp.feed_update(
         bot, Update.model_validate(_command_update(update_id, text), context={"bot": bot})
     )
+    if fake.rich:
+        return flatten_rich_message(fake.rich[-1].rich_message)
     return fake.sent[-1].text
 
 
