@@ -2268,3 +2268,16 @@ with no caller in `app/`, and the measurement script. Plan §9 names
 this result as the trigger for reconsidering retrieval (pgvector), not
 for lowering a threshold. Any embedding model must run locally: 8e §10
 forbids personal note text from leaving the system.
+
+## W1 — Claude writes knowledge notes: plan written, decisions pending
+
+`anchor-claude-write-plan.md` specifies how Claude, through the Anchor
+connector, would update, create and link knowledge notes with undo in
+place of a per-write approval. Nothing is built. The ten decisions in
+the plan's §13 are open. Two of them change the brief's wording:
+- a secret in written text refuses the write rather than being masked;
+- the undo store sits on the vault volume outside the vault root,
+  because Railway allows one volume per service.
+
+W2 also waits on C3 and on knowledge indexing, neither of which exists
+yet (see "8d — full-text rank does not separate…").
