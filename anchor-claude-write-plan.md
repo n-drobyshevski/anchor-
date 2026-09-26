@@ -155,7 +155,7 @@ It is kept for **`UNDO_TTL_DAYS = 14`**, a constant. The argument is in §8.5.
 
 ### 6.3 What a changeset is
 
-**Proposal:** a changeset is all writes made by one connection within a **10-minute idle window**. A new one starts after 10 minutes without a write. That groups a burst like "extend two nodes and create a linked third" into one undoable unit.
+A changeset is all writes made by one connection within a **10-minute idle window**. A new one starts after 10 minutes without a write. That groups a burst like "extend two nodes and create a linked third" into one undoable unit.
 
 Settled (§13.4); the alternative, one changeset per tool call, was not chosen.
 
