@@ -129,6 +129,22 @@ def _has_leading_fence(data: bytes) -> bool:
     return first == b"---"
 
 
+def raw_anchor(data: bytes) -> str | None:
+    """The literal `anchor:` value in `data`'s frontmatter, or None if absent.
+
+    Unlike `note_mark`, this is not mapped through `_MARKS`: a knowledge
+    write must compare the exact string a note carried before and after,
+    so `anchor: read` and `anchor: knowledge` are never conflated with
+    `legacy_read` here. Callers must already know the frontmatter parses
+    (`note_mark(data) != "unknown"`); an unparsable block reads as absent.
+    """
+    loaded = load(data)
+    if loaded is None or MARK_KEY not in loaded:
+        return None
+    value = loaded[MARK_KEY]
+    return value if isinstance(value, str) else None
+
+
 def note_mark(data: bytes) -> NoteMark:
     """What the note's own properties say about it (module docstring)."""
     try:

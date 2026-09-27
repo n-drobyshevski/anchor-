@@ -15,7 +15,9 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -23,6 +25,7 @@ from vaultd.api import make_app
 from vaultd.config import Config
 from vaultd.manifest import Manifest
 from vaultd.store import Store
+from vaultd.undo import UndoStore
 
 # Deliberately low-entropy, so a secret scanner never mistakes it.
 TOKEN = "test-token-" + "x" * 32
@@ -48,6 +51,7 @@ def data_dir(tmp_path: Path) -> Path:
     (root / "vault").mkdir(parents=True)
     (root / "tmp").mkdir()
     (root / "config").mkdir()
+    (root / "undo").mkdir()
     return root
 
 
@@ -66,9 +70,43 @@ def manifest(vault: Path) -> Manifest:
     return Manifest(vault)
 
 
+class FakeClock:
+    """An injectable `now`, in the shape Supervisor's `monotonic` already uses.
+
+    Tests advance it explicitly instead of sleeping, so the undo TTL and
+    the per-hour caps are exercised without a real clock anywhere.
+    """
+
+    def __init__(self, start: datetime | None = None) -> None:
+        self.value = start or datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.value
+
+    def advance(self, **kwargs) -> None:
+        self.value += timedelta(**kwargs)
+
+
 @pytest.fixture
-async def client(aiohttp_client, store: Store, manifest: Manifest):
-    app = make_app(token=TOKEN, store=store, manifest_=manifest, status_source=StaticStatus())
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def undo_store(data_dir: Path, clock: Callable[[], datetime]) -> UndoStore:
+    return UndoStore(data_dir / "undo", clock=clock)
+
+
+@pytest.fixture
+async def client(aiohttp_client, store: Store, manifest: Manifest, undo_store: UndoStore, clock: Callable[[], datetime]):
+    app = make_app(
+        token=TOKEN,
+        store=store,
+        manifest_=manifest,
+        status_source=StaticStatus(),
+        undo_store=undo_store,
+        clock=clock,
+    )
     return await aiohttp_client(app)
 
 

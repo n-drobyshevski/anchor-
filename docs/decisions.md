@@ -2368,3 +2368,34 @@ One addition follows from the rename: while the write switch is on,
 `search_library` results carry the note's path and hash, and
 `get_note(path)` returns a whole knowledge note, so Claude can name the
 note it edits. With writing off, no path reaches Claude, as in C3.
+
+## W2a — vaultd's knowledge writes, rename and undo
+
+- **One lock, one code path.** Knowledge writes, renames and undo
+  restores go through `Store.put_unchecked`/`delete_unchecked`, the same
+  compare-and-swap and atomic-write code as Anchor's own files, all
+  under the store's single lock.
+- **Checks come first.** Caps are checked by a pure `precheck` before
+  anything is written, so a cap refusal never needs a rollback.
+- **The rename scans the whole vault**, `Anchor/` included (read
+  in-process, never returned). A rename is refused if any
+  non-knowledge file links to the note, or if the basename is
+  ambiguous anywhere.
+  - Links are matched by basename: `[[x]]`, `[[x|label]]`,
+    `[[x#heading]]`, `![[x]]` and `[[folder/x]]`. A rewrite keeps the
+    label and heading and drops the folder prefix.
+- **A rename is all or nothing.** Everything is planned before the
+  first write. If a backlink file changes mid-rename (an `ob` race),
+  what was already written is rolled back and the answer is 412. If
+  deleting the old path fails after the new one was created, the
+  changeset is still recorded, so undo removes the duplicate (500).
+- **Undo** runs a changeset's entries in reverse, so a file written
+  twice in one changeset unwinds correctly. An undo changeset records
+  no pre-images, because undoing an undo is refused.
+- **Where undo lives.** The undo root is `VAULT_UNDO_ROOT` (default
+  `/data/anchor-undo`), and vaultd refuses to start if it resolves
+  inside the vault.
+- **Every acceptance refusal is the same bare 403.** CAS stays 412,
+  and a missing file stays the existing 404.
+- One destination-class check in rename was removed as provably
+  redundant with the folder-rule check, with a comment saying why.

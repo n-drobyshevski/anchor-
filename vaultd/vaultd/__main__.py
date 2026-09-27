@@ -21,6 +21,7 @@ from vaultd.log import setup_logging
 from vaultd.manifest import Manifest
 from vaultd.store import Store
 from vaultd.supervisor import Supervisor
+from vaultd.undo import UndoStore
 
 
 async def start_site(runner: web.AppRunner, port: int) -> web.TCPSite:
@@ -38,6 +39,7 @@ async def serve(cfg: config.Config, env: dict[str, str], ob_bin: str = config.OB
         store=Store(cfg.vault_path, cfg.tmp_path),
         manifest_=Manifest(cfg.vault_path),
         status_source=supervisor,
+        undo_store=UndoStore(cfg.undo_root),
     )
     runner = web.AppRunner(app, access_log=None, handle_signals=False)
     await runner.setup()

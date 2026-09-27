@@ -48,10 +48,23 @@ OB_COMMAND_TIMEOUT_S = 120.0
 # fake script instead.
 OB_BIN = "/app/node_modules/.bin/ob"
 
+# Plan (Claude writes knowledge notes) section 6.4, 6.2: caps and the
+# undo TTL are constants, by the same rule as the rest of this module --
+# a deploy must not be able to widen the boundary by pasting a variable.
+KNOWLEDGE_WRITE_MAX_BYTES = 64 * 1024
+FILES_PER_CHANGESET = 5
+CHANGESETS_PER_HOUR = 4
+UNDOS_PER_HOUR = 4
+UNDO_TTL_DAYS = 14
+
 DEFAULT_VAULT_PATH = "/data/vault"
 DEFAULT_CONFIG_HOME = "/data/config"
 DEFAULT_DEVICE_NAME = "anchor-railway"
 DEFAULT_PORT = 8080
+# Outside the vault root on purpose (plan section 6.2, 13.9): a
+# directory `ob` never syncs. boot.py refuses to start if this ever
+# resolves inside VAULT_PATH.
+DEFAULT_UNDO_ROOT = "/data/anchor-undo"
 
 
 @dataclass(frozen=True)
@@ -64,6 +77,7 @@ class Config:
     vault_path: Path
     config_home: Path
     port: int
+    undo_root: Path
 
     @property
     def tmp_path(self) -> Path:
@@ -93,4 +107,5 @@ def from_env(env: Mapping[str, str]) -> Config:
         vault_path=Path(get("VAULT_PATH", DEFAULT_VAULT_PATH) or DEFAULT_VAULT_PATH),
         config_home=Path(get("XDG_CONFIG_HOME", DEFAULT_CONFIG_HOME) or DEFAULT_CONFIG_HOME),
         port=int(port_raw),
+        undo_root=Path(get("VAULT_UNDO_ROOT", DEFAULT_UNDO_ROOT) or DEFAULT_UNDO_ROOT),
     )
