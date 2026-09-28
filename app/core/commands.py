@@ -1,4 +1,4 @@
-"""One set of rules for /due, /focus, /quiet, /tz and proposal expiry,
+"""One set of rules for /due, /focus, /intensity, /quiet, /tz and proposal expiry,
 shared by Telegram and the web panels (W2 plan section 3, "Backend: one
 set of rules for both transports").
 
@@ -84,6 +84,25 @@ async def set_focus(
     await update_state(session, "focus_on", enabled, source)
     since = clock.now_utc() if enabled else None
     return await update_state(session, "focus_since", since, source)
+
+
+# The dial's own range: user_state.intensity's CHECK constraint
+# (app/db/models.py) is 1-5, and a soft pause word already clamps its
+# decrement to the same floor (app/core/turn.py).
+INTENSITY_MIN = 1
+INTENSITY_MAX = 5
+
+
+async def set_intensity(session: AsyncSession, value: int, source: Source) -> UserState:
+    """intensity, the dial the user owns (plan section 13: it changes
+    only via commands, buttons, pause handling or check-in logic --
+    never model output). Callers validate the range first: /intensity
+    answers its usage line for anything outside it, and the /menu
+    buttons only ever carry 1-5, so this raises rather than clamps --
+    an out-of-range value reaching here is a bug, not input."""
+    if not INTENSITY_MIN <= value <= INTENSITY_MAX:
+        raise ValueError(f"intensity out of range: {value}")
+    return await update_state(session, "intensity", value, source)
 
 
 async def set_quiet(

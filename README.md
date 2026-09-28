@@ -33,29 +33,30 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | Command | What it does | Gate |
 |---|---|---|
 | `/start` | Start | — |
-| `/menu` | Rich card with in-body buttons (Bot API 10.1) for the common commands, plus a vault & knowledge section with status and toggles; `/start` also adds a persistent «☰ Меню» button | — |
+| `/menu` | Rich card with in-body buttons (Bot API 10.1): a status line on top (pause, quiet, focus, intensity, main action) and sections for settings, quiet, memory, deals, vault & knowledge, planner, and data & access; every switch shows its current state and re-renders in place; `/start` also adds a persistent «☰ Меню» button | — |
 | `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup; a rich message with a 🔄 Обновить refresh button | — |
 | `/out`, `/in` | Pause the persona / come back | — |
 | `/remember`, `/memories`, `/forget`, `/pin`, `/unpin` | Memory | — |
 | `/checkin` | The day's check-in | — |
 | `/due` | Main action (also the open focus debt) | — |
 | `/paid` | Debts: list, `/paid N` closes one | — |
-| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone | — |
+| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone; focus and quiet are also in `/menu` | — |
+| `/intensity` | How hard the persona pushes, 1 (gentler) to 5 (stricter); bare shows the current value; also «Мягче»/«Строже» in `/menu` → Настройки | — |
 | `/mind` | Anchor's notebook | — |
 | `/order`, `/orders` | Standing orders: add, list | — |
 | `/review` | Weekly review | — |
 | `/amendments` | Adopted persona amendments | — |
-| `/digest` | What idle work did; undo | idle work itself: `IDLE_ENABLED` |
+| `/digest`, `/digest 7d` | What idle work did in the last day / week; undo | idle work itself: `IDLE_ENABLED` |
 | `/interests` | Topics for background research | the research itself: `RESEARCH_ENABLED` |
 | `/privacy` | What is stored and for how long | — |
 | `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
 | `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
-| `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default | `CLAUDE_ACCESS_ENABLED` |
+| `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default; also a toggle in `/menu`'s vault section | `CLAUDE_ACCESS_ENABLED` |
 | `/claude library write on`, `/claude library write off` | Let Claude edit, create and rename your knowledge notes (needs the library switch on); off by default; also a toggle in `/menu`'s vault section | `CLAUDE_ACCESS_ENABLED` |
 | `/claude undo`, `/claude undo all` | Undo Claude's latest batch of note changes, or everything from the last 24 hours | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
-| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
+| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
