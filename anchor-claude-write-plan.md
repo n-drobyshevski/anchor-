@@ -386,3 +386,23 @@ Each test is proven by a deliberate breaking edit, then reverted, and listed in 
 | 13.10 | C3 shipped `search_library` as top 6 with at least 2 shared lexemes, with no rank threshold (#38) |
 
 One addition follows from 13.1: `get_note(path)`, and paths plus hashes in `search_library` results, **only while the write switch is on** (§3). Otherwise Claude could not name the note it edits.
+
+---
+
+## 14. Rev. 3: the tree, new folders, and reorganising
+
+Seen in production: `create_note(folder="Philosophy")` was refused as
+`folder_missing`. Claude could not see the vault's structure, and vaultd
+creates no folders. The settled answers:
+
+| | Decision |
+|---|---|
+| Who decides where a note goes | **Claude**, from a view of the tree. The bot and vaultd make no model call on the write path, as before. |
+| What Claude sees | `list_tree()`: knowledge folders and the titles of knowledge notes (no text), **only while writing is on**. A note that is not knowledge, even inside a knowledge folder, never appears. |
+| New folders | vaultd creates missing folders on the way to a new note or a move target, **only inside a folder already covered by `knowledge_folders`**, at most **4 levels** below that root, **3 new folders per changeset, 10 per day**. Never a top-level folder, never under `Anchor/`, never where a `never` or `personal` rule would cover the new path. `Anchor/settings.md` stays unwritable. |
+| Undo of a folder | Undo removes a folder it created only if the folder is empty afterwards (`rmdir`, never recursive). |
+| Reorganising | Moves (`rename_note`) have **their own budget**: **20 files per changeset** (a moved file plus its rewritten backlinks) and **60 per day**. Content edits keep the 5-files-per-changeset cap. Changesets per hour stay 4. |
+| Guidance | `list_tree`'s and `create_note`'s descriptions tell Claude: look at the tree first, use the most specific existing folder, match the existing naming, and create a subfolder only when it groups several notes. |
+
+The guard hook gains `list_tree`. The digest adds «новых папок: N»
+when there were any.
