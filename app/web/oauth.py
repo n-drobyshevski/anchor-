@@ -19,7 +19,8 @@ answers, and never writes a row itself.
 - **Status** answers only the browser that holds the binding cookie.
   Without it -- or with another request's, or for an unknown handle --
   the answer is one identical page, so a guessed handle yields nothing.
-  The page polls with `<meta refresh>`: the CSP allows no script.
+  The page polls with `<meta refresh>`. The CSP allows one inline
+  script, pinned by its hash, for the copy button, and no other.
 - **Token** and **revoke** are form posts from claude.ai's servers.
 
 Every response carries `Cache-Control: no-store`, `Referrer-Policy:
@@ -30,6 +31,8 @@ handle, cookie or client id: routes, reasons and ids only.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import logging
 import re
@@ -55,10 +58,29 @@ POLL_SECONDS = 3
 MAX_BODY = 16 * 1024
 MAX_STATE = 512
 
+# The waiting page's copy button: the only script any page here runs.
+# No inline handlers (a hash does not cover them); without the Clipboard
+# API the button stays hidden and the command block is still select-all.
+_COPY_SCRIPT = (
+    "(function(){var b=document.getElementById('copy'),"
+    "c=document.querySelector('.command'),l=b&&b.querySelector('span');"
+    "if(!b||!c||!l||!navigator.clipboard)return;b.hidden=false;"
+    "b.addEventListener('click',function(){"
+    "navigator.clipboard.writeText(c.textContent).then("
+    "function(){l.textContent='Скопировано';"
+    "b.classList.add('done')},"
+    "function(){l.textContent='Не вышло — "
+    "выдели вручную'})})})();"
+)
+_COPY_HASH = base64.b64encode(hashlib.sha256(_COPY_SCRIPT.encode()).digest()).decode()
+
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+    "Content-Security-Policy": (
+        f"default-src 'none'; script-src 'sha256-{_COPY_HASH}'; "
+        "style-src 'unsafe-inline'; frame-ancestors 'none'"
+    ),
 }
 
 _CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -74,6 +96,10 @@ WAITING_HTML = (
     "<li>Отправь ему команду:</li>"
     "</ol>"
     "<p class=command>/claude connect {code}</p>"
+    "<button id=copy type=button hidden><svg viewBox='0 0 24 24' aria-hidden=true>"
+    "<g fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round>"
+    "<rect x=9 y=9 width=12 height=12 rx=2 /><path d='M5 15V5a2 2 0 0 1 2-2h8'/></g></svg>"
+    "<span aria-live=polite>Скопировать команду</span></button>"
     "<p class=status><span class=dot></span>Жду подтверждения — страница обновится сама.</p>"
     "<p class=note>Если ты не подключал Claude сам — просто закрой эту страницу.</p>"
 )
@@ -101,7 +127,7 @@ _STYLE = (
     "@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--surface:#292524;--text:#faf8f5;"
     "--muted:#bcb3aa;--border:#3a3531;--fill:#3a3531;--accent:#a8a29e;"
     "--shadow:0 2px 6px rgb(0 0 0/.25),0 12px 28px rgb(0 0 0/.35)}}"
-    "*{box-sizing:border-box}"
+    "*{box-sizing:border-box}[hidden]{display:none!important}"
     "body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;"
     "justify-content:center;padding:24px 16px;background:var(--bg);color:var(--text);"
     "font:16px/1.5 ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
@@ -120,6 +146,12 @@ _STYLE = (
     "font:600 clamp(14px,4.6vw,20px)/1.3 ui-monospace,'SF Mono',Menlo,Consolas,monospace;"
     "letter-spacing:.04em;white-space:nowrap;"
     "-webkit-user-select:all;user-select:all;overflow-wrap:anywhere}"
+    "#copy{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;"
+    "margin-top:10px;padding:11px 16px;border:0;border-radius:999px;background:var(--accent);"
+    "color:var(--surface);font:inherit;font-size:15px;font-weight:600;line-height:1.2;cursor:pointer;"
+    "transition:opacity .15s}#copy:hover{opacity:.9}"
+    "#copy:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    "#copy svg{width:18px;height:18px;flex:none}#copy.done{background:var(--text)}"
     ".status{display:flex;align-items:flex-start;gap:8px;margin-top:16px;color:var(--muted);"
     "font-size:14px}"
     ".dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;"
@@ -168,16 +200,22 @@ def _json(body: dict, status: int = 200) -> web.StreamResponse:
 
 
 def _page(
-    heading: str, body_html: str, status: int = 200, refresh: str | None = None
+    heading: str,
+    body_html: str,
+    status: int = 200,
+    refresh: str | None = None,
+    script: bool = False,
 ) -> web.StreamResponse:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    tail = f"<script>{_COPY_SCRIPT}</script>" if script else ""
     document = (
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         f"{meta}<title>{TITLE}</title><style>{_STYLE}</style></head>"
         f"<body><main><div class=brand>{_MARK}<div><b>Anchor</b>"
         "<span>подключение Claude</span></div></div>"
-        f"<div class=card><h1>{html.escape(heading)}</h1>{body_html}</div></main></body></html>"
+        f"<div class=card><h1>{html.escape(heading)}</h1>{body_html}</div></main>{tail}"
+        "</body></html>"
     )
     return _secure(web.Response(text=document, status=status, content_type="text/html"))
 
@@ -291,6 +329,7 @@ def _waiting(handle: str, code: str) -> web.StreamResponse:
         WAITING_HEADING,
         WAITING_HTML.format(code=html.escape(code)),
         refresh=f"{POLL_SECONDS};url={url}",
+        script=True,
     )
 
 
