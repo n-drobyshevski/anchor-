@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from vaultd import classes, frontmatter
+from vaultd import classes, frontmatter, knowledge
 from vaultd.manifest import Manifest
 from tests.conftest import AUTH, write
 
@@ -167,7 +167,14 @@ def test_invalid_settings_lists_no_notes(vault: Path, name: str) -> None:
     write(vault, "Anchor/Memory/0001-abcdef.md", "---\nanchor: fact\n---\n")
     scan = Manifest(vault).scan()
     assert [(e.path, e.scope) for e in scan.entries] == [("Anchor/Memory/0001-abcdef.md", "anchor")]
-    assert scan.summary.as_json() == {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "invalid"}
+    assert scan.summary.as_json() == {
+        "conflict": 0,
+        "legacy_read": 0,
+        "unknown_value": 0,
+        "settings": "invalid",
+        "knowledge_roots": [],
+        "knowledge_roots_count": 0,
+    }
 
 
 def test_a_symlinked_settings_file_is_invalid(vault: Path, tmp_path: Path) -> None:
@@ -203,14 +210,58 @@ def test_acceptance_library_diary_and_counts(vault: Path) -> None:
         ("Old/Бег.md", "personal"),
     ]
     # The diary note marked knowledge and the partner note are both conflicts.
-    assert scan.summary.as_json() == {"conflict": 2, "legacy_read": 1, "unknown_value": 1, "settings": "ok"}
+    assert scan.summary.as_json() == {
+        "conflict": 2,
+        "legacy_read": 1,
+        "unknown_value": 1,
+        "settings": "valid",
+        "knowledge_roots": ["Library"],
+        "knowledge_roots_count": 1,
+    }
 
 
-def test_absent_settings_is_reported(vault: Path) -> None:
+def test_missing_settings_is_reported(vault: Path) -> None:
     write(vault, "x.md", note("knowledge"))
     scan = Manifest(vault).scan()
     assert [e.path for e in scan.entries] == ["x.md"]
-    assert scan.summary.settings == "absent"
+    assert scan.summary.settings == "missing"
+    assert scan.summary.knowledge_roots == ()
+
+
+def test_valid_settings_with_no_knowledge_folders_reports_no_roots(vault: Path) -> None:
+    write(vault, SETTINGS, settings())  # every list defaults to []
+    write(vault, "x.md", note(None))
+    scan = Manifest(vault).scan()
+    assert scan.summary.settings == "valid"
+    assert scan.summary.knowledge_roots == ()
+    assert scan.summary.as_json()["knowledge_roots_count"] == 0
+
+
+def test_wrong_case_settings_is_reported_but_never_read_as_rules(vault: Path) -> None:
+    """The production bug: `Anchor/Settings.md` (capital S) on a
+    case-sensitive Linux disk. vaultd must notice it -- so `/vault` can
+    say so -- without ever treating it as the settings file: a
+    knowledge write into the folder it names is refused exactly as if
+    the file were simply absent (docs/decisions.md, "8e -- the settings
+    file": fail closed)."""
+    write(vault, "Anchor/Settings.md", settings("[Library]"))
+    (vault / "Library").mkdir()
+    write(vault, "Library/CCRU.md", note(None))
+
+    rules = classes.load_rules(vault)
+    assert rules.state == "absent"  # still "no rules", not "ok"
+    assert classes.wrong_case_settings_present(vault) is True
+
+    scan = Manifest(vault).scan()
+    assert scan.summary.settings == "wrong_case"
+    assert scan.summary.knowledge_roots == ()
+    # No folder rule applied, so the note under Library/ is unclassified
+    # (no anchor: property of its own) and stays invisible.
+    assert scan.entries == []
+
+    with pytest.raises(knowledge.Refused) as exc:
+        knowledge.plan_new_folders(vault, "Library/New/Note.md", rules)
+    assert exc.value.reason == "folder_missing"
 
 
 def test_editing_settings_reclassifies_without_rereading_notes(vault: Path) -> None:
@@ -291,7 +342,14 @@ async def test_the_manifest_summary_never_carries_a_path(client, vault: Path) ->
     resp = await client.get("/v1/manifest", headers=AUTH)
     raw = await resp.text()
     body = json.loads(raw)
-    assert body["summary"] == {"conflict": 3, "legacy_read": 1, "unknown_value": 1, "settings": "ok"}
+    assert body["summary"] == {
+        "conflict": 3,
+        "legacy_read": 1,
+        "unknown_value": 1,
+        "settings": "valid",
+        "knowledge_roots": ["Библиотека"],
+        "knowledge_roots_count": 1,
+    }
     assert [f["path"] for f in body["files"]] == ["Жизнь/Партнёр.md"]
     summary_json = json.dumps(body["summary"], ensure_ascii=False) + json.dumps(body["summary"])
     serialised = raw + json.dumps(body, ensure_ascii=False)

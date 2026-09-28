@@ -299,7 +299,7 @@ def _manifest(personal: int = 0, knowledge: int = 0, **summary) -> dict:
         {"path": f"Library/{i}.md", "sha256": "c" * 64, "size": 1, "scope": "note", "class": "knowledge"}
         for i in range(knowledge)
     ]
-    base = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "ok"}
+    base = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "valid", "knowledge_roots": []}
     return {"files": files, "summary": {**base, **summary}}
 
 
@@ -323,10 +323,12 @@ async def test_the_notes_line_counts_by_class_and_labels_what_needs_a_look(sessi
     await _consent(sessionmaker, True)
     stub.respond("GET", "/v1/manifest", 200, _manifest(12, 40, conflict=2, legacy_read=3, unknown_value=1))
     reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
-    assert reply.splitlines()[-1] == (
+    lines = reply.splitlines()
+    assert lines[-2] == (
         "Заметки: личные 12 · знания 40 · проверить: конфликт 2, anchor: read 3"
         " · не прочитано: неизвестная метка 1"
     )
+    assert lines[-1] == vault_ui.NOTES_ROOTS_EMPTY
     assert "Жизнь" not in reply and "Library" not in reply
 
 
@@ -335,7 +337,9 @@ async def test_the_notes_line_shows_only_nonzero_parts(sessionmaker, stub):
     await _consent(sessionmaker, True)
     stub.respond("GET", "/v1/manifest", 200, _manifest(1, 0, legacy_read=1))
     reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
-    assert reply.splitlines()[-1] == "Заметки: личные 1 · знания 0 · проверить: anchor: read 1"
+    lines = reply.splitlines()
+    assert lines[-2] == "Заметки: личные 1 · знания 0 · проверить: anchor: read 1"
+    assert lines[-1] == vault_ui.NOTES_ROOTS_EMPTY
 
 
 async def test_an_unusable_settings_file_is_named(sessionmaker, stub):
@@ -344,6 +348,66 @@ async def test_an_unusable_settings_file_is_named(sessionmaker, stub):
     stub.respond("GET", "/v1/manifest", 200, _manifest(settings="invalid"))
     reply = await _run(sessionmaker, _settings("mirror", stub.url), "/vault")
     assert reply.splitlines()[-1] == vault_ui.NOTES_SETTINGS_INVALID_LINE
+
+
+# --- 8f: the knowledge-roots line (missing/valid/wrong_case, next to the notes line) ---
+
+
+async def test_settings_roots_line_valid_with_roots(sessionmaker, stub):
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    stub.respond("GET", "/v1/manifest", 200, _manifest(knowledge_roots=["Library"]))
+    reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert reply.splitlines()[-1] == "Корни знаний: Library"
+
+
+async def test_settings_roots_line_valid_with_no_roots(sessionmaker, stub):
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    stub.respond("GET", "/v1/manifest", 200, _manifest())
+    reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert reply.splitlines()[-1] == vault_ui.NOTES_ROOTS_EMPTY
+
+
+async def test_settings_roots_line_missing(sessionmaker, stub):
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    stub.respond("GET", "/v1/manifest", 200, _manifest(settings="missing"))
+    reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert reply.splitlines()[-1] == vault_ui.NOTES_ROOTS_MISSING
+
+
+async def test_settings_roots_line_wrong_case(sessionmaker, stub):
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    stub.respond("GET", "/v1/manifest", 200, _manifest(settings="wrong_case"))
+    reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert reply.splitlines()[-1] == vault_ui.NOTES_ROOTS_WRONG_CASE
+
+
+async def test_settings_roots_line_truncates_past_five(sessionmaker, stub):
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    roots = [f"Root{i}" for i in range(7)]
+    stub.respond("GET", "/v1/manifest", 200, _manifest(knowledge_roots=roots))
+    reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert reply.splitlines()[-1] == "Корни знаний: Root0, Root1, Root2, Root3, Root4 и ещё 2"
+
+
+async def test_settings_roots_never_appear_in_logs(sessionmaker, caplog, monkeypatch, stub):
+    """Root names go into the Telegram reply, never a log record (project
+    instructions; the same live_loggers pattern as test_vault_privacy_logs.py)."""
+    for name in ("app.tg.vault", "app.tg.router", "app.vault.status", "app.vault.client"):
+        monkeypatch.setattr(logging.getLogger(name), "disabled", False)
+    await _seed(sessionmaker)
+    await _consent(sessionmaker, True)
+    secret_root = "Секретная-папка-с-планами"
+    stub.respond("GET", "/v1/manifest", 200, _manifest(knowledge_roots=[secret_root]))
+    with caplog.at_level(logging.DEBUG):
+        reply = await _run(sessionmaker, _settings("status", stub.url), "/vault")
+    assert secret_root in reply  # the Telegram reply is exactly where it belongs
+    blob = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    assert secret_root not in blob
 
 
 @pytest.mark.parametrize("manifest_status", [500, 200])

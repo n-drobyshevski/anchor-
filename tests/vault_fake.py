@@ -35,7 +35,7 @@ class FakeVault:
         # 8e: notes vaultd would list, path -> (class, content), and the
         # summary it would report. Synthetic; never a real vault.
         self.notes: dict[str, tuple[str, str]] = {}
-        self.summary = NotesSummary(conflict=0, legacy_read=0, unknown_value=0, settings="absent")
+        self.summary = NotesSummary(conflict=0, legacy_read=0, unknown_value=0, settings="missing")
         # 8d: paths that 404 on a direct GET even though the manifest
         # (already read this pass) still lists them -- vaultd
         # recomputes the effective class at read time (8e plan section
