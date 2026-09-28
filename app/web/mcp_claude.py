@@ -72,9 +72,14 @@ async def handle(request: web.Request) -> web.StreamResponse:
             return _unauthorized(settings)
         window = await grants.find_open_window(session, clock, connection.id)
         library_read = connection.library_read
+        # Belt and suspenders (W2b): write can never be true while read
+        # is false at the switch itself (app/web/oauth_store.py's
+        # set_library/set_library_write), but this reader-level `and`
+        # means a future bug there fails closed, not open.
+        library_write = connection.library_write and connection.library_read
 
     reader = mcp_core.Reader(
-        listed=grants.SCOPES + (grants.LIBRARY_SCOPE,),
+        listed=grants.SCOPES + (grants.LIBRARY_SCOPE, mcp_core.WRITE_SCOPE),
         grant=window,
         limit_key=connection.id,
         notice=NOTIFY_TEXT.format(connection=connection.id),
@@ -82,6 +87,17 @@ async def handle(request: web.Request) -> web.StreamResponse:
         instructions=INSTRUCTIONS,
         library=mcp_core.LibraryAccess(
             open=library_read, closed=mcp_core.Refusal(mcp_core.LIBRARY_CLOSED_TEXT)
+        ),
+        write=mcp_core.LibraryAccess(
+            open=library_write, closed=mcp_core.Refusal(mcp_core.WRITE_CLOSED_TEXT)
+        ),
+        connection_id=connection.id,
+        # Overridable so a test can hand the six write tools a fake
+        # vaultd (tests/claude_write_fake.py) without a real VaultClient
+        # ever reaching the network; production never sets this key, so
+        # the Reader's own default (VaultClient.from_settings) applies.
+        vault_client_factory=request.app.get(
+            "vault_client_factory", mcp_core.VaultClient.from_settings
         ),
     )
     return await mcp_core.serve(request, reader, request.app["claude_limiter"])

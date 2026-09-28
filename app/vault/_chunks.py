@@ -171,3 +171,64 @@ async def search_ranked(
         )
     ).all()
     return [(heading, body, float(rank), int(matched)) for heading, body, rank, matched in rows]
+
+
+async def search_ranked_with_file(
+    session: AsyncSession, model: type, user_text: str, limit: int, *, min_matched: int = 0
+) -> list[tuple[str | None, str, float, int, int]]:
+    """Like `search_ranked`, with the chunk's `file_id` appended (W2b).
+
+    Only `notes_knowledge.search_library_rows` calls this -- the write
+    switch's own need to hand Claude a path and a hash back
+    (anchor-claude-write-plan.md section 3) is knowledge-only; nothing
+    about a personal note's file ever needs to leave this module, and
+    `search`/`search_ranked` above stay exactly as they were so every
+    existing caller (including 8d's measurement script) is untouched.
+    """
+    if limit <= 0 or not user_text.strip():
+        return []
+    table = model.__tablename__
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                WITH q AS (
+                    SELECT
+                        to_tsquery('russian', (
+                            SELECT string_agg(quote_literal(lexeme), ' | ')
+                            FROM unnest(to_tsvector('russian', :user_text))
+                        )) AS query,
+                        (
+                            SELECT array_agg(DISTINCT lexeme)
+                            FROM unnest(to_tsvector('russian', :user_text))
+                        ) AS lexemes
+                ),
+                scored AS (
+                    SELECT
+                        c.id,
+                        c.heading,
+                        c.text,
+                        c.file_id,
+                        ts_rank_cd(c.tsv, q.query, 32) AS rank,
+                        (
+                            SELECT count(*)
+                            FROM unnest(tsvector_to_array(c.tsv)) AS w
+                            WHERE w = ANY (q.lexemes)
+                        ) AS matched
+                    FROM {table} AS c, q, user_state AS s
+                    WHERE s.id = 1 AND s.notes_consent AND c.tsv @@ q.query
+                )
+                SELECT heading, text, rank, matched, file_id
+                FROM scored
+                WHERE matched >= :min_matched
+                ORDER BY rank DESC, id
+                LIMIT :limit
+                """
+            ),
+            {"user_text": user_text, "limit": limit, "min_matched": min_matched},
+        )
+    ).all()
+    return [
+        (heading, body, float(rank), int(matched), int(file_id))
+        for heading, body, rank, matched, file_id in rows
+    ]

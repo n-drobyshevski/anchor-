@@ -79,9 +79,23 @@ BLOCKED_TOOLS = {
 # underscores; the local CLI adds claude_ai_. "Anchor", "anchor 2" and
 # "Anchor (old)" all match.
 ANCHOR_SERVER = re.compile(r"(?i)^mcp__(?:claude_ai_)?anchor\w*?__")
-# Anchor's read tools (app/web/mcp_core.py), plus the planned C3 one.
+# Anchor's read tools (app/web/mcp_core.py), C3's search_library, and
+# W2b's six write tools (app/web/claude_write.py) -- Claude Code builds
+# these, it never calls them.
 ANCHOR_TOOLS = frozenset(
-    {"get_memory", "get_journal", "get_dialogs", "get_state", "search_library"}
+    {
+        "get_memory",
+        "get_journal",
+        "get_dialogs",
+        "get_state",
+        "search_library",
+        "update_note",
+        "create_note",
+        "rename_note",
+        "get_note",
+        "list_changes",
+        "undo_changeset",
+    }
 )
 RAILWAY_LOGS = "mcp__Railway__get-logs"
 

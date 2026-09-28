@@ -202,3 +202,85 @@ async def test_a_file_with_a_foreign_class_is_refused(stub) -> None:
     with pytest.raises(VaultError) as exc:
         await _client(stub).get_file("Бег.md")
     assert exc.value.code == errors.BAD_RESPONSE
+
+
+# --- knowledge routes (W2b) ---------------------------------------------
+
+
+async def test_get_knowledge_parses_content_and_hash(stub) -> None:
+    stub.respond("GET", "/v1/knowledge", 200, {"path": "Library/CCRU.md", "sha256": "b" * 64, "content": "text"})
+    result = await _client(stub).get_knowledge("Library/CCRU.md")
+    assert result.path == "Library/CCRU.md"
+    assert result.sha256 == "b" * 64
+    assert result.content == "text"
+    assert stub.calls() == [("GET", "/v1/knowledge")]
+
+
+async def test_get_knowledge_404_is_not_found(stub) -> None:
+    stub.respond("GET", "/v1/knowledge", 404, {"error": "not_found"})
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).get_knowledge("Library/CCRU.md")
+    assert exc.value.code == errors.NOT_FOUND
+
+
+async def test_put_knowledge_sends_changeset_and_returns_hash(stub) -> None:
+    stub.respond("PUT", "/v1/knowledge", 200, {"sha256": "c" * 64})
+    sha = await _client(stub).put_knowledge("Library/CCRU.md", "new text", "a" * 64, "chg1")
+    assert sha == "c" * 64
+    assert stub.calls() == [("PUT", "/v1/knowledge")]
+
+
+async def test_put_knowledge_403_empty_body_is_refused(stub) -> None:
+    stub.respond("PUT", "/v1/knowledge", 403, b"")
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).put_knowledge("Library/CCRU.md", "x", "a" * 64, "chg1")
+    assert exc.value.code == errors.REFUSED
+
+
+async def test_put_knowledge_412_is_conflict(stub) -> None:
+    stub.respond("PUT", "/v1/knowledge", 412, {"error": "precondition_failed"})
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).put_knowledge("Library/CCRU.md", "x", "a" * 64, "chg1")
+    assert exc.value.code == errors.CONFLICT
+
+
+async def test_rename_knowledge_parses_relinked(stub) -> None:
+    stub.respond(
+        "POST", "/v1/knowledge/rename", 200,
+        {"path": "Library/New.md", "sha256": "d" * 64, "relinked": 2},
+    )
+    result = await _client(stub).rename_knowledge("Library/Old.md", "Library/New.md", "a" * 64, "chg1")
+    assert result.path == "Library/New.md"
+    assert result.sha256 == "d" * 64
+    assert result.relinked == 2
+
+
+async def test_list_changes_parses_entries(stub) -> None:
+    stub.respond(
+        "GET", "/v1/changes", 200,
+        {
+            "changes": [
+                {
+                    "id": "chg1",
+                    "kind": "write",
+                    "time": "2026-09-27T10:00:00Z",
+                    "undone": False,
+                    "files": [{"path": "Library/CCRU.md", "sha256": "e" * 64}],
+                }
+            ]
+        },
+    )
+    changes = await _client(stub).list_changes()
+    assert len(changes) == 1
+    assert changes[0].id == "chg1"
+    assert changes[0].kind == "write"
+    assert changes[0].undone is False
+    assert changes[0].files[0].path == "Library/CCRU.md"
+    assert changes[0].files[0].sha256 == "e" * 64
+
+
+async def test_undo_changeset_parses_counts(stub) -> None:
+    stub.respond("POST", "/v1/undo", 200, {"restored": 2, "refused": 1})
+    result = await _client(stub).undo_changeset("chg1")
+    assert result.restored == 2
+    assert result.refused == 1

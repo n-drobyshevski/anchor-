@@ -97,7 +97,7 @@ async def test_claude_library_on_and_off_and_the_status_line(sessionmaker):
     async with TestClient(TestServer(world.app)) as client:
         await world.connect(client)
     assert await world.command("/claude library on") == claude_ui.LIBRARY_SET_ON
-    assert "Библиотека: включена." in await world.command("/claude")
+    assert "Библиотека: включена · запись выключена." in await world.command("/claude")
     assert await world.command("/claude library off") == claude_ui.LIBRARY_SET_OFF
     assert "Библиотека: выключена." in await world.command("/claude")
     assert await world.command("/claude library maybe") == claude_ui.LIBRARY_USAGE

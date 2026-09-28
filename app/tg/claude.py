@@ -32,6 +32,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
+from app.core import clock as clock_module
 from app.core import grants
 from app.core.clock import Clock
 from app.core.clock import zone as zone_of
@@ -41,7 +42,9 @@ from app.core.state import get_state
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
 from app.tg.vault import _ru_plural
-from app.web import oauth, oauth_store
+from app.vault.client import VaultClient
+from app.web import claude_write, oauth, oauth_store
+from app.web.claude_write import Refused, undoable_changesets
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,10 @@ USAGE = (
     "/claude — подключение и окно для чтения\n"
     "/claude connect КОД — подтвердить подключение кодом со страницы claude.ai\n"
     "/claude disconnect — закрыть подключение\n"
-    "/claude library on|off — включить или выключить библиотеку"
+    "/claude library on|off — включить или выключить библиотеку\n"
+    "/claude library write on|off — включить или выключить запись в библиотеку\n"
+    "/claude undo — откатить последнее изменение Claude\n"
+    "/claude undo all — откатить все изменения Claude за последние 24 часа"
 )
 NO_CONNECTION = (
     "Нет подключения.\n\n"
@@ -69,13 +75,28 @@ STATUS = "Подключение #{id} от {created}, до {expires}."
 # C3: the library's standing switch, shown as one more status line, and
 # also the answer to a no-connection `/claude library on|off` -- reuses
 # NO_CONNECTION's own wording style rather than a new string.
-LIBRARY_LINE = "Библиотека: {state}."
-LIBRARY_ON = "включена"
-LIBRARY_OFF = "выключена"
+LIBRARY_LINE_OFF = "Библиотека: выключена."
+LIBRARY_LINE_READ_ONLY = "Библиотека: включена · запись выключена."
+LIBRARY_LINE_READ_WRITE = "Библиотека: включена · запись включена."
 LIBRARY_NO_CONNECTION = "Нет подключения. Сначала подключи Claude: /claude"
 LIBRARY_USAGE = "/claude library on|off"
 LIBRARY_SET_ON = "Библиотека включена. Читать её Claude может без окна, пока подключение живо."
 LIBRARY_SET_OFF = "Библиотека выключена."
+
+# W2b (plan section 5): the write switch, off by default, needs read on.
+LIBRARY_WRITE_USAGE = "/claude library write on|off"
+LIBRARY_WRITE_NEEDS_READ = "Сначала включи чтение: /claude library on"
+LIBRARY_WRITE_SET_ON = (
+    "Запись в библиотеку включена: Claude может менять заметки-знания. Откатить: /claude undo"
+)
+LIBRARY_WRITE_SET_OFF = "Запись в библиотеку выключена."
+
+# W2b (plan section 6): /claude undo, undo all.
+UNDO_NOTHING = "Нечего откатывать."
+UNDO_CAP = "Слишком много откатов за час. Попробуй позже."
+UNDO_DONE = "Откатил: {restored} {noun}."
+UNDO_REFUSED_SUFFIX = " Не откатил {refused}: их изменили после Claude."
+UNDO_FILE_FORMS = ("файл", "файла", "файлов")
 WINDOW_TEXT = (
     "{status}\n\n"
     "Окно для чтения, только чтение. Всё, что Claude прочитает, уйдёт в "
@@ -110,6 +131,19 @@ DIGEST_FORMS = ("запрос", "запроса", "запросов")
 # short enough that "the first allowed tick that day or the next"
 # reads as "shortly after the block lifts", not "sometime tomorrow".
 DIGEST_RETRY = datetime.timedelta(minutes=15)
+
+# W2b (plan section 6.7): the digest's write line and its undo-all button.
+DIGEST_WRITE_LINE = "Claude за сутки изменил {n} {noun}: {titles}."
+DIGEST_WRITE_FORMS = ("заметку", "заметки", "заметок")
+DIGEST_REFUSED_SUFFIX = " Отклонено: {k}."
+DIGEST_MAX_TITLES = 10
+DIGEST_MORE = "и ещё {m}"
+DIGEST_CREATED_SUFFIX = " (создана)"
+DIGEST_RENAMED_SEP = " → "
+DIGEST_RENAMED_SUFFIX = " (переименована)"
+UNDO_ALL_BUTTON = "Откатить всё за сутки"
+UNDO_STALE = "Устарело."
+UNDO_DAY_DONE = "Откатил за {date}: {restored} {noun}."
 
 
 def available(settings: Settings) -> str | None:
@@ -163,7 +197,11 @@ def _local(moment, timezone: str) -> str:
 
 
 def _library_line(connection) -> str:
-    return LIBRARY_LINE.format(state=LIBRARY_ON if connection.library_read else LIBRARY_OFF)
+    """The three-way status line (W2b: read off / read on, write off /
+    read on, write on)."""
+    if not connection.library_read:
+        return LIBRARY_LINE_OFF
+    return LIBRARY_LINE_READ_WRITE if connection.library_write else LIBRARY_LINE_READ_ONLY
 
 
 async def _window_text(session, clock: Clock, connection, period: int, ttl: int) -> str:
@@ -226,6 +264,60 @@ async def library(sessionmaker, clock: Clock, word: str) -> str:
     return LIBRARY_SET_ON if connection.library_read else LIBRARY_SET_OFF
 
 
+async def library_write(sessionmaker, clock: Clock, word: str) -> str:
+    """`/claude library write on|off` (W2b, plan section 5): the write
+    switch. `on` with read off is refused without touching the DB --
+    read-then-refuse, so a retry after `/claude library on` just works."""
+    if word not in ("on", "off"):
+        return LIBRARY_WRITE_USAGE
+    async with sessionmaker() as session:
+        connection = await oauth_store.current_connection(session, clock)
+        if connection is None:
+            return LIBRARY_NO_CONNECTION
+        if word == "on" and not connection.library_read:
+            return LIBRARY_WRITE_NEEDS_READ
+        connection = await oauth_store.set_library_write(session, clock, word == "on")
+    return LIBRARY_WRITE_SET_ON if connection.library_write else LIBRARY_WRITE_SET_OFF
+
+
+def _undo_reply(restored: int, refused: int) -> str:
+    text = UNDO_DONE.format(restored=restored, noun=_ru_plural(restored, UNDO_FILE_FORMS))
+    if refused:
+        text += UNDO_REFUSED_SUFFIX.format(refused=refused)
+    return text
+
+
+async def undo(
+    sessionmaker, settings: Settings, clock: Clock, scope: str,
+    client_factory=VaultClient.from_settings,
+) -> str:
+    """`/claude undo` (last changeset) / `/claude undo all` (last 24h),
+    plan section 6.2. Works even with the write switch off -- it only
+    ever restores the user's own text -- but needs a live connection."""
+    async with sessionmaker() as session:
+        connection = await oauth_store.current_connection(session, clock)
+        if connection is None:
+            return LIBRARY_NO_CONNECTION
+        since = None if scope == "last" else clock.now_utc() - datetime.timedelta(hours=24)
+        limit = 1 if scope == "last" else None
+        rows = await undoable_changesets(session, connection.id, since=since, limit=limit)
+        if not rows:
+            return UNDO_NOTHING
+        client = client_factory(settings)
+        restored_total = 0
+        refused_total = 0
+        for row in rows:
+            try:
+                result = await claude_write.undo_changeset(session, clock, client, connection.id, row.id)
+            except Refused as exc:
+                if exc.code == "cap_undos":
+                    return UNDO_CAP
+                continue
+            restored_total += result["restored"]
+            refused_total += result["refused"]
+    return _undo_reply(restored_total, refused_total)
+
+
 async def command(
     sessionmaker,
     settings: Settings,
@@ -240,8 +332,14 @@ async def command(
         return await connect(sessionmaker, clock, pending, words[1]), None
     if words == ["disconnect"]:
         return await disconnect(sessionmaker, clock), None
+    if words[:2] == ["library", "write"] and len(words) == 3:
+        return await library_write(sessionmaker, clock, words[2]), None
     if words[0] == "library" and len(words) == 2:
         return await library(sessionmaker, clock, words[1]), None
+    if words == ["undo"]:
+        return await undo(sessionmaker, settings, clock, "last"), None
+    if words == ["undo", "all"]:
+        return await undo(sessionmaker, settings, clock, "all"), None
     return USAGE, None
 
 
@@ -327,17 +425,87 @@ async def handle_callback(
     await edit_keyboard(bot, chat_id, message_id, text, window_keyboard(mask, period, ttl, issued_at))
 
 
+def _title(path: str) -> str:
+    return path.rsplit("/", 1)[-1].removesuffix(".md")
+
+
+def _changeset_markers(row, entry) -> list[str]:
+    """One marker per note a write changeset touched: a plain title,
+    "«X» (создана)" or "«C» → «D» (переименована)" (W2b, plan section
+    6.7). Best effort from vaultd's flat per-changeset file list: the
+    ledger keeps only aggregate `created`/`renamed` counts, never
+    paths, so a rename is recognised by vaultd's own file ordering
+    (vaultd/vaultd/knowledge.py's `perform_rename` always lists the new
+    path immediately before its now-absent old path, whose exposed
+    hash is null) rather than a stored role per file.
+    """
+    if entry is None or not entry.files:
+        return []
+    files = list(entry.files)
+    claimed: set[int] = set()
+    markers: list[str] = []
+    if row.renamed:
+        for i, f in enumerate(files):
+            if f.sha256 is None and i > 0 and (i - 1) not in claimed:
+                old_title, new_title = _title(f.path), _title(files[i - 1].path)
+                markers.append(
+                    f"«{old_title}»{DIGEST_RENAMED_SEP}«{new_title}»{DIGEST_RENAMED_SUFFIX}"
+                )
+                claimed.add(i)
+                claimed.add(i - 1)
+    created_left = row.created
+    for i, f in enumerate(files):
+        if i in claimed:
+            continue
+        title = _title(f.path)
+        if created_left > 0:
+            markers.append(f"«{title}»{DIGEST_CREATED_SUFFIX}")
+            created_left -= 1
+        else:
+            markers.append(f"«{title}»")
+    return markers
+
+
+def _write_digest_text(markers: list[str], refused: int) -> str:
+    shown = markers[:DIGEST_MAX_TITLES]
+    extra = len(markers) - len(shown)
+    titles = ", ".join(shown)
+    if extra > 0:
+        titles = f"{titles}, {DIGEST_MORE.format(m=extra)}" if titles else DIGEST_MORE.format(m=extra)
+    text = DIGEST_WRITE_LINE.format(
+        n=len(markers), noun=_ru_plural(len(markers), DIGEST_WRITE_FORMS), titles=titles
+    )
+    if refused:
+        text += DIGEST_REFUSED_SUFFIX.format(k=refused)
+    return text
+
+
+def undo_all_keyboard(local_date: datetime.date, epoch: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=UNDO_ALL_BUTTON, callback_data=f"cu:{local_date.isoformat()}:{epoch}"
+                )
+            ]
+        ]
+    )
+
+
 async def run_library_digest(
-    session, settings: Settings, clock: Clock, bot: Bot, payload: dict
+    session, settings: Settings, clock: Clock, bot: Bot, payload: dict,
+    client_factory=VaultClient.from_settings,
 ) -> None:
     """The once-a-day library digest job (connector plan section 9, C3;
-    app/core/scheduler.py's `maybe_enqueue_library_digest` queues it,
-    app/worker.py runs it).
+    W2b extends it with a write line). app/core/scheduler.py's
+    `maybe_enqueue_library_digest` queues it, app/worker.py runs it.
 
     Content-free by construction: reads only `grants.library_read_count`
-    (a date and a count, app/db/models.py's ClaudeLibraryRead), never a
-    query or a chunk. Zero reads that day -- nothing is sent, and
-    nothing is deferred either: there is nothing to retry.
+    (a date and a count) and `claude_changeset` (ids, counts, times).
+    Titles are fetched from vaultd at digest time and sent to Telegram
+    only -- never logged, never stored. Nothing that day at all --
+    nothing is sent, and nothing is deferred: there is nothing to
+    retry.
 
     `may_report_now` is asked here, not at enqueue time, and a "no"
     raises `Deferred` (app/core/scene.Deferred) rather than giving up --
@@ -348,11 +516,106 @@ async def run_library_digest(
     midnight) early the next, rather than being silently dropped.
     """
     local_date = datetime.date.fromisoformat(payload["local_date"])
-    count = await grants.library_read_count(session, local_date)
-    if count == 0:
-        return
+    read_count = await grants.library_read_count(session, local_date)
     state = await get_state(session)
+    day_start = clock_module.combine_local(local_date, datetime.time(0, 0), state.timezone)
+    day_end = clock_module.combine_local(
+        local_date + datetime.timedelta(days=1), datetime.time(0, 0), state.timezone
+    )
+    write_rows = await claude_write.changesets_between(session, day_start, day_end)
+    if read_count == 0 and not write_rows:
+        return
     if not may_report_now(settings, clock, state):
         raise Deferred(clock.now_utc() + DIGEST_RETRY)
-    text = DIGEST_TEXT.format(n=count, noun=_ru_plural(count, DIGEST_FORMS))
-    await bot.send_message(chat_id=state.chat_id, text=text)
+
+    lines = []
+    if read_count:
+        lines.append(DIGEST_TEXT.format(n=read_count, noun=_ru_plural(read_count, DIGEST_FORMS)))
+    keyboard = None
+    if write_rows:
+        client = client_factory(settings)
+        try:
+            vault_index = {c.id: c for c in await client.list_changes()}
+        except Exception:  # noqa: BLE001 - an unreachable vault must not drop the read line
+            vault_index = {}
+        markers: list[str] = []
+        refused_total = 0
+        for row in write_rows:
+            markers.extend(_changeset_markers(row, vault_index.get(row.vault_ref)))
+            refused_total += row.refused
+        if markers:
+            lines.append(_write_digest_text(markers, refused_total))
+            keyboard = undo_all_keyboard(local_date, state.vault_epoch)
+    if not lines:
+        return
+    await bot.send_message(chat_id=state.chat_id, text=" ".join(lines), reply_markup=keyboard)
+
+
+async def handle_undo_callback(
+    sessionmaker,
+    settings: Settings,
+    bot: Bot,
+    clock: Clock,
+    *,
+    callback_id: str,
+    chat_id: int,
+    message_id: int,
+    data: str,
+    client_factory=VaultClient.from_settings,
+) -> None:
+    """`cu:<YYYY-MM-DD>:<vault_epoch>` -- the digest's own [Откатить
+    всё за сутки] (W2b, plan section 6.7). Stale date, stale epoch and
+    a replay (every write changeset for that date already undone) all
+    answer «Устарело.» and change nothing; app/web/ingress.py's
+    BLOCKED_CALLBACK_PREFIX and the router's own is_web_sink guard both
+    refuse a web-sink press before this is ever called.
+    """
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "cu":
+        await answer_callback(bot, callback_id)
+        await edit_keyboard(bot, chat_id, message_id, UNDO_STALE, None)
+        return
+    try:
+        local_date = datetime.date.fromisoformat(parts[1])
+    except ValueError:
+        await answer_callback(bot, callback_id)
+        await edit_keyboard(bot, chat_id, message_id, UNDO_STALE, None)
+        return
+    epoch = parts[2]
+
+    async with sessionmaker() as session:
+        state = await get_state(session)
+        connection = await oauth_store.current_connection(session, clock)
+        if epoch != state.vault_epoch or connection is None:
+            await answer_callback(bot, callback_id)
+            await edit_keyboard(bot, chat_id, message_id, UNDO_STALE, None)
+            return
+        timezone = state.timezone
+        day_start = clock_module.combine_local(local_date, datetime.time(0, 0), timezone)
+        day_end = clock_module.combine_local(
+            local_date + datetime.timedelta(days=1), datetime.time(0, 0), timezone
+        )
+        rows = [
+            row
+            for row in await claude_write.changesets_between(session, day_start, day_end)
+            if row.undone_at is None
+        ]
+        if not rows:
+            await answer_callback(bot, callback_id)
+            await edit_keyboard(bot, chat_id, message_id, UNDO_STALE, None)
+            return
+        client = client_factory(settings)
+        restored_total = 0
+        for row in sorted(rows, key=lambda r: r.created_at, reverse=True):
+            try:
+                result = await claude_write.undo_changeset(
+                    session, clock, client, connection.id, row.id
+                )
+            except Refused:
+                continue
+            restored_total += result["restored"]
+    await answer_callback(bot, callback_id)
+    text = UNDO_DAY_DONE.format(
+        date=local_date.isoformat(), restored=restored_total, noun=_ru_plural(restored_total, UNDO_FILE_FORMS)
+    )
+    await edit_keyboard(bot, chat_id, message_id, text, None)

@@ -244,6 +244,26 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(models.VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 
+    # W2b: claude_changeset needs a live oauth_connection's id.
+    async with sessionmaker() as session:
+        connection = models.OauthConnection(
+            client_id="claude-ai", created_at=now, expires_at=now + datetime.timedelta(days=30)
+        )
+        session.add(connection)
+        await session.flush()
+        session.add(
+            models.ClaudeChangeset(
+                connection_id=connection.id,
+                vault_ref="chg_export_test",
+                kind="write",
+                files=1,
+                bytes=42,
+                created_at=now,
+                last_write_at=now,
+            )
+        )
+        await session.commit()
+
 
 # --- contents ---
 

@@ -207,7 +207,8 @@ async def test_the_debug_views_show_no_secret_column(sessionmaker):
         for table, column in rows.all():
             columns.setdefault(table, set()).add(column)
     assert columns["oauth_connection"] == {
-        "id", "created_at", "expires_at", "last_used_at", "revoked_at", "library_read"
+        "id", "created_at", "expires_at", "last_used_at", "revoked_at", "library_read",
+        "library_write",
     }
     assert columns["oauth_request"] == {
         "id", "status", "code_expires_at", "connection_id", "created_at"

@@ -16,15 +16,18 @@ table.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import NoteChunkKnowledge
+from app.db.models import NoteChunkKnowledge, VaultFile
 from app.vault import _chunks
 from app.vault._chunks import Chunk, NotesConsentOff
 
 __all__ = [
     "Chunk",
+    "LibraryRow",
     "NotesConsentOff",
     "LIBRARY_MAX_CHUNKS",
     "LIBRARY_MIN_MATCHED",
@@ -32,7 +35,23 @@ __all__ = [
     "replace_chunks",
     "search",
     "search_library",
+    "search_library_rows",
 ]
+
+
+@dataclass(frozen=True)
+class LibraryRow:
+    """One `search_library` result, with the path and hash W2b's write
+    switch needs to let Claude name the note it read (plan section 3).
+    `sha256` is the vault's last-synced hash of the file
+    (`vault_file.disk_sha256`), a hint for which note to `get_note` --
+    never treated as a fresh CAS `base_hash` on its own; a write tool
+    always re-reads first."""
+
+    heading: str | None
+    text: str
+    path: str
+    sha256: str | None
 
 # Connector plan section 9 (C3), the user's fixed decision -- not a
 # setting, so a deploy cannot loosen either number:
@@ -88,3 +107,35 @@ async def search_library(
         session, NoteChunkKnowledge, user_text, limit, min_matched=min_matched
     )
     return [f"«{heading}»: {body}" if heading else body for heading, body, _rank, _matched in rows]
+
+
+async def search_library_rows(
+    session: AsyncSession,
+    user_text: str,
+    *,
+    limit: int = LIBRARY_MAX_CHUNKS,
+    min_matched: int = LIBRARY_MIN_MATCHED,
+) -> list[LibraryRow]:
+    """Like `search_library`, but structured, with each chunk's file
+    path and last-synced hash (W2b, plan section 3): `mcp_core.py`
+    builds the "with path+hash" or plain text shape depending on
+    whether the write switch is on, in one place, rather than this
+    module knowing about that switch at all.
+    """
+    rows = await _chunks.search_ranked_with_file(
+        session, NoteChunkKnowledge, user_text, limit, min_matched=min_matched
+    )
+    if not rows:
+        return []
+    file_ids = {file_id for _h, _t, _r, _m, file_id in rows}
+    result = await session.execute(
+        select(VaultFile.id, VaultFile.path, VaultFile.disk_sha256).where(VaultFile.id.in_(file_ids))
+    )
+    by_id = {fid: (path, sha) for fid, path, sha in result.all()}
+    out = []
+    for heading, body, _rank, _matched, file_id in rows:
+        path, sha = by_id.get(file_id, (None, None))
+        if path is None:
+            continue
+        out.append(LibraryRow(heading=heading, text=body, path=path, sha256=sha))
+    return out

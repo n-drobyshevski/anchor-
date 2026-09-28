@@ -2220,6 +2220,27 @@ def build_router(
             message_text=callback.message.text,
         )
 
+    @router.callback_query(F.data.startswith("cu:"))
+    async def claude_undo_all_callback(callback: CallbackQuery) -> None:
+        """`cu:<date>:<epoch>` -- the Claude write digest's own
+        [Откатить всё за сутки] (W2b). Refused from the web chat, like
+        `v:`, `g:` and `cl:`: the digest that carries this button is
+        only ever sent to Telegram.
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await claude_ui.handle_undo_callback(
+            sessionmaker,
+            settings,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
     @router.callback_query()
     async def unknown_callback(callback: CallbackQuery) -> None:
         """Always answer, or the button spins in the client until it times out."""

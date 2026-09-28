@@ -44,6 +44,8 @@ from app.core import clock as clock_module
 from app.core import grants
 from app.db.models import AccessGrant, UserState
 from app.vault import notes_knowledge
+from app.web import claude_write
+from app.vault.client import VaultClient
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,27 @@ _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": F
 LIBRARY_CLOSED_TEXT = "Библиотека закрыта. Включи в Telegram: /claude library on"
 LIBRARY_NOTES_OFF_TEXT = "Заметки выключены. Включи в Telegram: /vault notes on"
 LIBRARY_EMPTY_TEXT = "В библиотеке ничего не нашлось."
+
+# W2b (anchor-claude-write-plan.md sections 3, 5): the write switch's
+# own gate, same shape as LibraryAccess above -- a standing switch, not
+# a window. WRITE_CLOSED_TEXT names the *reason* (write is off); every
+# other refusal on the write tool surface is the one fixed
+# WRITE_REFUSED_TEXT, which never says why and never echoes a path
+# (app/web/claude_write.py logs the reason code).
+WRITE_SCOPE = "claude_write"
+WRITE_CLOSED_TEXT = "Запись в библиотеку выключена. Включи в Telegram: /claude library write on"
+WRITE_REFUSED_TEXT = "Запись отклонена."
+WRITE_TOOLS = frozenset(
+    {"get_note", "update_note", "create_note", "rename_note", "list_changes", "undo_changeset"}
+)
+# undo_changeset works even with the write switch off (plan section
+# 6.2: "Undo works even if the write switch is off... needs a live
+# connection"), so it alone is dispatched without the write-switch gate.
+UNGATED_WRITE_TOOLS = frozenset({"undo_changeset"})
+
+_WRITE_READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
+_WRITE_DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False}
+_WRITE_CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
 
 TOOLS = {
     "get_memory": {
@@ -140,6 +163,81 @@ TOOLS = {
             "additionalProperties": False,
         },
     },
+    "get_note": {
+        "scope": WRITE_SCOPE,
+        "description": "Read one knowledge note's full body and hash. Only while the write switch is on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 500}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        "annotations": _WRITE_READ_ONLY,
+    },
+    "update_note": {
+        "scope": WRITE_SCOPE,
+        "description": "Replace a knowledge note's body. Requires the hash from a previous read (base_hash).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "new_body": {"type": "string", "maxLength": 65536},
+                "base_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+            },
+            "required": ["path", "new_body", "base_hash"],
+            "additionalProperties": False,
+        },
+        "annotations": _WRITE_DESTRUCTIVE,
+    },
+    "create_note": {
+        "scope": WRITE_SCOPE,
+        "description": "Create a new knowledge note. Refused if the name is already taken.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "minLength": 1, "maxLength": 500},
+                "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                "body": {"type": "string", "maxLength": 65536},
+            },
+            "required": ["folder", "title", "body"],
+            "additionalProperties": False,
+        },
+        "annotations": _WRITE_CREATE,
+    },
+    "rename_note": {
+        "scope": WRITE_SCOPE,
+        "description": (
+            "Rename or move a knowledge note, rewriting every knowledge note that links to it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "new_path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "base_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+            },
+            "required": ["path", "new_path", "base_hash"],
+            "additionalProperties": False,
+        },
+        "annotations": _WRITE_DESTRUCTIVE,
+    },
+    "list_changes": {
+        "scope": WRITE_SCOPE,
+        "description": "Recent changesets Claude made: id, time, the files' titles, and whether undone.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": _WRITE_READ_ONLY,
+    },
+    "undo_changeset": {
+        "scope": WRITE_SCOPE,
+        "description": "Restore every file in one of Claude's changesets from its pre-image.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "integer", "minimum": 1}},
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        "annotations": _WRITE_DESTRUCTIVE,
+    },
 }
 
 NOT_PERMITTED = "Unknown or not permitted tool"
@@ -198,6 +296,11 @@ class Reader:
       "журнал (14)".
     - `library`: `search_library`'s own gate (see LibraryAccess), never
       `grant`/`refusal` -- the switch is standing, not a window.
+    - `write`: the six write tools' own gate (W2b), same shape as
+      `library` -- a second standing switch, never `grant`/`refusal`.
+    - `vault_client_factory`: how a write tool reaches vaultd. Grok's
+      Reader never sets this (it is never asked for, since Grok's
+      `write` is always closed); Claude's passes `VaultClient.from_settings`.
     """
 
     listed: tuple[str, ...]
@@ -207,6 +310,9 @@ class Reader:
     refusal: Refusal = RPC_REFUSAL
     instructions: str = SERVER_INSTRUCTIONS
     library: LibraryAccess = LIBRARY_CLOSED
+    write: LibraryAccess = LIBRARY_CLOSED
+    vault_client_factory: object = VaultClient.from_settings
+    connection_id: int | None = None
 
 
 class RateLimiter:
@@ -256,7 +362,7 @@ def tools_for(scopes: tuple[str, ...] | list[str]) -> list[dict]:
             "name": name,
             "description": spec["description"],
             "inputSchema": spec["inputSchema"],
-            "annotations": _READ_ONLY,
+            "annotations": spec.get("annotations", _READ_ONLY),
         }
         for name, spec in TOOLS.items()
         if spec["scope"] in scopes
@@ -346,7 +452,7 @@ async def _serve_search_library(
                     extra={"event": "search_library", "reason": "notes_off"},
                 )
                 return _tool_text(request_id, LIBRARY_NOTES_OFF_TEXT, is_error=True)
-            results = await notes_knowledge.search_library(session, query)
+            rows = await notes_knowledge.search_library_rows(session, query)
             await grants.record_library_read(
                 session, clock_module.local_date(clock, timezone)
             )
@@ -358,10 +464,100 @@ async def _serve_search_library(
 
     logger.info(
         "mcp tool call",
-        extra={"event": "mcp", "kind": "search_library", "count": len(results)},
+        extra={"event": "mcp", "kind": "search_library", "count": len(rows)},
     )
-    text = "\n\n".join(results) if results else LIBRARY_EMPTY_TEXT
+    # W2b, plan section 3: with the write switch on, each result also
+    # carries the note's path and hash, so Claude can name what it
+    # edits; with it off, the shape is exactly C3's own (text only).
+    with_write = reader.write.open
+    lines = []
+    for row in rows:
+        line = f"«{row.heading}»: {row.text}" if row.heading else row.text
+        if with_write:
+            line = json.dumps(
+                {"text": line, "path": row.path, "hash": row.sha256}, ensure_ascii=False
+            )
+        lines.append(line)
+    text = "\n\n".join(lines) if lines else LIBRARY_EMPTY_TEXT
     return _tool_text(request_id, text, is_error=False)
+
+
+def _str_arg(arguments: dict, name: str) -> str:
+    value = arguments.get(name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(name)
+    return value
+
+
+async def _serve_write_tool(
+    request: web.Request, request_id, reader: Reader, name: str, arguments: dict
+) -> web.Response:
+    """`get_note`/`update_note`/`create_note`/`rename_note`/
+    `list_changes`/`undo_changeset` (W2b, plan section 3): gated by
+    `reader.write` for every tool except `undo_changeset`, which works
+    even with the write switch off (plan section 6.2) -- it only
+    restores the user's own text, and needs nothing but a live
+    connection, which `reader.connection_id` being set already proves.
+    """
+    if name not in UNGATED_WRITE_TOOLS and not reader.write.open:
+        refusal = reader.write.closed
+        if refusal.text is None:
+            return _rpc_error(request_id, -32602, NOT_PERMITTED)
+        return _tool_text(request_id, refusal.text, is_error=True)
+
+    if reader.connection_id is None:
+        return _tool_text(request_id, WRITE_REFUSED_TEXT, is_error=True)
+
+    settings: Settings = request.app["settings"]
+    sessionmaker = request.app["sessionmaker"]
+    clock = request.app["clock"]
+    client = reader.vault_client_factory(settings)
+    connection_id = reader.connection_id
+    async with sessionmaker() as session:
+        try:
+            if name == "get_note":
+                payload = await claude_write.get_note(client, _str_arg(arguments, "path"))
+            elif name == "update_note":
+                payload = await claude_write.update_note(
+                    session, clock, client, connection_id,
+                    _str_arg(arguments, "path"), _str_arg(arguments, "new_body"),
+                    _str_arg(arguments, "base_hash"),
+                )
+            elif name == "create_note":
+                payload = await claude_write.create_note(
+                    session, clock, client, connection_id,
+                    _str_arg(arguments, "folder"), _str_arg(arguments, "title"),
+                    arguments.get("body") if isinstance(arguments.get("body"), str) else "",
+                )
+            elif name == "rename_note":
+                payload = await claude_write.rename_note(
+                    session, clock, client, connection_id,
+                    _str_arg(arguments, "path"), _str_arg(arguments, "new_path"),
+                    _str_arg(arguments, "base_hash"),
+                )
+            elif name == "list_changes":
+                payload = await claude_write.list_changes(session, connection_id, client)
+            elif name == "undo_changeset":
+                changeset_id = arguments.get("id")
+                if isinstance(changeset_id, bool) or not isinstance(changeset_id, int):
+                    return _rpc_error(request_id, -32602, "Invalid arguments")
+                payload = await claude_write.undo_changeset(session, clock, client, connection_id, changeset_id)
+            else:
+                return _rpc_error(request_id, -32602, NOT_PERMITTED)
+        except ValueError:
+            return _rpc_error(request_id, -32602, "Invalid arguments")
+        except claude_write.Refused as exc:
+            logger.info(
+                "claude_write refused",
+                extra={"event": "claude_write", "tool": name, "reason": exc.code},
+            )
+            return _tool_text(request_id, WRITE_REFUSED_TEXT, is_error=True)
+        except Exception as exc:  # noqa: BLE001 - never echo internals to the client
+            logger.warning("mcp tool failed", extra={"event": type(exc).__name__, "kind": name})
+            return _rpc_error(request_id, -32603, "Internal error")
+
+    logger.info("mcp tool call", extra={"event": "mcp", "kind": name, "connection_id": connection_id})
+    return _tool_text(request_id, json.dumps(payload, ensure_ascii=False), is_error=False)
 
 
 async def serve(
@@ -422,6 +618,9 @@ async def serve(
 
     if name == "search_library":
         return await _serve_search_library(request, request_id, reader, arguments)
+
+    if name in WRITE_TOOLS:
+        return await _serve_write_tool(request, request_id, reader, name, arguments)
 
     grant = reader.grant
     if grant is None or spec["scope"] not in grant.scopes:

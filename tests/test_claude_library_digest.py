@@ -42,9 +42,11 @@ class FakeBot:
 
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.keyboards: list[object] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
         self.sent.append((chat_id, text))
+        self.keyboards.append(reply_markup)
 
 
 async def _seed_state(sessionmaker, **overrides) -> None:

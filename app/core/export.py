@@ -34,6 +34,7 @@ from app.db.models import (
     BriefNote,
     Checkin,
     CheckinOrderResult,
+    ClaudeChangeset,
     IdleChange,
     IdleRun,
     InterestTopic,
@@ -148,6 +149,11 @@ EXPORTED_MODELS = (
     # tests/test_export.py.
     VaultFile,
     VaultHold,
+    # W2b (anchor-claude-write-plan.md section 7): unlike `access_grant`
+    # and `claude_library_read` (a derived counter, deliberately kept
+    # out), this is a direct answer to "what did Claude change on my
+    # behalf" -- ids, counts and times only, no path, no text.
+    ClaudeChangeset,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

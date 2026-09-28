@@ -101,6 +101,45 @@ class FileContent:
     note_class: str | None = None
 
 
+@dataclass(frozen=True)
+class KnowledgeContent:
+    path: str
+    sha256: str
+    content: str
+
+
+@dataclass(frozen=True)
+class ChangeFile:
+    path: str
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class ChangeEntry:
+    """One row of vaultd's `GET /v1/changes` index (W2b). No pre-image
+    bytes ever reach the bot -- vaultd's own index route never returns
+    them (vaultd/vaultd/undo.py's `list_changes`)."""
+
+    id: str
+    kind: str
+    time: datetime.datetime
+    undone: bool
+    files: list[ChangeFile]
+
+
+@dataclass(frozen=True)
+class RenameResult:
+    path: str
+    sha256: str
+    relinked: int
+
+
+@dataclass(frozen=True)
+class UndoResult:
+    restored: int
+    refused: int
+
+
 def _count(value: Any) -> int:
     _require(isinstance(value, int) and not isinstance(value, bool) and value >= 0)
     return value
@@ -256,3 +295,69 @@ class VaultClient:
         deleted = data.get("deleted")
         _require(isinstance(deleted, int) and not isinstance(deleted, bool))
         return deleted
+
+    # -- knowledge: the class boundary Claude cannot cross (W2b) ------------
+
+    async def get_knowledge(self, path: str) -> KnowledgeContent:
+        data = await self._request("GET", "/v1/knowledge", params={"path": path})
+        content, sha = data.get("content"), data.get("sha256")
+        _require(isinstance(content, str) and isinstance(sha, str) and data.get("path") == path)
+        return KnowledgeContent(path=path, sha256=sha, content=content)
+
+    async def put_knowledge(
+        self, path: str, content: str, if_sha256: str | None, changeset: str
+    ) -> str:
+        data = await self._request(
+            "PUT",
+            "/v1/knowledge",
+            params={"path": path},
+            body={"content": content, "if_sha256": if_sha256, "changeset": changeset},
+        )
+        sha = data.get("sha256")
+        _require(isinstance(sha, str))
+        return sha
+
+    async def rename_knowledge(
+        self, path: str, new_path: str, if_sha256: str, changeset: str
+    ) -> RenameResult:
+        data = await self._request(
+            "POST",
+            "/v1/knowledge/rename",
+            body={"path": path, "new_path": new_path, "if_sha256": if_sha256, "changeset": changeset},
+        )
+        new_sha, relinked = data.get("sha256"), data.get("relinked")
+        _require(isinstance(new_sha, str))
+        _require(isinstance(relinked, int) and not isinstance(relinked, bool) and relinked >= 0)
+        return RenameResult(path=data.get("path", new_path), sha256=new_sha, relinked=relinked)
+
+    async def list_changes(self) -> list[ChangeEntry]:
+        data = await self._request("GET", "/v1/changes")
+        changes = data.get("changes")
+        _require(isinstance(changes, list))
+        out = []
+        for item in changes:
+            _require(isinstance(item, dict))
+            cid, kind, when, undone, files = (
+                item.get(k) for k in ("id", "kind", "time", "undone", "files")
+            )
+            _require(isinstance(cid, str) and kind in ("write", "undo") and isinstance(undone, bool))
+            _require(isinstance(files, list))
+            parsed_files = []
+            for f in files:
+                _require(isinstance(f, dict))
+                path, sha = f.get("path"), f.get("sha256")
+                _require(isinstance(path, str) and (sha is None or isinstance(sha, str)))
+                parsed_files.append(ChangeFile(path=path, sha256=sha))
+            out.append(
+                ChangeEntry(
+                    id=cid, kind=kind, time=_parse_time(when), undone=undone, files=parsed_files
+                )
+            )
+        return out
+
+    async def undo_changeset(self, vault_ref: str) -> UndoResult:
+        data = await self._request("POST", "/v1/undo", params={"changeset": vault_ref})
+        restored, refused = data.get("restored"), data.get("refused")
+        _require(isinstance(restored, int) and not isinstance(restored, bool) and restored >= 0)
+        _require(isinstance(refused, int) and not isinstance(refused, bool) and refused >= 0)
+        return UndoResult(restored=restored, refused=refused)

@@ -1250,6 +1250,12 @@ class OauthConnection(Base):
     connection starts with it off; app/tg/claude.py's `/claude library
     on|off` is the only writer besides the disconnect/revoke paths that
     zero every column here.
+
+    `library_write` (W2b, anchor-claude-write-plan.md section 5) is a
+    second standing switch, off by default, that needs `library_read`
+    on to be turned on -- turning `library_read` off also turns this
+    off (app/web/oauth_store.py's `set_library`). Gates the six write
+    tools (app/web/claude_write.py); never a grant/window scope.
     """
 
     __tablename__ = "oauth_connection"
@@ -1261,6 +1267,9 @@ class OauthConnection(Base):
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     library_read: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    library_write: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
 
@@ -1294,6 +1303,62 @@ class ClaudeLibraryRead(Base):
     )
 
     __table_args__ = (CheckConstraint("count >= 0", name="ck_claude_library_read_count"),)
+
+
+class ClaudeChangeset(Base):
+    """One row per changeset of Claude's writes to the vault (W2b,
+    anchor-claude-write-plan.md sections 6.3 and 7).
+
+    No paths, no text -- only ids, counts and times. `vault_ref` is
+    vaultd's own opaque changeset id (app/vault/client.py's
+    `put_knowledge`/`rename_knowledge`/`undo_changeset` all take it).
+    `kind='write'` rows are minted or reused by app/web/claude_write.py
+    (a 10-minute idle window per connection); `kind='undo'` rows are
+    recorded when `/claude undo` or the `undo_changeset` tool restores
+    one. `created`/`renamed` count, within a write changeset, how many
+    of its files were a `create_note` or a `rename_note` -- needed only
+    for the daily digest's "(создана)"/"(переименована)" markers,
+    since `GET /v1/changes` does not itself distinguish a create or a
+    rename from a plain update. `undone_at` is set on the *write* row
+    once it has been undone (never on an undo row itself: an undo
+    cannot be undone). `/export` includes this table (ids, counts,
+    times); `/delete` truncates it, cascading from `oauth_connection`.
+    """
+
+    __tablename__ = "claude_changeset"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("oauth_connection.id", ondelete="CASCADE"), nullable=False
+    )
+    vault_ref: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    files: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    refused: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    renamed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_write_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    undone_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("kind in ('write', 'undo')", name="ck_claude_changeset_kind"),
+        CheckConstraint("files >= 0", name="ck_claude_changeset_files"),
+        CheckConstraint("bytes >= 0", name="ck_claude_changeset_bytes"),
+        CheckConstraint("refused >= 0", name="ck_claude_changeset_refused"),
+        CheckConstraint("created >= 0", name="ck_claude_changeset_created"),
+        CheckConstraint("renamed >= 0", name="ck_claude_changeset_renamed"),
+        Index("ix_claude_changeset_connection_id", "connection_id"),
+    )
 
 
 class OauthRequest(Base):
