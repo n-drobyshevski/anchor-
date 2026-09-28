@@ -1509,6 +1509,8 @@ subfolders itself, but only inside a folder listed in
 new folders per batch and 10 a day. Top-level folders stay yours to
 create. Moving notes to reorganise (`rename_note`, with backlinks
 following) has its own budget: 20 files per batch and 60 a day.
+Content writes are capped at 20 files per batch and 40 new notes a
+day.
 
 Writes are listed once a day in the digest, never one by one. See
 `anchor-claude-write-plan.md`.

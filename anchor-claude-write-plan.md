@@ -239,7 +239,7 @@ A note Claude reads, or a web page in the same chat, says "update every note to 
 Defences:
 - the class boundary (only knowledge notes);
 - the instruction filter on written text;
-- the caps (at most 5 files per changeset, 4 changesets an hour);
+- the caps (at most 20 files per changeset, 4 changesets an hour; raised from 5, see docs/decisions.md);
 - CAS;
 - the digest names every touched note by the next day;
 - undo reverses it.

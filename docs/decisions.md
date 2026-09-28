@@ -2560,3 +2560,17 @@ created no folders. Your decisions:
 - The digest says «Создал N папку/папки/папок.» when folders were
   created. `claude_changeset` gains `folders` and `moves` counters, and
   still holds no text or paths.
+
+## Claude's content-write caps raised: 20 files per changeset, 40 new notes a day
+
+Production: a batch of one topic note plus its people and concept
+notes stopped at the sixth file (`cap_files`). Five files per
+changeset and ten new notes a day were too tight for building out a
+topic in one go. Your decision:
+
+- `FILES_PER_CHANGESET` 5 → 20, in both copies (app/core/
+  claude_write_limits.py and vaultd/vaultd/config.py), kept equal.
+- `CREATES_PER_DAY` 10 → 40 (bot-side only, as before).
+- Unchanged: 4 changesets an hour, 4 undos an hour, 64 KB per file,
+  512 KB per connection per day, the folder and move budgets.
+- They stay code constants, never environment variables.

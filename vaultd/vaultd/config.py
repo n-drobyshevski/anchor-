@@ -54,7 +54,7 @@ OB_BIN = "/app/node_modules/.bin/ob"
 # FILES_PER_CHANGESET covers content writes only (rev. 3 splits renames
 # off into their own MOVE_FILES_PER_CHANGESET/MOVES_PER_DAY budget).
 KNOWLEDGE_WRITE_MAX_BYTES = 64 * 1024
-FILES_PER_CHANGESET = 5
+FILES_PER_CHANGESET = 20
 CHANGESETS_PER_HOUR = 4
 UNDOS_PER_HOUR = 4
 UNDO_TTL_DAYS = 14

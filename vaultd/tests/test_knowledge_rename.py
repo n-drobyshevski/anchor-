@@ -182,7 +182,7 @@ async def test_refused_when_the_destination_folder_does_not_exist_and_has_no_kno
 
 async def test_refused_when_touching_more_files_than_the_move_cap(client, vault: Path):
     """Rev. 3: a rename's own budget is MOVE_FILES_PER_CHANGESET (20),
-    not the content-write FILES_PER_CHANGESET (5) -- 20 backlinks plus
+    not the content-write FILES_PER_CHANGESET (20) -- 20 backlinks plus
     the moved file itself is 21, one past the cap."""
     from vaultd.config import MOVE_FILES_PER_CHANGESET
 
