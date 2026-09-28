@@ -44,7 +44,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from vaultd.config import CHANGESETS_PER_HOUR, FILES_PER_CHANGESET, UNDO_TTL_DAYS
+from vaultd.config import (
+    CHANGESETS_PER_HOUR,
+    FILES_PER_CHANGESET,
+    FOLDERS_PER_CHANGESET,
+    FOLDERS_PER_DAY,
+    MOVE_FILES_PER_CHANGESET,
+    MOVES_PER_DAY,
+    UNDO_TTL_DAYS,
+)
 
 Clock = Callable[[], datetime]
 
@@ -85,12 +93,21 @@ REFUSAL_REASONS = frozenset(
         "dest_not_knowledge",
         "linked_from_non_knowledge",
         "ambiguous_basename",
+        # knowledge.py: folder auto-creation (rev. 3, plan section 14)
+        "folder_not_under_knowledge",
+        "folder_too_deep",
+        "folder_name_bad",
         # undo.py: caps (section 6.4) and undo-of-undo/unknown ids
         "cap_files",
         "cap_changesets",
         "cap_undos",
         "changeset_kind_mismatch",
         "undo_of_undo",
+        # undo.py: rev. 3's own caps -- folders created, files moved
+        "cap_folders",
+        "cap_folders_day",
+        "cap_moves",
+        "cap_moves_day",
         # api.py: GET /v1/knowledge, file simply absent
         "missing",
     }
@@ -246,10 +263,43 @@ class UndoStore:
                 count += 1
         return count
 
+    def _recent_sum(self, field: str) -> int:
+        """Sum of `field` across every 'write' changeset started within
+        the last 24h (rolling, not calendar-day) -- MOVES_PER_DAY's and
+        FOLDERS_PER_DAY's own counters (rev. 3). `field` is either an
+        int counter (`move_files`) or a list whose length is the count
+        (`folders`); reads raw meta directly, never `list_changes`
+        (which drops exactly the fields this needs)."""
+        self.sweep()
+        cutoff = self._clock() - timedelta(hours=24)
+        total = 0
+        try:
+            scanned = list(os.scandir(self._base()))
+        except OSError:
+            scanned = []
+        for entry in scanned:
+            meta = self._read_meta(entry.name)
+            if meta is None or meta.get("kind") != "write":
+                continue
+            try:
+                when = datetime.fromisoformat(meta["time"])
+            except (KeyError, ValueError):
+                continue
+            if when < cutoff:
+                continue
+            value = meta.get(field, [] if field == "folders" else 0)
+            total += len(value) if isinstance(value, list) else value
+        return total
+
     # -- capacity, checked before any byte is written -----------------------
 
     def precheck(self, changeset_id: str, kind: str, n_files: int) -> None:
-        """Raise CapExceeded if adding `n_files` to `changeset_id` would not fit.
+        """Raise CapExceeded if adding `n_files` content-write files to
+        `changeset_id` would not fit (FILES_PER_CHANGESET). A rename's
+        own files (`precheck_moves`) are counted separately -- a
+        changeset's `files` list can hold both kinds (a content write
+        and a rename can share one 10-minute idle window), so this
+        reads the `content_files` counter, never `len(meta["files"])`.
 
         Pure read: never creates the changeset or writes a blob, so a
         cap refusal here leaves nothing to roll back.
@@ -263,18 +313,53 @@ class UndoStore:
         else:
             if meta["kind"] != kind:
                 raise CapExceeded("changeset_kind_mismatch")
-            current_files = len(meta["files"])
+            current_files = meta.get("content_files", 0)
         if current_files + n_files > FILES_PER_CHANGESET:
             raise CapExceeded("cap_files")
 
+    def precheck_moves(self, changeset_id: str, n_files: int) -> None:
+        """Rev. 3's move budget: MOVE_FILES_PER_CHANGESET per changeset,
+        MOVES_PER_DAY per rolling 24h -- entirely separate from
+        `precheck` above, so a rename's moved file and its rewritten
+        backlinks never spend the content-write budget, or vice versa.
+        Mints/rate-limits a new changeset exactly like `precheck` does
+        (CHANGESETS_PER_HOUR, kind mismatch), so a caller doing both a
+        content write and a rename in the same changeset may call
+        either precheck first."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            if self.count_recent("write") >= CHANGESETS_PER_HOUR:
+                raise CapExceeded("cap_changesets")
+            current = 0
+        else:
+            if meta["kind"] != "write":
+                raise CapExceeded("changeset_kind_mismatch")
+            current = meta.get("move_files", 0)
+        if current + n_files > MOVE_FILES_PER_CHANGESET:
+            raise CapExceeded("cap_moves")
+        if self._recent_sum("move_files") + n_files > MOVES_PER_DAY:
+            raise CapExceeded("cap_moves_day")
+
+    def precheck_folders(self, changeset_id: str, n_folders: int) -> None:
+        """Rev. 3's folder-creation budget: FOLDERS_PER_CHANGESET per
+        changeset, FOLDERS_PER_DAY per rolling 24h. Always called
+        alongside `precheck`/`precheck_moves` for the same write (a
+        folder is only ever created on the way to a content write or a
+        rename), so it mints no changeset of its own."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        current = len(meta.get("folders", [])) if meta else 0
+        if current + n_folders > FOLDERS_PER_CHANGESET:
+            raise CapExceeded("cap_folders")
+        if self._recent_sum("folders") + n_folders > FOLDERS_PER_DAY:
+            raise CapExceeded("cap_folders_day")
+
     # -- writing -------------------------------------------------------------
 
-    def append(self, changeset_id: str, kind: str, entries: list[FileEntry]) -> None:
-        """Add `entries` to `changeset_id`, creating it (with `kind`) if new.
-
-        Callers must have called `precheck` for the same counts first,
-        under the same lock -- this does not re-check caps, only writes.
-        """
+    def _append_files(
+        self, changeset_id: str, kind: str, entries: list[FileEntry], counter: str, count: int
+    ) -> None:
         cdir = self._dir(changeset_id)
         blobs_dir = cdir / "blobs"
         blobs_dir.mkdir(parents=True, exist_ok=True)
@@ -291,7 +376,53 @@ class UndoStore:
             meta["files"].append(
                 {"path": entry.path, "pre_image_file": pre_image_file, "written_sha256": entry.written_sha256}
             )
+        meta[counter] = meta.get(counter, 0) + count
         self._write_meta(changeset_id, meta)
+
+    def append(self, changeset_id: str, kind: str, entries: list[FileEntry]) -> None:
+        """Add `entries` to `changeset_id` as content-write files,
+        creating it (with `kind`) if new. Callers must have called
+        `precheck` for the same counts first, under the same lock --
+        this does not re-check caps, only writes. A content write's
+        `entries` is always one FileEntry per file, so the counter is
+        `len(entries)`."""
+        self._append_files(changeset_id, kind, entries, "content_files", len(entries))
+
+    def append_move(self, changeset_id: str, kind: str, entries: list[FileEntry], n_files: int) -> None:
+        """Same as `append`, but for a rename's moved file and its
+        rewritten backlinks (rev. 3): counted under `move_files`, never
+        `content_files`, so the two budgets stay independent. Callers
+        must have called `precheck_moves` for the same `n_files` first.
+
+        `n_files` is passed explicitly, not derived from `len(entries)`:
+        an ordinary rename's `entries` holds two undo records (new path,
+        now-absent old path) for the one moved file, plus one per
+        rewritten backlink -- `len(entries) - 1` -- but a mid-rename
+        failure (`MidRenameFailure`) records only the new path's single
+        entry, still one moved file, and the caller knows which shape
+        it has."""
+        self._append_files(changeset_id, kind, entries, "move_files", n_files)
+
+    def append_folders(self, changeset_id: str, kind: str, folders: list[str]) -> None:
+        """Record folders created for `changeset_id` (rev. 3) -- for the
+        per-changeset/per-day cap, and so undo can remove them again
+        (deepest first, only if still empty). Callers must have called
+        `precheck_folders` for the same count first."""
+        cdir = self._dir(changeset_id)
+        cdir.mkdir(parents=True, exist_ok=True)
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            meta = {"id": changeset_id, "kind": kind, "time": _iso(self._clock()), "undone": False, "files": []}
+        meta.setdefault("folders", [])
+        meta["folders"].extend(folders)
+        self._write_meta(changeset_id, meta)
+
+    def folders_of(self, changeset_id: str) -> list[str]:
+        """The folder paths created for `changeset_id`, shallow to deep
+        (creation order) -- undo removes them in reverse."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        return list(meta.get("folders", [])) if meta else []
 
     def mark_undone(self, changeset_id: str) -> None:
         meta = self._read_meta(changeset_id)

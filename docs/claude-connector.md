@@ -80,10 +80,16 @@ turns writing off too, and so do `/revoke`, `/claude disconnect` and a
 new connection.
 
 - **What Claude can do:**
+  - `list_tree` lists knowledge folders and note titles (no text), so
+    Claude can see the vault's structure before writing;
   - `update_note` rewrites a note;
-  - `create_note` adds a note in a knowledge folder;
+  - `create_note` adds a note in a knowledge folder -- `folder` may be
+    a nested path, and a subfolder that does not yet exist is created
+    automatically, inside a knowledge folder only, at most 4 levels
+    deep;
   - `rename_note` moves a note and rewrites its `[[links]]` in other
-    knowledge notes;
+    knowledge notes; moves have their own budget, separate from
+    creating or editing notes;
   - `get_note` reads one note;
   - `list_changes` shows recent batches.
 
@@ -92,17 +98,20 @@ new connection.
 - **What stops it:**
   - vaultd accepts only notes that are knowledge at write time, never
     `Anchor/`, and never a change of a note's class;
+  - a new folder is only ever built from an existing folder already
+    covered by your `knowledge_folders` settings, and never at the top
+    level;
   - a note you changed since Claude read it is refused, never merged;
   - text that reads like an instruction to a model, or holds a secret,
     is refused;
-  - caps limit files, batches, bytes and new notes per hour and per
-    day.
+  - caps limit files, folders, moves, batches, bytes and new notes per
+    hour and per day.
 
   Every refusal says only «Запись отклонена.».
 - **What you see:** each file Claude touched carries
   `anchor_edited_by: claude` and `anchor_edited_at`. One daily message
   lists the changed notes, «Claude за сутки изменил N заметок: …», with
-  [Откатить всё за сутки].
+  a note if any new folders were created, and [Откатить всё за сутки].
 - **Undo:** Claude's `undo_changeset`, `/claude undo` (the latest
   batch) or `/claude undo all` (the last 24 h) put your earlier text
   back for 14 days. A file you edited since is left alone and counted.

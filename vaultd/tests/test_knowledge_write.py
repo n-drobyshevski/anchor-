@@ -85,10 +85,15 @@ async def test_create_needs_the_folders_own_rule_not_just_the_frontmatter(client
     assert not (vault / "Elsewhere" / "X.md").exists()
 
 
-async def test_create_in_a_folder_that_does_not_exist_is_refused(client, vault: Path):
-    resp = await _put(client, "Library/Sub/X.md", "Hello.\n", None)
+async def test_create_in_a_folder_that_does_not_exist_under_a_non_knowledge_folder_is_refused(client, vault: Path):
+    """`Elsewhere` exists but carries no folder rule at all -- rev. 3's
+    folder auto-creation (test_knowledge_folders.py) only ever builds
+    from an EXISTING ancestor that is itself covered by a
+    `knowledge_folders` rule; `Library/Sub/X.md` (Library IS such a
+    root) now succeeds instead, and is covered there."""
+    resp = await _put(client, "Elsewhere/Sub/X.md", "Hello.\n", None)
     assert resp.status == 403
-    assert not (vault / "Library" / "Sub").exists()
+    assert not (vault / "Elsewhere" / "Sub").exists()
 
 
 async def test_create_where_the_name_is_taken_is_refused(client, vault: Path):
@@ -280,7 +285,7 @@ async def test_every_403_is_byte_identical(client, vault: Path):
     scenarios = [
         _put(client, "Anchor/x.md", "x", None),
         _put(client, "Elsewhere/x.md", "x", None),
-        _put(client, "Library/Sub/x.md", "x", None),
+        _put(client, "Elsewhere/Sub/x.md", "x", None),  # no knowledge-covered ancestor to build from
         _put(client, "Life/Диван.md", "New.\n", sha(note("personal"))),
         _put(client, "Library/CCRU.md", note("personal", "New.\n"), sha(note("knowledge"))),
         _put(client, "Library/CCRU.md", "x" * 65537, None, changeset="cs-oversize"),

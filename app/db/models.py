@@ -1344,6 +1344,21 @@ class ClaudeChangeset(Base):
     renamed: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Rev. 3 (anchor-claude-write-plan.md section 14): folders Claude's
+    # writes created (create_note/rename_note, either one), and files
+    # touched by a rename (the moved note plus its rewritten backlinks)
+    # -- vaultd's own `folders_created`/`files_moved` counts, summed
+    # here so the bot's own mirrored caps (app/core/claude_write_limits)
+    # and the digest's "новых папок" line are ledger-backed too, not
+    # in-memory. `moves` never overlaps `files`: a rename's files count
+    # against MOVE_FILES_PER_CHANGESET/MOVES_PER_DAY only, never
+    # FILES_PER_CHANGESET.
+    folders: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    moves: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_write_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -1357,6 +1372,8 @@ class ClaudeChangeset(Base):
         CheckConstraint("refused >= 0", name="ck_claude_changeset_refused"),
         CheckConstraint("created >= 0", name="ck_claude_changeset_created"),
         CheckConstraint("renamed >= 0", name="ck_claude_changeset_renamed"),
+        CheckConstraint("folders >= 0", name="ck_claude_changeset_folders"),
+        CheckConstraint("moves >= 0", name="ck_claude_changeset_moves"),
         Index("ix_claude_changeset_connection_id", "connection_id"),
     )
 

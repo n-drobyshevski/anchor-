@@ -117,14 +117,15 @@ def test_hook_protocol_exit_code():
         # A connector renamed to something else is caught by its tools.
         "mcp__Renamed__get_dialogs",
         "mcp__claude_ai_My_Notes__search_library",
-        # W2b's six write tools, under a renamed server -- the same
-        # "caught by tool name regardless of server name" property.
+        # W2b/rev. 3's seven write tools, under a renamed server -- the
+        # same "caught by tool name regardless of server name" property.
         "mcp__claude_ai_My_Notes__update_note",
         "mcp__claude_ai_My_Notes__create_note",
         "mcp__claude_ai_My_Notes__rename_note",
         "mcp__claude_ai_My_Notes__get_note",
         "mcp__claude_ai_My_Notes__list_changes",
         "mcp__claude_ai_My_Notes__undo_changeset",
+        "mcp__claude_ai_My_Notes__list_tree",
         # The name the connector was actually given in claude.ai (C2's
         # first contact): caught by tool name, and denied by name too.
         "mcp__anc__get_journal",

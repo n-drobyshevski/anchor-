@@ -88,7 +88,15 @@ WRITE_SCOPE = "claude_write"
 WRITE_CLOSED_TEXT = "Запись в библиотеку выключена. Включи в Telegram: /claude library write on"
 WRITE_REFUSED_TEXT = "Запись отклонена."
 WRITE_TOOLS = frozenset(
-    {"get_note", "update_note", "create_note", "rename_note", "list_changes", "undo_changeset"}
+    {
+        "get_note",
+        "update_note",
+        "create_note",
+        "rename_note",
+        "list_changes",
+        "undo_changeset",
+        "list_tree",
+    }
 )
 # undo_changeset works even with the write switch off (plan section
 # 6.2: "Undo works even if the write switch is off... needs a live
@@ -191,7 +199,14 @@ TOOLS = {
     },
     "create_note": {
         "scope": WRITE_SCOPE,
-        "description": "Create a new knowledge note. Refused if the name is already taken.",
+        "description": (
+            "Create a new knowledge note. Refused if the name is already taken. `folder` may be a "
+            "nested path (e.g. \"Library/Philosophy\"); a subfolder that does not yet exist is "
+            "created automatically, inside a knowledge folder only. Call list_tree first. Put the "
+            "note in the most specific existing folder that fits; match the existing naming style; "
+            "create a new subfolder only when it groups several related notes; never at the top "
+            "level."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -207,7 +222,9 @@ TOOLS = {
     "rename_note": {
         "scope": WRITE_SCOPE,
         "description": (
-            "Rename or move a knowledge note, rewriting every knowledge note that links to it."
+            "Rename or move a knowledge note, rewriting every knowledge note that links to it. Use "
+            "this to reorganise the library instead of recreating a note elsewhere. Moves have their "
+            "own budget, separate from creating or editing notes."
         ),
         "inputSchema": {
             "type": "object",
@@ -224,6 +241,19 @@ TOOLS = {
     "list_changes": {
         "scope": WRITE_SCOPE,
         "description": "Recent changesets Claude made: id, time, the files' titles, and whether undone.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": _WRITE_READ_ONLY,
+    },
+    "list_tree": {
+        "scope": WRITE_SCOPE,
+        "description": (
+            "List every knowledge folder and the title of every knowledge note (no body text), so "
+            "the vault's structure can be seen before writing. Call this first: put a new note in "
+            "the most specific existing folder that fits, match the existing naming style, and "
+            "create a new subfolder (inside a knowledge folder only) only when it groups several "
+            "related notes -- never at the top level. Use rename_note to reorganise; moves have "
+            "their own budget. Only while the write switch is on."
+        ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _WRITE_READ_ONLY,
     },
@@ -296,7 +326,7 @@ class Reader:
       "журнал (14)".
     - `library`: `search_library`'s own gate (see LibraryAccess), never
       `grant`/`refusal` -- the switch is standing, not a window.
-    - `write`: the six write tools' own gate (W2b), same shape as
+    - `write`: the seven write tools' own gate (W2b), same shape as
       `library` -- a second standing switch, never `grant`/`refusal`.
     - `vault_client_factory`: how a write tool reaches vaultd. Grok's
       Reader never sets this (it is never asked for, since Grok's
@@ -537,6 +567,8 @@ async def _serve_write_tool(
                 )
             elif name == "list_changes":
                 payload = await claude_write.list_changes(session, connection_id, client)
+            elif name == "list_tree":
+                payload = await claude_write.list_tree(client)
             elif name == "undo_changeset":
                 changeset_id = arguments.get("id")
                 if isinstance(changeset_id, bool) or not isinstance(changeset_id, int):

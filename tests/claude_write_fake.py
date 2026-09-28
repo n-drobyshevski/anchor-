@@ -20,7 +20,15 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from app.vault import errors
-from app.vault.client import ChangeEntry, ChangeFile, KnowledgeContent, RenameResult, UndoResult
+from app.vault.client import (
+    ChangeEntry,
+    ChangeFile,
+    KnowledgeContent,
+    PutResult,
+    RenameResult,
+    Tree,
+    UndoResult,
+)
 from app.vault.errors import VaultError
 
 
@@ -46,6 +54,13 @@ class FakeKnowledgeVault:
     calls: list[tuple[str, str]] = field(default_factory=list)
     # Set to force the next rename's `relinked` count, for cap tests.
     next_relinked: int = 0
+    # Rev. 3: set to force the next put/rename's `folders_created`
+    # (vaultd's own count of new folders it built), for cap/digest
+    # tests. Overrides `files_moved` too, when a test needs a shape
+    # `1 + next_relinked` would not produce (e.g. MidRenameFailure).
+    next_folders_created: int = 0
+    next_files_moved: int | None = None
+    tree: Tree = field(default_factory=lambda: Tree(folders=[], notes=[], truncated=False))
     down: bool = False
 
     def _check_down(self) -> None:
@@ -62,7 +77,7 @@ class FakeKnowledgeVault:
         content = self.files[path]
         return KnowledgeContent(path=path, sha256=sha(content), content=content)
 
-    async def put_knowledge(self, path: str, content: str, if_sha256, changeset: str) -> str:
+    async def put_knowledge(self, path: str, content: str, if_sha256, changeset: str) -> PutResult:
         self.calls.append(("PUT", path))
         self._check_down()
         if path in self.refuse:
@@ -81,7 +96,7 @@ class FakeKnowledgeVault:
         new_sha = sha(content)
         self.files[path] = content
         self.changesets.setdefault(changeset, []).append(_Entry(path, pre_image, new_sha))
-        return new_sha
+        return PutResult(sha256=new_sha, folders_created=self.next_folders_created)
 
     async def rename_knowledge(self, path: str, new_path: str, if_sha256: str, changeset: str) -> RenameResult:
         self.calls.append(("RENAME", path))
@@ -100,7 +115,19 @@ class FakeKnowledgeVault:
         self.files[new_path] = current
         entries = [_Entry(new_path, None, new_sha), _Entry(path, current, None)]
         self.changesets.setdefault(changeset, []).extend(entries)
-        return RenameResult(path=new_path, sha256=new_sha, relinked=self.next_relinked)
+        files_moved = self.next_files_moved if self.next_files_moved is not None else 1 + self.next_relinked
+        return RenameResult(
+            path=new_path,
+            sha256=new_sha,
+            relinked=self.next_relinked,
+            folders_created=self.next_folders_created,
+            files_moved=files_moved,
+        )
+
+    async def knowledge_tree(self) -> Tree:
+        self.calls.append(("GET", "/v1/knowledge/tree"))
+        self._check_down()
+        return self.tree
 
     async def list_changes(self) -> list[ChangeEntry]:
         self.calls.append(("GET", "/v1/changes"))
@@ -161,12 +188,12 @@ async def _make_app(vault: FakeKnowledgeVault) -> web.Application:
         path = request.query.get("path", "")
         body = await request.json()
         try:
-            sha = await vault.put_knowledge(path, body["content"], body["if_sha256"], body["changeset"])
+            result = await vault.put_knowledge(path, body["content"], body["if_sha256"], body["changeset"])
         except VaultError as exc:
             if exc.code == errors.REFUSED:
                 return web.Response(status=403)
             return web.json_response({"error": exc.code}, status=_status(exc.code))
-        return web.json_response({"sha256": sha})
+        return web.json_response({"sha256": result.sha256, "folders_created": result.folders_created})
 
     async def rename_knowledge(request: web.Request) -> web.Response:
         body = await request.json()
@@ -178,7 +205,25 @@ async def _make_app(vault: FakeKnowledgeVault) -> web.Application:
             if exc.code == errors.REFUSED:
                 return web.Response(status=403)
             return web.json_response({"error": exc.code}, status=_status(exc.code))
-        return web.json_response({"path": result.path, "sha256": result.sha256, "relinked": result.relinked})
+        return web.json_response(
+            {
+                "path": result.path,
+                "sha256": result.sha256,
+                "relinked": result.relinked,
+                "folders_created": result.folders_created,
+                "files_moved": result.files_moved,
+            }
+        )
+
+    async def knowledge_tree(request: web.Request) -> web.Response:
+        tree = await vault.knowledge_tree()
+        return web.json_response(
+            {
+                "folders": tree.folders,
+                "notes": [{"path": n.path, "title": n.title} for n in tree.notes],
+                "truncated": tree.truncated,
+            }
+        )
 
     async def list_changes(request: web.Request) -> web.Response:
         changes = await vault.list_changes()
@@ -206,6 +251,7 @@ async def _make_app(vault: FakeKnowledgeVault) -> web.Application:
     app.router.add_get("/v1/knowledge", get_knowledge)
     app.router.add_put("/v1/knowledge", put_knowledge)
     app.router.add_post("/v1/knowledge/rename", rename_knowledge)
+    app.router.add_get("/v1/knowledge/tree", knowledge_tree)
     app.router.add_get("/v1/changes", list_changes)
     app.router.add_post("/v1/undo", undo)
     return app

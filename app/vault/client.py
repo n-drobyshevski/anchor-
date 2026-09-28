@@ -128,16 +128,49 @@ class ChangeEntry:
 
 
 @dataclass(frozen=True)
+class PutResult:
+    """`PUT /v1/knowledge`'s body (rev. 3 adds `folders_created`): the
+    new hash, and how many folders vaultd created on the way there
+    (`app/web/claude_write.py` sums this into `claude_changeset.folders`)."""
+
+    sha256: str
+    folders_created: int
+
+
+@dataclass(frozen=True)
 class RenameResult:
     path: str
     sha256: str
     relinked: int
+    # Rev. 3: folders vaultd created for the destination, and the total
+    # files this rename counts against the move budget (the moved note
+    # plus its rewritten backlinks -- `1 + relinked`, but read from
+    # vaultd's own response rather than recomputed here).
+    folders_created: int
+    files_moved: int
 
 
 @dataclass(frozen=True)
 class UndoResult:
     restored: int
     refused: int
+
+
+@dataclass(frozen=True)
+class TreeNote:
+    path: str
+    title: str
+
+
+@dataclass(frozen=True)
+class Tree:
+    """`GET /v1/knowledge/tree`'s body (rev. 3, BUILD item 4): the
+    knowledge folders and note titles `list_tree` hands to Claude. No
+    body text ever reaches this far."""
+
+    folders: list[str]
+    notes: list[TreeNote]
+    truncated: bool
 
 
 def _count(value: Any) -> int:
@@ -306,7 +339,7 @@ class VaultClient:
 
     async def put_knowledge(
         self, path: str, content: str, if_sha256: str | None, changeset: str
-    ) -> str:
+    ) -> PutResult:
         data = await self._request(
             "PUT",
             "/v1/knowledge",
@@ -315,7 +348,13 @@ class VaultClient:
         )
         sha = data.get("sha256")
         _require(isinstance(sha, str))
-        return sha
+        folders_created = data.get("folders_created")
+        _require(
+            isinstance(folders_created, int)
+            and not isinstance(folders_created, bool)
+            and folders_created >= 0
+        )
+        return PutResult(sha256=sha, folders_created=folders_created)
 
     async def rename_knowledge(
         self, path: str, new_path: str, if_sha256: str, changeset: str
@@ -328,7 +367,34 @@ class VaultClient:
         new_sha, relinked = data.get("sha256"), data.get("relinked")
         _require(isinstance(new_sha, str))
         _require(isinstance(relinked, int) and not isinstance(relinked, bool) and relinked >= 0)
-        return RenameResult(path=data.get("path", new_path), sha256=new_sha, relinked=relinked)
+        folders_created, files_moved = data.get("folders_created"), data.get("files_moved")
+        _require(
+            isinstance(folders_created, int)
+            and not isinstance(folders_created, bool)
+            and folders_created >= 0
+        )
+        _require(isinstance(files_moved, int) and not isinstance(files_moved, bool) and files_moved >= 0)
+        return RenameResult(
+            path=data.get("path", new_path),
+            sha256=new_sha,
+            relinked=relinked,
+            folders_created=folders_created,
+            files_moved=files_moved,
+        )
+
+    async def knowledge_tree(self) -> Tree:
+        data = await self._request("GET", "/v1/knowledge/tree")
+        folders, notes, truncated = data.get("folders"), data.get("notes"), data.get("truncated")
+        _require(isinstance(folders, list) and all(isinstance(f, str) for f in folders))
+        _require(isinstance(notes, list))
+        _require(isinstance(truncated, bool))
+        out_notes = []
+        for item in notes:
+            _require(isinstance(item, dict))
+            path, title = item.get("path"), item.get("title")
+            _require(isinstance(path, str) and isinstance(title, str))
+            out_notes.append(TreeNote(path=path, title=title))
+        return Tree(folders=folders, notes=out_notes, truncated=truncated)
 
     async def list_changes(self) -> list[ChangeEntry]:
         data = await self._request("GET", "/v1/changes")

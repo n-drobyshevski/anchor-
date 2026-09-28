@@ -136,6 +136,14 @@ DIGEST_RETRY = datetime.timedelta(minutes=15)
 DIGEST_WRITE_LINE = "Claude за сутки изменил {n} {noun}: {titles}."
 DIGEST_WRITE_FORMS = ("заметку", "заметки", "заметок")
 DIGEST_REFUSED_SUFFIX = " Отклонено: {k}."
+# Rev. 3 (plan section 14): "новых папок: N" when Claude's writes that
+# day created any folders. Pluralised with the same helper as every
+# other count in this file, over the three forms the task named
+# (папку/папки/папок) -- "N папку/папки/папок" agrees the way "N
+# заметку/заметки/заметок" already does above, so this reads as
+# ordinary Russian rather than the plain, unpluralised "Отклонено: N."
+DIGEST_FOLDERS_SUFFIX = " Создал {n} {noun}."
+DIGEST_FOLDER_FORMS = ("папку", "папки", "папок")
 DIGEST_MAX_TITLES = 10
 DIGEST_MORE = "и ещё {m}"
 DIGEST_CREATED_SUFFIX = " (создана)"
@@ -466,7 +474,7 @@ def _changeset_markers(row, entry) -> list[str]:
     return markers
 
 
-def _write_digest_text(markers: list[str], refused: int) -> str:
+def _write_digest_text(markers: list[str], refused: int, folders: int) -> str:
     shown = markers[:DIGEST_MAX_TITLES]
     extra = len(markers) - len(shown)
     titles = ", ".join(shown)
@@ -477,6 +485,8 @@ def _write_digest_text(markers: list[str], refused: int) -> str:
     )
     if refused:
         text += DIGEST_REFUSED_SUFFIX.format(k=refused)
+    if folders:
+        text += DIGEST_FOLDERS_SUFFIX.format(n=folders, noun=_ru_plural(folders, DIGEST_FOLDER_FORMS))
     return text
 
 
@@ -540,11 +550,13 @@ async def run_library_digest(
             vault_index = {}
         markers: list[str] = []
         refused_total = 0
+        folders_total = 0
         for row in write_rows:
             markers.extend(_changeset_markers(row, vault_index.get(row.vault_ref)))
             refused_total += row.refused
+            folders_total += row.folders
         if markers:
-            lines.append(_write_digest_text(markers, refused_total))
+            lines.append(_write_digest_text(markers, refused_total, folders_total))
             keyboard = undo_all_keyboard(local_date, state.vault_epoch)
     if not lines:
         return

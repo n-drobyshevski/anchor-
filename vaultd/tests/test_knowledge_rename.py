@@ -154,25 +154,64 @@ async def test_refused_when_the_destination_folder_is_personal(client, vault: Pa
     assert not (vault / "Life" / "New.md").exists()
 
 
-async def test_refused_when_the_destination_folder_does_not_exist(client, vault: Path):
+async def test_destination_folder_is_created_when_it_is_under_a_knowledge_root(client, vault: Path):
+    """Rev. 3: a rename's destination folder is auto-created the same
+    way a create's is (test_knowledge_folders.py covers the eligibility
+    rules in full) -- `Library` is a knowledge root, so `Library/Sub`
+    is built on the way."""
     write(vault, "Library/Old.md", note("knowledge"))
 
     resp = await _rename(client, "Library/Old.md", "Library/Sub/New.md", sha(note("knowledge")))
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["folders_created"] == 1
+    assert not (vault / "Library" / "Old.md").exists()
+    assert (vault / "Library" / "Sub" / "New.md").exists()
+
+
+async def test_refused_when_the_destination_folder_does_not_exist_and_has_no_knowledge_ancestor(
+    client, vault: Path
+):
+    write(vault, "Library/Old.md", note("knowledge"))
+
+    resp = await _rename(client, "Library/Old.md", "Elsewhere/Sub/New.md", sha(note("knowledge")))
     assert resp.status == 403
     assert (vault / "Library" / "Old.md").exists()
+    assert not (vault / "Elsewhere" / "Sub").exists()
 
 
-async def test_refused_when_touching_more_files_than_the_cap(client, vault: Path):
+async def test_refused_when_touching_more_files_than_the_move_cap(client, vault: Path):
+    """Rev. 3: a rename's own budget is MOVE_FILES_PER_CHANGESET (20),
+    not the content-write FILES_PER_CHANGESET (5) -- 20 backlinks plus
+    the moved file itself is 21, one past the cap."""
+    from vaultd.config import MOVE_FILES_PER_CHANGESET
+
     write(vault, "Library/Old.md", note("knowledge"))
-    for i in range(5):
+    n = MOVE_FILES_PER_CHANGESET
+    for i in range(n):
         write(vault, f"Library/Linker{i}.md", note("knowledge", "See [[Old]].\n"))
-    before = [(vault / "Library" / f"Linker{i}.md").read_bytes() for i in range(5)]
+    before = [(vault / "Library" / f"Linker{i}.md").read_bytes() for i in range(n)]
 
     resp = await _rename(client, "Library/Old.md", "Library/New.md", sha(note("knowledge")))
     assert resp.status == 403
     assert (vault / "Library" / "Old.md").exists()
-    after = [(vault / "Library" / f"Linker{i}.md").read_bytes() for i in range(5)]
+    after = [(vault / "Library" / f"Linker{i}.md").read_bytes() for i in range(n)]
     assert before == after
+
+
+async def test_a_rename_touching_ten_files_passes(client, vault: Path):
+    """Well under both the old content cap (5) and the new move cap
+    (20) -- proves the move budget, not the content-write one, is what
+    now governs a rename."""
+    write(vault, "Library/Old.md", note("knowledge"))
+    for i in range(9):
+        write(vault, f"Library/Linker{i}.md", note("knowledge", "See [[Old]].\n"))
+
+    resp = await _rename(client, "Library/Old.md", "Library/New.md", sha(note("knowledge")))
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["files_moved"] == 10
+    assert body["relinked"] == 9
 
 
 async def test_source_class_must_be_knowledge(client, vault: Path):

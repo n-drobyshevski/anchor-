@@ -98,6 +98,23 @@ def sanitize_title(title: str) -> str:
     return cleaned + ".md"
 
 
+def sanitize_folder(folder: str) -> str:
+    """A nested folder path for `create_note` (rev. 3, plan section 14,
+    BUILD item 7): each segment checked the way a title is -- no empty
+    segment, no `..`, no leading `.`. vaultd decides the rest (segment
+    length, control characters, `Anchor`, NFC, symlinks, and whether the
+    path may actually be built -- the knowledge-root/depth rules)."""
+    cleaned = []
+    for segment in folder.strip("/").split("/"):
+        segment = segment.strip()
+        if not segment or segment == ".." or segment.startswith("."):
+            raise Refused("bad_folder")
+        cleaned.append(segment)
+    if not cleaned:
+        raise Refused("bad_folder")
+    return "/".join(cleaned)
+
+
 def _check_content(new_body: str) -> None:
     if set(injection.hits(new_body)) & REFUSE_INJECTION_IDS:
         raise Refused("instruction")
@@ -155,6 +172,8 @@ async def _open_changeset(
         refused=0,
         created=0,
         renamed=0,
+        folders=0,
+        moves=0,
         created_at=now,
         last_write_at=now,
     )
@@ -182,6 +201,37 @@ async def _check_day_caps(
         raise Refused("cap_bytes_day")
     if is_create and creates_so_far >= limits.CREATES_PER_DAY:
         raise Refused("cap_creates")
+
+
+async def _check_day_folder_cap(session: AsyncSession, clock: Clock, connection_id: int) -> None:
+    """Rev. 3's FOLDERS_PER_DAY, fast-rejected the same way
+    `_check_day_caps` rejects CREATES_PER_DAY -- a local check against
+    the ledger's sum so far, before ever calling vaultd. vaultd enforces
+    the authoritative copy of this same cap on its own changeset."""
+    day_start = await _local_day_start(session, clock)
+    folders_so_far = await session.scalar(
+        select(func.coalesce(func.sum(ClaudeChangeset.folders), 0)).where(
+            ClaudeChangeset.connection_id == connection_id,
+            ClaudeChangeset.kind == "write",
+            ClaudeChangeset.created_at >= day_start,
+        )
+    )
+    if folders_so_far >= limits.FOLDERS_PER_DAY:
+        raise Refused("cap_folders_day")
+
+
+async def _check_day_move_cap(session: AsyncSession, clock: Clock, connection_id: int) -> None:
+    """Rev. 3's MOVES_PER_DAY, same shape as `_check_day_folder_cap`."""
+    day_start = await _local_day_start(session, clock)
+    moves_so_far = await session.scalar(
+        select(func.coalesce(func.sum(ClaudeChangeset.moves), 0)).where(
+            ClaudeChangeset.connection_id == connection_id,
+            ClaudeChangeset.kind == "write",
+            ClaudeChangeset.created_at >= day_start,
+        )
+    )
+    if moves_so_far >= limits.MOVES_PER_DAY:
+        raise Refused("cap_moves_day")
 
 
 async def _bump_refused(session: AsyncSession, row: ClaudeChangeset | None) -> None:
@@ -232,7 +282,7 @@ async def update_note(
         if row.files >= limits.FILES_PER_CHANGESET:
             raise Refused("cap_files")
         try:
-            new_sha = await client.put_knowledge(path, new_body, base_hash, row.vault_ref)
+            result = await client.put_knowledge(path, new_body, base_hash, row.vault_ref)
         except VaultError as exc:
             raise Refused(_map_vault_error(exc)) from exc
     except Refused as exc:
@@ -244,7 +294,7 @@ async def update_note(
     row.last_write_at = clock.now_utc()
     await session.commit()
     _log("update_note", connection_id, outcome="ok", bytes_=len(body_bytes))
-    return {"path": path, "hash": new_sha, "changeset_id": row.id}
+    return {"path": path, "hash": result.sha256, "changeset_id": row.id}
 
 
 async def create_note(
@@ -259,7 +309,7 @@ async def create_note(
     row = await _open_changeset(session, clock, connection_id)
     try:
         filename = sanitize_title(title)
-        path = f"{folder.strip('/')}/{filename}"
+        path = f"{sanitize_folder(folder)}/{filename}"
         body_bytes = body.encode("utf-8")
         if len(body_bytes) > limits.BYTES_PER_FILE:
             raise Refused("cap_bytes_file")
@@ -267,8 +317,11 @@ async def create_note(
         await _check_day_caps(session, clock, connection_id, new_bytes=len(body_bytes), is_create=True)
         if row.files >= limits.FILES_PER_CHANGESET:
             raise Refused("cap_files")
+        if row.folders >= limits.FOLDERS_PER_CHANGESET:
+            raise Refused("cap_folders")
+        await _check_day_folder_cap(session, clock, connection_id)
         try:
-            new_sha = await client.put_knowledge(path, body, None, row.vault_ref)
+            result = await client.put_knowledge(path, body, None, row.vault_ref)
         except VaultError as exc:
             raise Refused(_map_vault_error(exc)) from exc
     except Refused as exc:
@@ -277,11 +330,12 @@ async def create_note(
         raise
     row.files += 1
     row.created += 1
+    row.folders += result.folders_created
     row.bytes += len(body_bytes)
     row.last_write_at = clock.now_utc()
     await session.commit()
     _log("create_note", connection_id, outcome="ok", bytes_=len(body_bytes))
-    return {"path": path, "hash": new_sha, "changeset_id": row.id}
+    return {"path": path, "hash": result.sha256, "changeset_id": row.id}
 
 
 async def rename_note(
@@ -295,8 +349,21 @@ async def rename_note(
 ) -> dict:
     row = await _open_changeset(session, clock, connection_id)
     try:
-        if row.files >= limits.FILES_PER_CHANGESET:
-            raise Refused("cap_files")
+        # Rev. 3: a rename spends its own budget (moves), never the
+        # content-write one (files) -- the moved note plus its
+        # rewritten backlinks count against MOVE_FILES_PER_CHANGESET/
+        # MOVES_PER_DAY, enforced authoritatively by vaultd itself
+        # (app/core/claude_write_limits.py's own docstring). This is a
+        # fast local rejection once the ledger already shows the
+        # per-changeset budget spent; it is not an exact precheck of
+        # this call's own file count, which the bot cannot know before
+        # vaultd resolves the backlinks.
+        if row.moves >= limits.MOVE_FILES_PER_CHANGESET:
+            raise Refused("cap_moves")
+        if row.folders >= limits.FOLDERS_PER_CHANGESET:
+            raise Refused("cap_folders")
+        await _check_day_move_cap(session, clock, connection_id)
+        await _check_day_folder_cap(session, clock, connection_id)
         try:
             result = await client.rename_knowledge(path, new_path, base_hash, row.vault_ref)
         except VaultError as exc:
@@ -305,7 +372,8 @@ async def rename_note(
         await _bump_refused(session, row)
         _log("rename_note", connection_id, outcome="refused", reason=exc.code)
         raise
-    row.files += 1 + result.relinked
+    row.moves += result.files_moved
+    row.folders += result.folders_created
     row.renamed += 1
     row.last_write_at = clock.now_utc()
     await session.commit()
@@ -322,6 +390,21 @@ async def get_note(client: VaultClient, path: str) -> dict:
     except VaultError as exc:
         raise Refused(_map_vault_error(exc)) from exc
     return {"path": content.path, "hash": content.sha256, "body": content.content}
+
+
+async def list_tree(client: VaultClient) -> dict:
+    """`list_tree()` (rev. 3, plan section 14, BUILD item 6): knowledge
+    folders and note titles, no body text -- gated by the write switch,
+    like `list_changes`, and Claude-only (never Grok's route)."""
+    try:
+        tree = await client.knowledge_tree()
+    except VaultError as exc:
+        raise Refused(_map_vault_error(exc)) from exc
+    return {
+        "folders": tree.folders,
+        "notes": [{"path": n.path, "title": n.title} for n in tree.notes],
+        "truncated": tree.truncated,
+    }
 
 
 async def _fetch_changes(client: VaultClient) -> list[ChangeEntry]:

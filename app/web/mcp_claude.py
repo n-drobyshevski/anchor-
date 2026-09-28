@@ -92,7 +92,7 @@ async def handle(request: web.Request) -> web.StreamResponse:
             open=library_write, closed=mcp_core.Refusal(mcp_core.WRITE_CLOSED_TEXT)
         ),
         connection_id=connection.id,
-        # Overridable so a test can hand the six write tools a fake
+        # Overridable so a test can hand the seven write tools a fake
         # vaultd (tests/claude_write_fake.py) without a real VaultClient
         # ever reaching the network; production never sets this key, so
         # the Reader's own default (VaultClient.from_settings) applies.
