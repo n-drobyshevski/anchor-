@@ -47,16 +47,17 @@ async def _rename(client, path: str, new_path: str, if_sha256: str, changeset: s
     )
 
 
-async def test_six_content_writes_refused_at_the_sixth(client, vault: Path):
-    """Unaffected by rev. 3: FILES_PER_CHANGESET (5) still governs
+async def test_content_writes_refused_one_past_the_cap(client, vault: Path):
+    """Unaffected by rev. 3: FILES_PER_CHANGESET (20) still governs
     plain content writes on their own."""
-    assert FILES_PER_CHANGESET == 5
+    assert FILES_PER_CHANGESET == 20
     for i in range(FILES_PER_CHANGESET):
         resp = await _put(client, f"Library/F{i}.md", "x", None, changeset="cs")
         assert resp.status == 200
-    resp = await _put(client, "Library/F5.md", "x", None, changeset="cs")
+    over = f"Library/F{FILES_PER_CHANGESET}.md"
+    resp = await _put(client, over, "x", None, changeset="cs")
     assert resp.status == 403
-    assert not (vault / "Library" / "F5.md").exists()
+    assert not (vault / over).exists()
 
 
 async def test_content_cap_full_still_allows_a_rename_in_the_same_changeset(client, vault: Path):

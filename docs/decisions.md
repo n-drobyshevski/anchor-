@@ -1967,6 +1967,49 @@ surface a stolen web session must never reach. `grok`, `export` and
 menu.py`'s own docstring on `ACTIONS` for why each one stays a typed,
 deliberate act instead of a button two taps deep.
 
+## `/menu` becomes the settings hub
+
+An audit of what the bot stores against what `/menu` could reach found
+the controls were there but scattered: a "Режим" section held focus and
+pause as *both* on and off buttons with no hint of which was current,
+quiet had no way to tell whether it was on, the planner's on/off switch
+and Claude's library *read* switch had no button at all, and one real
+setting had no writer: `intensity`. Plan §13 lets only commands,
+buttons, pause handling or check-in logic move it, but nothing but a
+soft pause word ever did -- and that only ever lowers it -- so once
+lowered it could not come back up without a SQL edit.
+
+- **`/intensity 1-5`** (`commands_core.set_intensity`, source
+  `command`) is that missing writer. It raises rather than clamps on an
+  out-of-range value: the command checks its argument first and the
+  menu only ever sends 1-5, so a bad value reaching the core is a bug.
+  The extractor still cannot reach it (no import, same as before).
+- **The hub shows state before it offers actions.** Main and
+  "⚙️ Настройки" open with a status table (bot active/paused, quiet
+  until, focus, intensity, and the main action on main), read fresh by
+  `router._menu_view` on every render. Every switch draws only the
+  button that changes the current state, and after a press the router
+  re-renders the section it lives in (`menu.REFRESH_SECTION`) -- one
+  generic step instead of the vault toggles' own ad-hoc re-render.
+- **Intensity buttons carry their target.** "🔽 Мягче → 2" sends
+  `int_2`, not "minus one", so a stale or doubled tap lands on the
+  number the button showed.
+- **Navigation.** Every section ends with "‹ Меню" and "✕ Закрыть",
+  and every section is one tap from main and reachable only from there,
+  so "back" always means one place. Sections that only lead somewhere else were folded away
+  ("Режим" is gone), and "🗓 Планер" joins "📚 Хранилище" as a
+  connection section with a status table and the sync switch.
+  `/planner_link` stays typed for the same reason `/grok` does.
+- **Typed-only commands are named, not hidden.** The settings card says
+  how to change the time zone and the main action; the data card names
+  `/export`, `/delete` and `/grok`. None of them become buttons -- the
+  reasons in `menu.py`'s `ACTIONS` comment still hold.
+- **Deploy-level schedule is shown, not editable.** Night quiet hours
+  and the morning/evening times are `Settings` values; the settings card
+  shows them so the user knows when Anchor speaks. Making them per-user
+  would need new columns and changes to the outbound gate, so it is left
+  for its own change.
+
 ## 8c — `/forget` forgets the whole lineage (§18.1)
 
 Settled: `/forget` and deleting a fact file agree. `memory.forget`
@@ -2517,6 +2560,20 @@ created no folders. Your decisions:
 - The digest says «Создал N папку/папки/папок.» when folders were
   created. `claude_changeset` gains `folders` and `moves` counters, and
   still holds no text or paths.
+
+## Claude's content-write caps raised: 20 files per changeset, 40 new notes a day
+
+Production: a batch of one topic note plus its people and concept
+notes stopped at the sixth file (`cap_files`). Five files per
+changeset and ten new notes a day were too tight for building out a
+topic in one go. Your decision:
+
+- `FILES_PER_CHANGESET` 5 → 20, in both copies (app/core/
+  claude_write_limits.py and vaultd/vaultd/config.py), kept equal.
+- `CREATES_PER_DAY` 10 → 40 (bot-side only, as before).
+- Unchanged: 4 changesets an hour, 4 undos an hour, 64 KB per file,
+  512 KB per connection per day, the folder and move budgets.
+- They stay code constants, never environment variables.
 
 ## `/vault` says which knowledge roots it sees, and why not
 

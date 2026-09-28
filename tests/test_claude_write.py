@@ -428,9 +428,13 @@ async def test_cap_creates_per_day_is_ledger_backed_across_a_fresh_process(sessi
         tokens = await _connect_and_open(world, client)
         async with sessionmaker() as session:
             connection = (await session.execute(select(OauthConnection))).scalars().one()
+        # A few changesets carrying the whole day's creates between
+        # them, an hour apart, so the seed stays inside today however
+        # large CREATES_PER_DAY is.
+        assert limits.CREATES_PER_DAY % 4 == 0
         await _seed_prior_changesets(
             sessionmaker, connection.id, world.clock,
-            count=limits.CREATES_PER_DAY, created=1, bytes_each=1,
+            count=4, created=limits.CREATES_PER_DAY // 4, bytes_each=1,
         )
 
         # A fresh World, built without ever calling connect() again -- a

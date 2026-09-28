@@ -1,7 +1,8 @@
-"""Button menus (this milestone's spec, 2026-09-28): `/menu`'s rich hub
-with in-body buttons (Bot API 10.1), `/start`'s persistent `☰ Меню`
-button, the `mn:` callbacks, and the new vault section's settings
-toggles.
+"""Button menus (the redesigned hub, 2026-09-28): `/menu`'s rich hub with
+in-body buttons (Bot API 10.1), `/start`'s persistent `☰ Меню` button, the
+`mn:` callbacks, and the new section tree (main, settings, quiet, mem,
+deals, vault, planner, data -- "mode" is gone, and every non-main section
+now hangs directly off main, "‹ Меню" being the only way back).
 
 `app/tg/menu.py` is pure -- no DB, no I/O -- so most of it is tested
 directly, the same way tests/test_quiet_tz.py tests app/core/quiet.py's
@@ -25,8 +26,10 @@ from aiogram.types import InlineKeyboardMarkup, InputRichMessage, ReplyKeyboardM
 from sqlalchemy import select
 
 from app.config import Settings
-from app.db.models import Message, OauthConnection, TelegramUpdate, UserState
+from app.db.models import Message, OauthConnection, PlannerCredential, TelegramUpdate, UserState
+from app.planner import auth as planner_auth
 from app.tg import menu
+from app.tg import planner as planner_ui
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
 from conftest import FakeLLMProvider, FakeSession, flatten_rich_message, make_bot, rich_callback_data
 from vault_stub import start_stub
@@ -34,26 +37,26 @@ from vault_stub import start_stub
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
 
-ALL_SECTIONS = ("main", "mem", "deals", "quiet", "mode", "data", "vault")
+# Every non-main section a fully-open deploy (planner linked, vault
+# visible, research and Claude access on) can show.
+ALL_SECTIONS = tuple(menu.SECTIONS)
 
 # Never emitted, forged or not (menu.ACTIONS' own docstring gives the
 # reasoning for each).
-EXCLUDED_ACTIONS = ("export", "delete", "grok", "planner_link", "due", "remember", "forget", "tz")
+EXCLUDED_ACTIONS = (
+    "export", "delete", "grok", "planner_link", "due", "remember", "forget", "tz",
+)
 
 
 def _flag_combinations():
-    """Every combination of the settings that gate a menu entry, plus
-    web and the vault-view permutations (notes consent, library
-    read/write) that gate the vault section's own toggles."""
+    """Every combination of the settings that gate a menu entry or a
+    whole section, plus web."""
     return itertools.product(
         (False, True),  # PLANNER_ENABLED
         (False, True),  # RESEARCH_ENABLED
         ("off", "status", "mirror", "sync"),  # VAULT_MODE
         (False, True),  # CLAUDE_ACCESS_ENABLED
         (False, True),  # web
-        (False, True),  # notes_consent
-        (None, False, True),  # library_read
-        (False, True),  # library_write
     )
 
 
@@ -65,6 +68,27 @@ def _settings(planner: bool, research: bool, vault_mode: str, claude: bool) -> S
         VAULT_MODE=vault_mode,
         VAULT_API_TOKEN="x" * 32,
         CLAUDE_ACCESS_ENABLED=claude,
+    )
+
+
+def _view_samples() -> tuple[menu.MenuView, ...]:
+    """A representative sample of MenuView permutations across every
+    state-aware switch -- not the full cross product, which would
+    explode combinatorially for no extra coverage: `action_available`
+    never reads the view (only `settings`/`web`), so the view only ever
+    changes *which* of a pair of buttons is drawn, and each such pair is
+    already pinned down by its own dedicated test below."""
+    now = datetime.datetime(2026, 9, 28, 10, 0, tzinfo=datetime.timezone.utc)
+    return (
+        menu.MenuView(),
+        menu.MenuView(
+            now=now, timezone=TIMEZONE, persona_active=False, focus_on=True, intensity=1,
+            quiet_until=now + datetime.timedelta(hours=1), due_action="x" * 60,
+            notes_consent=True, library_read=True, library_write=True,
+            planner_status="active", planner_enabled=True,
+        ),
+        menu.MenuView(intensity=5, library_read=False, planner_status="revoked", planner_enabled=False),
+        menu.MenuView(library_read=None),
     )
 
 
@@ -84,7 +108,7 @@ def _rich_action_data(rich: InputRichMessage) -> list[str]:
 
 
 def test_every_section_renders_both_ways():
-    settings = Settings(_env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32)
+    settings = _settings(True, True, "status", True)
     for section in ALL_SECTIONS:
         for web in (False, True):
             rendered = menu.render(section, settings, web=web)
@@ -108,24 +132,64 @@ def test_unknown_section_is_none_both_ways():
     assert menu.render_rich("", settings, web=True) is None
 
 
+def test_mode_section_is_gone():
+    assert "mode" not in menu.SECTIONS
+    assert set(menu.SECTIONS) == {
+        "main", "settings", "quiet", "mem", "deals", "vault", "planner", "data",
+    }
+
+
+def test_section_exists_gates_vault_and_planner():
+    off = _settings(False, False, "off", False)
+    on = _settings(True, False, "status", False)
+    assert menu.section_exists("vault", off) is False
+    assert menu.section_exists("vault", on) is True
+    assert menu.section_exists("planner", off) is False
+    assert menu.section_exists("planner", on) is True
+    assert menu.section_exists("settings", off) is True
+    assert menu.section_exists("nope", on) is False
+
+
+@pytest.mark.parametrize(
+    "section,title",
+    [
+        ("main", menu.MAIN_TITLE),
+        ("settings", menu.SETTINGS_TITLE),
+        ("quiet", menu.QUIET_TITLE),
+        ("mem", menu.MEM_TITLE),
+        ("deals", menu.DEALS_TITLE),
+        ("vault", menu.VAULT_TITLE),
+        ("planner", menu.PLANNER_TITLE),
+        ("data", menu.DATA_TITLE),
+    ],
+)
+def test_section_titles_have_no_trailing_period_and_the_rich_heading_matches_verbatim(section, title):
+    assert not title.endswith(".")
+    settings = _settings(True, True, "status", True)
+    text, _ = menu.render(section, settings, web=False)
+    assert text.startswith(title)
+    rich = menu.render_rich(section, settings, web=False)
+    assert rich.blocks[0].text == title
+
+
 def test_every_callback_data_is_well_formed_both_ways():
-    for planner, research, vault_mode, claude, web, notes, read, write in _flag_combinations():
+    for planner, research, vault_mode, claude, web in _flag_combinations():
         settings = _settings(planner, research, vault_mode, claude)
-        vault = menu.VaultMenuView(notes_consent=notes, library_read=read, library_write=write)
-        for section in ALL_SECTIONS:
-            plain = menu.render(section, settings, web=web, vault=vault)
-            rich = menu.render_rich(section, settings, web=web, vault=vault)
-            assert (plain is None) == (rich is None)
-            if plain is None:
-                continue
-            _, markup = plain
-            for button in _buttons(markup):
-                data = button.callback_data
-                assert data.startswith("mn:")
-                assert len(data.encode("utf-8")) <= 64
-            for data in rich_callback_data(rich):
-                assert data.startswith("mn:")
-                assert len(data.encode("utf-8")) <= 64
+        for view in _view_samples():
+            for section in ALL_SECTIONS:
+                plain = menu.render(section, settings, web=web, view=view)
+                rich = menu.render_rich(section, settings, web=web, view=view)
+                assert (plain is None) == (rich is None)
+                if plain is None:
+                    continue
+                _, markup = plain
+                for button in _buttons(markup):
+                    data = button.callback_data
+                    assert data.startswith("mn:")
+                    assert len(data.encode("utf-8")) <= 64
+                for data in rich_callback_data(rich):
+                    assert data.startswith("mn:")
+                    assert len(data.encode("utf-8")) <= 64
     # The close button too, and the longest single action key.
     assert menu.CLOSE_CALLBACK.startswith("mn:")
     assert len(f"{menu.ACTION_PREFIX}lib_write_off".encode("utf-8")) <= 64
@@ -162,6 +226,19 @@ def test_vault_section_hidden_on_main_and_unreachable_when_mode_off():
     assert menu.render_rich("vault", on, web=False) is not None
 
 
+def test_planner_section_hidden_on_main_and_unreachable_when_disabled():
+    off = _settings(False, False, "off", False)
+    on = _settings(True, False, "off", False)
+    _, main_off = menu.render("main", off, web=False)
+    _, main_on = menu.render("main", on, web=False)
+    assert f"{menu.SECTION_PREFIX}planner" not in [b.callback_data for b in _buttons(main_off)]
+    assert f"{menu.SECTION_PREFIX}planner" in [b.callback_data for b in _buttons(main_on)]
+    assert menu.render("planner", off, web=False) is None
+    assert menu.render_rich("planner", off, web=False) is None
+    assert menu.render("planner", on, web=False) is not None
+    assert menu.render_rich("planner", on, web=False) is not None
+
+
 def test_vault_status_action_moved_out_of_data_section():
     settings = _settings(False, False, "status", False)
     _, data = menu.render("data", settings, web=False)
@@ -191,6 +268,12 @@ def test_hide_kb_hidden_on_web():
     assert f"{menu.ACTION_PREFIX}hide_kb" not in keys(data_web)
 
 
+def test_data_hint_is_shown():
+    settings = Settings(_env_file=None)
+    text, _ = menu.render("data", settings, web=False)
+    assert menu.DATA_HINT in text
+
+
 @pytest.mark.parametrize("action", EXCLUDED_ACTIONS + ("nonsense", "", "quiet"))
 def test_action_available_is_false_for_excluded_and_garbage(action):
     settings = Settings(_env_file=None)
@@ -199,48 +282,190 @@ def test_action_available_is_false_for_excluded_and_garbage(action):
 
 
 def test_every_rendered_action_button_satisfies_action_available_both_ways():
-    for planner, research, vault_mode, claude, web, notes, read, write in _flag_combinations():
+    for planner, research, vault_mode, claude, web in _flag_combinations():
         settings = _settings(planner, research, vault_mode, claude)
-        vault = menu.VaultMenuView(notes_consent=notes, library_read=read, library_write=write)
-        for section in ALL_SECTIONS:
-            plain = menu.render(section, settings, web=web, vault=vault)
-            if plain is None:
-                continue
-            _, markup = plain
-            for button in _action_buttons(markup):
-                _, action = menu.parse_callback(button.callback_data)
-                assert menu.action_available(action, settings, web=web), (
-                    f"{section}/{action} rendered for web={web} but action_available said no"
-                )
-            rich = menu.render_rich(section, settings, web=web, vault=vault)
-            for data in _rich_action_data(rich):
-                _, action = menu.parse_callback(data)
-                assert menu.action_available(action, settings, web=web), (
-                    f"{section}/{action} (rich) rendered for web={web} but action_available said no"
-                )
+        for view in _view_samples():
+            for section in ALL_SECTIONS:
+                plain = menu.render(section, settings, web=web, view=view)
+                if plain is None:
+                    continue
+                _, markup = plain
+                for button in _action_buttons(markup):
+                    _, action = menu.parse_callback(button.callback_data)
+                    assert menu.action_available(action, settings, web=web), (
+                        f"{section}/{action} rendered for web={web} but action_available said no"
+                    )
+                rich = menu.render_rich(section, settings, web=web, view=view)
+                for data in _rich_action_data(rich):
+                    _, action = menu.parse_callback(data)
+                    assert menu.action_available(action, settings, web=web), (
+                        f"{section}/{action} (rich) rendered for web={web} but action_available said no"
+                    )
+
+
+# --- pure: navigation (every non-main section is one tap from main) ------
+
+
+def test_every_non_main_section_last_row_is_nav_to_main_both_ways():
+    settings = _settings(True, True, "status", True)
+    for section in ALL_SECTIONS:
+        if section == menu.MAIN_SECTION:
+            continue
+        _, markup = menu.render(section, settings, web=False)
+        last_row = markup.inline_keyboard[-1]
+        assert [b.callback_data for b in last_row] == [
+            f"{menu.SECTION_PREFIX}{menu.MAIN_SECTION}", menu.CLOSE_CALLBACK,
+        ]
+        assert [b.text for b in last_row] == ["‹ Меню", "✕ Закрыть"]
+
+        rich = menu.render_rich(section, settings, web=False)
+        data = rich_callback_data(rich)
+        assert data[-2:] == [f"{menu.SECTION_PREFIX}{menu.MAIN_SECTION}", menu.CLOSE_CALLBACK]
+
+
+def test_settings_no_longer_links_to_quiet():
+    """Design change: settings' own rows are just intensity/focus/pause
+    now -- quiet is reachable from main directly, not through settings."""
+    settings = Settings(_env_file=None)
+    _, markup = menu.render("settings", settings, web=False)
+    assert f"{menu.SECTION_PREFIX}quiet" not in [b.callback_data for b in _buttons(markup)]
+
+
+def test_main_links_to_both_settings_and_quiet_directly():
+    settings = Settings(_env_file=None)
+    _, markup = menu.render("main", settings, web=False)
+    keys = [b.callback_data for b in _buttons(markup)]
+    assert f"{menu.SECTION_PREFIX}settings" in keys
+    assert f"{menu.SECTION_PREFIX}quiet" in keys
+
+
+# --- pure: main's status table --------------------------------------------
+
+
+def test_main_status_table_omits_due_row_when_unset():
+    settings = Settings(_env_file=None)
+    text, _ = menu.render("main", settings, web=False, view=menu.MenuView())
+    assert "Главное" not in text
+
+
+def test_main_status_table_shows_due_row_untruncated_when_short():
+    settings = Settings(_env_file=None)
+    view = menu.MenuView(due_action="сдать отчёт")
+    text, _ = menu.render("main", settings, web=False, view=view)
+    assert "Главное: сдать отчёт" in text
+
+
+def test_main_status_table_truncates_a_long_due_row_to_40_chars():
+    settings = Settings(_env_file=None)
+    view = menu.MenuView(due_action="слово " * 20)  # far over 40 chars
+    text, _ = menu.render("main", settings, web=False, view=view)
+    line = next(row for row in text.splitlines() if row.startswith("Главное:"))
+    value = line[len("Главное: "):]
+    assert len(value) == 40
+    assert value.endswith("…")
+
+
+# --- pure: settings' intensity row and state-aware toggles ---------------
+
+
+@pytest.mark.parametrize(
+    "intensity,expect_low,expect_high",
+    [(1, False, True), (3, True, True), (5, True, False)],
+)
+def test_intensity_row_draws_only_the_reachable_directions(intensity, expect_low, expect_high):
+    settings = Settings(_env_file=None)
+    _, markup = menu.render("settings", settings, web=False, view=menu.MenuView(intensity=intensity))
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert (f"{menu.ACTION_PREFIX}int_{intensity - 1}" in keys) is expect_low
+    assert (f"{menu.ACTION_PREFIX}int_{intensity + 1}" in keys) is expect_high
+
+
+def test_intensity_row_middle_buttons_name_the_value_they_set():
+    settings = Settings(_env_file=None)
+    _, markup = menu.render("settings", settings, web=False, view=menu.MenuView(intensity=3))
+    labels = {b.callback_data: b.text for b in _action_buttons(markup)}
+    assert labels[f"{menu.ACTION_PREFIX}int_2"] == "🔽 Мягче → 2"
+    assert labels[f"{menu.ACTION_PREFIX}int_4"] == "🔼 Строже → 4"
+
+
+def test_focus_toggle_is_state_aware():
+    settings = Settings(_env_file=None)
+    _, off = menu.render("settings", settings, web=False, view=menu.MenuView(focus_on=False))
+    _, on = menu.render("settings", settings, web=False, view=menu.MenuView(focus_on=True))
+    keys_off = [b.callback_data for b in _action_buttons(off)]
+    keys_on = [b.callback_data for b in _action_buttons(on)]
+    assert f"{menu.ACTION_PREFIX}focus_on" in keys_off and f"{menu.ACTION_PREFIX}focus_off" not in keys_off
+    assert f"{menu.ACTION_PREFIX}focus_off" in keys_on and f"{menu.ACTION_PREFIX}focus_on" not in keys_on
+
+
+def test_pause_toggle_is_state_aware():
+    settings = Settings(_env_file=None)
+    _, active = menu.render("settings", settings, web=False, view=menu.MenuView(persona_active=True))
+    _, paused = menu.render("settings", settings, web=False, view=menu.MenuView(persona_active=False))
+    keys_active = [b.callback_data for b in _action_buttons(active)]
+    keys_paused = [b.callback_data for b in _action_buttons(paused)]
+    assert f"{menu.ACTION_PREFIX}out" in keys_active and f"{menu.ACTION_PREFIX}in" not in keys_active
+    assert f"{menu.ACTION_PREFIX}in" in keys_paused and f"{menu.ACTION_PREFIX}out" not in keys_paused
+
+
+# --- pure: quiet ------------------------------------------------------
+
+
+def test_quiet_off_button_present_only_while_quiet_is_active():
+    settings = Settings(_env_file=None)
+    now = datetime.datetime(2026, 9, 28, 10, 0, tzinfo=datetime.timezone.utc)
+    inactive = menu.MenuView(now=now, quiet_until=None)
+    expired = menu.MenuView(now=now, quiet_until=now - datetime.timedelta(minutes=1))
+    active = menu.MenuView(now=now, quiet_until=now + datetime.timedelta(hours=1))
+    for view, expect in ((inactive, False), (expired, False), (active, True)):
+        _, markup = menu.render("quiet", settings, web=False, view=view)
+        present = f"{menu.ACTION_PREFIX}quiet_off" in [b.callback_data for b in _action_buttons(markup)]
+        assert present is expect
+
+
+def test_quiet_value_reads_nothing_when_not_active():
+    settings = Settings(_env_file=None)
+    text, _ = menu.render("quiet", settings, web=False, view=menu.MenuView())
+    assert "Сейчас: нет" in text
+
+
+def test_quiet_value_same_day_shows_time_only():
+    settings = Settings(_env_file=None)
+    now = datetime.datetime(2026, 9, 28, 10, 0, tzinfo=datetime.timezone.utc)  # 12:00 Paris
+    view = menu.MenuView(now=now, timezone=TIMEZONE, quiet_until=now + datetime.timedelta(hours=3))
+    text, _ = menu.render("quiet", settings, web=False, view=view)
+    assert "Сейчас: до 15:00" in text
+
+
+def test_quiet_value_other_day_shows_the_date_too():
+    settings = Settings(_env_file=None)
+    now = datetime.datetime(2026, 9, 28, 10, 0, tzinfo=datetime.timezone.utc)  # 12:00 Paris, 28th
+    view = menu.MenuView(now=now, timezone=TIMEZONE, quiet_until=now + datetime.timedelta(hours=20))
+    text, _ = menu.render("quiet", settings, web=False, view=view)
+    assert "Сейчас: до 29.09 08:00" in text
 
 
 # --- pure: the vault section specifically ---------------------------------
 
 
-def _vault_plain(settings, *, web=False, vault=None) -> str:
-    return menu.render("vault", settings, web=web, vault=vault)[0]
+def _vault_plain(settings, *, web=False, view=None) -> str:
+    return menu.render("vault", settings, web=web, view=view)[0]
 
 
 def test_notes_toggle_flips_with_consent():
     settings = _settings(False, False, "status", False)
-    off = menu.VaultMenuView(notes_consent=False)
-    on = menu.VaultMenuView(notes_consent=True)
-    _, markup_off = menu.render("vault", settings, web=False, vault=off)
-    _, markup_on = menu.render("vault", settings, web=False, vault=on)
+    off = menu.MenuView(notes_consent=False)
+    on = menu.MenuView(notes_consent=True)
+    _, markup_off = menu.render("vault", settings, web=False, view=off)
+    _, markup_on = menu.render("vault", settings, web=False, view=on)
     keys_off = [b.callback_data for b in _action_buttons(markup_off)]
     keys_on = [b.callback_data for b in _action_buttons(markup_on)]
     assert f"{menu.ACTION_PREFIX}notes_on" in keys_off
     assert f"{menu.ACTION_PREFIX}notes_off" not in keys_off
     assert f"{menu.ACTION_PREFIX}notes_off" in keys_on
     assert f"{menu.ACTION_PREFIX}notes_on" not in keys_on
-    assert "Заметки: вкл" in _vault_plain(settings, vault=on)
-    assert "Заметки: выкл" in _vault_plain(settings, vault=off)
+    assert "Заметки: вкл" in _vault_plain(settings, view=on)
+    assert "Заметки: выкл" in _vault_plain(settings, view=off)
 
 
 def test_notes_toggle_available_even_on_web():
@@ -249,6 +474,26 @@ def test_notes_toggle_available_even_on_web():
     assert menu.action_available("notes_off", settings, web=True) is True
     _, markup = menu.render("vault", settings, web=True)
     assert f"{menu.ACTION_PREFIX}notes_on" in [b.callback_data for b in _action_buttons(markup)]
+
+
+def test_lib_read_button_absent_without_a_connection():
+    settings = _settings(False, False, "status", True)
+    _, markup = menu.render("vault", settings, web=False, view=menu.MenuView(library_read=None))
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}lib_read_on" not in keys
+    assert f"{menu.ACTION_PREFIX}lib_read_off" not in keys
+
+
+def test_lib_read_button_present_and_state_dependent_when_connected():
+    settings = _settings(False, False, "status", True)
+    _, markup_off = menu.render("vault", settings, web=False, view=menu.MenuView(library_read=False))
+    _, markup_on = menu.render("vault", settings, web=False, view=menu.MenuView(library_read=True))
+    keys_off = [b.callback_data for b in _action_buttons(markup_off)]
+    keys_on = [b.callback_data for b in _action_buttons(markup_on)]
+    assert f"{menu.ACTION_PREFIX}lib_read_on" in keys_off
+    assert f"{menu.ACTION_PREFIX}lib_read_off" not in keys_off
+    assert f"{menu.ACTION_PREFIX}lib_read_off" in keys_on
+    assert f"{menu.ACTION_PREFIX}lib_read_on" not in keys_on
 
 
 @pytest.mark.parametrize(
@@ -262,8 +507,8 @@ def test_notes_toggle_available_even_on_web():
 )
 def test_lib_write_button_absent_unless_claude_tg_and_reading(claude_enabled, web, read):
     settings = _settings(False, False, "status", claude_enabled)
-    vault = menu.VaultMenuView(library_read=read, library_write=False)
-    _, markup = menu.render("vault", settings, web=web, vault=vault)
+    view = menu.MenuView(library_read=read, library_write=False)
+    _, markup = menu.render("vault", settings, web=web, view=view)
     keys = [b.callback_data for b in _action_buttons(markup)]
     assert f"{menu.ACTION_PREFIX}lib_write_on" not in keys
     assert f"{menu.ACTION_PREFIX}lib_write_off" not in keys
@@ -271,10 +516,10 @@ def test_lib_write_button_absent_unless_claude_tg_and_reading(claude_enabled, we
 
 def test_lib_write_button_present_and_state_dependent_when_reading():
     settings = _settings(False, False, "status", True)
-    read_only = menu.VaultMenuView(library_read=True, library_write=False)
-    read_write = menu.VaultMenuView(library_read=True, library_write=True)
-    _, markup_ro = menu.render("vault", settings, web=False, vault=read_only)
-    _, markup_rw = menu.render("vault", settings, web=False, vault=read_write)
+    read_only = menu.MenuView(library_read=True, library_write=False)
+    read_write = menu.MenuView(library_read=True, library_write=True)
+    _, markup_ro = menu.render("vault", settings, web=False, view=read_only)
+    _, markup_rw = menu.render("vault", settings, web=False, view=read_write)
     keys_ro = [b.callback_data for b in _action_buttons(markup_ro)]
     keys_rw = [b.callback_data for b in _action_buttons(markup_rw)]
     assert f"{menu.ACTION_PREFIX}lib_write_on" in keys_ro
@@ -289,11 +534,25 @@ def test_lib_write_forged_on_web_is_never_available():
     assert menu.action_available("lib_write_off", settings, web=True) is False
 
 
-def test_claude_library_row_hints_at_claude_library_on_when_reading_is_off():
+@pytest.mark.parametrize(
+    "read,write,expected",
+    [
+        (None, False, "нет подключения"),
+        (False, False, "выкл"),
+        (True, False, "чтение"),
+        (True, True, "чтение+запись"),
+    ],
+)
+def test_claude_library_row_value_states(read, write, expected):
     settings = _settings(False, False, "status", True)
-    text = _vault_plain(settings, vault=menu.VaultMenuView(library_read=False))
-    assert "Claude, библиотека: выкл" in text
-    assert "/claude library on" in text
+    text = _vault_plain(settings, view=menu.MenuView(library_read=read, library_write=write))
+    assert f"Claude, библиотека: {expected}" in text
+
+
+def test_claude_library_hint_no_longer_names_the_command():
+    settings = _settings(False, False, "status", True)
+    text = _vault_plain(settings, view=menu.MenuView(library_read=False))
+    assert "/claude library on" not in text
 
 
 def test_claude_library_row_absent_when_flag_off_or_web():
@@ -319,53 +578,106 @@ def test_roots_hint_absent_when_not_fetched():
     """`settings_state=None` -- notes consent off, or the manifest never
     answered -- shows nothing new, same as before 8f."""
     settings = _settings(False, False, "status", False)
-    text = _vault_plain(settings, vault=menu.VaultMenuView(notes_consent=False))
+    text = _vault_plain(settings, view=menu.MenuView(notes_consent=False))
     assert "Корни знаний" not in text
     assert "Anchor/settings.md" not in text
 
 
 def test_roots_hint_valid_with_roots():
     settings = _settings(False, False, "status", False)
-    vault = menu.VaultMenuView(
+    view = menu.MenuView(
         notes_consent=True, settings_state="valid", knowledge_roots=("Library",)
     )
-    assert "Корни знаний: Library" in _vault_plain(settings, vault=vault)
+    assert "Корни знаний: Library" in _vault_plain(settings, view=view)
 
 
 def test_roots_hint_valid_with_no_roots():
     settings = _settings(False, False, "status", False)
-    vault = menu.VaultMenuView(notes_consent=True, settings_state="valid", knowledge_roots=())
-    text = _vault_plain(settings, vault=vault)
+    view = menu.MenuView(notes_consent=True, settings_state="valid", knowledge_roots=())
+    text = _vault_plain(settings, view=view)
     assert "Корни знаний: не заданы — добавь knowledge_folders в Anchor/settings.md" in text
 
 
 def test_roots_hint_missing():
     settings = _settings(False, False, "status", False)
-    vault = menu.VaultMenuView(notes_consent=True, settings_state="missing")
-    text = _vault_plain(settings, vault=vault)
+    view = menu.MenuView(notes_consent=True, settings_state="missing")
+    text = _vault_plain(settings, view=view)
     assert "Anchor/settings.md не найден — корней знаний нет" in text
 
 
 def test_roots_hint_wrong_case():
     settings = _settings(False, False, "status", False)
-    vault = menu.VaultMenuView(notes_consent=True, settings_state="wrong_case")
-    text = _vault_plain(settings, vault=vault)
+    view = menu.MenuView(notes_consent=True, settings_state="wrong_case")
+    text = _vault_plain(settings, view=view)
     assert "переименуй его в Anchor/settings.md (регистр важен)" in text
 
 
 def test_roots_hint_invalid():
     settings = _settings(False, False, "status", False)
-    vault = menu.VaultMenuView(notes_consent=True, settings_state="invalid")
-    text = _vault_plain(settings, vault=vault)
+    view = menu.MenuView(notes_consent=True, settings_state="invalid")
+    text = _vault_plain(settings, view=view)
     assert "Anchor/settings.md с ошибкой — ни одна заметка не читается" in text
 
 
 def test_roots_hint_truncates_past_five():
     settings = _settings(False, False, "status", False)
     roots = tuple(f"Root{i}" for i in range(7))
-    vault = menu.VaultMenuView(notes_consent=True, settings_state="valid", knowledge_roots=roots)
-    text = _vault_plain(settings, vault=vault)
+    view = menu.MenuView(notes_consent=True, settings_state="valid", knowledge_roots=roots)
+    text = _vault_plain(settings, view=view)
     assert "Корни знаний: Root0, Root1, Root2, Root3, Root4 и ещё 2" in text
+
+
+# --- pure: the planner section specifically -------------------------------
+
+
+def test_planner_section_not_linked():
+    settings = _settings(True, False, "off", False)
+    view = menu.MenuView(planner_status=None)
+    text, markup = menu.render("planner", settings, web=False, view=view)
+    assert "Подключение: не подключён" in text
+    assert "Синхронизация" not in text
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}planner_on" not in keys
+    assert f"{menu.ACTION_PREFIX}planner_off" not in keys
+    assert menu.PLANNER_LINK_HINT in text
+
+
+def test_planner_section_linked_and_active():
+    settings = _settings(True, False, "off", False)
+    view = menu.MenuView(planner_status="active", planner_enabled=True)
+    text, markup = menu.render("planner", settings, web=False, view=view)
+    assert "Подключение: подключён" in text
+    assert "Синхронизация: вкл" in text
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}planner_off" in keys
+    assert f"{menu.ACTION_PREFIX}planner_on" not in keys
+    assert menu.PLANNER_LINK_HINT not in text
+
+
+def test_planner_section_linked_but_revoked():
+    settings = _settings(True, False, "off", False)
+    view = menu.MenuView(planner_status="revoked", planner_enabled=False)
+    text, markup = menu.render("planner", settings, web=False, view=view)
+    assert "Подключение: нужно переподключить" in text
+    assert "Синхронизация: выкл" in text
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}planner_on" in keys
+    assert f"{menu.ACTION_PREFIX}planner_off" not in keys
+    assert menu.PLANNER_LINK_HINT in text
+
+
+# --- pure: mem --------------------------------------------------------
+
+
+def test_mem_section_has_digest_and_digest_7d():
+    settings = _settings(False, True, "off", False)
+    _, markup = menu.render("mem", settings, web=False)
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}digest" in keys
+    assert f"{menu.ACTION_PREFIX}digest_7d" in keys
+
+
+# --- other pure bits --------------------------------------------------
 
 
 def test_parse_callback():
@@ -529,7 +841,7 @@ async def test_section_callback_edits_the_message_in_place_as_rich(sessionmaker)
 
     assert len(fake.edits) == 1
     assert fake.edits[0].rich_message is not None
-    assert flatten_rich_message(fake.edits[0].rich_message).startswith(menu.QUIET_TEXT)
+    assert flatten_rich_message(fake.edits[0].rich_message).startswith(menu.QUIET_TITLE)
     assert len(fake.answered) == 1
 
 
@@ -627,7 +939,7 @@ async def test_hide_kb_action_sends_the_reply_keyboard_remove(sessionmaker):
     assert isinstance(fake.sent[-1].reply_markup, ReplyKeyboardRemove)
 
 
-async def test_state_action_sends_the_state_message(sessionmaker):
+async def test_state_action_sends_the_state_message_and_does_not_rerender_the_card(sessionmaker):
     await _seed(sessionmaker, 1, 2)
     dp, bot, fake = _build(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/menu"))
@@ -635,9 +947,11 @@ async def test_state_action_sends_the_state_message(sessionmaker):
     await _feed(dp, bot, _callback_update(2, "mn:a:state", message_id=1))
 
     # /state is a rich message (app/tg/state_view.py), the second one
-    # sent after /menu's own.
+    # sent after /menu's own -- "state" is not in REFRESH_SECTION, so
+    # the menu card itself is never edited.
     assert len(fake.rich) == 2
     assert "Персона:" in flatten_rich_message(fake.rich[-1].rich_message)
+    assert fake.edits == []
 
 
 async def test_menu_on_the_web_sink_stays_plain(sessionmaker):
@@ -653,7 +967,7 @@ async def test_menu_on_the_web_sink_stays_plain(sessionmaker):
     assert isinstance(fake.sent[0].reply_markup, InlineKeyboardMarkup)
     assert len(fake.edits) == 1
     assert fake.edits[0].rich_message is None
-    assert fake.edits[0].text == menu.QUIET_TEXT
+    assert fake.edits[0].text.startswith(menu.QUIET_TITLE)
 
 
 class _RichMessageFailsSession(FakeSession):
@@ -694,7 +1008,7 @@ async def test_menu_section_edit_falls_back_to_plain_when_rich_is_rejected(sessi
     await _feed(dp, bot, _callback_update(2, "mn:s:quiet", message_id=1))
 
     assert fake.edits[-1].rich_message is None
-    assert fake.edits[-1].text == menu.QUIET_TEXT
+    assert fake.edits[-1].text.startswith(menu.QUIET_TITLE)
 
 
 async def test_vault_section_shows_status_table_and_notes_toggle(sessionmaker):
@@ -869,6 +1183,39 @@ async def test_lib_write_on_action_sets_the_write_switch_and_rerenders(sessionma
     assert f"{menu.ACTION_PREFIX}lib_write_off" in rich_callback_data(fake.edits[-1].rich_message)
 
 
+async def test_lib_read_on_action_sets_read_and_rerenders_the_vault_card(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    async with sessionmaker() as session:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        session.add(
+            OauthConnection(
+                client_id="test",
+                created_at=now,
+                expires_at=now + datetime.timedelta(days=30),
+                library_read=False,
+            )
+        )
+        await session.commit()
+    settings = Settings(
+        _env_file=None,
+        VAULT_MODE="status",
+        VAULT_API_TOKEN="x" * 32,
+        CLAUDE_ACCESS_ENABLED=True,
+        TZ_DEFAULT=TIMEZONE,
+    )
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:lib_read_on", message_id=1))
+
+    async with sessionmaker() as session:
+        connection = await session.get(OauthConnection, 1)
+    assert connection.library_read is True
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "Claude, библиотека: чтение" in flat
+    assert f"{menu.ACTION_PREFIX}lib_read_off" in rich_callback_data(fake.edits[-1].rich_message)
+
+
 async def test_forged_lib_write_on_web_sink_does_nothing(sessionmaker):
     await _seed(sessionmaker, 1, 2)
     settings = Settings(
@@ -890,3 +1237,91 @@ async def test_forged_lib_write_on_web_sink_does_nothing(sessionmaker):
         assert await session.get(OauthConnection, 1) is None
     assert len(fake.sent) == sent_before
     assert fake.answered[-1].text is not None
+
+
+# --- router-level: the new switches (intensity, focus/pause, planner) ----
+
+
+async def test_int_4_press_sets_intensity_and_rerenders_settings_in_place(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:int_4", message_id=1))
+
+    assert (await _state(sessionmaker)).intensity == 4
+    assert len(fake.edits) == 1
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert flat.startswith(menu.SETTINGS_TITLE)
+    assert "Интенсивность: 4/5" in flat
+
+
+async def test_focus_on_press_rerenders_settings_in_place(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:focus_on", message_id=1))
+
+    assert (await _state(sessionmaker)).focus_on is True
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert flat.startswith(menu.SETTINGS_TITLE)
+    assert "Фокус: вкл" in flat
+    assert f"{menu.ACTION_PREFIX}focus_off" in rich_callback_data(fake.edits[-1].rich_message)
+
+
+async def test_quiet_2h_press_rerenders_quiet_showing_do(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build(sessionmaker)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:quiet_2h", message_id=1))
+
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert flat.startswith(menu.QUIET_TITLE)
+    assert "Сейчас: до" in flat
+
+
+async def test_planner_on_press_without_a_credential_replies_not_linked_and_rerenders(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    settings = Settings(_env_file=None, PLANNER_ENABLED=True, TZ_DEFAULT=TIMEZONE)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:planner_on", message_id=1))
+
+    async with sessionmaker() as session:
+        assert await session.get(PlannerCredential, 1) is None
+    assert fake.sent[-1].text == planner_ui.ON_OFF_NOT_LINKED
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "Подключение: не подключён" in flat
+
+
+async def test_planner_on_press_with_a_linked_credential_enables_sync_and_rerenders(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    async with sessionmaker() as session:
+        session.add(
+            PlannerCredential(
+                id=1,
+                access_token="x",
+                refresh_token="y",
+                expires_at=now + datetime.timedelta(days=30),
+                status=planner_auth.ACTIVE,
+                enabled=False,
+            )
+        )
+        await session.commit()
+    settings = Settings(_env_file=None, PLANNER_ENABLED=True, TZ_DEFAULT=TIMEZONE)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:planner_on", message_id=1))
+
+    async with sessionmaker() as session:
+        credential = await session.get(PlannerCredential, 1)
+    assert credential.enabled is True
+    assert fake.sent[-1].text == planner_ui.ON_REPLY
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "Синхронизация: вкл" in flat
+    assert f"{menu.ACTION_PREFIX}planner_off" in rich_callback_data(fake.edits[-1].rich_message)

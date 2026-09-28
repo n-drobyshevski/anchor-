@@ -41,6 +41,26 @@ draws between "Telegram-shaped" and "domain"):
    `RichMessageButton`), the same upgrade app/tg/state_view.py already
    gave `/state`.
 
+The tree (every section is one tap from main, and its last row is
+always "‹ Меню" plus "✕ Закрыть", so no section is a dead end and the
+way back always goes to the same place):
+
+    main          status table (bot, quiet, focus, intensity, main
+                  action) + check-in, /state, today's plan
+      settings    status table + the switches: intensity, focus, pause
+      quiet       presets, and "off" only while quiet is on
+      mem         memory, notes, style amendments, research, background
+      deals       orders, debts, weekly review
+      vault       vault & knowledge: notes consent, Claude's library
+      planner     link status + sync on/off
+      data        privacy, Claude, revoke, the typed-only commands
+
+Switches are *state-aware*: only the button that changes the current
+state is drawn ("Включить фокус" while focus is off, never both), and
+the router re-renders the section the press came from once the command
+behind it has run (`REFRESH_SECTION`), so the card never shows a stale
+value next to a button that no longer means anything.
+
 Callback data, prefix `mn:` (distinct from every other prefix already in
 this router's callback_query table -- `m:k:`/`m:p:` (memory), `c:`
 (check-in), `d:` (delete), `so:`/`ob:`/`am:`/`p:`/`pa:`/`pl:`/`r:`/`g:`/
@@ -61,7 +81,9 @@ limit -- the longest, "mn:a:lib_write_off", is 18 bytes.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -118,116 +140,153 @@ def reply_keyboard() -> ReplyKeyboardMarkup:
 # --- the action table ---------------------------------------------------
 #
 # Every key here is a leaf button the hub can show, dispatched by the
-# router to the existing slash-command handler of the same name (or, for
-# the five `quiet_*`/two `focus_*`/two `notes_*`/two `lib_write_*`, to
-# /quiet, /focus, /vault or /claude with a fixed argument). Deliberately
-# never here, and so always refused by `action_available` below even if
-# a forged `mn:a:<key>` arrives from a tampered web client:
+# router to the existing slash-command handler of the same name, or to
+# one with a fixed argument (`quiet_*` -> /quiet, `focus_*` -> /focus,
+# `int_<n>` -> /intensity <n>, `digest_7d` -> /digest 7d, `notes_*` ->
+# /vault notes, `lib_read_*`/`lib_write_*` -> /claude library [write],
+# `planner_*` -> /planner on|off). Deliberately never here, and so
+# always refused by `action_available` below even if a forged
+# `mn:a:<key>` arrives from a tampered web client:
 #
 #   export, delete   -- Telegram-only, blocked a second, independent way
 #                        at app/web/ingress.py's BLOCKED_COMMANDS; a menu
 #                        callback that dispatched them would be a second
 #                        route around that block, defeating the reason
-#                        it exists.
+#                        it exists. The data section names them as typed
+#                        commands instead.
 #   grok             -- opens read access to everything the bot holds.
 #                        That must stay a typed, deliberate act
 #                        (app/tg/grok.py's own docstring), not a button a
 #                        stray tap can reach from a menu two levels deep.
 #   planner_link     -- sends a live OAuth authorize URL down the same
-#                        chat; same Telegram-only reasoning as grok.
+#                        chat; same Telegram-only reasoning as grok. The
+#                        planner section names it instead.
 #   due, remember,
 #   forget, tz       -- every one of these takes a typed argument the
 #                        menu has nowhere to collect, and `/due` with no
 #                        argument does not "show the current one" -- it
-#                        *clears* it (app/core/commands.py's `set_due`).
-#                        A bare `mn:a:due` would silently wipe the main
-#                        action the first time someone tapped it
-#                        expecting to see it.
+#                        *clears* it (app/core/commands.py's `set_due`),
+#                        closing the focus debt with it. A bare
+#                        `mn:a:due` would silently wipe the main action
+#                        the first time someone tapped it expecting to
+#                        see it. The settings section shows the current
+#                        values and the command to change each.
+#   claude undo,
+#   claude disconnect -- restoring vault files and ending a connection
+#                        are rare, deliberate acts; /revoke already
+#                        covers "close everything" from the data section.
 #   anything else    -- every command that takes free text (/order,
 #                        /task, /event, /read, /study, /mind add, /remember
 #                        itself, ...) is out for the same "nowhere to type
 #                        it" reason.
 #
-# `notes_on`/`notes_off` and `lib_write_on`/`lib_write_off` are the one
-# exception to "no typed argument": each is a fixed on/off pair, not
-# free text, so the button *is* the whole argument -- see the vault
-# section builder below.
+# The fixed-argument keys are the exception to "no typed argument": each
+# is one value of a small closed set (on/off, a preset duration, a digit
+# 1-5), not free text, so the button *is* the whole argument.
 ACTIONS: dict[str, str] = {
+    # main
     "checkin": "✅ Чек-ин",
     "state": "📊 Состояние",
     "plan": "📋 План на сегодня",
+    # settings
+    "int_1": "Интенсивность 1",
+    "int_2": "Интенсивность 2",
+    "int_3": "Интенсивность 3",
+    "int_4": "Интенсивность 4",
+    "int_5": "Интенсивность 5",
+    "focus_on": "🎯 Включить фокус",
+    "focus_off": "🎯 Выключить фокус",
+    "out": "⏸ Пауза",
+    "in": "▶️ Вернуться",
+    # quiet
+    "quiet_30m": "30 мин",
+    "quiet_2h": "2 ч",
+    "quiet_8h": "8 ч",
+    "quiet_1d": "1 день",
+    "quiet_off": "🔔 Снять тишину",
+    # mem
     "memories": "Что я помню",
     "mind": "Заметки Anchor",
     "amendments": "Поправки к стилю",
     "notes": "Карточки исследований",
     "interests": "Темы для поиска",
+    "digest": "🌙 Фон за сутки",
+    "digest_7d": "🌙 За неделю",
+    # deals
     "orders": "Договорённости",
     "paid": "Долги",
     "review": "Итоги недели",
-    "quiet_30m": "30 мин",
-    "quiet_2h": "2 ч",
-    "quiet_8h": "8 ч",
-    "quiet_1d": "1 день",
-    "quiet_off": "Снять тишину",
-    "focus_on": "Фокус вкл",
-    "focus_off": "Фокус выкл",
-    "out": "⏸ Пауза",
-    "in": "▶️ Вернуться",
-    "digest": "Фоновая работа",
-    "privacy": "Приватность",
-    "vault": "Хранилище Obsidian",
-    "claude": "Claude",
+    # vault
+    "vault": "Статус хранилища",
     "notes_on": "Заметки: включить",
     "notes_off": "Заметки: выключить",
+    "lib_read_on": "Claude: открыть библиотеку",
+    "lib_read_off": "Claude: закрыть библиотеку",
     "lib_write_on": "Claude: разрешить запись",
     "lib_write_off": "Claude: запретить запись",
+    # planner
+    "planner": "Статус планера",
+    "planner_on": "Синхронизация: включить",
+    "planner_off": "Синхронизация: выключить",
+    # data
+    "privacy": "Приватность",
+    "claude": "Claude",
     "revoke": "Закрыть доступ",
     "hide_kb": "Убрать кнопку меню",
 }
 
 # Bot API 9.4's `style` field, used sparingly (the spec's own word): a
 # check-in is the one affirmative, everyday action worth a green accent,
-# turning notes off or closing access is destructive and worth a red
-# one, and turning notes on or the write switch on is the affirmative
-# counterpart worth green. Every other button stays the plain, unstyled
-# default.
+# closing access or turning a knowledge switch off is destructive and
+# worth a red one, and turning such a switch on is the affirmative
+# counterpart worth green. Every other button -- the everyday settings
+# switches included, which are routine rather than affirmative or
+# destructive -- stays the plain, unstyled default.
 _STYLES: dict[str, str] = {
     "checkin": "success",
     "revoke": "danger",
     "notes_on": "success",
     "notes_off": "danger",
+    "lib_read_on": "success",
+    "lib_read_off": "danger",
     "lib_write_on": "success",
     "lib_write_off": "danger",
 }
 
-# Actions whose visibility depends on a setting or on `web` -- every
-# other key in ACTIONS is unconditionally available. Named here once so
-# `action_available` can check the settings-dependent keys by name and
-# fall through to True for the rest, rather than repeating the full key
-# list in two places.
-_CONDITIONAL_ACTIONS = frozenset(
-    {
-        "plan",
-        "notes",
-        "vault",
-        "claude",
-        "notes_on",
-        "notes_off",
-        "lib_write_on",
-        "lib_write_off",
-        "hide_kb",
-    }
-)
+# After which actions the router re-renders the menu card in place, and
+# as which section: each switch lives in exactly one section, and a
+# press should leave that section on screen showing the new state.
+# Actions not listed (lists, reports, /state, ...) leave the card as it
+# was -- their answer is a message of its own below it.
+REFRESH_SECTION: dict[str, str] = {
+    **{f"int_{n}": "settings" for n in range(1, 6)},
+    "focus_on": "settings",
+    "focus_off": "settings",
+    "out": "settings",
+    "in": "settings",
+    **{key: "quiet" for key in ("quiet_30m", "quiet_2h", "quiet_8h", "quiet_1d", "quiet_off")},
+    "notes_on": "vault",
+    "notes_off": "vault",
+    "lib_read_on": "vault",
+    "lib_read_off": "vault",
+    "lib_write_on": "vault",
+    "lib_write_off": "vault",
+    "planner_on": "planner",
+    "planner_off": "planner",
+}
+
+_PLANNER_ACTIONS = frozenset({"plan", "planner", "planner_on", "planner_off"})
+_VAULT_ACTIONS = frozenset({"vault", "notes_on", "notes_off"})
+_CLAUDE_ACTIONS = frozenset({"claude", "lib_read_on", "lib_read_off", "lib_write_on", "lib_write_off"})
 
 
 def _vault_section_visible(settings: Settings) -> bool:
     """Mirrors /vault itself (app/tg/vault.py's format_vault): "off" is
     the only mode with nothing to show, and "status"/"mirror"/"sync" all
-    mean the feature is at least partly live. Shared by the old `vault`
-    status action, the new vault *section* (both the main-menu button
-    that opens it and the section itself), and the `notes_on`/
-    `notes_off` toggles that live inside it -- none of those can show
-    while there is nothing behind them.
+    mean the feature is at least partly live. Shared by the main-menu
+    button that opens the vault section, the section itself, and the
+    `vault`/`notes_on`/`notes_off` actions that live inside it -- none of
+    those can show while there is nothing behind them.
     """
     return settings.VAULT_MODE != "off"
 
@@ -240,36 +299,118 @@ def action_available(action: str, settings: Settings, *, web: bool) -> bool:
     mistyped, or one of the ones deliberately left out (see ACTIONS' own
     docstring) -- is always False here, regardless of `web`.
 
-    `lib_write_on`/`lib_write_off` stop here at the same two settings-
-    only conditions `claude` itself does (CLAUDE_ACCESS_ENABLED, not
-    web): whether `library_read` also happens to be on is per-connection
-    state this function has no access to (the router calls it with only
-    `settings`/`web`, never a session), so that finer condition lives in
-    the vault section builder (which button gets *drawn*) and in
-    app/tg/claude.py's `library_write` itself (which refuses a forged
-    press the same way it refuses a typed `/claude library write on`
-    with reading off) -- both layers agree, neither can be skipped.
+    This is the *settings*-level gate only. Which of a switch's two
+    buttons is drawn depends on live state (`MenuView`) this function
+    never sees -- the router calls it with only `settings`/`web` -- so
+    a stale press on the other one is handled by the command behind it,
+    each of which is idempotent (`set_focus`, `set_notes_consent`,
+    `set_enabled`, ...) or refuses on its own (`library_write` with
+    reading off, `/planner on` never linked).
     """
     if action not in ACTIONS:
         return False
-    if action not in _CONDITIONAL_ACTIONS:
-        return True
-    if action == "plan":
+    if action in _PLANNER_ACTIONS:
         return settings.PLANNER_ENABLED
     if action == "notes":
         return settings.RESEARCH_ENABLED
-    if action in ("vault", "notes_on", "notes_off"):
+    if action in _VAULT_ACTIONS:
         return _vault_section_visible(settings)
-    if action in ("claude", "lib_write_on", "lib_write_off"):
+    if action in _CLAUDE_ACTIONS:
         # Telegram-only, like /claude itself (app/tg/router.py's own
         # is_web_sink guard on claude_command): a stolen web session
         # must not be able to reach the code-approval flow, or the
-        # write switch that flow gates.
+        # library switches that flow gates.
         return settings.CLAUDE_ACCESS_ENABLED and not web
-    # action == "hide_kb": removing a reply keyboard is meaningless
-    # through the web sink, which never had one to begin with (app/web/
-    # sink.py only ever renders InlineKeyboardMarkup).
-    return not web
+    if action == "hide_kb":
+        # Removing a reply keyboard is meaningless through the web sink,
+        # which never had one to begin with (app/web/sink.py only ever
+        # renders InlineKeyboardMarkup).
+        return not web
+    return True
+
+
+# --- the live state a section may show -----------------------------------
+
+
+@dataclass(frozen=True)
+class MenuView:
+    """Everything a section shows that is not a `Settings` value --
+    gathered by the router (app/tg/router.py's `_menu_view`) right
+    before a render, never cached. Defaults are a fresh install: bot
+    active, nothing switched on, nothing connected -- so a test or a
+    caller that has no session can omit it.
+
+    `now` is the clock's UTC now, used only to tell a live quiet period
+    from one that already ran out; with `now=None` quiet always reads as
+    off. `library_read=None` means "no live Claude connection at all"
+    (as opposed to a connection with the library switched off),
+    matching `oauth_store.current_connection`'s own `None`.
+    `planner_status` is `planner_credential.status` ("active" /
+    "revoked"), or None if the planner was never linked.
+
+    `settings_state`/`knowledge_roots` (8f) mirror
+    `NotesOverview.settings`/`.knowledge_roots` (app/vault/status.py):
+    the manifest's report on `Anchor/settings.md`, fetched -- like the
+    counts app/tg/vault.py's own notes line shows -- only while notes
+    consent is on. `settings_state=None` means "not fetched" (consent
+    off, or the manifest did not answer), same shape as
+    `format_notes_line`'s own `notes=None`.
+    """
+
+    now: datetime.datetime | None = None
+    timezone: str = "UTC"
+    persona_active: bool = True
+    focus_on: bool = False
+    intensity: int = 3
+    quiet_until: datetime.datetime | None = None
+    due_action: str | None = None
+    notes_consent: bool = False
+    library_read: bool | None = None
+    library_write: bool = False
+    planner_status: str | None = None
+    planner_enabled: bool = False
+    settings_state: str | None = None
+    knowledge_roots: tuple[str, ...] = ()
+
+
+def _tz(view: MenuView) -> ZoneInfo:
+    try:
+        return ZoneInfo(view.timezone)
+    except Exception:  # noqa: BLE001 - set_timezone validates; a bad row must not break the menu
+        return ZoneInfo("UTC")
+
+
+def quiet_active(view: MenuView) -> bool:
+    return view.quiet_until is not None and view.now is not None and view.quiet_until > view.now
+
+
+def _quiet_value(view: MenuView) -> str:
+    if not quiet_active(view):
+        return "нет"
+    tz = _tz(view)
+    local = view.quiet_until.astimezone(tz)
+    today = view.now.astimezone(tz).date()
+    return "до " + local.strftime("%H:%M" if local.date() == today else "%d.%m %H:%M")
+
+
+def _on_off(value: bool) -> str:
+    return "вкл" if value else "выкл"
+
+
+def _hhmm(value: datetime.time) -> str:
+    return value.strftime("%H:%M")
+
+
+# The main action is the user's own text; the hub shows it as a reminder,
+# not in full -- /state has room for the whole thing.
+_DUE_PREVIEW_MAX = 40
+
+
+def _due_preview(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) <= _DUE_PREVIEW_MAX:
+        return text
+    return text[: _DUE_PREVIEW_MAX - 1].rstrip() + "…"
 
 
 # --- the section spec: one shape, two renderers --------------------------
@@ -287,51 +428,18 @@ class Btn:
 
 
 @dataclass(frozen=True)
-class VaultMenuView:
-    """The one piece of the vault section that needs a live session to
-    know -- everything else in that section's status table
-    (`VAULT_MODE`, `VAULT_KNOWLEDGE_ENABLED`, `VAULT_PERSONAL_ENABLED`)
-    is a `Settings` value, already in hand wherever `render`/
-    `render_rich` are called. Defaults are "nothing to show yet" --
-    same as a fresh install with no connection -- so a caller rendering
-    a section other than "vault" can simply omit it.
-
-    `library_read`/`library_write` mirror `OauthConnection`'s own
-    columns (app/web/oauth_store.py); `library_read=None` means "no
-    live connection at all" (as opposed to a connection with the
-    library switched off), matching `current_connection`'s own `None`
-    return for "not connected".
-
-    `settings_state`/`knowledge_roots` (8f) mirror
-    `NotesOverview.settings`/`.knowledge_roots` (app/vault/status.py):
-    the manifest's report on `Anchor/settings.md`, fetched -- like the
-    counts app/tg/vault.py's own notes line shows -- only while notes
-    consent is on. `settings_state=None` means "not fetched" (consent
-    off, or the manifest did not answer), same shape as
-    `format_notes_line`'s own `notes=None`.
-    """
-
-    notes_consent: bool = False
-    library_read: bool | None = None
-    library_write: bool = False
-    settings_state: str | None = None
-    knowledge_roots: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class Section:
     """The neutral spec both `render` and `render_rich` draw from.
 
     `table_rows`, when present, is a status table -- (label, value)
-    pairs, plain strings only (no live rich-text entities: the vault
-    section is the only user, and every one of its values is already a
-    fixed word by the time it gets here). `rows` is the button grid,
-    outer list = rows, inner list = the buttons in that row; the rich
-    renderer turns each inner list into one `InputRichBlockButtons`
-    block (Bot API 10.1: "a block containing a list of buttons that are
-    shown in one row"), so this list-of-lists shape is not just an
-    `InlineKeyboardMarkup` convenience carried over -- it is what the
-    rich API itself expects.
+    pairs, plain strings only (no live rich-text entities). `rows` is
+    the button grid, outer list = rows, inner list = the buttons in that
+    row; the rich renderer turns each inner list into one
+    `InputRichBlockButtons` block (Bot API 10.1: "a block containing a
+    list of buttons that are shown in one row"), so this list-of-lists
+    shape is not just an `InlineKeyboardMarkup` convenience carried over
+    -- it is what the rich API itself expects. Every builder ends `rows`
+    with `_nav_row`, so navigation is never a builder's afterthought.
     """
 
     title: str
@@ -341,8 +449,12 @@ class Section:
     show_footer: bool = False
 
 
-def _action_btn(action: str) -> Btn:
-    return Btn(label=ACTIONS[action], callback_data=f"{ACTION_PREFIX}{action}", style=_STYLES.get(action))
+def _action_btn(action: str, label: str | None = None) -> Btn:
+    return Btn(
+        label=label or ACTIONS[action],
+        callback_data=f"{ACTION_PREFIX}{action}",
+        style=_STYLES.get(action),
+    )
 
 
 def _section_btn(section: str, label: str) -> Btn:
@@ -350,27 +462,35 @@ def _section_btn(section: str, label: str) -> Btn:
 
 
 _CLOSE_BTN = Btn(label="✕ Закрыть", callback_data=CLOSE_CALLBACK)
-_BACK_BTN = Btn(label="‹ Назад", callback_data=f"{SECTION_PREFIX}{MAIN_SECTION}")
+
+# Every section hangs off main and is reachable from main alone -- a
+# section reachable from two places would need a "back" that knows which
+# one it came from, and a label that sometimes lies is worse than one
+# more tap. So the way back is always the same button.
+_BACK_BTN = Btn(label="‹ Меню", callback_data=f"{SECTION_PREFIX}{MAIN_SECTION}")
 
 
-def _back_row() -> list[Btn]:
-    return [_BACK_BTN]
+def _nav_row() -> list[Btn]:
+    return [_BACK_BTN, _CLOSE_BTN]
 
 
 MAIN_TITLE = "Меню"
-MEM_TEXT = "Память и заметки."
-DEALS_TEXT = "Договорённости и долги."
-QUIET_TEXT = "Тишина — на сколько?"
-MODE_TEXT = "Режим."
-DATA_TEXT = "Данные и доступ."
-VAULT_TEXT = "📚 Хранилище и знания."
+SETTINGS_TITLE = "⚙️ Настройки"
+QUIET_TITLE = "🔕 Тишина"
+MEM_TITLE = "🧠 Память и заметки"
+DEALS_TITLE = "🤝 Договорённости и долги"
+VAULT_TITLE = "📚 Хранилище и знания"
+PLANNER_TITLE = "🗓 Планер"
+DATA_TITLE = "🔒 Данные и доступ"
 
-# The hint shown in the vault status table, in place of a drawn
-# lib_write button, when CLAUDE_ACCESS_ENABLED and Telegram but reading
-# is off -- W2b's own read-then-refuse order, spelled out instead of
-# tapped: `/claude library write on` would refuse with exactly this
-# same instruction (app/tg/claude.py's LIBRARY_WRITE_NEEDS_READ).
-_LIB_WRITE_NEEDS_READ_HINT = " (/claude library on)"
+SETTINGS_HINT = "Часовой пояс — /tz Europe/Paris, главное действие — /due и текст."
+QUIET_HINT = "Тишина отменяет запланированные сообщения и не даёт планировать новые."
+DATA_HINT = "Только командой: /export — выгрузить всё, /delete — удалить всё, /grok — доступ для Grok."
+PLANNER_LINK_HINT = "Подключить планер — /planner_link."
+
+# The hint shown in the vault status table next to "выкл" when there is
+# no Claude connection at all -- nothing for a button to switch yet.
+_LIB_NO_CONNECTION = "нет подключения"
 
 # 8f: the knowledge-roots hint, shown right under the vault section's
 # title while notes consent is on. Same wording app/tg/vault.py's own
@@ -407,137 +527,202 @@ def _settings_hint(state: str | None, roots: tuple[str, ...]) -> str | None:
 
 
 def _lib_value(read: bool | None, write: bool) -> str:
+    if read is None:
+        return _LIB_NO_CONNECTION
     if not read:
         return "выкл"
     return "чтение+запись" if write else "чтение"
 
 
-def _render_main(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del vault  # main only decides whether to *show* the vault section, not its contents.
+def _state_rows(view: MenuView) -> list[tuple[str, str]]:
+    """The rows main and settings share, in the same order and words."""
+    return [
+        ("Бот", "активен" if view.persona_active else "на паузе"),
+        ("Тишина", _quiet_value(view)),
+        ("Фокус", _on_off(view.focus_on)),
+        ("Интенсивность", f"{view.intensity}/5"),
+    ]
+
+
+def _render_main(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    table_rows = _state_rows(view)
+    if view.due_action:
+        table_rows.append(("Главное", _due_preview(view.due_action)))
+
     rows = [[_action_btn("checkin"), _action_btn("state")]]
     if action_available("plan", settings, web=web):
         rows.append([_action_btn("plan")])
-    rows.append(
-        [_section_btn("mem", "🧠 Память ›"), _section_btn("deals", "🤝 Договорённости ›")]
-    )
-    rows.append(
-        [_section_btn("quiet", "🔕 Тишина ›"), _section_btn("mode", "⚙️ Режим ›")]
-    )
+    rows.append([_section_btn("settings", "⚙️ Настройки ›"), _section_btn("quiet", "🔕 Тишина ›")])
+    rows.append([_section_btn("mem", "🧠 Память ›"), _section_btn("deals", "🤝 Договорённости ›")])
+    connections = []
     if _vault_section_visible(settings):
-        rows.append([_section_btn("vault", "📚 Хранилище и знания ›")])
+        connections.append(_section_btn("vault", "📚 Хранилище ›"))
+    if settings.PLANNER_ENABLED:
+        connections.append(_section_btn("planner", "🗓 Планер ›"))
+    if connections:
+        rows.append(connections)
     rows.append([_section_btn("data", "🔒 Данные и доступ ›")])
     rows.append([_CLOSE_BTN])
-    return Section(title=MAIN_TITLE, hint=None, table_rows=None, rows=rows, show_footer=True)
+    return Section(title=MAIN_TITLE, hint=None, table_rows=table_rows, rows=rows, show_footer=True)
 
 
-def _render_mem(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del vault
-    rows = [[_action_btn("memories")], [_action_btn("mind")], [_action_btn("amendments")]]
-    if action_available("notes", settings, web=web):
-        rows.append([_action_btn("notes")])
-    rows.append([_action_btn("interests")])
-    rows.append(_back_row())
-    return Section(title=MEM_TEXT, hint=None, table_rows=None, rows=rows)
+def _intensity_row(view: MenuView) -> list[Btn]:
+    """"Мягче → n-1" / "Строже → n+1": each button names the value it
+    sets, and carries that value (`int_<n>`), so a stale or doubled
+    press lands on the number the button showed instead of stepping
+    twice. The end of the scale draws only the one way off it."""
+    row = []
+    if view.intensity > 1:
+        low = view.intensity - 1
+        row.append(_action_btn(f"int_{low}", f"🔽 Мягче → {low}"))
+    if view.intensity < 5:
+        high = view.intensity + 1
+        row.append(_action_btn(f"int_{high}", f"🔼 Строже → {high}"))
+    return row
 
 
-def _render_deals(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del settings, web, vault
-    rows = [[_action_btn("orders")], [_action_btn("paid")], [_action_btn("review")]]
-    rows.append(_back_row())
-    return Section(title=DEALS_TEXT, hint=None, table_rows=None, rows=rows)
+def _render_settings(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    table_rows = _state_rows(view)
+    table_rows += [
+        ("Ночью тихо", f"{_hhmm(settings.QUIET_START)}–{_hhmm(settings.QUIET_END)}"),
+        ("Утро / вечер", f"{_hhmm(settings.MORNING_TIME)} / {_hhmm(settings.EVENING_TIME)}"),
+        ("Часовой пояс", view.timezone),
+    ]
+    rows = [
+        _intensity_row(view),
+        [_action_btn("focus_off" if view.focus_on else "focus_on")],
+        [_action_btn("out" if view.persona_active else "in")],
+        _nav_row(),
+    ]
+    return Section(title=SETTINGS_TITLE, hint=SETTINGS_HINT, table_rows=table_rows, rows=rows)
 
 
-def _render_quiet(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del settings, web, vault
+def _render_quiet(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    table_rows = [
+        ("Сейчас", _quiet_value(view)),
+        ("Ночью тихо", f"{_hhmm(settings.QUIET_START)}–{_hhmm(settings.QUIET_END)}"),
+    ]
     rows = [
         [_action_btn("quiet_30m"), _action_btn("quiet_2h")],
         [_action_btn("quiet_8h"), _action_btn("quiet_1d")],
-        [_action_btn("quiet_off")],
     ]
-    rows.append(_back_row())
-    return Section(title=QUIET_TEXT, hint=None, table_rows=None, rows=rows)
+    if quiet_active(view):
+        rows.append([_action_btn("quiet_off")])
+    rows.append(_nav_row())
+    return Section(title=QUIET_TITLE, hint=QUIET_HINT, table_rows=table_rows, rows=rows)
 
 
-def _render_mode(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del settings, web, vault
-    rows = [
-        [_action_btn("focus_on"), _action_btn("focus_off")],
-        [_action_btn("out"), _action_btn("in")],
-        [_action_btn("digest")],
+def _render_mem(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    rows = [[_action_btn("memories"), _action_btn("mind")], [_action_btn("amendments")]]
+    if action_available("notes", settings, web=web):
+        rows.append([_action_btn("notes"), _action_btn("interests")])
+    else:
+        rows.append([_action_btn("interests")])
+    rows.append([_action_btn("digest"), _action_btn("digest_7d")])
+    rows.append(_nav_row())
+    return Section(title=MEM_TITLE, hint=None, table_rows=None, rows=rows)
+
+
+def _render_deals(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    rows = [[_action_btn("orders"), _action_btn("paid")], [_action_btn("review")]]
+    rows.append(_nav_row())
+    return Section(title=DEALS_TITLE, hint=None, table_rows=None, rows=rows)
+
+
+def _render_vault(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    """Status table plus state-aware switches: notes consent, and --
+    Telegram only, with a live Claude connection -- the library's read
+    switch and, once reading is on, its write switch. Writing needs
+    reading (W2b), so the write button is simply not drawn while
+    reading is off; `library_write` refuses a forged press the same way
+    it refuses a typed `/claude library write on`.
+    """
+    table_rows = [
+        ("Режим", settings.VAULT_MODE),
+        ("Знания", _on_off(settings.VAULT_KNOWLEDGE_ENABLED)),
+        ("Личные", _on_off(settings.VAULT_PERSONAL_ENABLED)),
+        ("Заметки", _on_off(view.notes_consent)),
     ]
-    rows.append(_back_row())
-    return Section(title=MODE_TEXT, hint=None, table_rows=None, rows=rows)
+    rows: list[list[Btn]] = [[_action_btn("notes_off" if view.notes_consent else "notes_on")]]
+
+    if action_available("lib_read_on", settings, web=web):
+        table_rows.append(("Claude, библиотека", _lib_value(view.library_read, view.library_write)))
+        if view.library_read is not None:
+            rows.append([_action_btn("lib_read_off" if view.library_read else "lib_read_on")])
+        if view.library_read:
+            rows.append([_action_btn("lib_write_off" if view.library_write else "lib_write_on")])
+
+    rows.append([_action_btn("vault")])
+    rows.append(_nav_row())
+    hint = _settings_hint(view.settings_state, view.knowledge_roots)
+    return Section(title=VAULT_TITLE, hint=hint, table_rows=table_rows, rows=rows)
 
 
-def _render_data(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    del vault
-    # The `vault` status action moved to the new vault section below --
-    # this section keeps everything else "Данные и доступ" held before.
+def _render_planner(settings: Settings, *, web: bool, view: MenuView) -> Section:
+    linked = view.planner_status is not None
+    active = view.planner_status == "active"
+    if not linked:
+        link_value = "не подключён"
+    elif active:
+        link_value = "подключён"
+    else:
+        link_value = "нужно переподключить"
+    table_rows = [("Подключение", link_value)]
+    if linked:
+        table_rows.append(("Синхронизация", _on_off(view.planner_enabled)))
+
+    rows = [[_action_btn("plan")]]
+    if linked:
+        rows.append([_action_btn("planner_off" if view.planner_enabled else "planner_on")])
+    rows.append([_action_btn("planner")])
+    rows.append(_nav_row())
+    hint = None if active else PLANNER_LINK_HINT
+    return Section(title=PLANNER_TITLE, hint=hint, table_rows=table_rows, rows=rows)
+
+
+def _render_data(settings: Settings, *, web: bool, view: MenuView) -> Section:
     rows = [[_action_btn("privacy")]]
     if action_available("claude", settings, web=web):
         rows.append([_action_btn("claude")])
     rows.append([_action_btn("revoke")])
     if action_available("hide_kb", settings, web=web):
         rows.append([_action_btn("hide_kb")])
-    rows.append(_back_row())
-    return Section(title=DATA_TEXT, hint=None, table_rows=None, rows=rows)
-
-
-def _render_vault(settings: Settings, *, web: bool, vault: VaultMenuView) -> Section:
-    """The status table plus state-dependent toggles (plan section 2):
-    only the button matching the *current* state is drawn (never both
-    "on" and "off" for the same switch), so a tap always reads as "do
-    the thing", not "pick a side that might already be true". A stale
-    press -- e.g. `notes_on` arriving after consent was already flipped
-    on by a typed `/vault notes on` in between -- is still harmless: the
-    underlying commands (`set_notes_consent`, `library_write`) are
-    idempotent.
-    """
-    table_rows = [
-        ("Режим", settings.VAULT_MODE),
-        ("Знания", "вкл" if settings.VAULT_KNOWLEDGE_ENABLED else "выкл"),
-        ("Личные", "вкл" if settings.VAULT_PERSONAL_ENABLED else "выкл"),
-        ("Заметки", "вкл" if vault.notes_consent else "выкл"),
-    ]
-    rows: list[list[Btn]] = [[_action_btn("notes_off" if vault.notes_consent else "notes_on")]]
-
-    claude_row_shown = settings.CLAUDE_ACCESS_ENABLED and not web
-    if claude_row_shown:
-        value = _lib_value(vault.library_read, vault.library_write)
-        if not vault.library_read:
-            value += _LIB_WRITE_NEEDS_READ_HINT
-        table_rows.append(("Claude, библиотека", value))
-        if vault.library_read:
-            rows.append(
-                [_action_btn("lib_write_off" if vault.library_write else "lib_write_on")]
-            )
-
-    rows.append([_action_btn("vault")])
-    rows.append(_back_row())
-    hint = _settings_hint(vault.settings_state, vault.knowledge_roots)
-    return Section(title=VAULT_TEXT, hint=hint, table_rows=table_rows, rows=rows)
+    rows.append(_nav_row())
+    return Section(title=DATA_TITLE, hint=DATA_HINT, table_rows=None, rows=rows)
 
 
 _SECTION_BUILDERS = {
     MAIN_SECTION: _render_main,
+    "settings": _render_settings,
+    "quiet": _render_quiet,
     "mem": _render_mem,
     "deals": _render_deals,
-    "quiet": _render_quiet,
-    "mode": _render_mode,
-    "data": _render_data,
     "vault": _render_vault,
+    "planner": _render_planner,
+    "data": _render_data,
 }
+
+SECTIONS = frozenset(_SECTION_BUILDERS)
+
+
+def section_exists(section: str, settings: Settings) -> bool:
+    """Whether `section` can be shown under these settings: a name this
+    build knows, whose feature is not switched off at deploy level."""
+    if section not in _SECTION_BUILDERS:
+        return False
+    if section == "vault":
+        return _vault_section_visible(settings)
+    if section == "planner":
+        return settings.PLANNER_ENABLED
+    return True
 
 
 def _build_section(
-    section: str, settings: Settings, *, web: bool, vault: VaultMenuView | None
+    section: str, settings: Settings, *, web: bool, view: MenuView | None
 ) -> Section | None:
-    if section == "vault" and not _vault_section_visible(settings):
+    if not section_exists(section, settings):
         return None
-    builder = _SECTION_BUILDERS.get(section)
-    if builder is None:
-        return None
-    return builder(settings, web=web, vault=vault or VaultMenuView())
+    return _SECTION_BUILDERS[section](settings, web=web, view=view or MenuView())
 
 
 def _ikb(btn: Btn) -> InlineKeyboardButton:
@@ -578,10 +763,11 @@ def _plain_text(spec: Section) -> str:
 
 
 def render(
-    section: str, settings: Settings, *, web: bool, vault: VaultMenuView | None = None
+    section: str, settings: Settings, *, web: bool, view: MenuView | None = None
 ) -> tuple[str, InlineKeyboardMarkup] | None:
     """The text and keyboard for `section`, or None if it does not exist
-    (unknown name, or -- "vault" only -- `VAULT_MODE=off`).
+    (unknown name, or a feature section switched off at deploy level --
+    see `section_exists`).
 
     Every action button this ever emits satisfies `action_available` for
     the same `settings`/`web` -- each section builder above calls
@@ -593,7 +779,7 @@ def render(
     messages) and what a real Telegram client falls back to if
     `render_rich` is ever rejected.
     """
-    spec = _build_section(section, settings, web=web, vault=vault)
+    spec = _build_section(section, settings, web=web, view=view)
     if spec is None:
         return None
     markup = InlineKeyboardMarkup(inline_keyboard=[[_ikb(btn) for btn in row] for row in spec.rows])
@@ -601,7 +787,7 @@ def render(
 
 
 def render_rich(
-    section: str, settings: Settings, *, web: bool, vault: VaultMenuView | None = None
+    section: str, settings: Settings, *, web: bool, view: MenuView | None = None
 ) -> InputRichMessage | None:
     """The same section as `render`, laid out as Bot API 10.1 blocks
     with the buttons *inside* the message body (`InputRichBlockButtons`/
@@ -615,12 +801,10 @@ def render_rich(
     function's own docstring for why the two can never draw a different
     picture of a section.
     """
-    spec = _build_section(section, settings, web=web, vault=vault)
+    spec = _build_section(section, settings, web=web, view=view)
     if spec is None:
         return None
-    # Section titles are sentences in the plain renderer ("Память и
-    # заметки."); a heading reads wrong with the trailing period.
-    blocks: list = [InputRichBlockSectionHeading(text=spec.title.rstrip("."), size=2)]
+    blocks: list = [InputRichBlockSectionHeading(text=spec.title, size=2)]
     if spec.hint:
         blocks.append(InputRichBlockParagraph(text=spec.hint))
     if spec.table_rows:

@@ -16,6 +16,7 @@ from aiogram.types import Update
 from sqlalchemy import select
 
 from app.config import Settings
+from app.core import commands as commands_core
 from app.core import memory, proposal, safety_events
 from app.core.clock import SystemClock
 from app.core.clock import local_date as clock_local_date
@@ -29,7 +30,17 @@ from app.db.models import (
     UserState,
 )
 from app.tg import proposals as proposals_ui
-from app.tg.router import DUE_CLEARED, DUE_SET, FOCUS_OFF, FOCUS_ON, FOCUS_USAGE, build_router
+from app.tg.router import (
+    DUE_CLEARED,
+    DUE_SET,
+    FOCUS_OFF,
+    FOCUS_ON,
+    FOCUS_USAGE,
+    INTENSITY_NOW,
+    INTENSITY_SET,
+    INTENSITY_USAGE,
+    build_router,
+)
 from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
 
 pytestmark = pytest.mark.asyncio
@@ -228,6 +239,49 @@ async def test_focus_expires_a_pending_focus_proposal(sessionmaker, clock):
     async with sessionmaker() as session:
         row = await session.get(Proposal, proposal_id)
     assert row.status == "expired"
+
+
+# --- /intensity ---
+
+
+async def test_intensity_bare_shows_the_current_value(sessionmaker):
+    await _seed(sessionmaker, 1, intensity=4)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/intensity"))
+
+    assert fake.sent[0].text == INTENSITY_NOW.format(value=4)
+    assert (await _state(sessionmaker)).intensity == 4
+
+
+async def test_intensity_with_a_valid_digit_sets_it(sessionmaker):
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, "/intensity 2"))
+
+    assert fake.sent[0].text == INTENSITY_SET.format(value="2")
+    assert (await _state(sessionmaker)).intensity == 2
+
+
+@pytest.mark.parametrize("raw", ["0", "6", "abc", "3.5", "-1"])
+async def test_intensity_with_an_invalid_value_shows_usage_and_changes_nothing(sessionmaker, raw):
+    await _seed(sessionmaker, 1, intensity=3)
+    dp, bot, fake = _build_dp(sessionmaker)
+
+    await _feed(dp, bot, _command_update(1, f"/intensity {raw}"))
+
+    assert fake.sent[0].text == INTENSITY_USAGE
+    assert (await _state(sessionmaker)).intensity == 3
+
+
+async def test_set_intensity_raises_value_error_outside_1_5(sessionmaker):
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError):
+            await commands_core.set_intensity(session, 0, "command")
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError):
+            await commands_core.set_intensity(session, 6, "command")
 
 
 # --- /state (plan section 11) ---

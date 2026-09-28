@@ -166,6 +166,7 @@ BOT_COMMANDS = [
     BotCommand(command="checkin", description="Чек-ин за день"),
     BotCommand(command="due", description="Главное действие"),
     BotCommand(command="focus", description="Фокус вкл/выкл"),
+    BotCommand(command="intensity", description="Интенсивность 1–5"),
     BotCommand(command="quiet", description="Тишина на время"),
     BotCommand(command="tz", description="Часовой пояс"),
     BotCommand(command="export", description="Выгрузить все данные"),
@@ -244,6 +245,9 @@ DUE_SET = "Главное действие: «{text}»."
 FOCUS_USAGE = "Как именно? /focus on или /focus off."
 FOCUS_ON = "Фокус включён."
 FOCUS_OFF = "Фокус выключен."
+INTENSITY_NOW = "Интенсивность: {value}/5. Сменить: /intensity 1–5 (1 — мягче, 5 — строже)."
+INTENSITY_USAGE = "Сколько? /intensity 1–5: 1 — мягче, 5 — строже."
+INTENSITY_SET = "Интенсивность: {value}/5."
 
 # Web-chat plan track 1: the second, independent layer of defense
 # against /export and /delete from the web (design section 2; the
@@ -517,37 +521,49 @@ def build_router(
     async def start(message: Message) -> None:
         await message.answer(START_TEXT, reply_markup=menu.reply_keyboard())
 
-    async def _vault_menu_view() -> menu.VaultMenuView:
-        """Everything menu.py's vault section needs beyond `settings`
-        (VAULT_MODE/VAULT_KNOWLEDGE_ENABLED/VAULT_PERSONAL_ENABLED are
-        already `Settings` fields, read straight from there). Gathered
-        only when that section is actually about to be shown -- see
-        `_show_menu`'s own docstring -- never for main or any other
-        section, which have nothing to do with a session at all.
+    async def _menu_view(section: str) -> menu.MenuView:
+        """The live state menu.py's sections show beyond `settings`: the
+        user_state row for every section (main and settings both carry a
+        status table), plus the Claude connection only for the vault
+        section and the planner credential only for the planner section
+        -- neither query runs for a section that shows nothing of it.
 
         8f: `settings_state`/`knowledge_roots` need vaultd's manifest,
         so they are fetched the same way /vault itself does (below) --
-        a status probe, then the manifest, and only while notes consent
-        is on. Consent off leaves both at their "not fetched" default,
+        a status probe, then the manifest, and only for the vault
+        section, and only while notes consent is on. Consent off (or
+        any other section) leaves both at their "not fetched" default,
         exactly like `format_notes_line`'s own `notes=None`.
         """
+        connection = None
+        credential = None
+        settings_state = None
+        knowledge_roots: tuple[str, ...] = ()
         async with sessionmaker() as session:
             user_state = await get_state(session)
-            connection = None
-            if settings.CLAUDE_ACCESS_ENABLED:
+            if section == "vault" and settings.CLAUDE_ACCESS_ENABLED:
                 connection = await oauth_store.current_connection(session, clock)
-            settings_state = None
-            knowledge_roots: tuple[str, ...] = ()
-            if user_state.notes_consent:
+            if section == "vault" and user_state.notes_consent:
                 health = await vault_status.probe(session, settings, clock)
                 overview = await vault_status.notes_overview(settings, health)
                 if overview is not None:
                     settings_state = overview.settings
                     knowledge_roots = overview.knowledge_roots
-        return menu.VaultMenuView(
+            if section == "planner" and settings.PLANNER_ENABLED:
+                credential = await planner_auth.get_status(session)
+        return menu.MenuView(
+            now=clock.now_utc(),
+            timezone=user_state.timezone,
+            persona_active=user_state.persona_active,
+            focus_on=user_state.focus_on,
+            intensity=user_state.intensity,
+            quiet_until=user_state.quiet_until,
+            due_action=user_state.due_action,
             notes_consent=user_state.notes_consent,
             library_read=connection.library_read if connection else None,
             library_write=bool(connection.library_write) if connection else False,
+            planner_status=credential.status if credential else None,
+            planner_enabled=bool(credential.enabled) if credential else False,
             settings_state=settings_state,
             knowledge_roots=knowledge_roots,
         )
@@ -581,19 +597,19 @@ def build_router(
     async def _show_menu(bot, chat_id: int, section: str, *, message_id: int | None = None) -> int | None:
         """Send (`message_id=None`) or edit (`message_id` set) the
         `/menu` hub, showing `section`. Shared by `/menu`, the `☰ Меню`
-        reply-keyboard button, every `mn:s:` section tap, and the vault
-        toggles' re-render after `notes_on`/`notes_off`/`lib_write_on`/
-        `lib_write_off`. `mn:x` (closing the menu) is not a section and
-        is rendered separately, in `menu_callback` below.
+        reply-keyboard button, every `mn:s:` section tap, and the
+        re-render after a switch (menu.REFRESH_SECTION). `mn:x` (closing
+        the menu) is not a section and is rendered separately, in
+        `menu_callback` below.
 
         Returns the shown message's id, or None if `section` does not
         exist -- `menu.render`/`render_rich`'s own None, both built from
         the same spec (menu.py's own docstring), so a caller can treat
         this exactly like those functions' own "no such section" and
-        never sees the two disagree. `/menu`'s own first send and the
-        vault toggles' re-render both always pass a section that exists,
-        so that branch is reachable only from a stale/forged
-        `mn:s:<name>` tap.
+        never sees the two disagree. `/menu`'s own first send and a
+        switch's re-render both always pass a section that exists, so
+        that branch is reachable only from a stale/forged `mn:s:<name>`
+        tap.
 
         On the web sink: the same plain `send_keyboard`/`edit_keyboard`
         path `/menu` always used (app/web/sink.py only ever understands
@@ -605,10 +621,12 @@ def build_router(
         someone taps later, never leaves `/menu` silent.
         """
         web = getattr(bot, "is_web_sink", False)
-        vault = await _vault_menu_view() if section == "vault" else None
+        if not menu.section_exists(section, settings):
+            return None
+        view = await _menu_view(section)
 
         if web:
-            rendered = menu.render(section, settings, web=web, vault=vault)
+            rendered = menu.render(section, settings, web=web, view=view)
             if rendered is None:
                 return None
             text, markup = rendered
@@ -617,7 +635,7 @@ def build_router(
             await edit_keyboard(bot, chat_id, message_id, text, markup)
             return message_id
 
-        rich = menu.render_rich(section, settings, web=web, vault=vault)
+        rich = menu.render_rich(section, settings, web=web, view=view)
         if rich is None:
             return None
         if message_id is None:
@@ -630,9 +648,9 @@ def build_router(
                     type(exc).__name__,
                     extra={"event": "menu_rich_fallback"},
                 )
-                text, markup = menu.render(section, settings, web=web, vault=vault)
+                text, markup = menu.render(section, settings, web=web, view=view)
                 return await send_keyboard(bot, chat_id, text, markup)
-        text, markup = menu.render(section, settings, web=web, vault=vault)
+        text, markup = menu.render(section, settings, web=web, view=view)
         await _edit_menu(bot, chat_id, message_id, rich, text, markup)
         return message_id
 
@@ -982,6 +1000,29 @@ def build_router(
         await _reply_once(
             message, event_update.update_id, FOCUS_ON if enabled else FOCUS_OFF
         )
+
+    @router.message(Command("intensity"))
+    async def intensity_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """/intensity 1-5: the dial plan section 13 says only a command,
+        a button, pause handling or check-in logic may move. Before this
+        existed a soft pause word could lower it and nothing could ever
+        raise it back. Bare /intensity shows the current value."""
+        raw = (command.args or "").strip()
+        if not raw:
+            async with sessionmaker() as session:
+                user_state = await get_state(session)
+            await _reply_once(
+                message, event_update.update_id, INTENSITY_NOW.format(value=user_state.intensity)
+            )
+            return
+        if raw not in {str(n) for n in range(commands_core.INTENSITY_MIN, commands_core.INTENSITY_MAX + 1)}:
+            await _reply_once(message, event_update.update_id, INTENSITY_USAGE)
+            return
+        async with sessionmaker() as session:
+            await commands_core.set_intensity(session, int(raw), "command")
+        await _reply_once(message, event_update.update_id, INTENSITY_SET.format(value=raw))
 
     # --- 2f: data control (plan section 11) ---
 
@@ -1830,15 +1871,8 @@ def build_router(
         )
 
     async def _menu_notes(message: Message, event_update: Update, word: str) -> None:
-        """`notes_on`/`notes_off`: the vault section's own re-render
-        afterwards is what makes this a toggle rather than a one-shot
-        command -- the tapped card shows the flipped state in place,
-        the same way /state's [🔄 Обновить] shows fresh numbers, instead
-        of leaving the last-shown "выкл"/"вкл" sitting there stale until
-        the next full /menu."""
         del event_update  # vault() takes no event_update -- see its own signature above.
         await vault(message, CommandObject(prefix="/", command="vault", args=f"notes {word}"))
-        await _show_menu(message.bot, message.chat.id, "vault", message_id=message.message_id)
 
     async def _menu_notes_on(message: Message, event_update: Update) -> None:
         await _menu_notes(message, event_update, "on")
@@ -1846,22 +1880,48 @@ def build_router(
     async def _menu_notes_off(message: Message, event_update: Update) -> None:
         await _menu_notes(message, event_update, "off")
 
-    async def _menu_lib_write(message: Message, event_update: Update, word: str) -> None:
-        """`lib_write_on`/`lib_write_off`: same re-render as
-        `_menu_notes` above. `claude_command` keeps its own is_web_sink
-        guard and `_once` gate -- reached here only when
-        `action_available` already refused a web press, this is the
-        same defence in depth `_menu_claude` already relies on."""
+    async def _menu_library(message: Message, event_update: Update, args: str) -> None:
+        """`lib_read_*`/`lib_write_*`: `claude_command` keeps its own
+        is_web_sink guard and `_once` gate -- reached here only when
+        `action_available` already refused a web press, this is the same
+        defence in depth `_menu_claude` already relies on."""
         await claude_command(
-            message, event_update, CommandObject(prefix="/", command="claude", args=f"library write {word}")
+            message, event_update, CommandObject(prefix="/", command="claude", args=args)
         )
-        await _show_menu(message.bot, message.chat.id, "vault", message_id=message.message_id)
+
+    async def _menu_lib_read_on(message: Message, event_update: Update) -> None:
+        await _menu_library(message, event_update, "library on")
+
+    async def _menu_lib_read_off(message: Message, event_update: Update) -> None:
+        await _menu_library(message, event_update, "library off")
 
     async def _menu_lib_write_on(message: Message, event_update: Update) -> None:
-        await _menu_lib_write(message, event_update, "on")
+        await _menu_library(message, event_update, "library write on")
 
     async def _menu_lib_write_off(message: Message, event_update: Update) -> None:
-        await _menu_lib_write(message, event_update, "off")
+        await _menu_library(message, event_update, "library write off")
+
+    def _menu_intensity(value: int):
+        async def run(message: Message, event_update: Update) -> None:
+            await intensity_command(
+                message, event_update, CommandObject(prefix="/", command="intensity", args=str(value))
+            )
+
+        return run
+
+    async def _menu_planner(message: Message, event_update: Update, args: str | None) -> None:
+        await planner_command(
+            message, event_update, CommandObject(prefix="/", command="planner", args=args)
+        )
+
+    async def _menu_planner_status(message: Message, event_update: Update) -> None:
+        await _menu_planner(message, event_update, None)
+
+    async def _menu_planner_on(message: Message, event_update: Update) -> None:
+        await _menu_planner(message, event_update, "on")
+
+    async def _menu_planner_off(message: Message, event_update: Update) -> None:
+        await _menu_planner(message, event_update, "off")
 
     async def _menu_mind(message: Message, event_update: Update) -> None:
         # args=None takes the same "list, don't add" branch a bare
@@ -1884,6 +1944,11 @@ def build_router(
             message, event_update, CommandObject(prefix="/", command="digest", args=None)
         )
 
+    async def _menu_digest_7d(message: Message, event_update: Update) -> None:
+        await digest_command(
+            message, event_update, CommandObject(prefix="/", command="digest", args="7d")
+        )
+
     async def _menu_hide_kb(message: Message, event_update: Update) -> None:
         del event_update  # a fixed reply, nothing to gate or store.
         await message.answer(HIDE_KB_REPLY, reply_markup=ReplyKeyboardRemove())
@@ -1892,31 +1957,38 @@ def build_router(
         "checkin": checkin_command,
         "state": _menu_state,
         "plan": plan_command,
-        "memories": memories,
-        "mind": _menu_mind,
-        "amendments": amendments_command,
-        "notes": notes_command,
-        "interests": _menu_interests,
-        "orders": orders_command,
-        "paid": _menu_paid,
-        "review": review_command,
+        **{f"int_{n}": _menu_intensity(n) for n in range(1, 6)},
+        "focus_on": _menu_focus_on,
+        "focus_off": _menu_focus_off,
+        "out": out,
+        "in": resume,
         "quiet_30m": _menu_quiet_30m,
         "quiet_2h": _menu_quiet_2h,
         "quiet_8h": _menu_quiet_8h,
         "quiet_1d": _menu_quiet_1d,
         "quiet_off": _menu_quiet_off,
-        "focus_on": _menu_focus_on,
-        "focus_off": _menu_focus_off,
-        "out": out,
-        "in": resume,
+        "memories": memories,
+        "mind": _menu_mind,
+        "amendments": amendments_command,
+        "notes": notes_command,
+        "interests": _menu_interests,
         "digest": _menu_digest,
-        "privacy": privacy,
+        "digest_7d": _menu_digest_7d,
+        "orders": orders_command,
+        "paid": _menu_paid,
+        "review": review_command,
         "vault": _menu_vault,
-        "claude": _menu_claude,
         "notes_on": _menu_notes_on,
         "notes_off": _menu_notes_off,
+        "lib_read_on": _menu_lib_read_on,
+        "lib_read_off": _menu_lib_read_off,
         "lib_write_on": _menu_lib_write_on,
         "lib_write_off": _menu_lib_write_off,
+        "planner": _menu_planner_status,
+        "planner_on": _menu_planner_on,
+        "planner_off": _menu_planner_off,
+        "privacy": privacy,
+        "claude": _menu_claude,
         "revoke": revoke_command,
         "hide_kb": _menu_hide_kb,
     }
@@ -1985,6 +2057,13 @@ def build_router(
         async with sessionmaker() as session:
             await checkin_core.clear_awaiting(session)
         await MENU_ACTIONS[value](callback.message, event_update)
+        # A switch leaves its own section on screen showing the new
+        # state -- the same way /state's [🔄 Обновить] shows fresh
+        # numbers -- instead of the last-shown value sitting there next
+        # to a button that no longer means anything.
+        refresh = menu.REFRESH_SECTION.get(value)
+        if refresh is not None:
+            await _show_menu(callback.bot, chat_id, refresh, message_id=message_id)
 
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:

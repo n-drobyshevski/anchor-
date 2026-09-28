@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from vaultd.boot import BootRefused, check_undo_root
-from vaultd.config import Config
+from vaultd.config import FILES_PER_CHANGESET, Config
 from vaultd.undo import CapExceeded, FileEntry, UndoStore
 from tests.conftest import AUTH, FakeClock, write
 
@@ -126,12 +126,13 @@ async def test_undo_of_a_missing_changeset_is_404(client) -> None:
 
 
 async def test_files_per_changeset_cap(client, vault: Path):
-    for i in range(5):
+    for i in range(FILES_PER_CHANGESET):
         resp = await _put(client, f"Library/F{i}.md", "x", None, changeset="big")
         assert resp.status == 200
-    resp = await _put(client, "Library/F5.md", "x", None, changeset="big")
+    over = f"Library/F{FILES_PER_CHANGESET}.md"
+    resp = await _put(client, over, "x", None, changeset="big")
     assert resp.status == 403
-    assert not (vault / "Library" / "F5.md").exists()
+    assert not (vault / over).exists()
 
 
 async def test_changesets_per_hour_cap(client, vault: Path):
