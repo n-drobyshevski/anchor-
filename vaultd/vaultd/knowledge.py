@@ -583,7 +583,11 @@ def build_tree(root: Path, rules: classes.FolderRules) -> dict:
                     continue
             except OSError:
                 continue
-            if classes.is_settings_file(rel) or _first_segment(rel) == _ANCHOR_TOP:
+            # No separate `Anchor/` check here: the folder branch above
+            # already refuses to walk into `Anchor/` at all, and never
+            # calls back into this branch for it either, so a note
+            # under `Anchor/` can never reach this line.
+            if classes.is_settings_file(rel):
                 continue
             data = _read_regular_by_full_path(entry.path)
             if data is None:

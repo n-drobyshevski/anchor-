@@ -404,5 +404,5 @@ creates no folders. The settled answers:
 | Reorganising | Moves (`rename_note`) have **their own budget**: **20 files per changeset** (a moved file plus its rewritten backlinks) and **60 per day**. Content edits keep the 5-files-per-changeset cap. Changesets per hour stay 4. |
 | Guidance | `list_tree`'s and `create_note`'s descriptions tell Claude: look at the tree first, use the most specific existing folder, match the existing naming, and create a subfolder only when it groups several notes. |
 
-The guard hook gains `list_tree`. The digest adds «новых папок: N»
+The guard hook gains `list_tree`. The digest adds «Создал N папку/папки/папок.»
 when there were any.

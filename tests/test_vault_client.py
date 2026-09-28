@@ -224,9 +224,10 @@ async def test_get_knowledge_404_is_not_found(stub) -> None:
 
 
 async def test_put_knowledge_sends_changeset_and_returns_hash(stub) -> None:
-    stub.respond("PUT", "/v1/knowledge", 200, {"sha256": "c" * 64})
-    sha = await _client(stub).put_knowledge("Library/CCRU.md", "new text", "a" * 64, "chg1")
-    assert sha == "c" * 64
+    stub.respond("PUT", "/v1/knowledge", 200, {"sha256": "c" * 64, "folders_created": 2})
+    result = await _client(stub).put_knowledge("Library/CCRU.md", "new text", "a" * 64, "chg1")
+    assert result.sha256 == "c" * 64
+    assert result.folders_created == 2
     assert stub.calls() == [("PUT", "/v1/knowledge")]
 
 
@@ -247,12 +248,17 @@ async def test_put_knowledge_412_is_conflict(stub) -> None:
 async def test_rename_knowledge_parses_relinked(stub) -> None:
     stub.respond(
         "POST", "/v1/knowledge/rename", 200,
-        {"path": "Library/New.md", "sha256": "d" * 64, "relinked": 2},
+        {
+            "path": "Library/New.md", "sha256": "d" * 64, "relinked": 2,
+            "folders_created": 1, "files_moved": 3,
+        },
     )
     result = await _client(stub).rename_knowledge("Library/Old.md", "Library/New.md", "a" * 64, "chg1")
     assert result.path == "Library/New.md"
     assert result.sha256 == "d" * 64
     assert result.relinked == 2
+    assert result.folders_created == 1
+    assert result.files_moved == 3
 
 
 async def test_list_changes_parses_entries(stub) -> None:

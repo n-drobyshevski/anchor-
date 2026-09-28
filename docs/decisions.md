@@ -2440,3 +2440,37 @@ logs it once as `event=knowledge_refused, route, reason`. The response
 is unchanged, a bare 403 or the same 404, so Claude still cannot tell
 the refusals apart. `reason` joins vaultd's safe log keys; its only
 values are the closed-set codes, never a path or a name.
+
+## Rev. 3 — Claude places notes itself, inside knowledge roots
+
+Production showed `create_note(folder="Philosophy")` refused as
+`folder_missing`: Claude could not see the structure, and vaultd
+created no folders. Your decisions:
+
+- **Claude decides placement**, from `list_tree()`: knowledge folders
+  and knowledge note titles, no text, only while writing is on. A
+  personal-marked note inside a knowledge folder never appears, and
+  neither does anything under `Anchor/`. The bot and vaultd still make
+  no model call on the write path.
+- **vaultd creates missing folders**, but only below a folder already
+  covered by `knowledge_folders`, and only where the whole new path
+  resolves to knowledge (a `never` or `personal` rule refuses it).
+  - Limits: at most 4 levels below that root, 3 new folders per
+    changeset, 10 per day.
+  - Segment names are checked: NFC, no leading dot, no separators or
+    control characters, 120 characters at most.
+  - It never creates a top-level folder, and `Anchor/settings.md`
+    stays unwritable, so the roots stay yours.
+  - Undo removes a created folder only if it is empty afterwards,
+    deepest first and never recursively.
+- **Moves have their own budget**: 20 files per changeset (a moved
+  file plus its rewritten backlinks) and 60 a day. Content writes keep
+  5 per changeset, and they are counted separately even within the
+  same changeset. Changesets per hour stay 4.
+- `folder_missing` still means "no knowledge-covered ancestor". New
+  codes: `folder_not_under_knowledge`, `folder_too_deep`,
+  `folder_name_bad`, `cap_folders`, `cap_folders_day`, `cap_moves`,
+  `cap_moves_day`.
+- The digest says «Создал N папку/папки/папок.» when folders were
+  created. `claude_changeset` gains `folders` and `moves` counters, and
+  still holds no text or paths.

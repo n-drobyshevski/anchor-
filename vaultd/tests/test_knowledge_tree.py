@@ -66,6 +66,26 @@ async def test_hides_everything_under_anchor(client, vault: Path):
     assert not any(n["path"].startswith("Anchor") for n in tree["notes"])
 
 
+async def test_hides_anchor_even_if_settings_mistakenly_calls_it_knowledge(client, vault: Path):
+    """Defense in depth, the same shape as test_knowledge_write.py's own
+    `test_anchor_is_refused_even_if_settings_mistakenly_calls_it_knowledge`:
+    `Anchor/` is never listed even if `knowledge_folders` perversely
+    names it and the note's own property says `knowledge` -- isolates
+    `build_tree`'s own `Anchor/` exclusion from the ordinary
+    effective-class filter, which a real settings file would already
+    catch on its own (Anchor is never a real knowledge folder)."""
+    write(
+        vault,
+        "Anchor/settings.md",
+        "---\nanchor: settings\nknowledge_folders: [Anchor, Library]\n---\n",
+    )
+    write(vault, "Anchor/Memory/0001-a.md", note("knowledge"))
+
+    tree = await _tree(client)
+    assert not any(f.startswith("Anchor") for f in tree["folders"])
+    assert not any(n["path"].startswith("Anchor") for n in tree["notes"])
+
+
 async def test_hides_a_note_outside_any_knowledge_folder(client, vault: Path):
     write(vault, "Elsewhere/x.md", note(None))
     tree = await _tree(client)

@@ -175,7 +175,7 @@ async def test_write_line_omits_folders_suffix_at_zero(sessionmaker):
             session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
             client_factory=lambda _s: vault,
         )
-    assert "папк" not in bot.sent[0][1]
+    assert "Создал" not in bot.sent[0][1]
 
 
 @pytest.mark.parametrize("n, word", [(1, "папку"), (2, "папки"), (5, "папок"), (11, "папок"), (21, "папку")])

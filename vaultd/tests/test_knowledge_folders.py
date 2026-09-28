@@ -173,6 +173,18 @@ def test_plan_new_folders_itself_refuses_a_leading_dot_or_empty_segment(vault: P
     assert empty.value.reason == "folder_name_bad"
 
 
+def test_plan_new_folders_itself_refuses_a_segment_holding_a_slash_or_backslash(vault: Path):
+    """Defense in depth, called directly: a literal '/' cannot survive
+    `rel.split('/')` into one segment through the HTTP path, and a
+    literal '\\\\' is already refused earlier by `paths.parse_rel`
+    (test_paths.py) -- `_safe_segment`'s own copy of both checks is
+    proven here, the same way as the dot/empty case above."""
+    from vaultd import knowledge
+
+    assert knowledge._safe_segment("a/b") is False  # noqa: SLF001 - same package
+    assert knowledge._safe_segment("a\\b") is False  # noqa: SLF001
+
+
 
 
 async def test_refused_on_a_non_nfc_segment_name(client, vault: Path):

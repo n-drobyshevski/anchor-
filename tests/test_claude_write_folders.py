@@ -130,6 +130,26 @@ async def test_cap_folders_per_changeset_is_ledger_backed(sessionmaker):
     assert vault.calls == []
 
 
+async def test_cap_folders_per_changeset_also_blocks_rename(sessionmaker):
+    world, vault = await _world(sessionmaker)
+    connection = await _connection(sessionmaker)
+    async with sessionmaker() as session:
+        row = ClaudeChangeset(
+            connection_id=connection.id, vault_ref="cs", kind="write",
+            folders=limits.FOLDERS_PER_CHANGESET, created_at=world.clock.now_utc(),
+            last_write_at=world.clock.now_utc(),
+        )
+        session.add(row)
+        await session.commit()
+    async with sessionmaker() as session:
+        with pytest.raises(Refused) as exc:
+            await claude_write.rename_note(
+                session, world.clock, vault, connection.id, "Library/A.md", "Library/B.md", "a" * 64
+            )
+    assert exc.value.code == "cap_folders"
+    assert vault.calls == []
+
+
 async def test_cap_moves_per_changeset_is_ledger_backed(sessionmaker):
     world, vault = await _world(sessionmaker)
     connection = await _connection(sessionmaker)

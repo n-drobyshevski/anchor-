@@ -516,6 +516,7 @@ async def test_claude_changeset_export_has_no_text_or_path_columns():
     names = set(ClaudeChangeset.__table__.columns.keys())
     assert names == {
         "id", "connection_id", "vault_ref", "kind", "files", "bytes",
-        "refused", "created", "renamed", "created_at", "last_write_at", "undone_at",
+        "refused", "created", "renamed", "folders", "moves",
+        "created_at", "last_write_at", "undone_at",
     }
     assert not any("path" in n or "text" in n for n in names)
