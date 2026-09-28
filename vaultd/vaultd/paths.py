@@ -115,6 +115,31 @@ def open_dir(root_fd: int, parts: list[str], *, create: bool = False) -> int | N
         raise
 
 
+def existing_prefix_length(root: Path, parts: list[str]) -> int:
+    """How many leading `parts` already exist as real directories below
+    `root`, walked with O_NOFOLLOW (rev. 3's folder auto-creation, plan
+    section 14). Raises Refused if a symlink sits anywhere on the way,
+    in the existing prefix or not -- the same rule every other read in
+    this module applies; a caller must never build past a link."""
+    with open_root(root) as root_fd:
+        fd = os.dup(root_fd)
+        count = 0
+        try:
+            for part in parts:
+                try:
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    return count
+                except OSError:
+                    raise Refused from None
+                os.close(fd)
+                fd = nxt
+                count += 1
+            return count
+        finally:
+            os.close(fd)
+
+
 def read_regular_at(dir_fd: int, name: str) -> bytes | None:
     """The bytes of a regular file in `dir_fd`, or None if it is absent.
 

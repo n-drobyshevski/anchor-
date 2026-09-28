@@ -352,6 +352,17 @@ async def put_knowledge(request: web.Request) -> web.Response:
             _log_refused(request, exc.reason)
             return _refused()
         try:
+            new_folders = await asyncio.to_thread(knowledge.pending_new_folders, store, rel, if_sha)
+        except knowledge.Refused as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        if new_folders:
+            try:
+                await asyncio.to_thread(undo_store.precheck_folders, changeset, len(new_folders))
+            except CapExceeded as exc:
+                _log_refused(request, exc.reason)
+                return _refused()
+        try:
             new_sha, pre_image = await asyncio.to_thread(
                 knowledge.perform_put, store, rel, content, if_sha, now=now
             )
@@ -364,9 +375,11 @@ async def put_knowledge(request: web.Request) -> web.Response:
             return _json_error("precondition_failed", 412)
         except OSError:
             return _json_error("io_error", 500)
+        if new_folders:
+            await asyncio.to_thread(undo_store.append_folders, changeset, "write", list(new_folders))
         await asyncio.to_thread(undo_store.append, changeset, "write", [FileEntry(rel, pre_image, new_sha)])
     logger.info("knowledge_write", extra={"event": "knowledge_put"})
-    return web.json_response({"sha256": new_sha})
+    return web.json_response({"sha256": new_sha, "folders_created": len(new_folders)})
 
 
 async def rename_knowledge(request: web.Request) -> web.Response:
@@ -405,10 +418,16 @@ async def rename_knowledge(request: web.Request) -> web.Response:
             return _json_error("precondition_failed", 412)
         n_files = 1 + len(plan.backlinks)
         try:
-            await asyncio.to_thread(undo_store.precheck, changeset, "write", n_files)
+            await asyncio.to_thread(undo_store.precheck_moves, changeset, n_files)
         except CapExceeded as exc:
             _log_refused(request, exc.reason)
             return _refused()
+        if plan.new_folders:
+            try:
+                await asyncio.to_thread(undo_store.precheck_folders, changeset, len(plan.new_folders))
+            except CapExceeded as exc:
+                _log_refused(request, exc.reason)
+                return _refused()
         try:
             entries = await asyncio.to_thread(knowledge.perform_rename, store, plan, now=now)
         except knowledge.Refused as exc:
@@ -419,12 +438,39 @@ async def rename_knowledge(request: web.Request) -> web.Response:
         except knowledge.MidRenameFailure as exc:
             # The vault is left with a duplicate, not a loss; record what
             # is certain (the new path was created) so undoing this
-            # changeset can still remove it.
-            await asyncio.to_thread(undo_store.append, changeset, "write", exc.entries)
+            # changeset can still remove it. One file moved (the new
+            # path exists now), even though the old one could not be
+            # removed.
+            await asyncio.to_thread(undo_store.append_move, changeset, "write", exc.entries, 1)
             return _json_error("io_error", 500)
-        await asyncio.to_thread(undo_store.append, changeset, "write", entries)
+        if plan.new_folders:
+            await asyncio.to_thread(undo_store.append_folders, changeset, "write", list(plan.new_folders))
+        await asyncio.to_thread(undo_store.append_move, changeset, "write", entries, n_files)
     logger.info("knowledge_rename", extra={"event": "knowledge_rename", "count": len(entries)})
-    return web.json_response({"path": entries[0].path, "sha256": entries[0].written_sha256, "relinked": len(entries) - 2})
+    return web.json_response(
+        {
+            "path": entries[0].path,
+            "sha256": entries[0].written_sha256,
+            "relinked": len(entries) - 2,
+            "folders_created": len(plan.new_folders),
+            "files_moved": len(entries) - 1,
+        }
+    )
+
+
+async def get_knowledge_tree(request: web.Request) -> web.Response:
+    """`GET /v1/knowledge/tree` (rev. 3, BUILD item 4): what Claude sees
+    before it writes -- knowledge folders and note titles, no bodies.
+    No refusal shape here: an unusable settings file just answers with
+    empty lists (`knowledge.build_tree`), the same as everywhere else."""
+    store = request.app[STORE_KEY]
+    tree = await asyncio.to_thread(_build_tree, store)
+    return web.json_response(tree)
+
+
+def _build_tree(store: Store) -> dict:
+    rules = classes.load_rules(store.vault_path)
+    return knowledge.build_tree(store.vault_path, rules)
 
 
 async def get_changes(request: web.Request) -> web.Response:
@@ -463,6 +509,13 @@ async def undo_changeset(request: web.Request) -> web.Response:
                     recorded.append(record)
             else:
                 refused += 1
+        # Folders this changeset created (rev. 3): removed deepest first,
+        # only if still empty after the file restores above -- a
+        # non-empty one (a later write, or your own new file, landed in
+        # it) is silently left in place.
+        folders = await asyncio.to_thread(undo_store.folders_of, changeset)
+        for folder in reversed(folders):
+            await asyncio.to_thread(knowledge.remove_folder_if_empty, store, folder)
         if recorded:
             undo_id = undo_store.new_undo_id()
             await asyncio.to_thread(undo_store.append, undo_id, "undo", recorded)
@@ -502,6 +555,7 @@ def make_app(
     app.router.add_get("/v1/knowledge", get_knowledge)
     app.router.add_put("/v1/knowledge", put_knowledge)
     app.router.add_post("/v1/knowledge/rename", rename_knowledge)
+    app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/changes", get_changes)
     app.router.add_post("/v1/undo", undo_changeset)
     return app

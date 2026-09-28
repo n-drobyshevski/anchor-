@@ -1501,5 +1501,13 @@ cannot delete. There is no approval press; in its place:
   the digest's [Откатить всё за сутки], restores your earlier text for
   14 days.
 
+Claude sees the tree of knowledge folders and note titles
+(`list_tree`) and decides where a note belongs. It creates missing
+subfolders itself, but only inside a folder listed in
+`knowledge_folders` in `Anchor/settings.md`: at most 4 levels deep, 3
+new folders per batch and 10 a day. Top-level folders stay yours to
+create. Moving notes to reorganise (`rename_note`, with backlinks
+following) has its own budget: 20 files per batch and 60 a day.
+
 Writes are listed once a day in the digest, never one by one. See
 `anchor-claude-write-plan.md`.

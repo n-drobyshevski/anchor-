@@ -51,11 +51,28 @@ OB_BIN = "/app/node_modules/.bin/ob"
 # Plan (Claude writes knowledge notes) section 6.4, 6.2: caps and the
 # undo TTL are constants, by the same rule as the rest of this module --
 # a deploy must not be able to widen the boundary by pasting a variable.
+# FILES_PER_CHANGESET covers content writes only (rev. 3 splits renames
+# off into their own MOVE_FILES_PER_CHANGESET/MOVES_PER_DAY budget).
 KNOWLEDGE_WRITE_MAX_BYTES = 64 * 1024
 FILES_PER_CHANGESET = 5
 CHANGESETS_PER_HOUR = 4
 UNDOS_PER_HOUR = 4
 UNDO_TTL_DAYS = 14
+
+# Rev. 3 (anchor-claude-write-plan.md section 14): vaultd may create
+# missing folders on the way to a new note or a move target, only
+# inside a folder already covered by a `knowledge_folders` rule, and
+# only this far/this much:
+FOLDER_MAX_DEPTH = 4
+FOLDERS_PER_CHANGESET = 3
+FOLDERS_PER_DAY = 10
+# A rename's own budget -- the moved file plus every rewritten
+# backlink -- entirely separate from FILES_PER_CHANGESET above.
+MOVE_FILES_PER_CHANGESET = 20
+MOVES_PER_DAY = 60
+# GET /v1/knowledge/tree (rev. 3 BUILD item 4): at most this many notes
+# listed, with `truncated: true` past it.
+TREE_MAX_NOTES = 2000
 
 DEFAULT_VAULT_PATH = "/data/vault"
 DEFAULT_CONFIG_HOME = "/data/config"

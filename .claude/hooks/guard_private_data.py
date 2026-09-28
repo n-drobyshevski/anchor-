@@ -80,8 +80,8 @@ BLOCKED_TOOLS = {
 # "Anchor (old)" all match.
 ANCHOR_SERVER = re.compile(r"(?i)^mcp__(?:claude_ai_)?anchor\w*?__")
 # Anchor's read tools (app/web/mcp_core.py), C3's search_library, and
-# W2b's six write tools (app/web/claude_write.py) -- Claude Code builds
-# these, it never calls them.
+# W2b/rev. 3's seven write tools (app/web/claude_write.py) -- Claude
+# Code builds these, it never calls them.
 ANCHOR_TOOLS = frozenset(
     {
         "get_memory",
@@ -95,6 +95,7 @@ ANCHOR_TOOLS = frozenset(
         "get_note",
         "list_changes",
         "undo_changeset",
+        "list_tree",
     }
 )
 RAILWAY_LOGS = "mcp__Railway__get-logs"

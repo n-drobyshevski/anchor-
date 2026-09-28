@@ -26,6 +26,7 @@ tell the bot nothing the class boundary is trying to hide.
 from __future__ import annotations
 
 import os
+import stat
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,10 +34,12 @@ from pathlib import Path
 from typing import Callable
 
 from vaultd import classes, frontmatter, links, paths, provenance, undo
-from vaultd.config import KNOWLEDGE_WRITE_MAX_BYTES
+from vaultd.config import FOLDER_MAX_DEPTH, KNOWLEDGE_WRITE_MAX_BYTES, TREE_MAX_NOTES
 from vaultd.store import Conflict, Missing, Store, sha256
 
 _ANCHOR_TOP = "Anchor"
+_CONTROL = frozenset(chr(c) for c in list(range(0x20)) + [0x7F])
+_MAX_SEGMENT_CHARS = 120
 
 
 class Refused(Exception):
@@ -137,6 +140,135 @@ def _class_of(rel: str, data: bytes, rules: classes.FolderRules) -> str | None:
     return classes.effective_class(rel, mark, rules).note_class
 
 
+def _safe_segment(seg: str) -> bool:
+    """A new folder segment vaultd may create (rev. 3, plan section 14,
+    BUILD item 1d): non-empty, no leading '.', no '/' or '\\', no
+    control character, at most 120 chars, and already NFC-normalised --
+    vaultd never silently renormalises a name it is about to create, or
+    a Cyrillic folder could exist in two different byte forms.
+
+    No separate 'never literally Anchor' check: a *new* segment is only
+    ever considered once `plan_new_folders` has already found a
+    covering `knowledge_folders` rule for its existing ancestor (below),
+    and that rule is always a non-empty path -- so the first new
+    segment can never be the very first path segment, which is the only
+    position `candidate_path_reason`'s own `Anchor/` exclusion (and
+    `is_settings_file`) ever cares about. A `rel` starting with
+    `Anchor/` is refused before this function is even called."""
+    if not seg or seg.startswith("."):
+        return False
+    if "/" in seg or "\\" in seg:
+        return False
+    if any(c in _CONTROL for c in seg):
+        return False
+    if len(seg) > _MAX_SEGMENT_CHARS:
+        return False
+    if unicodedata.normalize("NFC", seg) != seg:
+        return False
+    return True
+
+
+def _covering_knowledge_rule(ancestor: classes.Segments, rules: classes.FolderRules) -> classes.Segments | None:
+    """The most specific `knowledge_folders` rule covering `ancestor`
+    (NFC-normalised segments), or None. "Most specific" (the longest
+    matching rule) so a nested rule -- `knowledge_folders: [Library,
+    Library/Deep]` -- roots a new folder's depth budget at whichever
+    rule actually names that ancestor, not an outer one."""
+    matches = [rule for rule in rules.knowledge if classes._covers(rule, ancestor)]  # noqa: SLF001 - same package
+    return max(matches, key=len) if matches else None
+
+
+def plan_new_folders(root: Path, rel: str, rules: classes.FolderRules) -> tuple[str, ...]:
+    """The new folder rel-paths (shallow to deep) `rel`'s write must
+    create, or `()` if its folder already exists. Pure and read-only --
+    never creates anything, never touches disk beyond the O_NOFOLLOW
+    directory walk -- so a caller can precheck caps and log a refusal
+    before any byte is written (rev. 3, plan section 14, BUILD item 1):
+
+    (a) the nearest EXISTING ancestor folder must be covered by a
+        `knowledge_folders` rule; that rule's own folder is the "root"
+        depth is measured from (c). An ancestor with no such rule --
+        including the knowledge root itself, when it was never created
+        on disk -- reuses `folder_missing`: there is no knowledge
+        ancestor to build from, which reads the same as "the folder is
+        missing" from the caller's side, and never creates a top-level
+        folder either way.
+    (b) the FULL new folder path's own effective class (folder rules
+        only) must still resolve to knowledge -- a `never`/`personal`
+        rule intercepting a deeper segment refuses with
+        `folder_not_under_knowledge`, even though the ancestor in (a)
+        was fine.
+    (c) depth below that root is at most FOLDER_MAX_DEPTH.
+    (d) every new segment is a safe name (`_safe_segment`).
+    (e) no symlink anywhere on the way -- `paths.existing_prefix_length`'s
+        own O_NOFOLLOW walk.
+    """
+    parts = rel.split("/")[:-1]
+    if not parts:
+        raise Refused("folder_missing")
+    existing = paths.existing_prefix_length(root, parts)
+    if existing == len(parts):
+        return ()
+    ancestor = tuple(unicodedata.normalize("NFC", p) for p in parts[:existing])
+    root_rule = _covering_knowledge_rule(ancestor, rules)
+    if root_rule is None:
+        raise Refused("folder_missing")
+    if classes._folder_class(rel, rules) != "knowledge":  # noqa: SLF001 - same package
+        raise Refused("folder_not_under_knowledge")
+    if len(parts) - len(root_rule) > FOLDER_MAX_DEPTH:
+        raise Refused("folder_too_deep")
+    for seg in parts[existing:]:
+        if not _safe_segment(seg):
+            raise Refused("folder_name_bad")
+    return tuple("/".join(parts[: existing + i + 1]) for i in range(len(parts) - existing))
+
+
+def pending_new_folders(store: Store, rel: str, if_sha256: str | None) -> tuple[str, ...]:
+    """The new folders `perform_put` will need to create for this write,
+    computed the same way it will -- so `PUT /v1/knowledge`'s handler
+    can precheck the folder caps and record what was created for undo
+    before any byte is written. `()` for an update (`if_sha256` is not
+    None -- an existing file's folder always already exists) or a
+    create whose folder already exists; any other refusal here is one
+    `perform_put` would raise anyway, just discovered earlier."""
+    if if_sha256 is not None:
+        return ()
+    if candidate_path_reason(rel) is not None:
+        return ()
+    root = store.vault_path
+    rules = classes.load_rules(root)
+    if rules.state == "invalid":
+        return ()
+    _current, folder_exists = _read_at(root, rel)
+    if folder_exists:
+        return ()
+    return plan_new_folders(root, rel, rules)
+
+
+def remove_folder_if_empty(store: Store, rel: str) -> bool:
+    """rmdir `rel` if it is still empty, O_NOFOLLOW, never recursive
+    (rev. 3, plan section 14). Left in place -- silently, no error -- if
+    it no longer exists, a symlink sits anywhere on the way, or it is
+    not empty (a later write, or one of your own files, landed in it):
+    undo must never delete something it did not itself create there."""
+    parts = rel.split("/")
+    parent_parts, name = parts[:-1], parts[-1]
+    try:
+        with paths.open_root(store.vault_path) as root_fd:
+            parent_fd = paths.open_dir(root_fd, parent_parts)
+            if parent_fd is None:
+                return False
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+                return True
+            except OSError:
+                return False
+            finally:
+                os.close(parent_fd)
+    except paths.Refused:
+        return False
+
+
 def check_new_content(rel: str, data: bytes, rules: classes.FolderRules, *, for_create: bool) -> None:
     """Raise Refused unless `data` may become the note at `rel`."""
     if len(data) > KNOWLEDGE_WRITE_MAX_BYTES:
@@ -177,7 +309,14 @@ def perform_put(
         if current is not None:
             raise Refused("name_taken")
         if not folder_exists:
-            raise Refused("folder_missing")  # only into an existing folder
+            # Validates eligibility only (rev. 3); the actual mkdir
+            # happens below, inside `store.put_unchecked`'s own
+            # O_NOFOLLOW `create=True` walk, once every check has
+            # passed. `api.py` has already called this same pure
+            # function itself, before this thread ever started, to
+            # precheck the folder caps and record what it is about to
+            # create for undo.
+            plan_new_folders(root, rel, rules)
         check_new_content(rel, data, rules, for_create=True)
         pre_image = None
         old_anchor = None
@@ -208,6 +347,9 @@ class RenamePlan:
     old_sha256: str
     # (rel, current bytes, rewritten text) for every knowledge note that links here.
     backlinks: tuple[tuple[str, bytes, str], ...]
+    # New folder rel-paths (shallow to deep) the destination needs (rev. 3); () if
+    # `new_rel`'s folder already exists.
+    new_folders: tuple[str, ...] = ()
 
 
 def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> RenamePlan:
@@ -235,8 +377,13 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
         raise Refused("not_knowledge")
 
     new_current, new_folder_exists = _read_at(root, new_rel)
+    new_folders: tuple[str, ...] = ()
     if not new_folder_exists:
-        raise Refused("folder_missing")
+        # Validates eligibility only (rev. 3); same shape as
+        # `perform_put`'s own call -- the destination folder is
+        # actually created later, inside `perform_rename`'s
+        # `store.put_unchecked` call.
+        new_folders = plan_new_folders(root, new_rel, rules)
     if new_current is not None:
         raise Refused("dest_taken")
     if classes._folder_class(new_rel, rules) != "knowledge":  # noqa: SLF001
@@ -273,7 +420,7 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
     if ambiguous:
         raise Refused("ambiguous_basename")  # the basename is ambiguous: another file already has it
 
-    return RenamePlan(old_rel, new_rel, old_data, if_sha256, tuple(backlinks))
+    return RenamePlan(old_rel, new_rel, old_data, if_sha256, tuple(backlinks), new_folders)
 
 
 def perform_rename(store: Store, plan: RenamePlan, *, now: Callable[[], str] = _now_iso) -> list[undo.FileEntry]:
@@ -367,3 +514,94 @@ def undo_one(store: Store, entry: undo.FileEntry) -> tuple[bool, undo.FileEntry 
         return True, undo.FileEntry(entry.path, None, sha256(entry.pre_image))
     except (Conflict, Missing, paths.Refused):
         return False, None
+
+
+# -- GET /v1/knowledge/tree: what Claude sees before it writes (rev. 3) -----
+
+_TREE_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _read_regular_by_full_path(full: str) -> bytes | None:
+    """A defensive, re-checked O_NOFOLLOW read of a file `os.scandir`
+    already found -- the same TOCTOU guard `links.py`'s own walk uses,
+    duplicated locally rather than imported (each walker here keeps its
+    own copy of this tiny helper, matching paths.py/links.py/manifest.py)."""
+    try:
+        fd = os.open(full, _TREE_FILE_FLAGS)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def build_tree(root: Path, rules: classes.FolderRules) -> dict:
+    """`GET /v1/knowledge/tree`'s body (rev. 3, BUILD item 4): every
+    folder under a `knowledge_folders` root whose own class is
+    knowledge, and every `.md` note whose *effective* class (folder
+    rule plus its own property, stricter wins) is knowledge -- a note
+    marked personal/never inside a knowledge folder never appears, and
+    neither does anything under `Anchor/`. No file content, ever.
+    Capped at TREE_MAX_NOTES notes, with `truncated: true` past it.
+    Invalid settings: empty lists, same as everywhere else in this
+    module."""
+    if rules.state == "invalid":
+        return {"folders": [], "notes": [], "truncated": False}
+    folders: list[str] = []
+    notes: list[dict] = []
+    truncated = False
+
+    def walk(directory: Path, prefix: str) -> None:
+        nonlocal truncated
+        try:
+            listing = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in sorted(listing, key=lambda e: e.name):
+            if entry.name.startswith("."):
+                continue
+            rel = prefix + entry.name
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if _first_segment(rel) == _ANCHOR_TOP:
+                        continue
+                    if classes._folder_class(rel + "/x", rules) == "knowledge":  # noqa: SLF001
+                        folders.append(rel)
+                    walk(Path(entry.path), rel + "/")
+                    continue
+                if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".md"):
+                    continue
+            except OSError:
+                continue
+            # No separate `Anchor/` check here: the folder branch above
+            # already refuses to walk into `Anchor/` at all, and never
+            # calls back into this branch for it either, so a note
+            # under `Anchor/` can never reach this line.
+            if classes.is_settings_file(rel):
+                continue
+            data = _read_regular_by_full_path(entry.path)
+            if data is None:
+                continue
+            mark = frontmatter.note_mark(data)
+            if mark == "unknown":
+                continue
+            resolved = classes.effective_class(rel, mark, rules)
+            if resolved.note_class != "knowledge":
+                continue
+            if len(notes) >= TREE_MAX_NOTES:
+                truncated = True
+                continue
+            notes.append({"path": rel, "title": rel.rsplit("/", 1)[-1][: -len(".md")]})
+
+    walk(root, "")
+    return {"folders": folders, "notes": notes, "truncated": truncated}

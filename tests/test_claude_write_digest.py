@@ -50,13 +50,14 @@ async def _seed(sessionmaker, *, epoch: str = "aaaaaa") -> OauthConnection:
 
 
 async def _write_row(
-    sessionmaker, connection_id: int, vault_ref: str, *, files=1, created=0, renamed=0, refused=0, when=NOW
+    sessionmaker, connection_id: int, vault_ref: str, *,
+    files=1, created=0, renamed=0, refused=0, folders=0, when=NOW,
 ) -> ClaudeChangeset:
     async with sessionmaker() as session:
         row = ClaudeChangeset(
             connection_id=connection_id, vault_ref=vault_ref, kind="write",
             files=files, bytes=10, created=created, renamed=renamed, refused=refused,
-            created_at=when, last_write_at=when,
+            folders=folders, created_at=when, last_write_at=when,
         )
         session.add(row)
         await session.commit()
@@ -158,6 +159,54 @@ async def test_write_line_includes_refused_when_nonzero(sessionmaker):
             client_factory=lambda _s: vault,
         )
     assert bot.sent[0][1].endswith("Отклонено: 2.")
+
+
+# --- rev. 3: "новых папок" / created folders -------------------------------
+
+
+async def test_write_line_omits_folders_suffix_at_zero(sessionmaker):
+    connection = await _seed(sessionmaker)
+    await _write_row(sessionmaker, connection.id, "v1", created=1, folders=0)
+    vault = FakeKnowledgeVault()
+    vault.changesets["v1"] = [_entry("Library/CCRU.md")]
+    bot = FakeBot()
+    async with sessionmaker() as session:
+        await claude_ui.run_library_digest(
+            session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
+            client_factory=lambda _s: vault,
+        )
+    assert "Создал" not in bot.sent[0][1]
+
+
+@pytest.mark.parametrize("n, word", [(1, "папку"), (2, "папки"), (5, "папок"), (11, "папок"), (21, "папку")])
+async def test_write_line_folders_suffix_plural(sessionmaker, n, word):
+    connection = await _seed(sessionmaker)
+    await _write_row(sessionmaker, connection.id, "v1", created=1, folders=n)
+    vault = FakeKnowledgeVault()
+    vault.changesets["v1"] = [_entry("Library/CCRU.md")]
+    bot = FakeBot()
+    async with sessionmaker() as session:
+        await claude_ui.run_library_digest(
+            session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
+            client_factory=lambda _s: vault,
+        )
+    assert bot.sent[0][1].endswith(f"Создал {n} {word}.")
+
+
+async def test_write_line_sums_folders_across_changesets(sessionmaker):
+    connection = await _seed(sessionmaker)
+    await _write_row(sessionmaker, connection.id, "v1", created=1, folders=2)
+    await _write_row(sessionmaker, connection.id, "v2", created=1, folders=1, when=NOW + datetime.timedelta(minutes=1))
+    vault = FakeKnowledgeVault()
+    vault.changesets["v1"] = [_entry("Library/A.md")]
+    vault.changesets["v2"] = [_entry("Library/B.md")]
+    bot = FakeBot()
+    async with sessionmaker() as session:
+        await claude_ui.run_library_digest(
+            session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
+            client_factory=lambda _s: vault,
+        )
+    assert bot.sent[0][1].endswith("Создал 3 папки.")
 
 
 async def test_no_write_activity_no_button(sessionmaker):

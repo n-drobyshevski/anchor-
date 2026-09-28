@@ -68,14 +68,14 @@ async def test_tools_are_listed_but_nothing_is_readable_without_a_window(session
         tokens = await world.connect(client)
         listed = await (await world.mcp(client, tokens["access_token"])).json()
         names = {t["name"] for t in listed["result"]["tools"]}
-        # search_library (C3) and the six W2b write tools are always
-        # listed for Claude -- each is gated by its own standing switch,
-        # not by whether a window happens to be open, unlike the four
-        # scopes above.
+        # search_library (C3) and the seven W2b/rev. 3 write tools are
+        # always listed for Claude -- each is gated by its own standing
+        # switch, not by whether a window happens to be open, unlike
+        # the four scopes above.
         assert names == {
             "get_memory", "get_journal", "get_dialogs", "get_state", "search_library",
             "get_note", "update_note", "create_note", "rename_note", "list_changes",
-            "undo_changeset",
+            "undo_changeset", "list_tree",
         }
         body = await _call(world, client, tokens["access_token"], "get_journal")
     assert body["result"] == {"content": [{"type": "text", "text": CLOSED}], "isError": True}
