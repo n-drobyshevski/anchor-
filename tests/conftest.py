@@ -362,7 +362,11 @@ def flatten_rich_message(rich_message) -> str:
     against the rich view. A table row's cells join with ": " (label,
     value), reconstructing the same "Label: value" shape _format_state's
     lines have; a details block's own table is walked too, after its
-    summary line.
+    summary line. A buttons block (app/tg/menu.py's render_rich, whose
+    buttons live in the body rather than a separate reply_markup)
+    contributes each button's own text, one per line, so a menu
+    section's flattened text still reads as "everything this message
+    shows", buttons included.
 
     Structure-aware rather than a fully generic walk: a naive "collect
     every string" would scatter a row's label and value onto separate
@@ -384,12 +388,31 @@ def flatten_rich_message(rich_message) -> str:
             lines.append(_rich_text_of(block["summary"]))
             for inner in block["blocks"]:
                 walk_block(inner)
+        elif kind == "buttons":
+            for button in block["buttons"]:
+                lines.append(_rich_text_of(button.get("text")))
         # divider and anything else: nothing to collect.
 
     dumped = rich_message.model_dump(mode="json", exclude_none=True)
     for block in dumped["blocks"]:
         walk_block(block)
     return "\n".join(lines)
+
+
+def rich_callback_data(rich_message) -> list[str]:
+    """Every `callback_data` a rich message's own buttons carry, in
+    document order -- the rich-view equivalent of reading
+    `InlineKeyboardMarkup.inline_keyboard` flat, for tests asserting on
+    app/tg/menu.py's `render_rich` (whose buttons are `InputRichBlock
+    Buttons` blocks in the body, not a `reply_markup`)."""
+    data: list[str] = []
+    dumped = rich_message.model_dump(mode="json", exclude_none=True)
+    for block in dumped["blocks"]:
+        if block["type"] == "buttons":
+            for button in block["buttons"]:
+                if button.get("callback_data") is not None:
+                    data.append(button["callback_data"])
+    return data
 
 
 class FakeLLMProvider:

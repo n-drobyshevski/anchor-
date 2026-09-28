@@ -1,11 +1,14 @@
-"""Button menus (this milestone's spec, 2026-09-25): `/menu`'s inline hub,
-`/start`'s persistent `☰ Меню` button, and the `mn:` callbacks.
+"""Button menus (this milestone's spec, 2026-09-28): `/menu`'s rich hub
+with in-body buttons (Bot API 10.1), `/start`'s persistent `☰ Меню`
+button, the `mn:` callbacks, and the new vault section's settings
+toggles.
 
 `app/tg/menu.py` is pure -- no DB, no I/O -- so most of it is tested
 directly, the same way tests/test_quiet_tz.py tests app/core/quiet.py's
 parser before ever touching the router. The router-level tests below
 follow that file's own Dispatcher pattern (also tests/test_interests_
-commands.py's `_callback_update`).
+commands.py's `_callback_update`), and mirror tests/test_state_view.py's
+own router group for the rich-message/fallback/web-sink coverage.
 """
 
 from __future__ import annotations
@@ -15,19 +18,21 @@ import itertools
 
 import pytest
 from aiogram import Bot, Dispatcher
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import EditMessageText, SendRichMessage, TelegramMethod
+from aiogram.types import InlineKeyboardMarkup, InputRichMessage, ReplyKeyboardMarkup, Update
 from sqlalchemy import select
 
 from app.config import Settings
-from app.db.models import Message, TelegramUpdate, UserState
+from app.db.models import Message, OauthConnection, TelegramUpdate, UserState
 from app.tg import menu
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
-from conftest import FakeLLMProvider, FakeSession, flatten_rich_message
+from conftest import FakeLLMProvider, FakeSession, flatten_rich_message, make_bot, rich_callback_data
 
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
 
-ALL_SECTIONS = ("main", "mem", "deals", "quiet", "mode", "data")
+ALL_SECTIONS = ("main", "mem", "deals", "quiet", "mode", "data", "vault")
 
 # Never emitted, forged or not (menu.ACTIONS' own docstring gives the
 # reasoning for each).
@@ -35,13 +40,18 @@ EXCLUDED_ACTIONS = ("export", "delete", "grok", "planner_link", "due", "remember
 
 
 def _flag_combinations():
-    """Every combination of the settings that gate a menu entry, plus web."""
+    """Every combination of the settings that gate a menu entry, plus
+    web and the vault-view permutations (notes consent, library
+    read/write) that gate the vault section's own toggles."""
     return itertools.product(
         (False, True),  # PLANNER_ENABLED
         (False, True),  # RESEARCH_ENABLED
         ("off", "status", "mirror", "sync"),  # VAULT_MODE
         (False, True),  # CLAUDE_ACCESS_ENABLED
         (False, True),  # web
+        (False, True),  # notes_consent
+        (None, False, True),  # library_read
+        (False, True),  # library_write
     )
 
 
@@ -64,11 +74,15 @@ def _action_buttons(markup: InlineKeyboardMarkup) -> list:
     return [b for b in _buttons(markup) if b.callback_data.startswith(menu.ACTION_PREFIX)]
 
 
-# --- pure: render / action_available ------------------------------------
+def _rich_action_data(rich: InputRichMessage) -> list[str]:
+    return [d for d in rich_callback_data(rich) if d.startswith(menu.ACTION_PREFIX)]
 
 
-def test_every_section_renders():
-    settings = Settings(_env_file=None)
+# --- pure: render / render_rich / action_available -----------------------
+
+
+def test_every_section_renders_both_ways():
+    settings = Settings(_env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32)
     for section in ALL_SECTIONS:
         for web in (False, True):
             rendered = menu.render(section, settings, web=web)
@@ -78,24 +92,41 @@ def test_every_section_renders():
             assert isinstance(markup, InlineKeyboardMarkup)
             assert markup.inline_keyboard
 
+            rich = menu.render_rich(section, settings, web=web)
+            assert rich is not None
+            assert isinstance(rich, InputRichMessage)
+            assert rich.blocks
 
-def test_unknown_section_is_none():
-    assert menu.render("nope", Settings(_env_file=None), web=False) is None
-    assert menu.render("", Settings(_env_file=None), web=True) is None
+
+def test_unknown_section_is_none_both_ways():
+    settings = Settings(_env_file=None)
+    assert menu.render("nope", settings, web=False) is None
+    assert menu.render("", settings, web=True) is None
+    assert menu.render_rich("nope", settings, web=False) is None
+    assert menu.render_rich("", settings, web=True) is None
 
 
-def test_every_callback_data_is_well_formed():
-    for planner, research, vault_mode, claude, web in _flag_combinations():
+def test_every_callback_data_is_well_formed_both_ways():
+    for planner, research, vault_mode, claude, web, notes, read, write in _flag_combinations():
         settings = _settings(planner, research, vault_mode, claude)
+        vault = menu.VaultMenuView(notes_consent=notes, library_read=read, library_write=write)
         for section in ALL_SECTIONS:
-            _, markup = menu.render(section, settings, web=web)
+            plain = menu.render(section, settings, web=web, vault=vault)
+            rich = menu.render_rich(section, settings, web=web, vault=vault)
+            assert (plain is None) == (rich is None)
+            if plain is None:
+                continue
+            _, markup = plain
             for button in _buttons(markup):
                 data = button.callback_data
                 assert data.startswith("mn:")
                 assert len(data.encode("utf-8")) <= 64
+            for data in rich_callback_data(rich):
+                assert data.startswith("mn:")
+                assert len(data.encode("utf-8")) <= 64
     # The close button too, and the longest single action key.
     assert menu.CLOSE_CALLBACK.startswith("mn:")
-    assert len(f"{menu.ACTION_PREFIX}quiet_30m".encode("utf-8")) <= 64
+    assert len(f"{menu.ACTION_PREFIX}lib_write_off".encode("utf-8")) <= 64
 
 
 def test_plan_hidden_when_planner_off_shown_when_on():
@@ -103,7 +134,7 @@ def test_plan_hidden_when_planner_off_shown_when_on():
     on = _settings(True, False, "off", False)
     _, main_off = menu.render("main", off, web=False)
     _, main_on = menu.render("main", on, web=False)
-    assert "plan" not in [b.callback_data for b in _action_buttons(main_off)]
+    assert f"{menu.ACTION_PREFIX}plan" not in [b.callback_data for b in _action_buttons(main_off)]
     assert f"{menu.ACTION_PREFIX}plan" in [b.callback_data for b in _action_buttons(main_on)]
 
 
@@ -116,13 +147,25 @@ def test_notes_hidden_when_research_off_shown_when_on():
     assert f"{menu.ACTION_PREFIX}notes" in [b.callback_data for b in _action_buttons(mem_on)]
 
 
-def test_vault_hidden_when_mode_off():
+def test_vault_section_hidden_on_main_and_unreachable_when_mode_off():
     off = _settings(False, False, "off", False)
     on = _settings(False, False, "status", False)
-    _, data_off = menu.render("data", off, web=False)
-    _, data_on = menu.render("data", on, web=False)
-    assert f"{menu.ACTION_PREFIX}vault" not in [b.callback_data for b in _action_buttons(data_off)]
-    assert f"{menu.ACTION_PREFIX}vault" in [b.callback_data for b in _action_buttons(data_on)]
+    _, main_off = menu.render("main", off, web=False)
+    _, main_on = menu.render("main", on, web=False)
+    assert f"{menu.SECTION_PREFIX}vault" not in [b.callback_data for b in _buttons(main_off)]
+    assert f"{menu.SECTION_PREFIX}vault" in [b.callback_data for b in _buttons(main_on)]
+    assert menu.render("vault", off, web=False) is None
+    assert menu.render_rich("vault", off, web=False) is None
+    assert menu.render("vault", on, web=False) is not None
+    assert menu.render_rich("vault", on, web=False) is not None
+
+
+def test_vault_status_action_moved_out_of_data_section():
+    settings = _settings(False, False, "status", False)
+    _, data = menu.render("data", settings, web=False)
+    _, vault = menu.render("vault", settings, web=False)
+    assert f"{menu.ACTION_PREFIX}vault" not in [b.callback_data for b in _action_buttons(data)]
+    assert f"{menu.ACTION_PREFIX}vault" in [b.callback_data for b in _action_buttons(vault)]
 
 
 def test_claude_hidden_when_flag_off_or_web():
@@ -153,16 +196,118 @@ def test_action_available_is_false_for_excluded_and_garbage(action):
     assert menu.action_available(action, settings, web=True) is False
 
 
-def test_every_rendered_action_button_satisfies_action_available():
-    for planner, research, vault_mode, claude, web in _flag_combinations():
+def test_every_rendered_action_button_satisfies_action_available_both_ways():
+    for planner, research, vault_mode, claude, web, notes, read, write in _flag_combinations():
         settings = _settings(planner, research, vault_mode, claude)
+        vault = menu.VaultMenuView(notes_consent=notes, library_read=read, library_write=write)
         for section in ALL_SECTIONS:
-            _, markup = menu.render(section, settings, web=web)
+            plain = menu.render(section, settings, web=web, vault=vault)
+            if plain is None:
+                continue
+            _, markup = plain
             for button in _action_buttons(markup):
                 _, action = menu.parse_callback(button.callback_data)
                 assert menu.action_available(action, settings, web=web), (
                     f"{section}/{action} rendered for web={web} but action_available said no"
                 )
+            rich = menu.render_rich(section, settings, web=web, vault=vault)
+            for data in _rich_action_data(rich):
+                _, action = menu.parse_callback(data)
+                assert menu.action_available(action, settings, web=web), (
+                    f"{section}/{action} (rich) rendered for web={web} but action_available said no"
+                )
+
+
+# --- pure: the vault section specifically ---------------------------------
+
+
+def _vault_plain(settings, *, web=False, vault=None) -> str:
+    return menu.render("vault", settings, web=web, vault=vault)[0]
+
+
+def test_notes_toggle_flips_with_consent():
+    settings = _settings(False, False, "status", False)
+    off = menu.VaultMenuView(notes_consent=False)
+    on = menu.VaultMenuView(notes_consent=True)
+    _, markup_off = menu.render("vault", settings, web=False, vault=off)
+    _, markup_on = menu.render("vault", settings, web=False, vault=on)
+    keys_off = [b.callback_data for b in _action_buttons(markup_off)]
+    keys_on = [b.callback_data for b in _action_buttons(markup_on)]
+    assert f"{menu.ACTION_PREFIX}notes_on" in keys_off
+    assert f"{menu.ACTION_PREFIX}notes_off" not in keys_off
+    assert f"{menu.ACTION_PREFIX}notes_off" in keys_on
+    assert f"{menu.ACTION_PREFIX}notes_on" not in keys_on
+    assert "Заметки: вкл" in _vault_plain(settings, vault=on)
+    assert "Заметки: выкл" in _vault_plain(settings, vault=off)
+
+
+def test_notes_toggle_available_even_on_web():
+    settings = _settings(False, False, "status", False)
+    assert menu.action_available("notes_on", settings, web=True) is True
+    assert menu.action_available("notes_off", settings, web=True) is True
+    _, markup = menu.render("vault", settings, web=True)
+    assert f"{menu.ACTION_PREFIX}notes_on" in [b.callback_data for b in _action_buttons(markup)]
+
+
+@pytest.mark.parametrize(
+    "claude_enabled,web,read",
+    [
+        (False, False, True),  # flag off
+        (True, True, True),  # web sink
+        (True, False, False),  # read off
+        (True, False, None),  # never connected
+    ],
+)
+def test_lib_write_button_absent_unless_claude_tg_and_reading(claude_enabled, web, read):
+    settings = _settings(False, False, "status", claude_enabled)
+    vault = menu.VaultMenuView(library_read=read, library_write=False)
+    _, markup = menu.render("vault", settings, web=web, vault=vault)
+    keys = [b.callback_data for b in _action_buttons(markup)]
+    assert f"{menu.ACTION_PREFIX}lib_write_on" not in keys
+    assert f"{menu.ACTION_PREFIX}lib_write_off" not in keys
+
+
+def test_lib_write_button_present_and_state_dependent_when_reading():
+    settings = _settings(False, False, "status", True)
+    read_only = menu.VaultMenuView(library_read=True, library_write=False)
+    read_write = menu.VaultMenuView(library_read=True, library_write=True)
+    _, markup_ro = menu.render("vault", settings, web=False, vault=read_only)
+    _, markup_rw = menu.render("vault", settings, web=False, vault=read_write)
+    keys_ro = [b.callback_data for b in _action_buttons(markup_ro)]
+    keys_rw = [b.callback_data for b in _action_buttons(markup_rw)]
+    assert f"{menu.ACTION_PREFIX}lib_write_on" in keys_ro
+    assert f"{menu.ACTION_PREFIX}lib_write_off" not in keys_ro
+    assert f"{menu.ACTION_PREFIX}lib_write_off" in keys_rw
+    assert f"{menu.ACTION_PREFIX}lib_write_on" not in keys_rw
+
+
+def test_lib_write_forged_on_web_is_never_available():
+    settings = _settings(False, False, "status", True)
+    assert menu.action_available("lib_write_on", settings, web=True) is False
+    assert menu.action_available("lib_write_off", settings, web=True) is False
+
+
+def test_claude_library_row_hints_at_claude_library_on_when_reading_is_off():
+    settings = _settings(False, False, "status", True)
+    text = _vault_plain(settings, vault=menu.VaultMenuView(library_read=False))
+    assert "Claude, библиотека: выкл" in text
+    assert "/claude library on" in text
+
+
+def test_claude_library_row_absent_when_flag_off_or_web():
+    settings_off = _settings(False, False, "status", False)
+    settings_on = _settings(False, False, "status", True)
+    assert "Claude, библиотека" not in _vault_plain(settings_off)
+    assert "Claude, библиотека" not in _vault_plain(settings_on, web=True)
+    assert "Claude, библиотека" in _vault_plain(settings_on, web=False)
+
+
+def test_vault_status_table_shows_mode_and_flags():
+    settings = _settings(False, False, "mirror", False)
+    text = _vault_plain(settings)
+    assert "Режим: mirror" in text
+    assert "Знания: выкл" in text
+    assert "Личные: выкл" in text
 
 
 def test_parse_callback():
@@ -184,6 +329,12 @@ def test_reply_keyboard_has_one_persistent_button():
 def test_menu_is_registered_right_after_start():
     commands = [c.command for c in BOT_COMMANDS]
     assert commands.index("menu") == commands.index("start") + 1
+
+
+def test_closed_rich_carries_the_closed_text_and_no_buttons():
+    rich = menu.closed_rich()
+    assert flatten_rich_message(rich) == menu.CLOSED_TEXT
+    assert rich_callback_data(rich) == []
 
 
 # --- router-level ---------------------------------------------------------
@@ -224,9 +375,9 @@ def _callback_update(update_id: int, data: str, *, message_id: int) -> dict:
     }
 
 
-def _build(sessionmaker, settings=None, llm=None):
-    fake = FakeSession()
-    bot = Bot(token="123456:TESTTOKEN", session=fake)
+def _build(sessionmaker, settings=None, llm=None, bot=None, fake=None):
+    if bot is None:
+        bot, fake = make_bot()
     dp = Dispatcher()
     dp.include_router(
         build_router(
@@ -268,14 +419,16 @@ async def test_start_reply_carries_the_menu_button(sessionmaker):
     assert [b.text for row in markup.keyboard for b in row] == [menu.MENU_BUTTON_TEXT]
 
 
-async def test_menu_command_sends_one_message_with_an_inline_keyboard(sessionmaker):
+async def test_menu_command_sends_one_rich_message_with_no_reply_markup(sessionmaker):
     await _seed(sessionmaker, 1)
     dp, bot, fake = _build(sessionmaker)
 
     await _feed(dp, bot, _command_update(1, "/menu"))
 
-    assert len(fake.sent) == 1
-    assert isinstance(fake.sent[0].reply_markup, InlineKeyboardMarkup)
+    assert len(fake.rich) == 1
+    assert fake.sent == []
+    assert fake.rich[0].reply_markup is None
+    assert rich_callback_data(fake.rich[0].rich_message)
 
 
 async def test_menu_button_text_opens_the_menu_with_no_llm_call_and_no_stored_chat_message(
@@ -287,8 +440,7 @@ async def test_menu_button_text_opens_the_menu_with_no_llm_call_and_no_stored_ch
 
     await _feed(dp, bot, _command_update(1, menu.MENU_BUTTON_TEXT))
 
-    assert len(fake.sent) == 1
-    assert isinstance(fake.sent[0].reply_markup, InlineKeyboardMarkup)
+    assert len(fake.rich) == 1
     assert llm.calls == 0
     async with sessionmaker() as session:
         rows = list((await session.execute(select(Message))).scalars())
@@ -309,7 +461,7 @@ async def test_menu_button_clears_a_pending_checkin_awaiting_step(sessionmaker):
     assert state.awaiting is None
 
 
-async def test_section_callback_edits_the_message_in_place(sessionmaker):
+async def test_section_callback_edits_the_message_in_place_as_rich(sessionmaker):
     await _seed(sessionmaker, 1, 2)
     dp, bot, fake = _build(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/menu"))
@@ -318,7 +470,8 @@ async def test_section_callback_edits_the_message_in_place(sessionmaker):
     await _feed(dp, bot, _callback_update(2, "mn:s:quiet", message_id=1))
 
     assert len(fake.edits) == 1
-    assert fake.edits[0].text == menu.QUIET_TEXT
+    assert fake.edits[0].rich_message is not None
+    assert flatten_rich_message(fake.edits[0].rich_message).startswith(menu.QUIET_TEXT)
     assert len(fake.answered) == 1
 
 
@@ -334,14 +487,15 @@ async def test_unknown_section_answers_stale_and_edits_nothing(sessionmaker):
     assert fake.answered[0].text is not None
 
 
-async def test_close_edits_to_the_closed_text_with_no_keyboard(sessionmaker):
+async def test_close_edits_to_the_closed_rich_text_with_no_buttons(sessionmaker):
     await _seed(sessionmaker, 1, 2)
     dp, bot, fake = _build(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/menu"))
 
     await _feed(dp, bot, _callback_update(2, "mn:x", message_id=1))
 
-    assert fake.edits[-1].text == menu.CLOSED_TEXT
+    assert fake.edits[-1].rich_message is not None
+    assert flatten_rich_message(fake.edits[-1].rich_message) == menu.CLOSED_TEXT
     assert fake.edits[-1].reply_markup is None
 
 
@@ -391,12 +545,14 @@ async def test_forged_export_and_delete_actions_do_nothing_but_answer(sessionmak
     dp, bot, fake = _build(sessionmaker)
     await _feed(dp, bot, _command_update(1, "/menu"))
     sent_before = len(fake.sent)
+    rich_before = len(fake.rich)
 
     await _feed(dp, bot, _callback_update(2, "mn:a:export", message_id=1))
     await _feed(dp, bot, _callback_update(3, "mn:a:delete", message_id=1))
 
     assert fake.documents == []
     assert len(fake.sent) == sent_before
+    assert len(fake.rich) == rich_before
     assert len(fake.answered) == 2
 
 
@@ -420,7 +576,169 @@ async def test_state_action_sends_the_state_message(sessionmaker):
 
     await _feed(dp, bot, _callback_update(2, "mn:a:state", message_id=1))
 
-    # /state now sends a rich message (app/tg/state_view.py), not a
-    # plain one -- flatten it back to text for this assertion.
-    assert len(fake.rich) == 1
-    assert "Персона:" in flatten_rich_message(fake.rich[0].rich_message)
+    # /state is a rich message (app/tg/state_view.py), the second one
+    # sent after /menu's own.
+    assert len(fake.rich) == 2
+    assert "Персона:" in flatten_rich_message(fake.rich[-1].rich_message)
+
+
+async def test_menu_on_the_web_sink_stays_plain(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    bot, fake = make_bot()
+    bot.is_web_sink = True
+    dp, bot, fake = _build(sessionmaker, bot=bot, fake=fake)
+
+    await _feed(dp, bot, _command_update(1, "/menu"))
+    await _feed(dp, bot, _callback_update(2, "mn:s:quiet", message_id=1))
+
+    assert fake.rich == []
+    assert isinstance(fake.sent[0].reply_markup, InlineKeyboardMarkup)
+    assert len(fake.edits) == 1
+    assert fake.edits[0].rich_message is None
+    assert fake.edits[0].text == menu.QUIET_TEXT
+
+
+class _RichMessageFailsSession(FakeSession):
+    """A FakeSession whose sendRichMessage/rich editMessageText always
+    rejects, like a Telegram client old enough to not understand Bot
+    API 10.1 would -- lifted from tests/test_state_view.py's own."""
+
+    async def make_request(self, bot: Bot, method: TelegramMethod, timeout: int | None = None):
+        if isinstance(method, SendRichMessage):
+            raise TelegramBadRequest(method=method, message="Bad Request: RICH_MESSAGE_INVALID")
+        if isinstance(method, EditMessageText) and method.rich_message is not None:
+            raise TelegramBadRequest(method=method, message="Bad Request: RICH_MESSAGE_INVALID")
+        return await super().make_request(bot, method, timeout)
+
+
+async def test_menu_send_falls_back_to_plain_when_rich_is_rejected(sessionmaker):
+    await _seed(sessionmaker, 1)
+    fake = _RichMessageFailsSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    dp, bot, fake = _build(sessionmaker, bot=bot, fake=fake)
+
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    assert fake.rich == []
+    assert len(fake.sent) == 1
+    assert isinstance(fake.sent[0].reply_markup, InlineKeyboardMarkup)
+
+
+async def test_menu_section_edit_falls_back_to_plain_when_rich_is_rejected(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    fake = _RichMessageFailsSession()
+    bot = Bot(token="123456:TESTTOKEN", session=fake)
+    dp, bot, fake = _build(sessionmaker, bot=bot, fake=fake)
+    # The first send also falls back to plain, minting message_id 1 the
+    # same way FakeSession's SendMessage branch does.
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:s:quiet", message_id=1))
+
+    assert fake.edits[-1].rich_message is None
+    assert fake.edits[-1].text == menu.QUIET_TEXT
+
+
+async def test_vault_section_shows_status_table_and_notes_toggle(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    settings = Settings(_env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, TZ_DEFAULT=TIMEZONE)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:s:vault", message_id=1))
+
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "Режим: status" in flat
+    assert "Заметки: выкл" in flat
+    assert f"{menu.ACTION_PREFIX}notes_on" in rich_callback_data(fake.edits[-1].rich_message)
+
+
+async def test_notes_on_action_sets_consent_and_rerenders_the_vault_card(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3)
+    settings = Settings(_env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, TZ_DEFAULT=TIMEZONE)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+    await _feed(dp, bot, _callback_update(2, "mn:s:vault", message_id=1))
+
+    await _feed(dp, bot, _callback_update(3, "mn:a:notes_on", message_id=1))
+
+    state = await _state(sessionmaker)
+    assert state.notes_consent is True
+    # The vault card re-renders in place (same message_id=1), on top of
+    # /vault's own confirmation reply.
+    assert any(m.text for m in fake.sent)  # the confirmation reply
+    last_edit = fake.edits[-1]
+    assert last_edit.rich_message is not None
+    flat = flatten_rich_message(last_edit.rich_message)
+    assert "Заметки: вкл" in flat
+    assert f"{menu.ACTION_PREFIX}notes_off" in rich_callback_data(last_edit.rich_message)
+
+
+async def test_notes_off_action_clears_consent_and_rerenders(sessionmaker):
+    await _seed(sessionmaker, 1, 2, notes_consent=True)
+    settings = Settings(_env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, TZ_DEFAULT=TIMEZONE)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:notes_off", message_id=1))
+
+    state = await _state(sessionmaker)
+    assert state.notes_consent is False
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "Заметки: выкл" in flat
+
+
+async def test_lib_write_on_action_sets_the_write_switch_and_rerenders(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    async with sessionmaker() as session:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        session.add(
+            OauthConnection(
+                client_id="test",
+                created_at=now,
+                expires_at=now + datetime.timedelta(days=30),
+                library_read=True,
+            )
+        )
+        await session.commit()
+    settings = Settings(
+        _env_file=None,
+        VAULT_MODE="status",
+        VAULT_API_TOKEN="x" * 32,
+        CLAUDE_ACCESS_ENABLED=True,
+        TZ_DEFAULT=TIMEZONE,
+    )
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:lib_write_on", message_id=1))
+
+    async with sessionmaker() as session:
+        connection = await session.get(OauthConnection, 1)
+    assert connection.library_write is True
+    flat = flatten_rich_message(fake.edits[-1].rich_message)
+    assert "чтение+запись" in flat
+    assert f"{menu.ACTION_PREFIX}lib_write_off" in rich_callback_data(fake.edits[-1].rich_message)
+
+
+async def test_forged_lib_write_on_web_sink_does_nothing(sessionmaker):
+    await _seed(sessionmaker, 1, 2)
+    settings = Settings(
+        _env_file=None,
+        VAULT_MODE="status",
+        VAULT_API_TOKEN="x" * 32,
+        CLAUDE_ACCESS_ENABLED=True,
+        TZ_DEFAULT=TIMEZONE,
+    )
+    bot, fake = make_bot()
+    bot.is_web_sink = True
+    dp, bot, fake = _build(sessionmaker, settings=settings, bot=bot, fake=fake)
+    await _feed(dp, bot, _command_update(1, "/menu"))
+    sent_before = len(fake.sent)
+
+    await _feed(dp, bot, _callback_update(2, "mn:a:lib_write_on", message_id=1))
+
+    async with sessionmaker() as session:
+        assert await session.get(OauthConnection, 1) is None
+    assert len(fake.sent) == sent_before
+    assert fake.answered[-1].text is not None

@@ -517,10 +517,112 @@ def build_router(
     async def start(message: Message) -> None:
         await message.answer(START_TEXT, reply_markup=menu.reply_keyboard())
 
+    async def _vault_menu_view() -> menu.VaultMenuView:
+        """Everything menu.py's vault section needs beyond `settings`
+        (VAULT_MODE/VAULT_KNOWLEDGE_ENABLED/VAULT_PERSONAL_ENABLED are
+        already `Settings` fields, read straight from there). Gathered
+        only when that section is actually about to be shown -- see
+        `_show_menu`'s own docstring -- never for main or any other
+        section, which have nothing to do with a session at all.
+        """
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            connection = None
+            if settings.CLAUDE_ACCESS_ENABLED:
+                connection = await oauth_store.current_connection(session, clock)
+        return menu.VaultMenuView(
+            notes_consent=user_state.notes_consent,
+            library_read=connection.library_read if connection else None,
+            library_write=bool(connection.library_write) if connection else False,
+        )
+
+    async def _edit_menu(
+        bot,
+        chat_id: int,
+        message_id: int,
+        rich,
+        plain_text: str,
+        plain_markup,
+    ) -> None:
+        """Edit the menu message in place to `rich`, falling back to the
+        plain `(plain_text, plain_markup)` pair on any rejection other
+        than the idempotent "not modified" -- mirrors /state's own edit
+        fallback (router.py ~672-695, above)."""
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, rich_message=rich, reply_markup=None
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            logger.warning(
+                "menu rich message rejected: %s",
+                type(exc).__name__,
+                extra={"event": "menu_rich_fallback"},
+            )
+            await edit_keyboard(bot, chat_id, message_id, plain_text, plain_markup)
+
+    async def _show_menu(bot, chat_id: int, section: str, *, message_id: int | None = None) -> int | None:
+        """Send (`message_id=None`) or edit (`message_id` set) the
+        `/menu` hub, showing `section`. Shared by `/menu`, the `☰ Меню`
+        reply-keyboard button, every `mn:s:` section tap, and the vault
+        toggles' re-render after `notes_on`/`notes_off`/`lib_write_on`/
+        `lib_write_off`. `mn:x` (closing the menu) is not a section and
+        is rendered separately, in `menu_callback` below.
+
+        Returns the shown message's id, or None if `section` does not
+        exist -- `menu.render`/`render_rich`'s own None, both built from
+        the same spec (menu.py's own docstring), so a caller can treat
+        this exactly like those functions' own "no such section" and
+        never sees the two disagree. `/menu`'s own first send and the
+        vault toggles' re-render both always pass a section that exists,
+        so that branch is reachable only from a stale/forged
+        `mn:s:<name>` tap.
+
+        On the web sink: the same plain `send_keyboard`/`edit_keyboard`
+        path `/menu` always used (app/web/sink.py only ever understands
+        plain SendMessage/EditMessageText). Otherwise: 10.1's
+        `sendRichMessage`/`editMessageText(rich_message=...)`, with a
+        `TelegramBadRequest` on *send* falling back to a plain message
+        and on *edit* falling back through `_edit_menu` above -- so a
+        rich-message rejection, or a pre-upgrade plain menu message
+        someone taps later, never leaves `/menu` silent.
+        """
+        web = getattr(bot, "is_web_sink", False)
+        vault = await _vault_menu_view() if section == "vault" else None
+
+        if web:
+            rendered = menu.render(section, settings, web=web, vault=vault)
+            if rendered is None:
+                return None
+            text, markup = rendered
+            if message_id is None:
+                return await send_keyboard(bot, chat_id, text, markup)
+            await edit_keyboard(bot, chat_id, message_id, text, markup)
+            return message_id
+
+        rich = menu.render_rich(section, settings, web=web, vault=vault)
+        if rich is None:
+            return None
+        if message_id is None:
+            try:
+                message = await bot.send_rich_message(chat_id=chat_id, rich_message=rich)
+                return message.message_id
+            except TelegramBadRequest as exc:
+                logger.warning(
+                    "menu rich message rejected: %s",
+                    type(exc).__name__,
+                    extra={"event": "menu_rich_fallback"},
+                )
+                text, markup = menu.render(section, settings, web=web, vault=vault)
+                return await send_keyboard(bot, chat_id, text, markup)
+        text, markup = menu.render(section, settings, web=web, vault=vault)
+        await _edit_menu(bot, chat_id, message_id, rich, text, markup)
+        return message_id
+
     async def _send_menu(message: Message) -> None:
         """Shared by `/menu` and the `☰ Меню` reply-keyboard button below."""
-        web = getattr(message.bot, "is_web_sink", False)
-        await send_keyboard(message.bot, message.chat.id, *menu.render(menu.MAIN_SECTION, settings, web=web))
+        await _show_menu(message.bot, message.chat.id, menu.MAIN_SECTION)
 
     @router.message(Command("menu"))
     async def menu_command(message: Message, event_update: Update) -> None:
@@ -1711,6 +1813,40 @@ def build_router(
             message, event_update, CommandObject(prefix="/", command="claude", args=None)
         )
 
+    async def _menu_notes(message: Message, event_update: Update, word: str) -> None:
+        """`notes_on`/`notes_off`: the vault section's own re-render
+        afterwards is what makes this a toggle rather than a one-shot
+        command -- the tapped card shows the flipped state in place,
+        the same way /state's [🔄 Обновить] shows fresh numbers, instead
+        of leaving the last-shown "выкл"/"вкл" sitting there stale until
+        the next full /menu."""
+        del event_update  # vault() takes no event_update -- see its own signature above.
+        await vault(message, CommandObject(prefix="/", command="vault", args=f"notes {word}"))
+        await _show_menu(message.bot, message.chat.id, "vault", message_id=message.message_id)
+
+    async def _menu_notes_on(message: Message, event_update: Update) -> None:
+        await _menu_notes(message, event_update, "on")
+
+    async def _menu_notes_off(message: Message, event_update: Update) -> None:
+        await _menu_notes(message, event_update, "off")
+
+    async def _menu_lib_write(message: Message, event_update: Update, word: str) -> None:
+        """`lib_write_on`/`lib_write_off`: same re-render as
+        `_menu_notes` above. `claude_command` keeps its own is_web_sink
+        guard and `_once` gate -- reached here only when
+        `action_available` already refused a web press, this is the
+        same defence in depth `_menu_claude` already relies on."""
+        await claude_command(
+            message, event_update, CommandObject(prefix="/", command="claude", args=f"library write {word}")
+        )
+        await _show_menu(message.bot, message.chat.id, "vault", message_id=message.message_id)
+
+    async def _menu_lib_write_on(message: Message, event_update: Update) -> None:
+        await _menu_lib_write(message, event_update, "on")
+
+    async def _menu_lib_write_off(message: Message, event_update: Update) -> None:
+        await _menu_lib_write(message, event_update, "off")
+
     async def _menu_mind(message: Message, event_update: Update) -> None:
         # args=None takes the same "list, don't add" branch a bare
         # "/mind" does (mind()'s own `(command.args or "").strip()`).
@@ -1761,6 +1897,10 @@ def build_router(
         "privacy": privacy,
         "vault": _menu_vault,
         "claude": _menu_claude,
+        "notes_on": _menu_notes_on,
+        "notes_off": _menu_notes_off,
+        "lib_write_on": _menu_lib_write_on,
+        "lib_write_off": _menu_lib_write_off,
         "revoke": revoke_command,
         "hide_kb": _menu_hide_kb,
     }
@@ -1803,16 +1943,18 @@ def build_router(
 
         if kind == "close":
             await answer_callback(callback.bot, callback.id)
-            await edit_keyboard(callback.bot, chat_id, message_id, menu.CLOSED_TEXT, None)
+            if web:
+                await edit_keyboard(callback.bot, chat_id, message_id, menu.CLOSED_TEXT, None)
+            else:
+                await _edit_menu(callback.bot, chat_id, message_id, menu.closed_rich(), menu.CLOSED_TEXT, None)
             return
 
         if kind == "section":
-            rendered = menu.render(value, settings, web=web)
-            if rendered is None:
+            shown = await _show_menu(callback.bot, chat_id, value, message_id=message_id)
+            if shown is None:
                 await answer_callback(callback.bot, callback.id, memory_ui.STALE)
                 return
             await answer_callback(callback.bot, callback.id)
-            await edit_keyboard(callback.bot, chat_id, message_id, *rendered)
             return
 
         # kind == "action". Re-checking action_available here (render()

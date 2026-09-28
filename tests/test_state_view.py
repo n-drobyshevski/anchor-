@@ -413,7 +413,12 @@ async def test_state_on_the_web_sink_still_sends_plain_text(sessionmaker):
 
 
 async def test_menu_state_action_also_goes_through_the_rich_path(sessionmaker):
-    """`/menu`'s "state" button calls the same `state()` handler."""
+    """`/menu`'s "state" button calls the same `state()` handler.
+
+    `/menu` itself is now a rich message too (app/tg/menu.py's
+    render_rich), so the state action's own send is the *second* one,
+    not the only one.
+    """
     await _seed(sessionmaker, 1, 2)
     bot, fake = make_bot()
     dp = _build_dp(sessionmaker)
@@ -421,7 +426,8 @@ async def test_menu_state_action_also_goes_through_the_rich_path(sessionmaker):
 
     await _feed(dp, bot, _callback_update(2, "mn:a:state", message_id=1))
 
-    assert len(fake.rich) == 1
+    assert len(fake.rich) == 2
+    assert "Персона:" in flatten_rich_message(fake.rich[-1].rich_message)
 
 
 async def test_refresh_callback_edits_in_place_and_answers_obnovleno(sessionmaker):
