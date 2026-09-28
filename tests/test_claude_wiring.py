@@ -213,3 +213,111 @@ async def test_search_library_is_reachable_through_the_real_app(sessionmaker):
     assert body["result"]["content"][0]["text"] == "«CCRU»: Гиперстишн и ускорение."
     await web_bot.session.close()
     await tg_bot.session.close()
+
+
+async def test_a_write_tool_is_reachable_through_the_real_app(sessionmaker):
+    """W2b, end to end through app/main.py's own builders: create_note
+    against a fake vaultd, exactly the "wiring through main's builders"
+    proof the task asks for.
+    """
+    from tests.claude_write_fake import FakeKnowledgeVault
+
+    settings = Settings(
+        MODE="webhook",
+        TELEGRAM_BOT_TOKEN="123456:TEST",
+        PUBLIC_URL=PUBLIC_URL,
+        ALLOWED_CHAT_ID=CHAT_ID,
+        CLAUDE_ACCESS_ENABLED=True,
+    )
+    clock = SystemClock()
+    store = oauth_store.PendingStore(clock)
+    dp = build_dispatcher(
+        sessionmaker, settings, FakeLLMProvider(), FakeLLMProvider(), clock, None, None,
+        claude_pending=store,
+    )
+    web_bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, session=FakeSession())
+    app = build_webhook_app(
+        settings, web_bot, dp, sessionmaker,
+        engine=None, provider=None, cheap_provider=None, safety_provider=None,
+        llm_client=None, clock=clock, hub=None, code_store=None, claude_pending=store,
+    )
+    app.on_startup.clear()
+    app.on_cleanup.clear()
+    vault = FakeKnowledgeVault()
+    app["vault_client_factory"] = lambda _settings, _v=vault: _v
+
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=CHAT_ID, timezone="Europe/Paris"))
+        session.add_all([TelegramUpdate(update_id=8, payload={}), TelegramUpdate(update_id=9, payload={}), TelegramUpdate(update_id=10, payload={})])
+        await session.commit()
+
+    tg_bot = Bot(token="123456:TESTTOKEN", session=FakeSession())
+    verifier = "verifier-" + "y" * 50
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    )
+    async with TestClient(TestServer(app)) as client:
+        authorize_resp = await client.get(
+            "/oauth/authorize", params=World.authorize_params(code_challenge=challenge)
+        )
+        page = await authorize_resp.text()
+        code = re.search(r"/claude connect ([A-Z0-9]{6})", page).group(1)
+        handle = re.search(r"h=([A-Za-z0-9_-]{22})", page).group(1)
+        set_cookie = authorize_resp.cookies.get(oauth.COOKIE)
+        cookie_value = set_cookie.value if set_cookie is not None else None
+
+        await dp.feed_update(
+            tg_bot,
+            Update.model_validate(
+                _command_update(8, f"/claude connect {code}"), context={"bot": tg_bot}
+            ),
+        )
+        headers = {"Cookie": f"{oauth.COOKIE}={cookie_value}"} if cookie_value else {}
+        status_resp = await client.get(
+            "/oauth/authorize/status", params={"h": handle}, headers=headers, allow_redirects=False
+        )
+        auth_code = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(status_resp.headers["Location"]).query
+        )["code"][0]
+
+        token_resp = await client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": auth_code,
+                "code_verifier": verifier,
+                "client_id": oauth_store.CLIENT_ID,
+                "redirect_uri": oauth_store.REDIRECT_URI,
+                "resource": f"{PUBLIC_URL}/mcp/claude",
+            },
+        )
+        tokens = await token_resp.json()
+
+        await dp.feed_update(
+            tg_bot,
+            Update.model_validate(_command_update(9, "/claude library on"), context={"bot": tg_bot}),
+        )
+        await dp.feed_update(
+            tg_bot,
+            Update.model_validate(
+                _command_update(10, "/claude library write on"), context={"bot": tg_bot}
+            ),
+        )
+
+        call = await client.post(
+            "/mcp/claude",
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "create_note",
+                    "arguments": {"folder": "Library", "title": "CCRU", "body": "Гиперстишн."},
+                },
+            },
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+        body = await call.json()
+
+    assert body["result"]["isError"] is False, body
+    assert vault.files["Library/CCRU.md"] == "Гиперстишн."
+    await web_bot.session.close()
+    await tg_bot.session.close()

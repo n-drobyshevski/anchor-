@@ -319,7 +319,7 @@ async def _revoke_connections(
     await session.execute(
         update(OauthConnection)
         .where(OauthConnection.id.in_(connection_ids), OauthConnection.revoked_at.is_(None))
-        .values(revoked_at=now, library_read=False)
+        .values(revoked_at=now, library_read=False, library_write=False)
     )
     await session.execute(
         update(OauthToken)
@@ -540,11 +540,18 @@ async def set_library(session: AsyncSession, clock: Clock, on: bool) -> OauthCon
     """`/claude library on|off` (C3): flip the standing switch on the
     live connection. None with no connection -- the caller (/claude
     library) answers "Нет подключения" itself, the same text /claude's
-    own status uses for no connection at all."""
+    own status uses for no connection at all.
+
+    Turning read *off* also turns `library_write` off (W2b, plan
+    section 5): writing needs reading, so the coupling belongs where
+    read itself changes, not scattered across every place that ends a
+    connection."""
     connection = await current_connection(session, clock)
     if connection is None:
         return None
     connection.library_read = on
+    if not on:
+        connection.library_write = False
     await session.commit()
     logger.info(
         "claude library switch",
@@ -553,9 +560,31 @@ async def set_library(session: AsyncSession, clock: Clock, on: bool) -> OauthCon
     return connection
 
 
+async def set_library_write(session: AsyncSession, clock: Clock, on: bool) -> OauthConnection | None:
+    """`/claude library write on|off` (W2b, plan section 5): the write
+    switch. None with no connection. Turning on while `library_read`
+    is off is refused (returns the connection unchanged) -- the caller
+    (app/tg/claude.py's `library_write`) already checks this and gives
+    its own text; this is defence in depth, so a future bug in the
+    caller cannot leave the switch in an impossible state."""
+    connection = await current_connection(session, clock)
+    if connection is None:
+        return None
+    if on and not connection.library_read:
+        return connection
+    connection.library_write = on
+    await session.commit()
+    logger.info(
+        "claude library write switch",
+        extra={"event": "claude_library_write", "connection_id": connection.id, "on": on},
+    )
+    return connection
+
+
 async def disable_library_if_connected(session: AsyncSession, clock: Clock) -> None:
     """/revoke (app/tg/access.py): turn the switch off without ending the
-    connection itself -- /revoke closes windows, it does not disconnect."""
+    connection itself -- /revoke closes windows, it does not disconnect.
+    `set_library(..., False)` clears `library_write` too."""
     await set_library(session, clock, False)
 
 

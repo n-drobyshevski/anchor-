@@ -141,6 +141,14 @@ PURGED_TABLES = (
     # to this user's Claude reads, and oauth_connection above -- the
     # standing switch it counts -- is purged the same way.
     "claude_library_read",
+    # W2b (anchor-claude-write-plan.md section 7): Claude's write/undo
+    # changeset ledger. No paths, no text -- ids, counts and times --
+    # but it is still a record of what Claude changed on this user's
+    # behalf, and oauth_connection above (its FK, ON DELETE CASCADE) is
+    # purged the same way regardless. vaultd's own undo store (the
+    # pre-images themselves) is wiped by the vault_purge job's
+    # POST /v1/purge, not by this TRUNCATE.
+    "claude_changeset",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a

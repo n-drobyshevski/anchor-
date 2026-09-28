@@ -244,6 +244,26 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(models.VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 
+    # W2b: claude_changeset needs a live oauth_connection's id.
+    async with sessionmaker() as session:
+        connection = models.OauthConnection(
+            client_id="claude-ai", created_at=now, expires_at=now + datetime.timedelta(days=30)
+        )
+        session.add(connection)
+        await session.flush()
+        session.add(
+            models.ClaudeChangeset(
+                connection_id=connection.id,
+                vault_ref="chg_export_test",
+                kind="write",
+                files=1,
+                bytes=42,
+                created_at=now,
+                last_write_at=now,
+            )
+        )
+        await session.commit()
+
 
 # --- contents ---
 
@@ -483,3 +503,19 @@ async def test_the_omission_list_does_not_name_a_table_that_is_exported():
     exported = {m.__tablename__ for m in export.EXPORTED_MODELS}
     assert not (exported & set(NOT_EXPORTED))
     assert set(NOT_EXPORTED) <= set(models.Base.metadata.tables)
+
+
+async def test_claude_changeset_export_has_no_text_or_path_columns():
+    """W2b: /export's claude_changeset carries ids, counts and times
+    only -- no path, no text. Checked against the mapped columns
+    directly (a stronger, name-based guard than "the seeded row looks
+    fine"), so a future column named after a path or free text is
+    caught here rather than only by someone reading the row by eye."""
+    from app.db.models import ClaudeChangeset
+
+    names = set(ClaudeChangeset.__table__.columns.keys())
+    assert names == {
+        "id", "connection_id", "vault_ref", "kind", "files", "bytes",
+        "refused", "created", "renamed", "created_at", "last_write_at", "undone_at",
+    }
+    assert not any("path" in n or "text" in n for n in names)

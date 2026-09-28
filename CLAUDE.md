@@ -20,7 +20,10 @@
 - Never call Anchor's own connector, even if its tools appear in your
   session (`mcp__Anchor__...`, `mcp__claude_ai_Anchor__...`, or any
   tool named `get_memory`, `get_journal`, `get_dialogs`, `get_state`,
-  `search_library`): it returns the same conversations as the database.
+  `search_library`, `update_note`, `create_note`, `rename_note`,
+  `get_note`, `list_changes`, `undo_changeset`): it returns the same
+  conversations as the database, and the last six can write to the
+  user's vault -- you are building them, not calling them.
   Never read Railway's `http` log stream either: request paths carry
   Grok's capability token. The guard hook blocks both; do not work
   around it.

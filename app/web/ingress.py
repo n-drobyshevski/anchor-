@@ -73,7 +73,7 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # accepting a rule or a mass forget is Telegram's alone (phase-8 plan
 # section 8), and hold messages are never sent to the web chat. A
 # tuple, because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:")
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:")
 
 
 class BlockedCommand(Exception):

@@ -24,6 +24,7 @@ from app.core import purge
 from app.db.models import (
     Obligation,
     AccessGrant,
+    ClaudeChangeset,
     OauthConnection,
     OauthRequest,
     OauthToken,
@@ -368,6 +369,16 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     scopes=["journal"],
                     created_at=now,
                     expires_at=now + datetime.timedelta(hours=1),
+                ),
+                # W2b: a write changeset -- ids, counts and times only.
+                ClaudeChangeset(
+                    connection_id=connection.id,
+                    vault_ref="chg_delete_test",
+                    kind="write",
+                    files=1,
+                    bytes=10,
+                    created_at=now,
+                    last_write_at=now,
                 ),
             ]
         )

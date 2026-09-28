@@ -144,7 +144,8 @@ PRIVACY_TEXT = (
     "стирается — карточки и ссылки остаются.\n"
     "Заметки из Obsidian Anchor читает только с твоей меткой: личные — только для "
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
-    "а при /claude library on их может искать Claude (найденное уходит в Anthropic). "
+    "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
+    "при /claude library write on — и менять (откат: /claude undo). "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -2218,6 +2219,27 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             message_text=callback.message.text,
+        )
+
+    @router.callback_query(F.data.startswith("cu:"))
+    async def claude_undo_all_callback(callback: CallbackQuery) -> None:
+        """`cu:<date>:<epoch>` -- the Claude write digest's own
+        [Откатить всё за сутки] (W2b). Refused from the web chat, like
+        `v:`, `g:` and `cl:`: the digest that carries this button is
+        only ever sent to Telegram.
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await claude_ui.handle_undo_callback(
+            sessionmaker,
+            settings,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
         )
 
     @router.callback_query()

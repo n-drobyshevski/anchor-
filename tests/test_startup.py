@@ -112,3 +112,36 @@ async def test_run_startup_tasks_runs_both_steps(sessionmaker, tmp_path):
 
         persona_count = await session.execute(select(func.count()).select_from(PersonaVersion))
         assert persona_count.scalar_one() == 1
+
+
+async def test_startup_with_claude_access_disabled_clears_library_write(sessionmaker, tmp_path):
+    """W2b: turning CLAUDE_ACCESS_ENABLED off at startup revokes every
+    connection via oauth_store.revoke_everything, which must also clear
+    library_write (the same _revoke_connections coupling /revoke,
+    /claude disconnect and a replaced connection all share)."""
+    import datetime
+
+    from app.db.models import OauthConnection
+
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("# Anchor\n", encoding="utf-8")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    async with sessionmaker() as session:
+        session.add(
+            OauthConnection(
+                client_id="c", created_at=now, expires_at=now + datetime.timedelta(days=30),
+                library_read=True, library_write=True,
+            )
+        )
+        await session.commit()
+
+    settings = Settings(ALLOWED_CHAT_ID=CHAT_ID, TZ_DEFAULT="Europe/Paris", CLAUDE_ACCESS_ENABLED=False)
+    async with sessionmaker() as session:
+        await run_startup_tasks(session, settings, persona_path)
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(OauthConnection))).scalars().one()
+    assert row.revoked_at is not None
+    assert row.library_read is False
+    assert row.library_write is False
