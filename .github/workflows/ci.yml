@@ -112,7 +112,11 @@ jobs:
           version: "0.9"
 
       - name: Export requirements
-        run: uv export --frozen --no-dev --no-hashes -o requirements.txt
+        # --no-emit-project, as vaultd's export below: without it the
+        # file carries `-e .` and pip-audit asks PyPI about a package
+        # named `anchor` -- someone else's, never ours -- so a PyPI 503 on
+        # that one query (or a CVE on their release) fails this job.
+        run: uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
 
       - name: pip-audit (fails only when a fix is available)
         # pip-audit 2.x has no flag for "ignore vulns with no fix yet" --
