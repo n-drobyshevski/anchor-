@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import itertools
+import logging
 
 import pytest
 from aiogram import Bot, Dispatcher
@@ -28,6 +29,7 @@ from app.db.models import Message, OauthConnection, TelegramUpdate, UserState
 from app.tg import menu
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
 from conftest import FakeLLMProvider, FakeSession, flatten_rich_message, make_bot, rich_callback_data
+from vault_stub import start_stub
 
 CHAT_ID = 555
 TIMEZONE = "Europe/Paris"
@@ -308,6 +310,62 @@ def test_vault_status_table_shows_mode_and_flags():
     assert "Режим: mirror" in text
     assert "Знания: выкл" in text
     assert "Личные: выкл" in text
+
+
+# --- 8f: the knowledge-roots hint in the "Хранилище и знания" screen -------
+
+
+def test_roots_hint_absent_when_not_fetched():
+    """`settings_state=None` -- notes consent off, or the manifest never
+    answered -- shows nothing new, same as before 8f."""
+    settings = _settings(False, False, "status", False)
+    text = _vault_plain(settings, vault=menu.VaultMenuView(notes_consent=False))
+    assert "Корни знаний" not in text
+    assert "Anchor/settings.md" not in text
+
+
+def test_roots_hint_valid_with_roots():
+    settings = _settings(False, False, "status", False)
+    vault = menu.VaultMenuView(
+        notes_consent=True, settings_state="valid", knowledge_roots=("Library",)
+    )
+    assert "Корни знаний: Library" in _vault_plain(settings, vault=vault)
+
+
+def test_roots_hint_valid_with_no_roots():
+    settings = _settings(False, False, "status", False)
+    vault = menu.VaultMenuView(notes_consent=True, settings_state="valid", knowledge_roots=())
+    text = _vault_plain(settings, vault=vault)
+    assert "Корни знаний: не заданы — добавь knowledge_folders в Anchor/settings.md" in text
+
+
+def test_roots_hint_missing():
+    settings = _settings(False, False, "status", False)
+    vault = menu.VaultMenuView(notes_consent=True, settings_state="missing")
+    text = _vault_plain(settings, vault=vault)
+    assert "Anchor/settings.md не найден — корней знаний нет" in text
+
+
+def test_roots_hint_wrong_case():
+    settings = _settings(False, False, "status", False)
+    vault = menu.VaultMenuView(notes_consent=True, settings_state="wrong_case")
+    text = _vault_plain(settings, vault=vault)
+    assert "переименуй его в Anchor/settings.md (регистр важен)" in text
+
+
+def test_roots_hint_invalid():
+    settings = _settings(False, False, "status", False)
+    vault = menu.VaultMenuView(notes_consent=True, settings_state="invalid")
+    text = _vault_plain(settings, vault=vault)
+    assert "Anchor/settings.md с ошибкой — ни одна заметка не читается" in text
+
+
+def test_roots_hint_truncates_past_five():
+    settings = _settings(False, False, "status", False)
+    roots = tuple(f"Root{i}" for i in range(7))
+    vault = menu.VaultMenuView(notes_consent=True, settings_state="valid", knowledge_roots=roots)
+    text = _vault_plain(settings, vault=vault)
+    assert "Корни знаний: Root0, Root1, Root2, Root3, Root4 и ещё 2" in text
 
 
 def test_parse_callback():
@@ -686,6 +744,96 @@ async def test_notes_off_action_clears_consent_and_rerenders(sessionmaker):
     assert state.notes_consent is False
     flat = flatten_rich_message(fake.edits[-1].rich_message)
     assert "Заметки: выкл" in flat
+
+
+# --- 8f: the router wiring that fetches the roots hint for the menu -------
+
+
+async def test_vault_card_shows_the_roots_hint_when_notes_consent_is_on(sessionmaker):
+    """The router's own `_vault_menu_view` fetches vaultd's manifest --
+    same request /vault itself makes -- only while notes consent is on,
+    and hands the resulting settings state + roots to the menu section."""
+    stub, server = await start_stub()
+    try:
+        stub.respond(
+            "GET",
+            "/v1/manifest",
+            200,
+            {"files": [], "summary": {
+                "conflict": 0, "legacy_read": 0, "unknown_value": 0,
+                "settings": "wrong_case", "knowledge_roots": [],
+            }},
+        )
+        await _seed(sessionmaker, 1, 2, notes_consent=True)
+        settings = Settings(
+            _env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, VAULT_URL=stub.url,
+            TZ_DEFAULT=TIMEZONE,
+        )
+        dp, bot, fake = _build(sessionmaker, settings=settings)
+        await _feed(dp, bot, _command_update(1, "/menu"))
+
+        await _feed(dp, bot, _callback_update(2, "mn:s:vault", message_id=1))
+
+        flat = flatten_rich_message(fake.edits[-1].rich_message)
+        assert "переименуй его в Anchor/settings.md (регистр важен)" in flat
+        assert ("GET", "/v1/manifest") in stub.calls()
+    finally:
+        await server.close()
+
+
+async def test_vault_card_roots_never_appear_in_logs(sessionmaker, caplog, monkeypatch):
+    for name in ("app.tg.router", "app.vault.status", "app.vault.client"):
+        monkeypatch.setattr(logging.getLogger(name), "disabled", False)
+    stub, server = await start_stub()
+    try:
+        secret_root = "Секретная-папка-с-планами"
+        stub.respond(
+            "GET",
+            "/v1/manifest",
+            200,
+            {"files": [], "summary": {
+                "conflict": 0, "legacy_read": 0, "unknown_value": 0,
+                "settings": "valid", "knowledge_roots": [secret_root],
+            }},
+        )
+        await _seed(sessionmaker, 1, 2, notes_consent=True)
+        settings = Settings(
+            _env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, VAULT_URL=stub.url,
+            TZ_DEFAULT=TIMEZONE,
+        )
+        dp, bot, fake = _build(sessionmaker, settings=settings)
+        await _feed(dp, bot, _command_update(1, "/menu"))
+
+        with caplog.at_level(logging.DEBUG):
+            await _feed(dp, bot, _callback_update(2, "mn:s:vault", message_id=1))
+
+        flat = flatten_rich_message(fake.edits[-1].rich_message)
+        assert secret_root in flat  # the menu card is exactly where it belongs
+        blob = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+        assert secret_root not in blob
+    finally:
+        await server.close()
+
+
+async def test_vault_card_makes_no_manifest_request_when_notes_consent_is_off(sessionmaker):
+    stub, server = await start_stub()
+    try:
+        await _seed(sessionmaker, 1, 2)
+        settings = Settings(
+            _env_file=None, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, VAULT_URL=stub.url,
+            TZ_DEFAULT=TIMEZONE,
+        )
+        dp, bot, fake = _build(sessionmaker, settings=settings)
+        await _feed(dp, bot, _command_update(1, "/menu"))
+
+        await _feed(dp, bot, _callback_update(2, "mn:s:vault", message_id=1))
+
+        flat = flatten_rich_message(fake.edits[-1].rich_message)
+        assert "Корни знаний" not in flat
+        assert "Anchor/settings.md" not in flat
+        assert ("GET", "/v1/manifest") not in stub.calls()
+    finally:
+        await server.close()
 
 
 async def test_lib_write_on_action_sets_the_write_switch_and_rerenders(sessionmaker):

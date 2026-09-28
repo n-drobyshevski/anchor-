@@ -524,16 +524,32 @@ def build_router(
         only when that section is actually about to be shown -- see
         `_show_menu`'s own docstring -- never for main or any other
         section, which have nothing to do with a session at all.
+
+        8f: `settings_state`/`knowledge_roots` need vaultd's manifest,
+        so they are fetched the same way /vault itself does (below) --
+        a status probe, then the manifest, and only while notes consent
+        is on. Consent off leaves both at their "not fetched" default,
+        exactly like `format_notes_line`'s own `notes=None`.
         """
         async with sessionmaker() as session:
             user_state = await get_state(session)
             connection = None
             if settings.CLAUDE_ACCESS_ENABLED:
                 connection = await oauth_store.current_connection(session, clock)
+            settings_state = None
+            knowledge_roots: tuple[str, ...] = ()
+            if user_state.notes_consent:
+                health = await vault_status.probe(session, settings, clock)
+                overview = await vault_status.notes_overview(settings, health)
+                if overview is not None:
+                    settings_state = overview.settings
+                    knowledge_roots = overview.knowledge_roots
         return menu.VaultMenuView(
             notes_consent=user_state.notes_consent,
             library_read=connection.library_read if connection else None,
             library_write=bool(connection.library_write) if connection else False,
+            settings_state=settings_state,
+            knowledge_roots=knowledge_roots,
         )
 
     async def _edit_menu(

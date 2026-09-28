@@ -301,11 +301,21 @@ class VaultMenuView:
     live connection at all" (as opposed to a connection with the
     library switched off), matching `current_connection`'s own `None`
     return for "not connected".
+
+    `settings_state`/`knowledge_roots` (8f) mirror
+    `NotesOverview.settings`/`.knowledge_roots` (app/vault/status.py):
+    the manifest's report on `Anchor/settings.md`, fetched -- like the
+    counts app/tg/vault.py's own notes line shows -- only while notes
+    consent is on. `settings_state=None` means "not fetched" (consent
+    off, or the manifest did not answer), same shape as
+    `format_notes_line`'s own `notes=None`.
     """
 
     notes_consent: bool = False
     library_read: bool | None = None
     library_write: bool = False
+    settings_state: str | None = None
+    knowledge_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -361,6 +371,39 @@ VAULT_TEXT = "📚 Хранилище и знания."
 # tapped: `/claude library write on` would refuse with exactly this
 # same instruction (app/tg/claude.py's LIBRARY_WRITE_NEEDS_READ).
 _LIB_WRITE_NEEDS_READ_HINT = " (/claude library on)"
+
+# 8f: the knowledge-roots hint, shown right under the vault section's
+# title while notes consent is on. Same wording app/tg/vault.py's own
+# `format_settings_line` gives `/vault` -- duplicated, not imported,
+# matching this module's own `_table` (state_view.py's twin): the two
+# UI modules stay independently pure.
+_ROOTS_LIST = "Корни знаний: {roots}"
+_ROOTS_EMPTY = "Корни знаний: не заданы — добавь knowledge_folders в Anchor/settings.md"
+_ROOTS_MISSING = "Anchor/settings.md не найден — корней знаний нет"
+_ROOTS_WRONG_CASE = "Файл настроек называется не так: переименуй его в Anchor/settings.md (регистр важен)"
+_ROOTS_INVALID = "Anchor/settings.md с ошибкой — ни одна заметка не читается"
+_ROOTS_SHOWN = 5
+
+
+def _settings_hint(state: str | None, roots: tuple[str, ...]) -> str | None:
+    """None when there is nothing to say yet (notes consent off, or the
+    manifest never answered) -- same as the vault section simply having
+    no hint before 8f."""
+    if state is None:
+        return None
+    if state == "invalid":
+        return _ROOTS_INVALID
+    if state == "missing":
+        return _ROOTS_MISSING
+    if state == "wrong_case":
+        return _ROOTS_WRONG_CASE
+    if not roots:
+        return _ROOTS_EMPTY
+    shown = roots[:_ROOTS_SHOWN]
+    text = ", ".join(shown)
+    if len(roots) > _ROOTS_SHOWN:
+        text += f" и ещё {len(roots) - _ROOTS_SHOWN}"
+    return _ROOTS_LIST.format(roots=text)
 
 
 def _lib_value(read: bool | None, write: bool) -> str:
@@ -471,7 +514,8 @@ def _render_vault(settings: Settings, *, web: bool, vault: VaultMenuView) -> Sec
 
     rows.append([_action_btn("vault")])
     rows.append(_back_row())
-    return Section(title=VAULT_TEXT, hint=None, table_rows=table_rows, rows=rows)
+    hint = _settings_hint(vault.settings_state, vault.knowledge_roots)
+    return Section(title=VAULT_TEXT, hint=hint, table_rows=table_rows, rows=rows)
 
 
 _SECTION_BUILDERS = {
