@@ -341,7 +341,12 @@ async def test_cap_bytes_per_file(sessionmaker):
     64 KB), so this cap is proven below its own tool dispatch."""
     world, vault = await _world(sessionmaker)
     connection = await _connection(sessionmaker)
-    big = "x" * (limits.BYTES_PER_FILE + 1)
+    # A fixed byte count (not derived from `limits.BYTES_PER_FILE` at
+    # runtime): otherwise a breaking edit that loosens the constant
+    # would silently loosen this test's own body size along with it,
+    # and the cap would never actually be exercised.
+    assert limits.BYTES_PER_FILE == 65536  # keeps this test's literal honest
+    big = "x" * 65537
     async with sessionmaker() as session:
         with pytest.raises(Refused) as exc:
             await claude_write.create_note(session, world.clock, vault, connection.id, "Library", "Big", big)
@@ -450,9 +455,11 @@ async def test_cap_bytes_per_connection_per_day(sessionmaker):
         tokens = await _connect_and_open(world, client)
         async with sessionmaker() as session:
             connection = (await session.execute(select(OauthConnection))).scalars().one()
+        # A fixed byte count, for the same reason as test_cap_bytes_per_file.
+        assert limits.BYTES_PER_CONNECTION_PER_DAY == 524288
         await _seed_prior_changesets(
             sessionmaker, connection.id, world.clock,
-            count=1, created=0, bytes_each=limits.BYTES_PER_CONNECTION_PER_DAY,
+            count=1, created=0, bytes_each=524288,
         )
         result = await _call(
             world, client, tokens["access_token"], "create_note",
@@ -561,3 +568,48 @@ def test_sanitize_title_refuses_a_title_that_sanitises_to_nothing():
     with pytest.raises(Refused) as exc:
         claude_write.sanitize_title("...")
     assert exc.value.code == "bad_title"
+
+
+# --- logging: write/undo flows WERE logged, no path/title/text --------
+
+
+LOG_LOGGERS = ("app.web.claude_write", "app.web.mcp_core", "app.tg.claude")
+
+
+@pytest.fixture
+def live_loggers(monkeypatch):
+    """Same reasoning as tests/test_claude_privacy.py's own fixture:
+    alembic's in-process run (this session's fixture) disables every
+    logger that already exists, so re-enable the ones this test reads."""
+    import logging
+
+    for name in LOG_LOGGERS:
+        monkeypatch.setattr(logging.getLogger(name), "disabled", False)
+
+
+async def test_write_and_undo_flows_are_logged_with_no_path_or_title(sessionmaker, caplog, live_loggers):
+    import logging
+
+    world, vault = await _world(sessionmaker)
+    caplog.set_level(logging.DEBUG)
+    secret_title = "Гиперстишн"
+    secret_path = f"Library/{secret_title}.md"
+    async with TestClient(TestServer(world.app)) as client:
+        tokens = await _connect_and_open(world, client)
+        payload = await _tool_payload(
+            world, client, tokens["access_token"], "create_note",
+            {"folder": "Library", "title": secret_title, "body": "тайное содержимое"},
+        )
+        await _tool_payload(
+            world, client, tokens["access_token"], "undo_changeset", {"id": payload["changeset_id"]}
+        )
+
+    events = {getattr(r, "event", None) for r in caplog.records}
+    # Not vacuous: both the write and the undo flow were logged.
+    assert "claude_write" in events
+    assert "mcp" in events
+    for record in caplog.records:
+        rendered = record.getMessage() + json.dumps(record.__dict__, default=str, ensure_ascii=False)
+        assert secret_path not in rendered, (record.name, record.getMessage())
+        assert secret_title not in rendered, (record.name, record.getMessage())
+        assert "тайное содержимое" not in rendered, (record.name, record.getMessage())

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 
 import pytest
 
@@ -61,6 +62,24 @@ async def _write_row(
         await session.commit()
         await session.refresh(row)
         return row
+
+
+@pytest.mark.parametrize(
+    "n, word", [(1, "заметку"), (2, "заметки"), (5, "заметок"), (11, "заметок"), (21, "заметку")]
+)
+async def test_write_line_plural(sessionmaker, n, word):
+    connection = await _seed(sessionmaker)
+    vault = FakeKnowledgeVault()
+    for i in range(n):
+        await _write_row(sessionmaker, connection.id, f"v{i}")
+        vault.changesets[f"v{i}"] = [_entry(f"Library/N{i}.md")]
+    bot = FakeBot()
+    async with sessionmaker() as session:
+        await claude_ui.run_library_digest(
+            session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
+            client_factory=lambda _s: vault,
+        )
+    assert f"{n} {word}" in bot.sent[0][1]
 
 
 async def test_write_line_created_marker(sessionmaker):
@@ -202,13 +221,24 @@ async def test_undo_all_callback_stale_date(sessionmaker):
 
 
 async def test_undo_all_callback_stale_epoch(sessionmaker):
-    await _seed(sessionmaker, epoch="aaaaaa")
+    # A real, undoable changeset for that date: if the epoch check were
+    # dropped, the press would actually restore this file instead of
+    # the assertion passing vacuously because there was nothing to undo.
+    from tests.claude_write_fake import _Entry, sha
+
+    connection = await _seed(sessionmaker, epoch="aaaaaa")
+    vault = FakeKnowledgeVault()
+    vault.files["Library/New.md"] = "content"
+    await _write_row(sessionmaker, connection.id, "v1")
+    vault.changesets["v1"] = [_Entry("Library/New.md", None, sha("content"))]
     bot = FakeBot()
     await claude_ui.handle_undo_callback(
         sessionmaker, Settings(), bot, FrozenClock(NOW),
         callback_id="cb1", chat_id=CHAT_ID, message_id=1, data="cu:2026-09-26:zzzzzz",
+        client_factory=lambda _s: vault,
     )
     assert bot.edits[-1][2] == claude_ui.UNDO_STALE
+    assert "Library/New.md" in vault.files  # untouched
 
 
 async def test_undo_all_callback_replay_is_stale(sessionmaker):
@@ -233,14 +263,60 @@ async def test_web_sink_refused_at_ingress_layer():
     assert "cu:2026-09-26:aaaaaa".startswith(ingress.BLOCKED_CALLBACK_PREFIX)
 
 
-async def test_web_sink_refused_at_router_layer():
+async def test_web_sink_refused_at_router_layer(sessionmaker):
     """Mirrors the `v:`/`g:`/`cl:` router guard -- `cu:` gets the same
-    `is_web_sink` check before dispatch (app/tg/router.py)."""
-    import inspect
+    `is_web_sink` check before dispatch (app/tg/router.py), proven by
+    actually feeding the press through a web-sink-flagged bot and
+    checking nothing about the changeset changed."""
+    from claude_helpers import World, settings as claude_settings
 
-    from app.tg import router as router_module
+    connection = await _seed(sessionmaker)
+    vault = FakeKnowledgeVault()
+    vault.files["Library/New.md"] = "content"
+    from tests.claude_write_fake import _Entry, sha
 
-    source = inspect.getsource(router_module)
-    idx = source.index('F.data.startswith("cu:")')
-    handler_src = source[idx : idx + 800]
-    assert "is_web_sink" in handler_src
+    await _write_row(sessionmaker, connection.id, "v1")
+    vault.changesets["v1"] = [_Entry("Library/New.md", None, sha("content"))]
+
+    world = World(sessionmaker, claude_settings())
+    world.app["vault_client_factory"] = lambda _s, _v=vault: _v
+    world.tg_bot.is_web_sink = True
+    await world.press("cu:2026-09-26:aaaaaa")
+    assert world.tg_fake.answered[-1].text == "Эта команда доступна только в Telegram."
+    assert "Library/New.md" in vault.files  # nothing was undone
+
+
+# --- logging: the digest flow is logged, no title/text ------------------
+
+
+async def test_digest_flow_is_logged_with_no_title(sessionmaker, caplog):
+    import logging
+
+    from app.core.scheduler import maybe_enqueue_library_digest
+
+    for name in ("app.core.scheduler", "app.tg.claude"):
+        logging.getLogger(name).disabled = False
+    caplog.set_level(logging.DEBUG)
+
+    connection = await _seed(sessionmaker)
+    secret_title = "Гиперстишн"
+    await _write_row(sessionmaker, connection.id, "v1", created=1)
+    vault = FakeKnowledgeVault()
+    vault.changesets["v1"] = [_entry(f"Library/{secret_title}.md")]
+    bot = FakeBot()
+
+    async with sessionmaker() as session:
+        enqueued = await maybe_enqueue_library_digest(session, Settings(CLAUDE_ACCESS_ENABLED=True), FrozenClock(NOW), "UTC")
+    assert enqueued is True
+    async with sessionmaker() as session:
+        await claude_ui.run_library_digest(
+            session, Settings(), FrozenClock(NOW), bot, {"local_date": "2026-09-26"},
+            client_factory=lambda _s: vault,
+        )
+
+    events = {getattr(r, "event", None) for r in caplog.records}
+    assert "claude_library_digest" in events  # not vacuous: the enqueue was logged
+    assert f"«{secret_title}»" in bot.sent[0][1]  # the digest itself does carry it, to Telegram only
+    for record in caplog.records:
+        rendered = record.getMessage() + json.dumps(record.__dict__, default=str, ensure_ascii=False)
+        assert secret_title not in rendered, (record.name, record.getMessage())

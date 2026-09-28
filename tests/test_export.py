@@ -503,3 +503,19 @@ async def test_the_omission_list_does_not_name_a_table_that_is_exported():
     exported = {m.__tablename__ for m in export.EXPORTED_MODELS}
     assert not (exported & set(NOT_EXPORTED))
     assert set(NOT_EXPORTED) <= set(models.Base.metadata.tables)
+
+
+async def test_claude_changeset_export_has_no_text_or_path_columns():
+    """W2b: /export's claude_changeset carries ids, counts and times
+    only -- no path, no text. Checked against the mapped columns
+    directly (a stronger, name-based guard than "the seeded row looks
+    fine"), so a future column named after a path or free text is
+    caught here rather than only by someone reading the row by eye."""
+    from app.db.models import ClaudeChangeset
+
+    names = set(ClaudeChangeset.__table__.columns.keys())
+    assert names == {
+        "id", "connection_id", "vault_ref", "kind", "files", "bytes",
+        "refused", "created", "renamed", "created_at", "last_write_at", "undone_at",
+    }
+    assert not any("path" in n or "text" in n for n in names)

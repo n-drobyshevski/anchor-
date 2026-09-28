@@ -225,6 +225,42 @@ async def test_claude_undo_all_undoes_last_24h_newest_first(world_factory):
     assert "Library/B.md" not in vault.files
 
 
+async def test_claude_undo_all_only_reaches_24_hours(world_factory, sessionmaker):
+    """`/claude undo all` reaches the last 24h, not further -- a
+    changeset older than that is left alone."""
+    world, vault = await world_factory()
+    async with TestClient(TestServer(world.app)) as client:
+        tokens = await _open_write(world, client)
+        await _create(world, client, tokens["access_token"], "Recent")
+    async with sessionmaker() as session:
+        connection = (await session.execute(select(OauthConnection))).scalars().one()
+        old = world.clock.now_utc() - datetime.timedelta(hours=25)
+        session.add(
+            ClaudeChangeset(
+                connection_id=connection.id, vault_ref="old-one", kind="write",
+                files=1, bytes=1, created_at=old, last_write_at=old,
+            )
+        )
+        await session.commit()
+    # A real entry, not an empty one: if the 24h window were broken
+    # (e.g. unbounded), this changeset would actually get restored
+    # (the file deleted, since it is a "create" entry) rather than the
+    # assertions passing vacuously because there was nothing to undo.
+    from tests.claude_write_fake import _Entry, sha
+
+    vault.files["Library/OldFile.md"] = "still there"
+    vault.changesets["old-one"] = [_Entry("Library/OldFile.md", None, sha("still there"))]
+    reply = await world.command("/claude undo all")
+    assert reply == "Откатил: 1 файл."
+    assert "Library/Recent.md" not in vault.files
+    assert "Library/OldFile.md" in vault.files  # untouched: older than 24h
+    async with sessionmaker() as session:
+        old_row = (
+            await session.execute(select(ClaudeChangeset).where(ClaudeChangeset.vault_ref == "old-one"))
+        ).scalars().one()
+    assert old_row.undone_at is None
+
+
 async def test_claude_undo_nothing_to_undo(world_factory):
     world, vault = await world_factory()
     async with TestClient(TestServer(world.app)) as client:

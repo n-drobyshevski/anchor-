@@ -71,3 +71,15 @@ def test_claude_changeset_created_with_check_and_cascade(scratch_database):  # n
     _alembic(scratch_database, "downgrade", BEFORE)
     assert "claude_changeset" not in _tables(scratch_database)
     _alembic(scratch_database, "upgrade", "head")
+
+
+def test_claude_changeset_has_no_text_or_path_columns(scratch_database):  # noqa: F811
+    _alembic(scratch_database, "upgrade", AFTER)
+    names = set(_columns(scratch_database, "public", "claude_changeset"))
+    assert names == {
+        "id", "connection_id", "vault_ref", "kind", "files", "bytes",
+        "refused", "created", "renamed", "created_at", "last_write_at", "undone_at",
+    }
+    assert not any("path" in n or "text" in n for n in names)
+    _alembic(scratch_database, "downgrade", BEFORE)
+    _alembic(scratch_database, "upgrade", "head")
