@@ -14,7 +14,10 @@ Every refusal the plan names has its own test here. The promises:
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
+import hashlib
+import re
 import urllib.parse
 
 import pytest
@@ -128,6 +131,24 @@ async def test_an_unknown_client_is_named_on_the_page(sessionmaker):
             "/oauth/authorize", params=world.authorize_params(client_id="https://x.example/c")
         )
         assert oauth.UNKNOWN_CLIENT in await resp.text()
+
+
+async def test_only_the_waiting_page_runs_a_script_and_the_csp_pins_it(sessionmaker):
+    world = await _world(sessionmaker)
+    async with TestClient(TestServer(world.app)) as client:
+        waiting = await client.get("/oauth/authorize", params=world.authorize_params())
+        page = await waiting.text()
+        refused = await client.get("/oauth/authorize", params=world.authorize_params(state=None))
+        expired = await world.poll(client, "A" * 22, None)
+        scripts = re.findall(r"<script>(.*?)</script>", page, flags=re.S)
+        assert len(scripts) == 1 and page.count("<script") == 1
+        digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
+        csp = waiting.headers["Content-Security-Policy"]
+        assert f"script-src 'sha256-{digest}';" in csp
+        assert "unsafe-inline';" not in csp.split("script-src", 1)[1].split(";", 1)[0]
+        assert "id=copy" in page
+        for resp in (refused, expired):
+            assert "<script" not in await resp.text()
 
 
 async def test_a_repeated_parameter_is_refused(sessionmaker):

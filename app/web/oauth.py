@@ -19,7 +19,8 @@ answers, and never writes a row itself.
 - **Status** answers only the browser that holds the binding cookie.
   Without it -- or with another request's, or for an unknown handle --
   the answer is one identical page, so a guessed handle yields nothing.
-  The page polls with `<meta refresh>`: the CSP allows no script.
+  The page polls with `<meta refresh>`. The CSP allows one inline
+  script, pinned by its hash, for the copy button, and no other.
 - **Token** and **revoke** are form posts from claude.ai's servers.
 
 Every response carries `Cache-Control: no-store`, `Referrer-Policy:
@@ -30,6 +31,8 @@ handle, cookie or client id: routes, reasons and ids only.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import logging
 import re
@@ -55,10 +58,29 @@ POLL_SECONDS = 3
 MAX_BODY = 16 * 1024
 MAX_STATE = 512
 
+# The waiting page's copy button: the only script any page here runs.
+# No inline handlers (a hash does not cover them); without the Clipboard
+# API the button stays hidden and the command block is still select-all.
+_COPY_SCRIPT = (
+    "(function(){var b=document.getElementById('copy'),"
+    "c=document.querySelector('.command'),l=b&&b.querySelector('span');"
+    "if(!b||!c||!l||!navigator.clipboard)return;b.hidden=false;"
+    "b.addEventListener('click',function(){"
+    "navigator.clipboard.writeText(c.textContent).then("
+    "function(){l.textContent='Скопировано';"
+    "b.classList.add('done')},"
+    "function(){l.textContent='Не вышло — "
+    "выдели вручную'})})})();"
+)
+_COPY_HASH = base64.b64encode(hashlib.sha256(_COPY_SCRIPT.encode()).digest()).decode()
+
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+    "Content-Security-Policy": (
+        f"default-src 'none'; script-src 'sha256-{_COPY_HASH}'; "
+        "style-src 'unsafe-inline'; frame-ancestors 'none'"
+    ),
 }
 
 _CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -67,14 +89,78 @@ _SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
 TITLE = "Anchor · подключение Claude"
-WAITING_TEXT = (
-    "Открой Telegram и отправь боту:<br><b>/claude connect {code}</b><br><br>"
-    "Если ты не подключал Claude сам — просто закрой эту страницу."
+WAITING_HEADING = "Подтверди в Telegram"
+WAITING_HTML = (
+    "<ol class=steps>"
+    "<li>Открой бота Anchor в Telegram.</li>"
+    "<li>Отправь ему команду:</li>"
+    "</ol>"
+    "<p class=command>/claude connect {code}</p>"
+    "<button id=copy type=button hidden><svg viewBox='0 0 24 24' aria-hidden=true>"
+    "<g fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round>"
+    "<rect x=9 y=9 width=12 height=12 rx=2 /><path d='M5 15V5a2 2 0 0 1 2-2h8'/></g></svg>"
+    "<span aria-live=polite>Скопировать команду</span></button>"
+    "<p class=status><span class=dot></span>Жду подтверждения — страница обновится сама.</p>"
+    "<p class=note>Если ты не подключал Claude сам — просто закрой эту страницу.</p>"
 )
+REFUSED_HEADING = "Не получилось подключить"
+BUSY_HEADING = "Попробуй позже"
+EXPIRED_HEADING = "Запрос устарел"
 UNKNOWN_CLIENT = "Клиент не распознан."
 BAD_REQUEST = "Запрос на подключение некорректен. Начни подключение в claude.ai заново."
 BUSY = "Сейчас нельзя начать подключение. Попробуй позже."
 EXPIRED = "Запрос не найден или устарел. Начни подключение в claude.ai заново."
+
+# The page is self-contained: the CSP above allows inline styles and
+# nothing else, so no fonts, images or scripts. The palette is the web
+# app's (app/web/static/app.css), the mark is app/web/static/icon.svg.
+_MARK = (
+    "<svg class=mark viewBox='0 0 32 32' aria-hidden=true><g fill=none stroke=currentColor "
+    "stroke-width=2.4 stroke-linecap=round stroke-linejoin=round>"
+    "<circle cx=16 cy=7 r=3.4 /><line x1=16 y1=10.4 x2=16 y2=27 />"
+    "<line x1=10 y1=14 x2=22 y2=14 /><path d='M6 17c0 6 4.5 10 10 10s10-4 10-10'/></g></svg>"
+)
+_STYLE = (
+    ":root{color-scheme:light dark;--bg:#faf8f5;--surface:#fff;--text:#292524;"
+    "--muted:#57514b;--border:#e7e0d7;--fill:#f2ede7;--accent:#57534e;"
+    "--shadow:0 2px 6px rgb(28 25 23/.07),0 12px 28px rgb(28 25 23/.08)}"
+    "@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--surface:#292524;--text:#faf8f5;"
+    "--muted:#bcb3aa;--border:#3a3531;--fill:#3a3531;--accent:#a8a29e;"
+    "--shadow:0 2px 6px rgb(0 0 0/.25),0 12px 28px rgb(0 0 0/.35)}}"
+    "*{box-sizing:border-box}[hidden]{display:none!important}"
+    "body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;"
+    "justify-content:center;padding:24px 16px;background:var(--bg);color:var(--text);"
+    "font:16px/1.5 ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+    "-webkit-font-smoothing:antialiased}"
+    "main{width:100%;max-width:26rem}"
+    ".brand{display:flex;align-items:center;gap:10px;margin:0 0 16px 4px;color:var(--accent)}"
+    ".mark{width:28px;height:28px;flex:none}"
+    ".brand b{display:block;color:var(--text);font-size:15px;font-weight:600;line-height:1.2}"
+    ".brand span{display:block;color:var(--muted);font-size:13px;line-height:1.3}"
+    ".card{background:var(--surface);border:1px solid var(--border);border-radius:16.8px;"
+    "box-shadow:var(--shadow);padding:28px 24px}"
+    "h1{margin:0 0 12px;font-size:22px;line-height:1.25;font-weight:650;letter-spacing:-.01em}"
+    "p{margin:0}.message{color:var(--muted)}"
+    ".steps{margin:0 0 12px;padding-left:1.4em;color:var(--muted)}.steps li{padding-left:2px}"
+    ".command{padding:16px;border-radius:12px;background:var(--fill);text-align:center;"
+    "font:600 clamp(14px,4.6vw,20px)/1.3 ui-monospace,'SF Mono',Menlo,Consolas,monospace;"
+    "letter-spacing:.04em;white-space:nowrap;"
+    "-webkit-user-select:all;user-select:all;overflow-wrap:anywhere}"
+    "#copy{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;"
+    "margin-top:10px;padding:11px 16px;border:0;border-radius:999px;background:var(--accent);"
+    "color:var(--surface);font:inherit;font-size:15px;font-weight:600;line-height:1.2;cursor:pointer;"
+    "transition:opacity .15s}#copy:hover{opacity:.9}"
+    "#copy:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    "#copy svg{width:18px;height:18px;flex:none}#copy.done{background:var(--text)}"
+    ".status{display:flex;align-items:flex-start;gap:8px;margin-top:16px;color:var(--muted);"
+    "font-size:14px}"
+    ".dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;"
+    "margin-top:7px;animation:pulse 1.6s ease-in-out infinite}"
+    "@keyframes pulse{50%{opacity:.25}}"
+    "@media (prefers-reduced-motion:reduce){.dot{animation:none}}"
+    ".note{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);"
+    "color:var(--muted);font-size:14px}"
+)
 
 
 def issuer(settings: Settings) -> str:
@@ -113,21 +199,33 @@ def _json(body: dict, status: int = 200) -> web.StreamResponse:
     return _secure(web.json_response(body, status=status))
 
 
-def _page(body_html: str, status: int = 200, refresh: str | None = None) -> web.StreamResponse:
+def _page(
+    heading: str,
+    body_html: str,
+    status: int = 200,
+    refresh: str | None = None,
+    script: bool = False,
+) -> web.StreamResponse:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    tail = f"<script>{_COPY_SCRIPT}</script>" if script else ""
     document = (
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"{meta}<title>{TITLE}</title>"
-        "<style>body{font:18px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:34rem;"
-        "padding:0 1rem}b{font-size:1.3em;letter-spacing:.05em}</style></head>"
-        f"<body><p>{body_html}</p></body></html>"
+        f"{meta}<title>{TITLE}</title><style>{_STYLE}</style></head>"
+        f"<body><main><div class=brand>{_MARK}<div><b>Anchor</b>"
+        "<span>подключение Claude</span></div></div>"
+        f"<div class=card><h1>{html.escape(heading)}</h1>{body_html}</div></main>{tail}"
+        "</body></html>"
     )
     return _secure(web.Response(text=document, status=status, content_type="text/html"))
 
 
+def _message(heading: str, text: str, status: int) -> web.StreamResponse:
+    return _page(heading, f"<p class=message>{html.escape(text)}</p>", status=status)
+
+
 def _expired() -> web.StreamResponse:
-    return _page(html.escape(EXPIRED), status=404)
+    return _message(EXPIRED_HEADING, EXPIRED, 404)
 
 
 def _address(request: web.Request) -> str:
@@ -228,7 +326,10 @@ def validate_authorize(query, settings: Settings) -> tuple[str | None, str]:
 def _waiting(handle: str, code: str) -> web.StreamResponse:
     url = f"{STATUS_PATH}?h={handle}"
     return _page(
-        WAITING_TEXT.format(code=html.escape(code)), refresh=f"{POLL_SECONDS};url={url}"
+        WAITING_HEADING,
+        WAITING_HTML.format(code=html.escape(code)),
+        refresh=f"{POLL_SECONDS};url={url}",
+        script=True,
     )
 
 
@@ -237,7 +338,7 @@ async def authorize(request: web.Request) -> web.StreamResponse:
     reason, scope_or_text = validate_authorize(request.query, settings)
     if reason is not None:
         _log(AUTHORIZE_PATH, f"refused_{reason}")
-        return _page(html.escape(scope_or_text), status=400)
+        return _message(REFUSED_HEADING, scope_or_text, 400)
 
     store: oauth_store.PendingStore = request.app["claude_pending"]
     browser_secret = request.cookies.get(COOKIE, "")
@@ -256,7 +357,7 @@ async def authorize(request: web.Request) -> web.StreamResponse:
     )
     if created is None:
         _log(AUTHORIZE_PATH, "busy")
-        return _page(html.escape(BUSY), status=429)
+        return _message(BUSY_HEADING, BUSY, 429)
     handle, entry = created
     _log(AUTHORIZE_PATH, "pending")
     response = _waiting(handle, entry.code)
