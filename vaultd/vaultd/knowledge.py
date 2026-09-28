@@ -40,7 +40,20 @@ _ANCHOR_TOP = "Anchor"
 
 
 class Refused(Exception):
-    """Every acceptance failure that is not CAS (412) or missing-on-update (404)."""
+    """Every acceptance failure that is not CAS (412) or missing-on-update (404).
+
+    `reason` is required and must be one of `undo.REFUSAL_REASONS` -- a
+    bare `Refused()` is a `TypeError`, so no raise site can skip naming
+    which check failed. The HTTP layer (api.py) still turns every one of
+    these into the same 403 with an empty body; only the operator log
+    sees `reason`.
+    """
+
+    def __init__(self, reason: str) -> None:
+        if reason not in undo.REFUSAL_REASONS:
+            raise ValueError(f"unknown refusal reason: {reason!r}")
+        super().__init__(reason)
+        self.reason = reason
 
 
 class MidRenameFailure(Exception):
@@ -80,9 +93,20 @@ def _first_segment(rel: str) -> str:
     return unicodedata.normalize("NFC", rel).split("/", 1)[0]
 
 
+def candidate_path_reason(rel: str) -> str | None:
+    """None if `rel` may hold a knowledge note, else the refusal code that says why not."""
+    if not rel.endswith(".md"):
+        return "not_md"
+    if paths.has_dot_segment(rel):
+        return "dot_segment"
+    if _first_segment(rel) == _ANCHOR_TOP:
+        return "anchor_path"
+    return None
+
+
 def is_candidate_path(rel: str) -> bool:
     """.md, no dot segment, not under `Anchor/`. Symlinks are caught by the walk below."""
-    return rel.endswith(".md") and not paths.has_dot_segment(rel) and _first_segment(rel) != _ANCHOR_TOP
+    return candidate_path_reason(rel) is None
 
 
 def _read_at(root: Path, rel: str) -> tuple[bytes | None, bool]:
@@ -103,7 +127,7 @@ def _read_at(root: Path, rel: str) -> tuple[bytes | None, bool]:
             finally:
                 os.close(dir_fd)
     except paths.Refused:
-        raise Refused from None
+        raise Refused("symlink") from None
 
 
 def _class_of(rel: str, data: bytes, rules: classes.FolderRules) -> str | None:
@@ -116,15 +140,15 @@ def _class_of(rel: str, data: bytes, rules: classes.FolderRules) -> str | None:
 def check_new_content(rel: str, data: bytes, rules: classes.FolderRules, *, for_create: bool) -> None:
     """Raise Refused unless `data` may become the note at `rel`."""
     if len(data) > KNOWLEDGE_WRITE_MAX_BYTES:
-        raise Refused
+        raise Refused("too_large")
     mark = frontmatter.note_mark(data)
     if mark == "unknown":
-        raise Refused
+        raise Refused("bad_frontmatter")
     if for_create:
         if classes._folder_class(rel, rules) != "knowledge":  # noqa: SLF001 - same package
-            raise Refused
+            raise Refused("folder_not_knowledge")
         if classes.effective_class(rel, mark, rules).note_class != "knowledge":
-            raise Refused
+            raise Refused("content_not_knowledge")
 
 
 def perform_put(
@@ -135,22 +159,25 @@ def perform_put(
     Runs entirely under the caller's lock, in one call, so the CAS
     window is the same as any other vaultd write.
     """
-    if not is_candidate_path(rel):
-        raise Refused
+    path_reason = candidate_path_reason(rel)
+    if path_reason is not None:
+        raise Refused(path_reason)
     try:
         data = content.encode("utf-8")
     except UnicodeEncodeError:
-        raise Refused from None
+        raise Refused("bad_utf8") from None
 
     root = store.vault_path
     rules = classes.load_rules(root)
+    if rules.state == "invalid":
+        raise Refused("settings_invalid")
     current, folder_exists = _read_at(root, rel)
 
     if if_sha256 is None:
         if current is not None:
-            raise Refused  # the name is taken
+            raise Refused("name_taken")
         if not folder_exists:
-            raise Refused  # only into an existing folder
+            raise Refused("folder_missing")  # only into an existing folder
         check_new_content(rel, data, rules, for_create=True)
         pre_image = None
         old_anchor = None
@@ -158,7 +185,7 @@ def perform_put(
         if current is None:
             raise Missing
         if _class_of(rel, current, rules) != "knowledge":
-            raise Refused
+            raise Refused("not_knowledge")
         if sha256(current) != if_sha256:
             raise Conflict
         check_new_content(rel, data, rules, for_create=False)
@@ -166,7 +193,7 @@ def perform_put(
         pre_image = current
 
     if if_sha256 is not None and old_anchor != frontmatter.raw_anchor(data):
-        raise Refused  # a write cannot reclassify -- creating a file has no "old" to preserve
+        raise Refused("reclassify")  # a write cannot reclassify -- creating a file has no "old" to preserve
 
     stamped = provenance.apply(data, now())
     new_sha = store.put_unchecked(rel, stamped, if_sha256)
@@ -185,10 +212,14 @@ class RenamePlan:
 
 def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> RenamePlan:
     """Validate a rename and find every backlink. Touches no disk beyond reading."""
-    if not is_candidate_path(old_rel) or not is_candidate_path(new_rel):
-        raise Refused
+    old_reason = candidate_path_reason(old_rel)
+    if old_reason is not None:
+        raise Refused(old_reason)
+    new_reason = candidate_path_reason(new_rel)
+    if new_reason is not None:
+        raise Refused(new_reason)
     if old_rel == new_rel:
-        raise Refused
+        raise Refused("same_path")
 
     old_data, _ = _read_at(root, old_rel)
     if old_data is None:
@@ -197,17 +228,19 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
         raise Conflict
 
     rules = classes.load_rules(root)
+    if rules.state == "invalid":
+        raise Refused("settings_invalid")
     old_mark = frontmatter.note_mark(old_data)
     if old_mark == "unknown" or classes.effective_class(old_rel, old_mark, rules).note_class != "knowledge":
-        raise Refused
+        raise Refused("not_knowledge")
 
     new_current, new_folder_exists = _read_at(root, new_rel)
     if not new_folder_exists:
-        raise Refused
+        raise Refused("folder_missing")
     if new_current is not None:
-        raise Refused  # destination taken
+        raise Refused("dest_taken")
     if classes._folder_class(new_rel, rules) != "knowledge":  # noqa: SLF001
-        raise Refused
+        raise Refused("dest_not_knowledge")
     # No separate check of the destination's resolved class: the guard
     # above already proved `old_mark` is "knowledge" or "none" (nothing
     # else can pass it), and combined with a folder rule of "knowledge"
@@ -232,13 +265,13 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
         if count == 0:
             continue
         if _first_segment(rel) == _ANCHOR_TOP:
-            raise Refused  # a fact/journal page (or any other Anchor file) links here
+            raise Refused("linked_from_non_knowledge")  # a fact/journal page (or any other Anchor file) links here
         note_class = _class_of(rel, data, rules)
         if note_class != "knowledge":
-            raise Refused  # a personal/never/unclassified note links here
+            raise Refused("linked_from_non_knowledge")  # a personal/never/unclassified note links here
         backlinks.append((rel, data, new_text))
     if ambiguous:
-        raise Refused  # the basename is ambiguous: another file already has it
+        raise Refused("ambiguous_basename")  # the basename is ambiguous: another file already has it
 
     return RenamePlan(old_rel, new_rel, old_data, if_sha256, tuple(backlinks))
 
@@ -260,10 +293,14 @@ def perform_rename(store: Store, plan: RenamePlan, *, now: Callable[[], str] = _
     """
     try:
         new_sha = store.put_unchecked(plan.new_rel, plan.old_data, None)
-    except (Conflict, paths.Refused) as exc:
+    except Conflict as exc:
         # Nothing was written yet: an ordinary refusal (a race filled the
-        # destination, or turned it into a symlink), not a mid-rename state.
-        raise Refused from exc
+        # destination), not a mid-rename state.
+        raise Refused("dest_taken") from exc
+    except paths.Refused as exc:
+        # Nothing was written yet: a race turned the destination into a
+        # symlink, not a mid-rename state.
+        raise Refused("symlink") from exc
     try:
         store.delete_unchecked(plan.old_rel, plan.old_sha256)
     except (Missing, Conflict, paths.Refused) as exc:

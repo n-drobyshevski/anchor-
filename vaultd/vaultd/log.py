@@ -29,6 +29,7 @@ SAFE_EXTRA_KEYS = frozenset(
         "restarts",
         "count",
         "backoff_s",
+        "reason",
     }
 )
 
