@@ -2429,3 +2429,14 @@ note it edits. With writing off, no path reaches Claude, as in C3.
 - **[Откатить всё за сутки]** uses `cu:<date>:<epoch>`, is blocked from
   the web chat at ingress and in the router, and answers «Устарело» to
   a stale or repeated press.
+
+## vaultd logs why it refused a knowledge write
+
+Production showed `PUT /v1/knowledge` → 403 twice, with no way to tell
+which rule refused it. Each `Refused` / `CapExceeded` now carries a
+required reason code from a closed set of 25 (e.g. `folder_not_knowledge`,
+`folder_missing`, `name_taken`, `settings_invalid`, `cap_files`). vaultd
+logs it once as `event=knowledge_refused, route, reason`. The response
+is unchanged, a bare 403 or the same 404, so Claude still cannot tell
+the refusals apart. `reason` joins vaultd's safe log keys; its only
+values are the closed-set codes, never a path or a name.

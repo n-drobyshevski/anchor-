@@ -53,8 +53,63 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# The closed set of reason codes a knowledge-route refusal can carry into
+# the operator log (see api.py's `_log_refused`). The HTTP response never
+# sees these -- the client keeps the one bare 403/404 -- but the log line
+# says which rule fired. Defined here, not in knowledge.py, so both
+# `knowledge.Refused` and `CapExceeded` (this module) can require one
+# without an import cycle (knowledge.py already imports this module).
+REFUSAL_REASONS = frozenset(
+    {
+        # knowledge.py: path shape (write-plan section 4.1)
+        "not_md",
+        "dot_segment",
+        "anchor_path",
+        "symlink",
+        # knowledge.py: content
+        "bad_utf8",
+        "too_large",
+        "bad_frontmatter",
+        "reclassify",
+        # knowledge.py: classification (settings.md, folder rules, section 4.2/4.4)
+        "settings_invalid",
+        "not_knowledge",
+        "folder_not_knowledge",
+        "content_not_knowledge",
+        # knowledge.py: create/update placement
+        "name_taken",
+        "folder_missing",
+        # knowledge.py: rename (section 4, backlinks)
+        "same_path",
+        "dest_taken",
+        "dest_not_knowledge",
+        "linked_from_non_knowledge",
+        "ambiguous_basename",
+        # undo.py: caps (section 6.4) and undo-of-undo/unknown ids
+        "cap_files",
+        "cap_changesets",
+        "cap_undos",
+        "changeset_kind_mismatch",
+        "undo_of_undo",
+        # api.py: GET /v1/knowledge, file simply absent
+        "missing",
+    }
+)
+
+
 class CapExceeded(Exception):
-    """A vaultd-side cap (files/changeset, changesets/hour, undos/hour) was hit."""
+    """A vaultd-side cap (files/changeset, changesets/hour, undos/hour) was hit.
+
+    `reason` is required and must be one of `REFUSAL_REASONS`, so the
+    operator log always has something to say even though the HTTP
+    response stays a bare 403 (write-plan section 4, 6.2).
+    """
+
+    def __init__(self, reason: str) -> None:
+        if reason not in REFUSAL_REASONS:
+            raise ValueError(f"unknown refusal reason: {reason!r}")
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -203,14 +258,14 @@ class UndoStore:
         meta = self._read_meta(changeset_id)
         if meta is None:
             if kind == "write" and self.count_recent("write") >= CHANGESETS_PER_HOUR:
-                raise CapExceeded
+                raise CapExceeded("cap_changesets")
             current_files = 0
         else:
             if meta["kind"] != kind:
-                raise CapExceeded
+                raise CapExceeded("changeset_kind_mismatch")
             current_files = len(meta["files"])
         if current_files + n_files > FILES_PER_CHANGESET:
-            raise CapExceeded
+            raise CapExceeded("cap_files")
 
     # -- writing -------------------------------------------------------------
 

@@ -68,6 +68,18 @@ def _refused() -> web.Response:
     return web.Response(status=403)
 
 
+def _log_refused(request: web.Request, reason: str) -> None:
+    """Log which rule refused -- the HTTP response never carries this.
+
+    One record per refusal, `reason` a code from `undo.REFUSAL_REASONS`
+    (never a path, folder name or title).
+    """
+    logger.info(
+        "knowledge refused",
+        extra={"event": "knowledge_refused", "route": _route_template(request), "reason": reason},
+    )
+
+
 def _now_iso(clock: Callable[[], datetime]) -> str:
     return clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -267,29 +279,41 @@ async def get_knowledge(request: web.Request) -> web.Response:
         rel = _rel_from_query(request)
     except paths.Malformed:
         return _json_error("malformed_path", 400)
-    data = await asyncio.to_thread(_read_knowledge, request.app[STORE_KEY], rel)
+    data, reason = await asyncio.to_thread(_read_knowledge, request.app[STORE_KEY], rel)
     if data is None:
+        _log_refused(request, reason)
         return web.json_response(_NOT_FOUND, status=404)
     try:
         content = data.decode("utf-8")
     except UnicodeDecodeError:
+        _log_refused(request, "bad_utf8")
         return web.json_response(_NOT_FOUND, status=404)
     return web.json_response({"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content})
 
 
-def _read_knowledge(store: Store, rel: str) -> bytes | None:
-    if not knowledge.is_candidate_path(rel):
-        return None
+def _read_knowledge(store: Store, rel: str) -> tuple[bytes | None, str]:
+    """(bytes, "ok") if `rel` is a readable knowledge note, else (None, reason).
+
+    `reason` is only ever looked at when the first element is None (the
+    404 path); the same closed set of codes `knowledge.Refused` uses.
+    """
+    path_reason = knowledge.candidate_path_reason(rel)
+    if path_reason is not None:
+        return None, path_reason
     try:
         data = paths.read_file(store.vault_path, rel)
     except paths.Refused:
-        return None
-    if data is None or len(data) > NOTE_MAX_BYTES:
-        return None
+        return None, "symlink"
+    if data is None:
+        return None, "missing"
+    if len(data) > NOTE_MAX_BYTES:
+        return None, "too_large"
     rules = classes.load_rules(store.vault_path)
+    if rules.state == "invalid":
+        return None, "settings_invalid"
     if knowledge._class_of(rel, data, rules) != "knowledge":  # noqa: SLF001 - same package
-        return None
-    return data
+        return None, "not_knowledge"
+    return data, "ok"
 
 
 def _parse_json_body(body: Any, keys: frozenset[str]) -> dict | None:
@@ -324,13 +348,15 @@ async def put_knowledge(request: web.Request) -> web.Response:
     async with request.app[LOCK_KEY]:
         try:
             await asyncio.to_thread(undo_store.precheck, changeset, "write", 1)
-        except CapExceeded:
+        except CapExceeded as exc:
+            _log_refused(request, exc.reason)
             return _refused()
         try:
             new_sha, pre_image = await asyncio.to_thread(
                 knowledge.perform_put, store, rel, content, if_sha, now=now
             )
-        except knowledge.Refused:
+        except knowledge.Refused as exc:
+            _log_refused(request, exc.reason)
             return _refused()
         except Missing:
             return web.json_response(_NOT_FOUND, status=404)
@@ -370,7 +396,8 @@ async def rename_knowledge(request: web.Request) -> web.Response:
     async with request.app[LOCK_KEY]:
         try:
             plan = await asyncio.to_thread(knowledge.plan_rename, store.vault_path, old_rel, new_rel, if_sha)
-        except knowledge.Refused:
+        except knowledge.Refused as exc:
+            _log_refused(request, exc.reason)
             return _refused()
         except Missing:
             return web.json_response(_NOT_FOUND, status=404)
@@ -379,11 +406,13 @@ async def rename_knowledge(request: web.Request) -> web.Response:
         n_files = 1 + len(plan.backlinks)
         try:
             await asyncio.to_thread(undo_store.precheck, changeset, "write", n_files)
-        except CapExceeded:
+        except CapExceeded as exc:
+            _log_refused(request, exc.reason)
             return _refused()
         try:
             entries = await asyncio.to_thread(knowledge.perform_rename, store, plan, now=now)
-        except knowledge.Refused:
+        except knowledge.Refused as exc:
+            _log_refused(request, exc.reason)
             return _refused()
         except knowledge.RenameRaced:
             return _json_error("precondition_failed", 412)
@@ -414,8 +443,10 @@ async def undo_changeset(request: web.Request) -> web.Response:
         if kind is None:
             return web.json_response(_NOT_FOUND, status=404)
         if kind == "undo":
+            _log_refused(request, "undo_of_undo")
             return _refused()
         if await asyncio.to_thread(undo_store.count_recent, "undo") >= UNDOS_PER_HOUR:
+            _log_refused(request, "cap_undos")
             return _refused()
         entries = await asyncio.to_thread(undo_store.files_of, changeset)
         restored = 0
