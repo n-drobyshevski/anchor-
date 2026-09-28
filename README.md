@@ -52,6 +52,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
 | `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
 | `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default | `CLAUDE_ACCESS_ENABLED` |
+| `/claude library write on`, `/claude library write off` | Let Claude edit, create and rename your knowledge notes (needs the library switch on); off by default | `CLAUDE_ACCESS_ENABLED` |
+| `/claude undo`, `/claude undo all` | Undo Claude's latest batch of note changes, or everything from the last 24 hours | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
@@ -1486,3 +1488,18 @@ and Grok never gets the tool. Searches are not announced one by one:
 one digest a day, «Claude за сутки: библиотека — N запросов», and only
 on a day with searches. `/revoke`, `/claude disconnect` and a new
 connection all turn the switch off.
+
+**Writing (W2).** `/claude library write on` lets Claude update, create
+and rename knowledge notes, linking them with `[[wikilinks]]`. It
+cannot delete. There is no approval press; in its place:
+- vaultd writes only notes whose class is knowledge at write time;
+- a note that changed on your phone refuses the write;
+- instruction-like text and secrets are refused, and caps limit how
+  much can change and how fast;
+- every file carries `anchor_edited_by: claude`;
+- undo, from Claude (`undo_changeset`), from `/claude undo`, or from
+  the digest's [Откатить всё за сутки], restores your earlier text for
+  14 days.
+
+Writes are listed once a day in the digest, never one by one. See
+`anchor-claude-write-plan.md`.

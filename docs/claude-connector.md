@@ -72,11 +72,46 @@ window:
 new connection all turn the switch off. `/delete` wipes it with the
 connection.
 
+## Writing: `/claude library write on`
+
+With the library on, `/claude library write on` lets Claude change your
+**knowledge** notes. It is off by default. Turning the library off
+turns writing off too, and so do `/revoke`, `/claude disconnect` and a
+new connection.
+
+- **What Claude can do:**
+  - `update_note` rewrites a note;
+  - `create_note` adds a note in a knowledge folder;
+  - `rename_note` moves a note and rewrites its `[[links]]` in other
+    knowledge notes;
+  - `get_note` reads one note;
+  - `list_changes` shows recent batches.
+
+  It cannot delete. While writing is on, `search_library` results also
+  carry each note's path and hash, so Claude can name what it edits.
+- **What stops it:**
+  - vaultd accepts only notes that are knowledge at write time, never
+    `Anchor/`, and never a change of a note's class;
+  - a note you changed since Claude read it is refused, never merged;
+  - text that reads like an instruction to a model, or holds a secret,
+    is refused;
+  - caps limit files, batches, bytes and new notes per hour and per
+    day.
+
+  Every refusal says only «Запись отклонена.».
+- **What you see:** each file Claude touched carries
+  `anchor_edited_by: claude` and `anchor_edited_at`. One daily message
+  lists the changed notes, «Claude за сутки изменил N заметок: …», with
+  [Откатить всё за сутки].
+- **Undo:** Claude's `undo_changeset`, `/claude undo` (the latest
+  batch) or `/claude undo all` (the last 24 h) put your earlier text
+  back for 14 days. A file you edited since is left alone and counted.
+
 ## What leaves, and what doesn't
 
 - **Anything Claude reads goes to Anthropic** and stays in that claude.ai conversation, under your claude.ai privacy settings (including whether chats may be used to improve models). **Closing a window stops further reads. It cannot recall what was already read.**
 - **Text Claude reads can carry instructions.** If other connectors that can *write* (Drive, a planner, email) are enabled in the same chat, read Anchor in a chat without them.
-- **Claude can only read.** None of the tools write, and none reach the queue, raw Telegram updates, pending memories, research data or personal vault notes. Knowledge notes are reachable only through `search_library`, and only while `/claude library on`.
+- **Claude can only read, unless you turn writing on.** Without `/claude library write on` none of the tools write, and none reach the queue, raw Telegram updates, pending memories, research data or personal vault notes. Knowledge notes are reachable only through `search_library`, and only while `/claude library on`.
 - **Stored, and never exported:** only hashes of codes and tokens, plus ids and timestamps.
   - Pending requests live only in memory, for up to 10 minutes.
   - Logs carry ids, routes and outcomes. Never a token, code, `state`, confirmation code, cookie or client id.

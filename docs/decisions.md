@@ -2399,3 +2399,33 @@ note it edits. With writing off, no path reaches Claude, as in C3.
   and a missing file stays the existing 404.
 - One destination-class check in rename was removed as provably
   redundant with the folder-rule check, with a comment saying why.
+
+## W2b — the bot's write path
+
+- **Write needs read.** `oauth_connection.library_write` is set by
+  `/claude library write on`, needs `library_read`, and is cleared
+  whenever read is, and by `/revoke`, `/claude disconnect`, a replaced
+  connection and flag-off.
+- **Paths reach Claude only while writing is on.** `get_note`,
+  `list_changes`, and path plus hash in `search_library` results.
+  `undo_changeset` works with writing off, because it only restores
+  your text.
+- **Changesets** are minted by the bot, one per connection per
+  10-minute idle window. `claude_changeset` holds ids, counts and times
+  only: files, bytes, refused, created, renamed. `/export` carries it
+  and `/delete` truncates it.
+- **Caps are constants and ledger-backed.** Every cap, creates per day
+  included, is counted from `claude_changeset`, so a restart cannot
+  loosen one. A refused write still opens (or reuses) a changeset, so
+  refusals count toward the hourly batch cap; that is the stricter
+  direction.
+- **One refusal text**, «Запись отклонена.». The reason code goes to the
+  log only.
+- **The digest's write line** takes titles from vaultd's
+  `/v1/changes` at send time (Telegram only, never stored or logged).
+  The «создана»/«переименована» markers come from the counters and the
+  file order of a rename; in a batch that mixes a rename with other
+  writes they are best-effort.
+- **[Откатить всё за сутки]** uses `cu:<date>:<epoch>`, is blocked from
+  the web chat at ingress and in the router, and answers «Устарело» to
+  a stale or repeated press.
