@@ -2517,3 +2517,26 @@ created no folders. Your decisions:
 - The digest says «Создал N папку/папки/папок.» when folders were
   created. `claude_changeset` gains `folders` and `moves` counters, and
   still holds no text or paths.
+
+## `/vault` says which knowledge roots it sees, and why not
+
+Production: `Anchor/Settings.md` (capital S) was invisible to vaultd,
+which runs on case-sensitive Linux, and later an invalid settings file
+refused every write, while Telegram kept showing «Знания: вкл».
+
+- vaultd's manifest summary reports `settings` as `valid`, `missing`,
+  `invalid` or `wrong_case`.
+  - `wrong_case` means `Anchor/settings.md` is absent but a file in
+    `Anchor/` matches it case-insensitively. That file is **never read
+    as rules** (fails closed).
+- It also reports `knowledge_roots`: the `knowledge_folders` values,
+  only when valid. `personal_folders` and `never_folders` are never
+  surfaced.
+- `/vault` and the «Хранилище и знания» screen show one line for each
+  state, «Корни знаний: Library» included. Root names appear in the
+  Telegram reply only, never in logs.
+- The menu screen now reads the manifest, but only while notes consent
+  is on.
+- The settings vocabulary changed on both sides (`ok`/`absent` became
+  `valid`/`missing`). An old bot and a new vaultd refuse each other's
+  summary, fail closed, until both have deployed.
