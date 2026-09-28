@@ -1924,6 +1924,49 @@ value appears in the rich view. The web chat keeps plain text, since
 its sink only understands text messages. A `TelegramBadRequest` on send
 or refresh falls back to the plain text, so `/state` is never silent.
 
+## `/menu` is a rich message with in-body buttons
+
+`/menu` gets the same Bot API 10.1 upgrade `/state` did, but with the
+buttons themselves inside the message body (`InputRichBlockButtons`/
+`RichMessageButton`) rather than a separate `reply_markup`, since 10.1
+lets a button block sit anywhere blocks can -- there is no longer a
+reason to keep the picture and the controls in two different API
+concepts. `app/tg/menu.py` builds one neutral `Section` spec per screen
+(a title, an optional hint, an optional status table, and rows of
+buttons) and both `render()` (the old plain `(text,
+InlineKeyboardMarkup)` pair) and `render_rich()` draw from it, so the
+two can never show a different set of buttons for the same settings.
+`render()` stays in use for two audiences that never see rich blocks
+at all: the web chat (`app/web/sink.py` only understands plain
+`SendMessage`/`EditMessageText`) and, for real Telegram clients, the
+fallback a `TelegramBadRequest` on send or edit drops back to --
+covering both an actual rejection and a pre-upgrade plain menu message
+someone taps a button on later. `app/tg/router.py`'s `_show_menu` is
+the one place that picks a path and keeps `menu.render`/`render_rich`
+from drifting on what each caller passes them.
+
+The new "📚 Хранилище и знания" section moves the existing `vault`
+status button out of "Данные и доступ" and adds a status table (mode,
+the knowledge/personal flags, notes consent, and -- Telegram only, with
+`CLAUDE_ACCESS_ENABLED` -- Claude's library read/write state) plus two
+state-dependent toggle pairs: `notes_on`/`notes_off` for
+`/vault notes on|off`, and `lib_write_on`/`lib_write_off` for
+`/claude library write on|off`. Only the button matching the *current*
+state is ever drawn -- never both "on" and "off" for the same switch --
+so a tap always reads as "do the thing", not "pick a side that might
+already be true". Both pairs are buttons now, not just typed commands,
+because both are fully reversible (`/vault notes off` deletes only a
+rebuildable index; `/claude undo` can restore whatever the write switch
+let Claude change) and `notes_off`/`lib_write_off` get Bot API 9.4's
+`danger` style for exactly that reason, `notes_on`/`lib_write_on` get
+`success`. The write toggle stays Telegram-only, mirroring `/claude`
+itself (`claude_command`'s own `is_web_sink` guard) and gated the same
+way in `menu.action_available`, since it opens the same code-approval
+surface a stolen web session must never reach. `grok`, `export` and
+`delete` are still excluded from the hub entirely -- see `app/tg/
+menu.py`'s own docstring on `ACTIONS` for why each one stays a typed,
+deliberate act instead of a button two taps deep.
+
 ## 8c — `/forget` forgets the whole lineage (§18.1)
 
 Settled: `/forget` and deleting a fact file agree. `memory.forget`
