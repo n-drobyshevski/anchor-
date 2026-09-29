@@ -1,5 +1,6 @@
 // Сегодня (#/today): everything about today on one screen -- a pending
-// proposal when there is one, the day's action, today's check-in,
+// proposal when there is one, the day's action, open debts, today's
+// check-in,
 // Режим (focus, quiet, pause), today's spend and the metadata line.
 // Replaces the old State, Proposals and Check-in screens' "today"
 // parts; their history moved to Дневник and the settings to Настройки.
@@ -11,12 +12,14 @@ import { ScreenError, ScreenLoading } from '../ui/ScreenState.js';
 import { useAppState } from './useAppState.js';
 import { TodaySection, useCheckinToday } from './today/checkin.js';
 import { PendingCard, useProposals } from './today/proposals.js';
+import { DebtsCard, useDebts } from './today/debts.js';
 import { DueCard, MetaLine, ModeCard, SpendCard } from './today/stateCards.js';
 
 export function Today() {
   const app = useAppState();
   const checkin = useCheckinToday();
   const proposals = useProposals();
+  const debts = useDebts();
   const { state } = app;
 
   // «следующее сообщение ~HH:MM» sits under the toolbar's title
@@ -58,6 +61,7 @@ export function Today() {
             timezone=${state.timezone}
             onSave=${(text) => app.applyMutation('/api/state/due', { text })}
           />
+          <${DebtsCard} debts=${debts} timezone=${state.timezone} />
           <${TodaySection} data=${checkin.data} onSubmit=${checkin.submit} />
         </div>
         <div class="screen-column">

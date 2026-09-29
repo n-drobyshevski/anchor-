@@ -1,5 +1,5 @@
-// Настройки's cards, moved out of the old State screen: the account's
-// time zone and Claude's write limits. screens/Settings.js owns the
+// Настройки's cards: the account's time zone and Claude's write limits
+// (moved out of the old State screen), and the persona's intensity. screens/Settings.js owns the
 // StateDTO and the mutations.
 import { html } from '../../html.js';
 import { useEffect, useMemo, useState } from '../../../vendor/hooks.module.js';
@@ -181,6 +181,55 @@ export function ClaudeLimitsCard({ limits, resetAt, timezone, onSet, onResetCoun
             : html`<span></span>`}
         <button type="button" class="btn" disabled=${busy} onClick=${resetCounters}>Обнулить счётчики</button>
       </div>
+    </section>
+  `;
+}
+
+// ---------- Напор ----------
+// How hard the persona pushes: the same 1-5 dial as Telegram's
+// /intensity and /menu's «Мягче»/«Строже» (POST /api/state/intensity).
+
+const INTENSITY_WORDS = { 1: 'мягко', 2: 'спокойно', 3: 'обычно', 4: 'твёрдо', 5: 'строго' };
+
+export function IntensityCard({ value, min, max, onSet }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const levels = [];
+  for (let v = min; v <= max; v += 1) levels.push(v);
+
+  async function choose(v) {
+    if (v === value) return;
+    setBusy(true);
+    setError('');
+    const result = await onSet(v);
+    setBusy(false);
+    if (result !== true) setError(result);
+  }
+
+  return html`
+    <section class="card" aria-labelledby="intensity-heading">
+      <div class="card-row">
+        <h2 id="intensity-heading">Напор</h2>
+        <span class="field-hint" aria-live="polite">${INTENSITY_WORDS[value] || ''}</span>
+      </div>
+      <p class="field-hint">Насколько настойчиво Echo подталкивает: 1 — мягче, 5 — строже. То же, что /intensity в Telegram.</p>
+      <div class="segmented" role="group" aria-labelledby="intensity-heading">
+        ${levels.map(
+          (v) => html`
+            <button
+              key=${v}
+              type="button"
+              aria-pressed=${v === value ? 'true' : 'false'}
+              aria-label=${`${v} — ${INTENSITY_WORDS[v] || ''}`}
+              disabled=${busy}
+              onClick=${() => choose(v)}
+            >
+              ${v}
+            </button>
+          `,
+        )}
+      </div>
+      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
     </section>
   `;
 }

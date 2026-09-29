@@ -29,7 +29,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import proposal as proposal_core
-from app.db.models import Checkin, CheckinOrderResult, Journal, Memory, Message, StateChange
+from app.db.models import Checkin, CheckinOrderResult, Journal, Memory, Message, Obligation, StateChange
 from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
@@ -504,6 +504,36 @@ async def _tail_checkin_once(
     return current
 
 
+# --- the sixth cursor: obligation -> invalidate("debts") -----------------
+
+# The debt queue (app/core/obligations.py) writes no state_change row:
+# `/due`, an accepted promise and the missed-check-in sweep open a debt
+# (max id moves), `/paid` and its buttons close one (the open count
+# drops). The pair catches both for Сегодня's debts card.
+DebtsFingerprint = tuple[int, int]
+
+
+async def _debts_fingerprint(session: AsyncSession) -> DebtsFingerprint:
+    result = await session.execute(
+        select(func.max(Obligation.id), func.count().filter(Obligation.status == "open"))
+    )
+    max_id, open_count = result.one()
+    return (max_id or 0, open_count or 0)
+
+
+async def _tail_debts_once(
+    session: AsyncSession, hub: WebHub, fingerprint: DebtsFingerprint
+) -> DebtsFingerprint:
+    """One poll of the debt queue's fingerprint: publish_invalidate(
+    "debts") exactly once when it has moved. Same shape as
+    `_tail_checkin_once`; app/web/panels/obligations.py's own closes
+    also publish directly."""
+    current = await _debts_fingerprint(session)
+    if current != fingerprint:
+        hub.publish_invalidate("debts")
+    return current
+
+
 async def _tail_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     hub: WebHub,
@@ -512,6 +542,7 @@ async def _tail_loop(
     proposals_fingerprint: ProposalFingerprint,
     memory_fingerprint: MemoryFingerprint,
     checkin_fingerprint: CheckinFingerprint,
+    debts_fingerprint: DebtsFingerprint,
 ) -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -530,6 +561,7 @@ async def _tail_loop(
                 checkin_fingerprint = await _tail_checkin_once(
                     session, hub, checkin_fingerprint
                 )
+                debts_fingerprint = await _tail_debts_once(session, hub, debts_fingerprint)
         except Exception as exc:  # noqa: BLE001 - a tail crash must never take the process down
             logger.warning("web tail failed", extra={"event": type(exc).__name__})
 
@@ -547,6 +579,7 @@ async def start_tail(
         proposals_fingerprint = await _proposals_fingerprint(session)
         memory_fingerprint = await _memory_fingerprint(session)
         checkin_fingerprint = await _checkin_fingerprint(session)
+        debts_fingerprint = await _debts_fingerprint(session)
     return asyncio.create_task(
         _tail_loop(
             sessionmaker,
@@ -556,6 +589,7 @@ async def start_tail(
             proposals_fingerprint,
             memory_fingerprint,
             checkin_fingerprint,
+            debts_fingerprint,
         ),
         name="anchor-web-tail",
     )

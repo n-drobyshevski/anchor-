@@ -859,3 +859,38 @@ async def test_the_tail_loop_publishes_a_checkin_change(sessionmaker, monkeypatc
     finally:
         await stop_tail(task)
     assert "checkin" in _checkin_topics(hub)
+
+
+# --- the debt queue -> invalidate("debts") ----------------------------------
+
+
+def _debts_topics(hub: WebHub) -> list[str]:
+    return [r.data["topic"] for r in hub._buffer if r.event == "invalidate" and r.data["topic"] == "debts"]
+
+
+async def test_debts_fingerprint_moves_on_open_and_close(sessionmaker):
+    from app.core import obligations
+    from app.core.clock import FrozenClock
+    from app.web.tail import _debts_fingerprint, _tail_debts_once
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fp = await _debts_fingerprint(session)
+    assert fp == (0, 0)
+
+    async with sessionmaker() as session:
+        row = await obligations.open_(session, text="позвонить", kind="promised", source="proposal")
+    async with sessionmaker() as session:
+        fp = await _tail_debts_once(session, hub, fp)
+    assert _debts_topics(hub) == ["debts"]
+
+    # Nothing changed: no second publish.
+    async with sessionmaker() as session:
+        fp = await _tail_debts_once(session, hub, fp)
+    assert _debts_topics(hub) == ["debts"]
+
+    async with sessionmaker() as session:
+        await obligations.close(session, FrozenClock(NOW), row.id)
+    async with sessionmaker() as session:
+        fp = await _tail_debts_once(session, hub, fp)
+    assert _debts_topics(hub) == ["debts", "debts"]

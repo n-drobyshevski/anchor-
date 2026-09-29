@@ -252,6 +252,12 @@ async def seed_history(raw_url: str) -> None:
                 "INSERT INTO journal (local_date, text) VALUES ($1, $2)",
                 today - datetime.timedelta(days=back), text,
             )
+        # Two open debts for Сегодня's «Долги» card.
+        await conn.execute(
+            "INSERT INTO obligation (text, kind, source, opened_at) VALUES "
+            "('Позвонить в банк', 'promised', 'proposal', now() - interval '2 days'), "
+            "('Дочитать главу', 'promised', 'proposal', now() - interval '1 day')"
+        )
     finally:
         await conn.close()
 
@@ -584,6 +590,46 @@ async def scenario_state_due_action(page, ctx: Ctx) -> None:
     ctx.did_state_action = True
 
 
+async def scenario_debts_and_intensity(page, ctx: Ctx) -> None:
+    """Сегодня: close a seeded debt with «Сделано». Настройки: set the
+    intensity dial. Both silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail("#/today missing from nav; cannot run the debts action")
+        return
+    sent_before = ctx.harness.sent_count
+    row = page.locator("#debts-card li", has_text="Позвонить в банк")
+    try:
+        await row.wait_for(state="visible", timeout=10_000)
+        await row.locator("button", has_text="Сделано").click()
+        await row.wait_for(state="detached", timeout=10_000)
+        ctx.ok("Debts: closed a debt from Сегодня")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Debts close did not remove the row: {exc}")
+
+    if not await _goto_screen(page, ctx, "#/settings"):
+        ctx.fail("#/settings missing from nav; cannot run the intensity action")
+        return
+    try:
+        button = page.locator('.screen-settings section[aria-labelledby="intensity-heading"] button', has_text="4")
+        await button.click()
+        await page.wait_for_function(
+            """() => {
+                const b = [...document.querySelectorAll('section[aria-labelledby="intensity-heading"] button')]
+                    .find((el) => el.textContent.trim() === '4');
+                return b && b.getAttribute('aria-pressed') === 'true';
+            }""",
+            timeout=10_000,
+        )
+        ctx.ok("Settings: set intensity to 4")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Intensity did not change: {exc}")
+
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("debts/intensity writes caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("debts/intensity writes sent nothing to Telegram")
+
+
 async def scenario_memory_add(page, ctx: Ctx) -> None:
     if not await _goto_screen(page, ctx, "#/memory"):
         ctx.fail("#/memory missing from nav; cannot run the Memory panel action")
@@ -828,6 +874,7 @@ async def run_pass(
         if do_actions:
             await scenario_state_due_action(page, ctx)
             await scenario_memory_add(page, ctx)
+            await scenario_debts_and_intensity(page, ctx)
         await scenario_nav_screens(page, ctx)
         if do_actions:
             await scenario_checkin(page, ctx)

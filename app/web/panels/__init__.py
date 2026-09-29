@@ -23,6 +23,7 @@ from aiohttp import web
 
 from app.web.panels import checkin as checkin_panel
 from app.web.panels import memory as memory_panel
+from app.web.panels import obligations as obligations_panel
 from app.web.panels import proposals as proposals_panel
 from app.web.panels import state as state_panel
 
@@ -32,3 +33,4 @@ def register(app: web.Application) -> None:
     proposals_panel.register(app)
     memory_panel.register(app)
     checkin_panel.register(app)
+    obligations_panel.register(app)
