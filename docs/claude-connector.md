@@ -113,6 +113,8 @@ new connection.
       KB, or `2m`);
     - `/claude limits KEY reset` or `/claude limits reset` restores
       the defaults;
+    - `/claude limits counters` (or «🔄 Обнулить счётчики») starts
+      the hourly and daily counts over, keeping the caps;
     - the web app's state screen has the same controls («Лимиты записи
       Claude»).
 

@@ -129,6 +129,11 @@ async def _local_day_start(session: AsyncSession, clock: Clock) -> datetime.date
     return clock_module.combine_local(today, datetime.time(0, 0), timezone)
 
 
+async def _counting_day_start(session: AsyncSession, clock: Clock) -> datetime.datetime:
+    """Local midnight, or the user's last counter reset if later."""
+    return limits.since(await _local_day_start(session, clock), await limits.counters_reset_at(session))
+
+
 async def _open_changeset(
     session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
 ) -> ClaudeChangeset:
@@ -148,7 +153,12 @@ async def _open_changeset(
         .order_by(ClaudeChangeset.id.desc())
         .limit(1)
     )
-    if row is not None and now - row.last_write_at < limits.CHANGESET_IDLE:
+    reset_at = await limits.counters_reset_at(session)
+    if (
+        row is not None
+        and now - row.last_write_at < limits.CHANGESET_IDLE
+        and (reset_at is None or row.created_at >= reset_at)
+    ):
         return row
 
     count = await session.scalar(
@@ -157,7 +167,7 @@ async def _open_changeset(
         .where(
             ClaudeChangeset.connection_id == connection_id,
             ClaudeChangeset.kind == "write",
-            ClaudeChangeset.created_at >= now - datetime.timedelta(hours=1),
+            ClaudeChangeset.created_at >= limits.since(now - datetime.timedelta(hours=1), reset_at),
         )
     )
     if count >= caps.changesets_per_hour:
@@ -191,7 +201,7 @@ async def _check_day_caps(
     new_bytes: int,
     is_create: bool,
 ) -> None:
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     totals = (
         await session.execute(
             select(func.coalesce(func.sum(ClaudeChangeset.bytes), 0), func.coalesce(func.sum(ClaudeChangeset.created), 0))
@@ -216,7 +226,7 @@ async def _check_day_folder_cap(
     `_check_day_caps` rejects CREATES_PER_DAY -- a local check against
     the ledger's sum so far, before ever calling vaultd. vaultd enforces
     the authoritative copy of this same cap on its own changeset."""
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     folders_so_far = await session.scalar(
         select(func.coalesce(func.sum(ClaudeChangeset.folders), 0)).where(
             ClaudeChangeset.connection_id == connection_id,
@@ -232,7 +242,7 @@ async def _check_day_move_cap(
     session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
 ) -> None:
     """Rev. 3's MOVES_PER_DAY, same shape as `_check_day_folder_cap`."""
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     moves_so_far = await session.scalar(
         select(func.coalesce(func.sum(ClaudeChangeset.moves), 0)).where(
             ClaudeChangeset.connection_id == connection_id,
@@ -507,7 +517,8 @@ async def undo_changeset(
         .where(
             ClaudeChangeset.connection_id == connection_id,
             ClaudeChangeset.kind == "undo",
-            ClaudeChangeset.created_at >= clock.now_utc() - datetime.timedelta(hours=1),
+            ClaudeChangeset.created_at
+            >= limits.since(clock.now_utc() - datetime.timedelta(hours=1), await limits.counters_reset_at(session)),
         )
     )
     if count >= (await limits.effective(session)).undos_per_hour:

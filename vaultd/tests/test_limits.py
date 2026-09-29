@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,8 @@ def test_bad_keys_in_the_file_fall_back_per_key(tmp_path: Path):
         {"moves_per_day": "5"},
         {"moves_per_day": True},
         {"moves_per_day": 1.5},
+        {"counters_reset_at": -1},
+        {"counters_reset_at": "2026-09-29"},
     ],
 )
 def test_validate_refuses(body):
@@ -146,3 +149,25 @@ async def test_zero_undos_per_hour_refuses_every_undo(client):
     await client.put("/v1/limits", json={"undos_per_hour": 0}, headers=AUTH)
     resp = await client.post("/v1/undo", params={"changeset": "cs"}, headers=AUTH)
     assert resp.status == 403
+
+
+# -- the counter reset -------------------------------------------------------------
+
+
+async def test_a_counter_reset_gives_a_fresh_changeset_budget(client):
+    for i in range(CHANGESETS_PER_HOUR):
+        assert (await _put(client, f"Library/F{i}.md", f"cs{i}")).status == 200
+    assert (await _put(client, "Library/over.md", "over")).status == 403
+    # One second ahead, so the changesets above (same second) never count.
+    reset_at = int(time.time()) + 1
+    resp = await client.put("/v1/limits", json={"counters_reset_at": reset_at}, headers=AUTH)
+    assert (await resp.json())["values"]["counters_reset_at"] == reset_at
+    assert (await _put(client, "Library/after.md", "after")).status == 200
+
+
+async def test_a_counter_reset_keeps_the_changesets_for_undo(client, vault: Path):
+    assert (await _put(client, "Library/A.md", "cs")).status == 200
+    await client.put("/v1/limits", json={"counters_reset_at": int(time.time()) + 1}, headers=AUTH)
+    resp = await client.post("/v1/undo", params={"changeset": "cs"}, headers=AUTH)
+    assert resp.status == 200
+    assert not (vault / "Library" / "A.md").exists()

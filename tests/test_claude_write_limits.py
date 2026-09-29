@@ -1,5 +1,7 @@
 """Claude's write caps as settings: the core, the enforcement, `/claude
-limits`, POST /api/state/claude-limits, and the push to vaultd.
+limits`, POST /api/state/claude-limits, and the push to vaultd; and the
+counter reset (`/claude limits counters`, POST
+/api/state/claude-counters/reset).
 """
 
 from __future__ import annotations
@@ -322,6 +324,124 @@ async def test_zero_undos_per_hour_refuses_undo(sessionmaker):
     assert exc.value.code == "cap_undos"
 
 
+# --- the counter reset -------------------------------------------------------------
+
+
+async def test_a_counter_reset_frees_the_day_and_hour_budgets(sessionmaker):
+    clock = FrozenClock(START)
+    connection = await _connection(sessionmaker)
+    vault = FakeKnowledgeVault()
+    async with sessionmaker() as session:
+        await limits.set_limit(session, clock, "creates_per_day", 1)
+        await claude_write.create_note(session, clock, vault, connection.id, "Library", "A", "x")
+        with pytest.raises(Refused) as exc:
+            await claude_write.create_note(session, clock, vault, connection.id, "Library", "B", "x")
+        assert exc.value.code == "cap_creates"
+        clock.advance(datetime.timedelta(seconds=1))
+        await limits.reset_counters(session, clock)
+        await claude_write.create_note(session, clock, vault, connection.id, "Library", "B", "x")
+        # The cap itself is unchanged: the next create is refused again.
+        with pytest.raises(Refused) as exc:
+            await claude_write.create_note(session, clock, vault, connection.id, "Library", "C", "x")
+    assert exc.value.code == "cap_creates"
+
+
+async def test_a_counter_reset_starts_a_fresh_changeset(sessionmaker):
+    clock = FrozenClock(START)
+    connection = await _connection(sessionmaker)
+    vault = FakeKnowledgeVault()
+    async with sessionmaker() as session:
+        await limits.set_limit(session, clock, "files_per_changeset", 1)
+        first = await claude_write.create_note(session, clock, vault, connection.id, "Library", "A", "x")
+        with pytest.raises(Refused):
+            await claude_write.create_note(session, clock, vault, connection.id, "Library", "B", "x")
+        clock.advance(datetime.timedelta(seconds=1))
+        await limits.reset_counters(session, clock)
+        second = await claude_write.create_note(session, clock, vault, connection.id, "Library", "B", "x")
+        assert second["changeset_id"] != first["changeset_id"]
+        # The ledger is untouched: the first changeset can still be undone.
+        await claude_write.undo_changeset(session, clock, vault, connection.id, first["changeset_id"])
+
+
+async def test_a_counter_reset_frees_the_undo_budget(sessionmaker):
+    clock = FrozenClock(START)
+    connection = await _connection(sessionmaker)
+    vault = FakeKnowledgeVault()
+    async with sessionmaker() as session:
+        await limits.set_limit(session, clock, "undos_per_hour", 1)
+        await limits.set_limit(session, clock, "files_per_changeset", 1)
+        a = await claude_write.create_note(session, clock, vault, connection.id, "Library", "A", "x")
+        clock.advance(limits.CHANGESET_IDLE)
+        b = await claude_write.create_note(session, clock, vault, connection.id, "Library", "B", "x")
+        await claude_write.undo_changeset(session, clock, vault, connection.id, a["changeset_id"])
+        with pytest.raises(Refused) as exc:
+            await claude_write.undo_changeset(session, clock, vault, connection.id, b["changeset_id"])
+        assert exc.value.code == "cap_undos"
+        clock.advance(datetime.timedelta(seconds=1))
+        await limits.reset_counters(session, clock)
+        await claude_write.undo_changeset(session, clock, vault, connection.id, b["changeset_id"])
+
+
+async def test_a_counter_reset_is_pushed_to_vaultd(sessionmaker):
+    vault = _LimitsVault()
+    clock = FrozenClock(START)
+    async with sessionmaker() as session:
+        pushed = await limits.reset_counters_and_push(session, settings(VAULT_MODE="mirror"), clock, vault)
+    assert pushed is True
+    assert vault.sent[-1]["counters_reset_at"] == int(START.timestamp())
+    assert not await _pending(sessionmaker)
+    # vaultd now holds it, so the next sync pass sends nothing.
+    async with sessionmaker() as session:
+        assert await limits.reconcile(session, vault) is True
+    assert len(vault.sent) == 1
+
+
+async def test_no_reset_sends_no_reset_key(sessionmaker):
+    """A vaultd that predates the reset keeps working until one happens;
+    one that knows it reports 0 for "never", which still matches."""
+    vault = _LimitsVault()
+    vault.held["counters_reset_at"] = 0
+    async with sessionmaker() as session:
+        assert await limits.reconcile(session, vault) is True
+    assert vault.sent == []
+
+
+async def test_a_failed_counter_reset_push_stays_pending(sessionmaker):
+    vault = _LimitsVault(down=True)
+    async with sessionmaker() as session:
+        pushed = await limits.reset_counters_and_push(
+            session, settings(VAULT_MODE="mirror"), FrozenClock(START), vault
+        )
+    assert pushed is False
+    assert await _pending(sessionmaker)
+    vault.down = False
+    async with sessionmaker() as session:
+        assert await limits.reconcile(session, vault) is True
+    assert vault.held["counters_reset_at"] == int(START.timestamp())
+    assert not await _pending(sessionmaker)
+
+
+async def test_claude_limits_counters_command(sessionmaker):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    assert "Счётчики обнулены" in await world.command("/claude limits counters")
+    async with sessionmaker() as session:
+        assert await limits.counters_reset_at(session) is not None
+        assert await limits.effective(session) == limits.DEFAULTS
+
+
+async def test_the_counters_button_resets_and_keeps_the_caps(sessionmaker):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    await world.command("/claude limits")
+    assert "cw:c" in _buttons(world.tg_fake.sent[-1].reply_markup)
+    await world.press("cw:c")
+    assert world.tg_fake.answered[-1].text == "Счётчики обнулены."
+    async with sessionmaker() as session:
+        assert await limits.counters_reset_at(session) is not None
+        assert await limits.effective(session) == limits.DEFAULTS
+
+
 # --- Telegram: /claude limits ----------------------------------------------------
 
 
@@ -471,6 +591,27 @@ async def test_web_can_raise_lower_and_reset(sessionmaker):
         resp = await _post(client, "/api/state/claude-limits", {"key": "creates_per_day", "value": None}, cookies)
         rows = {r["key"]: r for r in (await resp.json())["state"]["claude_write_limits"]}
         assert rows["creates_per_day"]["value"] == 40
+
+
+async def test_web_can_reset_the_counters(sessionmaker):
+    app, fake = await _web(sessionmaker)
+    async with TestClient(TestServer(app)) as client:
+        cookies = await _log_in(client, fake)
+        body = await (await _get(client, "/api/state", cookies=cookies)).json()
+        assert body["claude_counters_reset_at"] is None
+        resp = await _post(client, "/api/state/claude-counters/reset", {}, cookies)
+        assert resp.status == 200
+        state = (await resp.json())["state"]
+    assert state["claude_counters_reset_at"] == START.isoformat()
+    assert all(row["value"] == row["default"] for row in state["claude_write_limits"])
+
+
+async def test_web_counter_reset_needs_a_session_and_claude(sessionmaker):
+    app, fake = await _web(sessionmaker, CLAUDE_ACCESS_ENABLED=False)
+    async with TestClient(TestServer(app)) as client:
+        assert (await _post(client, "/api/state/claude-counters/reset", {})).status == 401
+        cookies = await _log_in(client, fake)
+        assert (await _post(client, "/api/state/claude-counters/reset", {}, cookies)).status == 404
 
 
 async def test_web_needs_a_session(sessionmaker):

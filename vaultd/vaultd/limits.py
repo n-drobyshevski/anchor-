@@ -7,6 +7,12 @@ the source of truth and pushes the values here with `PUT /v1/limits`
 (docs/decisions.md, "Claude write caps become settings"). Each value
 is held to its `SPECS` bounds, so no push can set a nonsense number.
 
+**Counter reset.** `counters_reset_at` is not a cap but a moment
+(unix seconds, 0 = never): the user's «сбросить счётчики». Every
+hourly and rolling-24h counter in undo.py counts only changesets
+started at or after it, so a reset gives Claude a fresh budget without
+touching the ledger undo needs. The bot pushes it with the caps.
+
 What stays constant: the byte cap per note, folder depth and the undo
 TTL -- those touch vaultd's body/read caps and its storage, and are
 not in `SPECS`.
@@ -69,6 +75,7 @@ class Limits:
     folders_per_day: int = FOLDERS_PER_DAY
     move_files_per_changeset: int = MOVE_FILES_PER_CHANGESET
     moves_per_day: int = MOVES_PER_DAY
+    counters_reset_at: int = 0
 
     def as_json(self) -> dict[str, int]:
         return asdict(self)
@@ -81,10 +88,19 @@ class Invalid(ValueError):
     """A limits body with an unknown key, a non-int or an out-of-range value."""
 
 
+# Not a cap, so not in SPECS (no bounds, no default to show).
+RESET_KEY = "counters_reset_at"
+KEYS = (*SPECS, RESET_KEY)
+
+
 def _valid_value(key: str, value: Any) -> bool:
-    spec = SPECS[key]
     # bool is an int subclass; `true` is not a cap.
-    return isinstance(value, int) and not isinstance(value, bool) and spec.min <= value <= spec.max
+    if not isinstance(value, int) or isinstance(value, bool):
+        return False
+    if key == RESET_KEY:
+        return value >= 0
+    spec = SPECS[key]
+    return spec.min <= value <= spec.max
 
 
 def validate(body: Any, base: Limits = DEFAULTS) -> Limits:
@@ -92,7 +108,7 @@ def validate(body: Any, base: Limits = DEFAULTS) -> Limits:
     if not isinstance(body, dict):
         raise Invalid("not an object")
     for key, value in body.items():
-        if key not in SPECS:
+        if key not in KEYS:
             raise Invalid(f"unknown key {key!r}")
         if not _valid_value(key, value):
             raise Invalid(f"bad value for {key!r}")
@@ -116,7 +132,7 @@ class LimitsStore:
             return DEFAULTS
         # Keep only known, in-range keys: a stale or hand-edited file
         # falls back per key rather than all-or-nothing.
-        clean = {k: v for k, v in raw.items() if k in SPECS and _valid_value(k, v)}
+        clean = {k: v for k, v in raw.items() if k in KEYS and _valid_value(k, v)}
         return Limits(**{**DEFAULTS.as_json(), **clean})
 
     def put(self, limits: Limits) -> None:

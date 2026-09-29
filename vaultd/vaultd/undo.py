@@ -249,10 +249,20 @@ class UndoStore:
         out.sort(key=lambda m: m["time"])
         return out
 
+    def _since(self, window: timedelta) -> datetime:
+        """The start of a counting window: `window` ago, or the user's
+        last counter reset if that is later (limits.py)."""
+        cutoff = self._clock() - window
+        reset_at = self.limits.get().counters_reset_at
+        if reset_at:
+            cutoff = max(cutoff, datetime.fromtimestamp(reset_at, tz=timezone.utc))
+        return cutoff
+
     def count_recent(self, kind: str) -> int:
-        """How many `kind` changesets started within the last hour."""
+        """How many `kind` changesets started within the last hour
+        (since the last counter reset, if later)."""
         self.sweep()
-        cutoff = self._clock() - timedelta(hours=1)
+        cutoff = self._since(timedelta(hours=1))
         count = 0
         for meta_dict in self.list_changes():
             if meta_dict["kind"] != kind:
@@ -267,9 +277,10 @@ class UndoStore:
         FOLDERS_PER_DAY's own counters (rev. 3). `field` is either an
         int counter (`move_files`) or a list whose length is the count
         (`folders`); reads raw meta directly, never `list_changes`
-        (which drops exactly the fields this needs)."""
+        (which drops exactly the fields this needs). Since the last
+        counter reset, if later."""
         self.sweep()
-        cutoff = self._clock() - timedelta(hours=24)
+        cutoff = self._since(timedelta(hours=24))
         total = 0
         try:
             scanned = list(os.scandir(self._base()))

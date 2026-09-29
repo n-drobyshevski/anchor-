@@ -1512,7 +1512,9 @@ following) has its own budget: 20 files per batch and 60 a day.
 Content writes are capped at 20 files per batch and 40 new notes a
 day. These budgets are defaults: `/claude limits` in Telegram, or the
 «Лимиты записи Claude» card on the web app's state screen, shows and
-changes them (docs/decisions.md, "Claude write caps become settings").
+changes them (docs/decisions.md, "Claude write caps become settings"),
+and «Обнулить счётчики» there (or `/claude limits counters`) starts the
+hourly and daily counts over.
 
 Writes are listed once a day in the digest, never one by one. See
 `anchor-claude-write-plan.md`.

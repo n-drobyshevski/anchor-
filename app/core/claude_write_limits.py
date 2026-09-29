@@ -22,6 +22,16 @@ pass and pushes when they differ, so any drift heals itself. Until
 then the two copies can disagree -- whichever is stricter wins, which
 is the safe direction.
 
+**Counter reset.** `reset_counters` stamps
+`vault_status.claude_counters_reset_at`: every hourly and daily cap
+(creates, bytes, changesets, undos, folders, moves) then counts only
+changesets started at or after it, and the next write opens a fresh
+changeset, so the per-changeset caps start over too. The ledger itself
+is untouched -- undo still needs it. vaultd gets the same moment as
+`counters_reset_at` (unix seconds) alongside its seven caps, through
+the same push/reconcile path; the key is sent only once a reset has
+happened, so a vaultd that predates it keeps working until then.
+
 All caps except `CREATES_PER_DAY`/`BYTES_PER_CONNECTION_PER_DAY`/
 `CHANGESETS_PER_HOUR`/`UNDOS_PER_HOUR`/`FOLDERS_PER_DAY`/`MOVES_PER_DAY`
 are checked directly against an argument or a `claude_changeset` row
@@ -212,14 +222,61 @@ async def reset_all(session: AsyncSession) -> Limits:
     return DEFAULTS
 
 
+RESET_KEY = "counters_reset_at"
+
+
+async def counters_reset_at(session: AsyncSession) -> datetime.datetime | None:
+    """The user's last counter reset, or None if never."""
+    row = await session.get(VaultStatus, 1)
+    return row.claude_counters_reset_at if row is not None else None
+
+
+def since(window_start: datetime.datetime, reset_at: datetime.datetime | None) -> datetime.datetime:
+    """Where a cap's counting window starts: its own start, or the last
+    counter reset if that is later."""
+    return window_start if reset_at is None else max(window_start, reset_at)
+
+
+async def reset_counters(session: AsyncSession, clock: Clock) -> datetime.datetime:
+    """Start every hourly and daily count over from now. Whole seconds,
+    so the bot's moment and vaultd's (unix seconds) are the same one.
+    Commits and marks vaultd's copy as needing a push."""
+    now = clock.now_utc().replace(microsecond=0)
+    stmt = (
+        pg_insert(VaultStatus)
+        .values(id=1, claude_counters_reset_at=now, limits_push_pending=True)
+        .on_conflict_do_update(
+            index_elements=[VaultStatus.id],
+            set_={"claude_counters_reset_at": now, "limits_push_pending": True},
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+    logger.info("claude write counters reset", extra={"event": "claude_counters_reset"})
+    return now
+
+
 async def push_pending(session: AsyncSession) -> bool:
     row = await session.get(VaultStatus, 1)
     return bool(row is not None and row.limits_push_pending)
 
 
-def _vault_subset(limits: Limits) -> dict[str, int]:
+def _vault_subset(limits: Limits, reset_at: datetime.datetime | None) -> dict[str, int]:
     values = limits.as_dict()
-    return {key: values[key] for key in VAULT_KEYS}
+    subset = {key: values[key] for key in VAULT_KEYS}
+    if reset_at is not None:
+        subset[RESET_KEY] = int(reset_at.timestamp())
+    return subset
+
+
+async def _wanted(session: AsyncSession) -> dict[str, int]:
+    return _vault_subset(await effective(session), await counters_reset_at(session))
+
+
+def _held(values: dict[str, int]) -> dict[str, int]:
+    """vaultd's copy as comparable with `_wanted`: a vaultd that knows
+    the reset key reports 0 for "never", which the bot leaves out."""
+    return {k: v for k, v in values.items() if not (k == RESET_KEY and v == 0)}
 
 
 async def _settle(session: AsyncSession, landed: dict) -> None:
@@ -228,7 +285,7 @@ async def _settle(session: AsyncSession, landed: dict) -> None:
     PUT was in flight (another tab, Telegram) leaves it pending, and the
     next reconcile sends the newer values."""
     await session.commit()  # a fresh transaction, so `effective` sees the latest
-    if landed == _vault_subset(await effective(session)):
+    if _held(landed) == await _wanted(session):
         await _mark_push_pending(session, False)
         await session.commit()
 
@@ -237,7 +294,7 @@ async def push(session: AsyncSession, client) -> bool:
     """Send vaultd the full effective set of its seven caps. True if the
     PUT landed; False leaves the change pending, and the next
     `reconcile` retries it."""
-    want = _vault_subset(await effective(session))
+    want = await _wanted(session)
     try:
         landed = await client.put_limits(want)
     except VaultError as exc:
@@ -260,7 +317,7 @@ async def reconcile(session: AsyncSession, client) -> bool:
     except VaultError as exc:
         logger.warning("claude write limits check deferred", extra={"error_code": exc.code})
         return False
-    if held == _vault_subset(await effective(session)):
+    if _held(held) == await _wanted(session):
         if await push_pending(session):
             await _settle(session, held)
         return True
@@ -287,6 +344,18 @@ async def set_and_push(
     if (key != "*" and key not in VAULT_KEYS) or settings.VAULT_MODE == "off":
         return new, None
     return new, await push(session, client_factory(settings))
+
+
+async def reset_counters_and_push(
+    session: AsyncSession, settings: Settings, clock: Clock, client_factory=VaultClient.from_settings
+) -> bool | None:
+    """`reset_counters`, then push vaultd's copy straight away, like
+    `set_and_push`. True, False (saved; the sync pass retries) or None
+    (the vault is off)."""
+    await reset_counters(session, clock)
+    if settings.VAULT_MODE == "off":
+        return None
+    return await push(session, client_factory(settings))
 
 
 def format_value(key: str, value: int) -> str:
