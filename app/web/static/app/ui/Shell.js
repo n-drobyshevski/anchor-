@@ -22,12 +22,12 @@ import { Memory } from '../screens/Memory.js';
 import { Checkin } from '../screens/Checkin.js';
 import { Proposals } from '../screens/Proposals.js';
 import { route } from '../store.js';
+import { Toasts } from './Toasts.js';
 import { Toolbar } from './Toolbar.js';
 
-// A later screen that should behave like State/Memory/Proposals (mount
-// only while active) adds its hash here, to ui/SurfaceSwitcher.js's
-// NAV_ITEMS and to router.js's KNOWN_ROUTES (router.js normalizes any
-// other hash back to '#/chat').
+// Every screen but Chat, by its routes.js hash. A later screen that
+// should behave like State/Memory/Proposals (mount only while active)
+// adds its row to routes.js and its component here.
 const OTHER_SCREENS = {
   '#/state': State,
   '#/memory': Memory,
@@ -46,6 +46,7 @@ export function Shell() {
       <div class="shell-screen">
         <${Chat} hidden=${!isChat} />
         ${OtherScreen ? html`<${OtherScreen} />` : null}
+        <${Toasts} />
       </div>
     </div>
   `;

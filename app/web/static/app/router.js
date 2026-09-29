@@ -2,11 +2,11 @@
 // `location.hash`, normalizing anything unrecognized back to the
 // default screen. It does not pick a component itself -- ui/Shell.js
 // reads `route` and maps it to a screen -- so adding a screen later
-// only means adding its hash here and to ui/SurfaceSwitcher.js's NAV_ITEMS.
+// only means adding it to routes.js (and its component to Shell.js).
 import { route } from './store.js';
+import { DEFAULT_ROUTE, ROUTES } from './routes.js';
 
-const KNOWN_ROUTES = ['#/chat', '#/state', '#/memory', '#/checkin', '#/proposals'];
-const DEFAULT_ROUTE = '#/chat';
+const KNOWN_ROUTES = ROUTES.map((r) => r.route);
 
 function normalize(hash) {
   return KNOWN_ROUTES.includes(hash) ? hash : DEFAULT_ROUTE;

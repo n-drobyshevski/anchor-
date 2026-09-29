@@ -22,10 +22,13 @@
 // Greenwich.
 import { html } from '../html.js';
 import { useEffect, useLayoutEffect, useRef, useState } from '../../vendor/hooks.module.js';
-import { apiGet, apiPost } from '../api.js';
-import { forceLogout, pushToast } from '../store.js';
-import { useAutoRefetch } from '../hooks.js';
-import { Toasts } from '../ui/Toasts.js';
+import { pushToast } from '../store.js';
+import { useElementWidth, usePagedResource, useResource } from '../hooks.js';
+import { detailText, send } from '../lib/request.js';
+import { clockTime, pluralRu } from '../lib/format.js';
+import { DAY_MS, dateKey, dayHeading, parseLocalDate, shortDate, shortDateWithWeekday } from '../lib/dates.js';
+import { CharCounter } from '../ui/CharCounter.js';
+import { ScreenError, ScreenLoading } from '../ui/ScreenState.js';
 
 const CHART_DAYS = 30;
 const JOURNAL_PAGE = 30;
@@ -49,91 +52,6 @@ const ORDER_OPTIONS = [
 
 const DUE_LABELS = { done: 'выполнено', partial: 'частично', no: 'не выполнено' };
 const ORDER_LABELS = { done: 'да', no: 'нет' };
-
-// 422 `detail` -> Russian, per the contract's list.
-const DETAIL_MESSAGES = {
-  rating: 'Выбери оценку от 1 до 5.',
-  note_too_long: 'Заметка слишком длинная.',
-  note_command: 'Заметка не может начинаться с «/».',
-  due_result: 'Отметь, как прошло действие на сегодня.',
-  orders: 'Список поручений изменился — форма обновлена.',
-};
-
-const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-const MONTHS_GENITIVE = [
-  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
-];
-const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
-const WEEKDAYS_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
-
-// ---------- helpers ----------
-
-// Russian plural: pluralRu(5, ['день', 'дня', 'дней']) -> 'дней'.
-export function pluralRu(n, forms) {
-  const abs = Math.abs(n) % 100;
-  const last = abs % 10;
-  if (abs > 10 && abs < 20) return forms[2];
-  if (last === 1) return forms[0];
-  if (last >= 2 && last <= 4) return forms[1];
-  return forms[2];
-}
-
-// "YYYY-MM-DD" -> UTC-midnight milliseconds, or NaN if malformed.
-function parseLocalDate(s) {
-  if (typeof s !== 'string' || s.length !== 10 || s[4] !== '-' || s[7] !== '-') return NaN;
-  const y = Number(s.slice(0, 4));
-  const m = Number(s.slice(5, 7));
-  const d = Number(s.slice(8, 10));
-  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return NaN;
-  if (m < 1 || m > 12 || d < 1 || d > 31) return NaN;
-  return Date.UTC(y, m - 1, d);
-}
-
-function dateKey(ms) {
-  const dt = new Date(ms);
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(dt.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-const DAY_MS = 86400000;
-
-function shortDate(ms) {
-  const dt = new Date(ms);
-  return `${dt.getUTCDate()} ${MONTHS_SHORT[dt.getUTCMonth()]}`;
-}
-
-function shortDateWithWeekday(ms) {
-  const dt = new Date(ms);
-  return `${WEEKDAYS_SHORT[dt.getUTCDay()]}, ${dt.getUTCDate()} ${MONTHS_SHORT[dt.getUTCMonth()]}`;
-}
-
-// «Сегодня» / «Вчера» / «23 сентября, среда», relative to `todayKey`.
-function dayHeading(key, todayKey) {
-  const ms = parseLocalDate(key);
-  if (Number.isNaN(ms)) return key;
-  const todayMs = parseLocalDate(todayKey);
-  if (!Number.isNaN(todayMs)) {
-    if (ms === todayMs) return 'Сегодня';
-    if (ms === todayMs - DAY_MS) return 'Вчера';
-  }
-  const dt = new Date(ms);
-  const todayYear = Number.isNaN(todayMs) ? null : new Date(todayMs).getUTCFullYear();
-  const year = todayYear !== null && todayYear !== dt.getUTCFullYear() ? ` ${dt.getUTCFullYear()}` : '';
-  return `${dt.getUTCDate()} ${MONTHS_GENITIVE[dt.getUTCMonth()]}${year}, ${WEEKDAYS[dt.getUTCDay()]}`;
-}
-
-function retryText(retryAfterSeconds) {
-  const s = Number(retryAfterSeconds) || 60;
-  if (s < 60) {
-    const n = Math.max(1, Math.ceil(s));
-    return `Слишком много попыток — попробуй через ${n} ${pluralRu(n, ['секунду', 'секунды', 'секунд'])}.`;
-  }
-  const m = Math.ceil(s / 60);
-  return `Слишком много попыток — попробуй через ${m} мин.`;
-}
 
 // Mirrors the backend's control-char rule so a stray paste is caught
 // before the request, not as a bare 400.
@@ -222,11 +140,11 @@ function CheckinForm({ form, today, onSubmit, onCancel }) {
   const trimmed = note.trim();
 
   function validate() {
-    if (!rating) return DETAIL_MESSAGES.rating;
-    if (dueAction && !due) return DETAIL_MESSAGES.due_result;
+    if (!rating) return detailText('rating');
+    if (dueAction && !due) return detailText('due_result');
     if (orders.some((o) => !orderResults[o.id])) return 'Ответь по каждому поручению.';
-    if (trimmed.length > noteMax) return DETAIL_MESSAGES.note_too_long;
-    if (trimmed.startsWith('/')) return DETAIL_MESSAGES.note_command;
+    if (trimmed.length > noteMax) return detailText('note_too_long');
+    if (trimmed.startsWith('/')) return detailText('note_command');
     if (CONTROL_RE.test(note)) return 'В заметке есть недопустимые символы.';
     return '';
   }
@@ -293,9 +211,7 @@ function CheckinForm({ form, today, onSubmit, onCancel }) {
           value=${note}
           onInput=${(e) => setNote(e.target.value)}
         ></textarea>
-        <p id="checkin-note-counter" class="char-counter${trimmed.length > noteMax ? ' char-counter-over' : ''}">
-          ${trimmed.length}/${noteMax}
-        </p>
+        <${CharCounter} id="checkin-note-counter" length=${trimmed.length} max=${noteMax} />
       </div>
       <p class="inline-error" role="alert">${error}</p>
       <div class="card-footer">
@@ -465,25 +381,6 @@ function barPath(x, y, w, h, r) {
     `Q${f(x + w)} ${f(y)} ${f(x + w)} ${f(y + rr)}` +
     `V${f(y + h)}Z`
   );
-}
-
-function useElementWidth(fallback) {
-  const ref = useRef(null);
-  const [width, setWidth] = useState(fallback);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return undefined;
-    const measure = () => {
-      const w = Math.floor(el.getBoundingClientRect().width);
-      if (w > 0) setWidth(w);
-    };
-    measure();
-    if (typeof ResizeObserver !== 'function') return undefined;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  return [ref, width];
 }
 
 function RatingChart({ days, endKey }) {
@@ -756,14 +653,6 @@ function MonthSection({ range, failed, onRetry }) {
 
 // ---------- «Журнал» ----------
 
-// A journal line's time of day, in the browser's zone (like Chat's
-// message times).
-function hmLocal(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
 function groupByDay(items) {
   const groups = [];
   for (const item of items) {
@@ -790,9 +679,9 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
             : null}
         </h2>
       </div>
-      ${failed && !loaded
+      ${failed && !items.length
         ? html`
-            <p class="field-hint">
+            <p class="field-hint" role="alert">
               Не удалось загрузить.
               <button type="button" class="link-button" onClick=${onRetry}>Повторить</button>
             </p>
@@ -811,7 +700,7 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
                             (it) => html`
                               <li key=${it.id} class="journal-item">
                                 ${it.created_at
-                                  ? html`<span class="journal-time mono">${hmLocal(it.created_at)}</span>`
+                                  ? html`<span class="journal-time mono">${clockTime(it.created_at)}</span>`
                                   : null}
                                 <span>${it.text}</span>
                               </li>
@@ -840,162 +729,58 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
 
 // ---------- screen ----------
 
+// While a submitted check-in is still being processed («Отправлено»),
+// the screen rechecks this often. The worker's finish publishes
+// invalidate("checkin"), so this only matters if that event was lost.
+const IN_PROGRESS_POLL_MS = 10000;
+
+function journalQuery(offset, limit) {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return `/api/journal?${params.toString()}`;
+}
+
+const hasItems = (d) => Array.isArray(d.items);
+
 export function Checkin() {
-  const [data, setData] = useState(null);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const [range, setRange] = useState(null);
-  const [rangeFailed, setRangeFailed] = useState(false);
-  const [journal, setJournal] = useState([]);
-  const [journalTotal, setJournalTotal] = useState(0);
-  const [journalLoaded, setJournalLoaded] = useState(false);
-  const [journalFailed, setJournalFailed] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  // Same stale-response guard as Memory.js: a replacing fetch claims a
-  // new number; an append (loadMore) is dropped if one moved past it.
-  const journalSeq = useRef(0);
-  const mainSeq = useRef(0);
-  const rangeSeq = useRef(0);
+  // 'checkin' covers check-in rows, journal rows (the tail maps the
+  // journal field to it) and this screen's own POST.
+  const main = useResource('/api/checkin', 'checkin');
+  const range = useResource(`/api/checkins?days=${CHART_DAYS}`, 'checkin', { accept: hasItems });
+  const journal = usePagedResource(journalQuery, 'checkin', { pageSize: JOURNAL_PAGE, maxLimit: JOURNAL_MAX_LIMIT });
+  const data = main.data;
 
-  async function loadMain() {
-    const seq = ++mainSeq.current;
-    const res = await apiGet('/api/checkin');
-    if (res.status === 401) {
-      forceLogout();
-      return;
-    }
-    if (seq !== mainSeq.current) return;
-    if (res.ok && res.data) {
-      setData(res.data);
-      setLoadFailed(false);
-    } else {
-      setLoadFailed(true);
-    }
-  }
-
-  async function loadRange() {
-    const seq = ++rangeSeq.current;
-    const res = await apiGet(`/api/checkins?days=${CHART_DAYS}`);
-    if (res.status === 401) {
-      forceLogout();
-      return;
-    }
-    if (seq !== rangeSeq.current) return;
-    if (res.ok && res.data && Array.isArray(res.data.items)) {
-      setRange(res.data);
-      setRangeFailed(false);
-    } else {
-      setRangeFailed(true);
-    }
-  }
-
-  function journalQuery(offset, limit) {
-    const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
-    return `/api/journal?${params.toString()}`;
-  }
-
-  // Refetches however many journal rows are already loaded (in chunks
-  // of the endpoint's cap), so a background refresh does not undo a
-  // «Показать ещё» -- same reasoning as Memory.js's reload().
-  async function loadJournal() {
-    const seq = ++journalSeq.current;
-    const target = Math.max(journal.length, JOURNAL_PAGE);
-    const collected = [];
-    let last = null;
-    for (let offset = 0; offset < target; offset += JOURNAL_MAX_LIMIT) {
-      const chunk = Math.min(JOURNAL_MAX_LIMIT, target - offset);
-      const res = await apiGet(journalQuery(offset, chunk));
-      if (res.status === 401) {
-        forceLogout();
-        return;
-      }
-      if (seq !== journalSeq.current) return;
-      if (!res.ok || !res.data || !Array.isArray(res.data.items)) {
-        setJournalFailed(true);
-        return;
-      }
-      collected.push(...res.data.items);
-      last = res.data;
-      if (res.data.items.length < chunk) break;
-    }
-    if (!last) return;
-    setJournal(collected);
-    setJournalTotal(last.total);
-    setJournalLoaded(true);
-    setJournalFailed(false);
-  }
-
-  async function loadMoreJournal() {
-    const seq = journalSeq.current;
-    setLoadingMore(true);
-    const res = await apiGet(journalQuery(journal.length, JOURNAL_PAGE));
-    setLoadingMore(false);
-    if (res.status === 401) {
-      forceLogout();
-      return;
-    }
-    if (seq !== journalSeq.current) return;
-    if (res.ok && res.data && Array.isArray(res.data.items)) {
-      // De-duplicate by id: a row written between pages shifts offsets.
-      setJournal((prev) => {
-        const seen = new Set(prev.map((it) => it.id));
-        return [...prev, ...res.data.items.filter((it) => !seen.has(it.id))];
-      });
-      setJournalTotal(res.data.total);
-    } else {
-      pushToast('Не удалось загрузить.');
-    }
-  }
-
-  function reload() {
-    return Promise.all([loadMain(), loadRange(), loadJournal()]);
-  }
-
-  // 'checkin' covers check-in rows, journal rows (tail maps the journal
-  // field to it in W4) and this screen's own POST.
-  useAutoRefetch('checkin', reload);
+  const inProgress = !!(data && data.in_progress);
+  useEffect(() => {
+    if (!inProgress) return undefined;
+    const timer = setInterval(main.reload, IN_PROGRESS_POLL_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line
+  }, [inProgress]);
 
   async function submit(body) {
-    const res = await apiPost('/api/checkin', body);
-    if (res.status === 401) {
-      forceLogout();
-      return 'Сессия истекла.';
-    }
+    const res = await send('/api/checkin', body, { fallback: 'Не удалось отправить.' });
     if (res.status === 202) {
       pushToast('Отправлено.');
-      await reload();
+      // Only today's section changes now (to «Отправлено»); the chart
+      // and journal follow with the invalidate the worker publishes.
+      await main.reload();
       return true;
     }
     if (res.status === 422) {
       const detail = res.data && res.data.detail;
-      if (detail === 'orders' || detail === 'due_result') await loadMain();
-      return DETAIL_MESSAGES[detail] || 'Неверное значение.';
+      if (detail === 'orders' || detail === 'due_result') await main.reload();
+      return res.error;
     }
     if (res.status === 409) {
-      await loadMain();
+      await main.reload();
       return 'Предыдущий чек-ин ещё обрабатывается — ответ придёт в чат.';
     }
-    if (res.status === 429) {
-      return retryText(res.data && res.data.retry_after);
-    }
     if (res.status === 400) return 'Не удалось отправить: неверные данные.';
-    return 'Не удалось отправить.';
+    return res.error;
   }
 
-  if (loadFailed && !data) {
-    return html`
-      <div class="screen-wrap">
-        <div class="screen">
-          <p class="empty-hint">
-            Не удалось загрузить.
-            <button type="button" class="link-button" onClick=${reload}>Повторить</button>
-          </p>
-        </div>
-        <${Toasts} />
-      </div>
-    `;
-  }
   if (!data) {
-    return html`<div class="screen-wrap"><div class="screen" aria-busy="true"></div></div>`;
+    return main.failed ? html`<${ScreenError} wide onRetry=${main.reload} />` : html`<${ScreenLoading} wide />`;
   }
 
   return html`
@@ -1005,20 +790,19 @@ export function Checkin() {
           <${TodaySection} data=${data} onSubmit=${submit} />
         </div>
         <div class="checkin-side">
-          <${MonthSection} range=${range} failed=${rangeFailed} onRetry=${loadRange} />
+          <${MonthSection} range=${range.data} failed=${range.failed} onRetry=${range.reload} />
           <${JournalSection}
-            items=${journal}
-            total=${journalTotal}
-            loaded=${journalLoaded}
-            failed=${journalFailed}
-            loadingMore=${loadingMore}
+            items=${journal.items}
+            total=${journal.total}
+            loaded=${journal.loaded}
+            failed=${journal.failed}
+            loadingMore=${journal.loadingMore}
             todayKey=${data.local_date}
-            onMore=${loadMoreJournal}
-            onRetry=${loadJournal}
+            onMore=${journal.loadMore}
+            onRetry=${journal.reload}
           />
         </div>
       </div>
-      <${Toasts} />
     </div>
   `;
 }

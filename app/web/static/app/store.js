@@ -31,23 +31,12 @@ export async function logout() {
   forceLogout();
 }
 
-// The toolbar's «Пауза» (ui/Toolbar.js) sends `/out` exactly as it did
-// from #chat-header: through Chat's own sendMessage, so it still shows
-// as an optimistic own message and goes through POST /api/send. Chat
-// is always mounted while logged in (ui/Shell.js), and registers its
-// handler on mount; requestPause() before that is a no-op.
-let pauseHandler = null;
-
-export function registerPauseHandler(fn) {
-  pauseHandler = fn;
-  return () => {
-    if (pauseHandler === fn) pauseHandler = null;
-  };
-}
-
-export function requestPause() {
-  if (pauseHandler) pauseHandler();
-}
+// Whether the persona is paused (StateDTO.paused): null until the
+// first GET /api/state lands. Kept app-wide by main.js (after login,
+// on invalidate("state"), on tab focus) and by the State screen's own
+// loads, so the toolbar's pause/resume button (ui/Toolbar.js) shows
+// the right action on every screen, not only on #/state.
+export const paused = signal(null);
 
 // An optional second line under the toolbar's screen title (for
 // State: «следующее сообщение ~HH:MM»). The screen that sets it clears

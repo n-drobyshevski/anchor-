@@ -4,11 +4,12 @@
 // `proposalsBadge` signal gets its numbers from besides main.js's own
 // after-login fetch -- see that module's comment for why both exist.
 import { html } from '../html.js';
-import { useState } from '../../vendor/hooks.module.js';
-import { apiGet, apiPost } from '../api.js';
-import { forceLogout, proposalsBadge, pushToast } from '../store.js';
-import { useAutoRefetch } from '../hooks.js';
-import { Toasts } from '../ui/Toasts.js';
+import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { proposalsBadge, pushToast } from '../store.js';
+import { useMountedRef, useResource } from '../hooks.js';
+import { send } from '../lib/request.js';
+import { formatDateTime } from '../lib/format.js';
+import { ScreenError, ScreenLoading } from '../ui/ScreenState.js';
 
 // focus_on values arrive raw ("on", "вкл", ...); show them the way
 // app/core/proposal.py's parse_focus reads them.
@@ -28,22 +29,16 @@ const STATUS_LABELS = {
   expired: 'истекло',
 };
 
-function minutesText(retryAfterSeconds) {
-  const m = Math.max(1, Math.ceil((retryAfterSeconds || 60) / 60));
-  return `Слишком много попыток — попробуй через ${m} мин.`;
-}
-
-function formatDateTime(iso) {
-  return new Date(iso).toLocaleString('ru-RU');
-}
-
 function PendingCard({ proposal, onDecide }) {
   const [busy, setBusy] = useState(false);
+  // A successful decision's invalidate("proposals") can replace (and
+  // unmount) this card before the request's own await resolves.
+  const mounted = useMountedRef();
 
   async function decide(action) {
     setBusy(true);
     await onDecide(proposal.id, action);
-    setBusy(false);
+    if (mounted.current) setBusy(false);
   }
 
   return html`
@@ -79,82 +74,45 @@ function HistoryRow({ item }) {
 }
 
 export function Proposals() {
-  const [data, setData] = useState(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const { data, failed, reload } = useResource('/api/proposals', 'proposals');
 
-  async function reload() {
-    const res = await apiGet('/api/proposals');
-    if (res.status === 401) {
-      forceLogout();
-      return;
-    }
-    if (res.ok && res.data) {
-      setData(res.data);
-      setLoadFailed(false);
-      // Kept in sync here too (not only in main.js's own after-login/
-      // invalidate fetch), so the badge is exactly right the instant
-      // this screen's own reload lands, without waiting on a second
-      // round-trip main.js would otherwise make on the same event.
-      proposalsBadge.value = res.data.pending ? 1 : 0;
-    } else {
-      setLoadFailed(true);
-    }
-  }
-
-  useAutoRefetch('proposals', reload);
+  // Kept in sync here too (not only by main.js), so the badge is right
+  // the instant this screen's own load lands.
+  useEffect(() => {
+    if (data) proposalsBadge.value = data.pending ? 1 : 0;
+  }, [data]);
 
   async function decide(id, action) {
-    const res = await apiPost(`/api/proposals/${id}/${action}`, {});
-    if (res.status === 401) {
-      forceLogout();
-      return;
-    }
+    const res = await send(`/api/proposals/${id}/${action}`, {});
     if (res.status === 200) {
+      // No reload here: the endpoint publishes invalidate("proposals"),
+      // which refetches this screen (and main.js's badge) once. An
+      // explicit reload on top of it made three identical GETs.
       pushToast(action === 'accept' ? 'Принято.' : 'Отклонено.');
-      await reload();
       return;
     }
     if (res.status === 404) {
       pushToast('Уже неактуально');
-      await reload();
+      reload();
       return;
     }
     if (res.status === 409) {
       const stale = res.data && res.data.proposal;
       const label = stale ? STATUS_LABELS[stale.status] || stale.status : 'неактуально';
       pushToast(`Уже ${label}`);
-      await reload();
+      reload();
       return;
     }
-    if (res.status === 429) {
-      pushToast(minutesText(res.data && res.data.retry_after));
-      return;
-    }
-    pushToast('Не удалось сохранить.');
+    if (res.status !== 401) pushToast(res.status === 429 ? res.error : 'Не удалось сохранить.');
   }
 
-  if (loadFailed) {
-    return html`
-      <div class="screen-wrap">
-        <div class="screen">
-          <p class="empty-hint">
-            Не удалось загрузить.
-            <button type="button" class="link-button" onClick=${reload}>Повторить</button>
-          </p>
-        </div>
-        <${Toasts} />
-      </div>
-    `;
-  }
-  if (!data) {
-    return html`<div class="screen-wrap"><div class="screen" aria-busy="true"></div></div>`;
-  }
+  if (!data) return failed ? html`<${ScreenError} onRetry=${reload} />` : html`<${ScreenLoading} />`;
 
   return html`
     <div class="screen-wrap">
       <div class="screen screen-proposals">
         ${data.pending
-          ? html`<${PendingCard} proposal=${data.pending} onDecide=${decide} />`
+          ? html`<${PendingCard} key=${data.pending.id} proposal=${data.pending} onDecide=${decide} />`
           : html`<p class="empty-hint">Сейчас предложений нет</p>`}
         <section class="card" aria-labelledby="proposals-history-heading">
           <h2 id="proposals-history-heading">История</h2>
@@ -167,7 +125,6 @@ export function Proposals() {
             : html`<p class="field-hint">Пока пусто</p>`}
         </section>
       </div>
-      <${Toasts} />
     </div>
   `;
 }
