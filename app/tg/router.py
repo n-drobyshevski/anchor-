@@ -1884,6 +1884,9 @@ def build_router(
     async def _menu_lib_write_off(message: Message, event_update: Update) -> None:
         await _menu_library(message, event_update, "library write off")
 
+    async def _menu_claude_limits(message: Message, event_update: Update) -> None:
+        await _menu_library(message, event_update, "limits")
+
     def _menu_intensity(value: int):
         async def run(message: Message, event_update: Update) -> None:
             await intensity_command(
@@ -1967,6 +1970,7 @@ def build_router(
         "lib_read_off": _menu_lib_read_off,
         "lib_write_on": _menu_lib_write_on,
         "lib_write_off": _menu_lib_write_off,
+        "claude_limits": _menu_claude_limits,
         "planner": _menu_planner_status,
         "planner_on": _menu_planner_on,
         "planner_off": _menu_planner_off,
@@ -2439,6 +2443,26 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             message_text=callback.message.text,
+        )
+
+    @router.callback_query(F.data.startswith("cw:"))
+    async def claude_limits_callback(callback: CallbackQuery) -> None:
+        """`cw:s:<key>:<value>` / `cw:r` / `cw:i:<key>` -- `/claude
+        limits`' own +/- keyboard. Telegram only, like `cl:`/`cu:`: the
+        web app has its own card for the same caps
+        (POST /api/state/claude-limits)."""
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await claude_ui.handle_limits_callback(
+            sessionmaker,
+            settings,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
         )
 
     @router.callback_query(F.data.startswith("cu:"))

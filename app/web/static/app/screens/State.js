@@ -631,6 +631,7 @@ function LimitRow({ item, onSet }) {
   // A value set elsewhere (Telegram, another tab) replaces the draft.
   useEffect(() => {
     setDraft(String(toShown(item, item.value)));
+    setError('');
   }, [item.value]);
 
   const parsed = /^\d+$/.test(draft.trim()) ? Number(draft.trim()) : null;
@@ -661,10 +662,36 @@ function LimitRow({ item, onSet }) {
     }
   }
 
+  const overridden = item.value !== item.default;
+  const range = `${toShown(item, item.min)}–${toShown(item, item.max)}${unit}`;
+
+  // One compact row per cap: label and range on the left, the number on
+  // the right. «Сохранить» appears only once the draft differs, and
+  // «сбросить» only while the cap is overridden -- nine always-present
+  // buttons made the card a wall of disabled controls.
   return html`
-    <li class="row row-stacked">
-      <label for=${inputId} class="row-title">${item.label}</label>
+    <li class="row limit-row">
+      <div class="row-main">
+        <label for=${inputId} class="row-title">${item.label}</label>
+        <span class="field-hint" id=${`${inputId}-hint`}>
+          ${range}${overridden
+            ? html` · по умолчанию ${toShown(item, item.default)}${unit} ·${' '}<button
+                  type="button"
+                  class="link-button"
+                  disabled=${busy}
+                  onClick=${() => send(null)}
+                  aria-label=${`Вернуть «${item.label}» к ${toShown(item, item.default)}${unit}`}
+                >
+                  сбросить
+                </button>`
+            : null}
+        </span>
+        ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
+      </div>
       <div class="limit-controls">
+        ${dirty
+          ? html`<button type="button" class="btn btn-primary" disabled=${busy} onClick=${save}>Сохранить</button>`
+          : null}
         <input
           id=${inputId}
           class="limit-input mono"
@@ -677,22 +704,9 @@ function LimitRow({ item, onSet }) {
           value=${draft}
           onInput=${(e) => setDraft(e.target.value)}
           onKeyDown=${onKeyDown}
+          aria-describedby=${`${inputId}-hint`}
         />
-        <span class="field-hint">
-          ${unit ? `${unit.trim()} · ` : ''}${toShown(item, item.min)}–${toShown(item, item.max)}${item.value !== item.default
-            ? ` · по умолчанию ${toShown(item, item.default)}`
-            : ''}
-        </span>
-        <div class="card-footer-actions">
-          ${item.value !== item.default
-            ? html`<button type="button" class="btn btn-ghost" disabled=${busy} onClick=${() => send(null)}>
-                По умолчанию
-              </button>`
-            : null}
-          <button type="button" class="btn" disabled=${busy || !dirty} onClick=${save}>Сохранить</button>
-        </div>
       </div>
-      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
     </li>
   `;
 }

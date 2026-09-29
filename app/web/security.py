@@ -256,7 +256,10 @@ async def read_json_bounded(request: web.Request, max_bytes: int = MAX_BODY_BYTE
         raise PayloadTooLarge()
     try:
         data = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    # ValueError, not only JSONDecodeError: an integer literal past
+    # Python's 4300-digit conversion limit raises a plain ValueError, and
+    # that must be a 400 like any other malformed body, never a 500.
+    except (UnicodeDecodeError, ValueError) as exc:
         raise BadJson() from exc
     if not isinstance(data, dict):
         raise BadJson()

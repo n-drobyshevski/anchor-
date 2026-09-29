@@ -98,7 +98,7 @@ LIMITS_HEADER = "Лимиты записи Claude:"
 LIMITS_LINE = "• {label}: {value}{mark} — {key} ({min}–{max})"
 LIMITS_OVERRIDDEN = " (по умолчанию {default})"
 LIMITS_FOOTER = (
-    "Изменить: /claude limits КЛЮЧ ЧИСЛО\n"
+    "Кнопки ниже меняют на шаг. Точное число: /claude limits КЛЮЧ ЧИСЛО\n"
     "Вернуть по умолчанию: /claude limits КЛЮЧ reset · все: /claude limits reset"
 )
 LIMITS_USAGE = "/claude limits [КЛЮЧ ЧИСЛО | КЛЮЧ reset | reset]"
@@ -370,6 +370,113 @@ async def limits_text(sessionmaker) -> str:
     return "\n".join(lines)
 
 
+# The +/- keyboard under `/claude limits`: one row per cap, each button
+# carrying the value it sets (`cw:s:<key>:<value>`), never a step -- a
+# doubled or stale press lands on the number the button showed, the
+# same rule as the menu's intensity buttons. The middle button only
+# names the cap (`cw:i:<key>`).
+LIMITS_SHORT = {
+    "files_per_changeset": "Файлов/пакет",
+    "changesets_per_hour": "Пакетов/ч",
+    "creates_per_day": "Заметок/день",
+    "bytes_per_day": "КБ/день",
+    "undos_per_hour": "Откатов/ч",
+    "folders_per_changeset": "Папок/пакет",
+    "folders_per_day": "Папок/день",
+    "move_files_per_changeset": "Переносов/пакет",
+    "moves_per_day": "Переносов/день",
+}
+LIMITS_STEP = {
+    "files_per_changeset": 5,
+    "changesets_per_hour": 1,
+    "creates_per_day": 10,
+    "bytes_per_day": 128 * 1024,
+    "undos_per_hour": 1,
+    "folders_per_changeset": 1,
+    "folders_per_day": 5,
+    "move_files_per_changeset": 5,
+    "moves_per_day": 20,
+}
+LIMITS_RESET_BUTTON = "↺ Все по умолчанию"
+LIMITS_SAVED = "Сохранено."
+LIMITS_SAVED_PENDING = "Сохранено, vault обновится позже."
+LIMITS_STALE = "Устарело."
+
+
+def _short_value(key: str, value: int) -> str:
+    return str(value // 1024) if key == "bytes_per_day" else str(value)
+
+
+def limits_keyboard(current: write_limits.Limits) -> InlineKeyboardMarkup:
+    values = current.as_dict()
+    rows = []
+    for key, spec in write_limits.SPECS.items():
+        value, step = values[key], LIMITS_STEP[key]
+        row = []
+        if value > spec.min:
+            low = max(spec.min, value - step)
+            row.append(InlineKeyboardButton(text=f"➖ {_short_value(key, low)}", callback_data=f"cw:s:{key}:{low}"))
+        row.append(
+            InlineKeyboardButton(
+                text=f"{LIMITS_SHORT[key]}: {_short_value(key, value)}", callback_data=f"cw:i:{key}"
+            )
+        )
+        if value < spec.max:
+            high = min(spec.max, value + step)
+            row.append(InlineKeyboardButton(text=f"➕ {_short_value(key, high)}", callback_data=f"cw:s:{key}:{high}"))
+        rows.append(row)
+    if current != write_limits.DEFAULTS:
+        rows.append([InlineKeyboardButton(text=LIMITS_RESET_BUTTON, callback_data="cw:r")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def handle_limits_callback(
+    sessionmaker,
+    settings: Settings,
+    bot: Bot,
+    clock: Clock,
+    *,
+    callback_id: str,
+    chat_id: int,
+    message_id: int,
+    data: str,
+    client_factory=VaultClient.from_settings,
+) -> None:
+    """A press on `/claude limits`' keyboard: set (or reset) through the
+    same `set_and_push` the command and the web app use, then redraw
+    the message in place. A forged key or out-of-range value changes
+    nothing and answers «Устарело.»."""
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        await answer_callback(bot, callback_id, DISABLED)
+        return
+    parts = data.split(":")
+    if parts[:2] == ["cw", "i"] and len(parts) == 3 and parts[2] in write_limits.SPECS:
+        spec = write_limits.SPECS[parts[2]]
+        await answer_callback(
+            bot,
+            callback_id,
+            f"{spec.label}: {write_limits.format_value(parts[2], spec.min)}–"
+            f"{write_limits.format_value(parts[2], spec.max)}",
+        )
+        return
+    if parts == ["cw", "r"]:
+        key, value = "*", None
+    elif parts[:2] == ["cw", "s"] and len(parts) == 4 and parts[3].isascii() and parts[3].isdigit():
+        key, value = parts[2], int(parts[3])
+        try:
+            write_limits.check_value(key, value)
+        except write_limits.LimitError:
+            await answer_callback(bot, callback_id, LIMITS_STALE)
+            return
+    else:
+        await answer_callback(bot, callback_id, LIMITS_STALE)
+        return
+    async with sessionmaker() as session:
+        new, pushed = await write_limits.set_and_push(session, settings, clock, key, value, client_factory)
+    await answer_callback(bot, callback_id, LIMITS_SAVED_PENDING if pushed is False else LIMITS_SAVED)
+    await edit_keyboard(bot, chat_id, message_id, await limits_text(sessionmaker), limits_keyboard(new))
+
+
 async def limits(
     sessionmaker, settings: Settings, clock: Clock, words: list[str],
     client_factory=VaultClient.from_settings,
@@ -378,7 +485,7 @@ async def limits(
     connection -- the caps are a standing setting, not a window."""
     if not words:
         return await limits_text(sessionmaker)
-    if words == ["reset"]:
+    if [word.lower() for word in words] == ["reset"]:
         async with sessionmaker() as session:
             _, pushed = await write_limits.set_and_push(
                 session, settings, clock, "*", None, client_factory
@@ -429,7 +536,12 @@ async def command(
     if words == ["undo", "all"]:
         return await undo(sessionmaker, settings, clock, "all"), None
     if words[0] == "limits":
-        return await limits(sessionmaker, settings, clock, words[1:]), None
+        text = await limits(sessionmaker, settings, clock, words[1:])
+        if len(words) > 1:
+            return text, None
+        async with sessionmaker() as session:
+            current = await write_limits.effective(session)
+        return text, limits_keyboard(current)
     return USAGE, None
 
 

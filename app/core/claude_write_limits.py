@@ -16,10 +16,11 @@ constants: the first two touch vaultd's own body and path limits.
 **vaultd's copy.** vaultd enforces seven of the nine caps itself
 (`VAULT_KEYS`; creates and bytes per day are the bot's alone).
 `set_limit` marks `vault_status.limits_push_pending`, and `push`
-sends the full effective set to `PUT /v1/limits`; a push that fails
-stays pending and the next vault sync pass (app/vault/sync.py) retries
-it. Until then the two copies can disagree -- whichever is stricter
-wins, which is the safe direction.
+sends the full effective set to `PUT /v1/limits`. `reconcile` compares
+vaultd's copy (`GET /v1/limits`) with the bot's on every vault sync
+pass and pushes when they differ, so any drift heals itself. Until
+then the two copies can disagree -- whichever is stricter wins, which
+is the safe direction.
 
 All caps except `CREATES_PER_DAY`/`BYTES_PER_CONNECTION_PER_DAY`/
 `CHANGESETS_PER_HOUR`/`UNDOS_PER_HOUR`/`FOLDERS_PER_DAY`/`MOVES_PER_DAY`
@@ -94,7 +95,7 @@ SPECS: dict[str, Spec] = {
     "files_per_changeset": Spec(FILES_PER_CHANGESET, 1, 200, "Файлов в одном пакете"),
     "changesets_per_hour": Spec(CHANGESETS_PER_HOUR, 0, 60, "Пакетов в час"),
     "creates_per_day": Spec(CREATES_PER_DAY, 0, 500, "Новых заметок в день"),
-    "bytes_per_day": Spec(BYTES_PER_CONNECTION_PER_DAY, 0, 8 * 1024 * 1024, "Байт в день"),
+    "bytes_per_day": Spec(BYTES_PER_CONNECTION_PER_DAY, 0, 8 * 1024 * 1024, "Объём текста в день"),
     "undos_per_hour": Spec(UNDOS_PER_HOUR, 0, 60, "Откатов в час"),
     "folders_per_changeset": Spec(FOLDERS_PER_CHANGESET, 0, 20, "Новых папок в пакете"),
     "folders_per_day": Spec(FOLDERS_PER_DAY, 0, 100, "Новых папок в день"),
@@ -164,6 +165,10 @@ def check_value(key: str, value: int) -> None:
         raise LimitError("unknown_key")
     if isinstance(value, bool) or not isinstance(value, int) or not spec.min <= value <= spec.max:
         raise LimitError("out_of_range")
+    # Shown and edited in whole KB everywhere (Telegram and the web), so
+    # a byte count between two KB could neither be displayed nor typed.
+    if key == "bytes_per_day" and value % 1024:
+        raise LimitError("out_of_range")
 
 
 async def _mark_push_pending(session: AsyncSession, pending: bool) -> None:
@@ -212,19 +217,54 @@ async def push_pending(session: AsyncSession) -> bool:
     return bool(row is not None and row.limits_push_pending)
 
 
+def _vault_subset(limits: Limits) -> dict[str, int]:
+    values = limits.as_dict()
+    return {key: values[key] for key in VAULT_KEYS}
+
+
+async def _settle(session: AsyncSession, landed: dict) -> None:
+    """Clear the pending mark only if what vaultd now holds is what the
+    bot wants *now*, read after the request: a cap changed while the
+    PUT was in flight (another tab, Telegram) leaves it pending, and the
+    next reconcile sends the newer values."""
+    await session.commit()  # a fresh transaction, so `effective` sees the latest
+    if landed == _vault_subset(await effective(session)):
+        await _mark_push_pending(session, False)
+        await session.commit()
+
+
 async def push(session: AsyncSession, client) -> bool:
-    """Send vaultd the full effective set of its seven caps. True on
-    success (and the pending mark cleared); False leaves it pending
-    for the next vault sync pass to retry."""
-    values = (await effective(session)).as_dict()
+    """Send vaultd the full effective set of its seven caps. True if the
+    PUT landed; False leaves the change pending, and the next
+    `reconcile` retries it."""
+    want = _vault_subset(await effective(session))
     try:
-        await client.put_limits({key: values[key] for key in VAULT_KEYS})
+        landed = await client.put_limits(want)
     except VaultError as exc:
         logger.warning("claude write limits push deferred", extra={"error_code": exc.code})
         return False
-    await _mark_push_pending(session, False)
-    await session.commit()
+    await _settle(session, landed)
     return True
+
+
+async def reconcile(session: AsyncSession, client) -> bool:
+    """Make vaultd's copy match the bot's: read `GET /v1/limits` and
+    push only when it differs. Self-healing, so it covers every way the
+    two can drift -- a failed push, two pushes landing out of order, a
+    lost or unreadable `limits.json`, a `/v1/purge` that reset vaultd's
+    copy after a cap was set. Called by every vault sync pass, and by
+    `/state`'s and `/vault`'s probe while a change is pending (the sync
+    pass does not run in `status` mode). True when the copies match."""
+    try:
+        held = await client.get_limits()
+    except VaultError as exc:
+        logger.warning("claude write limits check deferred", extra={"error_code": exc.code})
+        return False
+    if held == _vault_subset(await effective(session)):
+        if await push_pending(session):
+            await _settle(session, held)
+        return True
+    return await push(session, client)
 
 
 async def set_and_push(
@@ -251,18 +291,20 @@ async def set_and_push(
 
 def format_value(key: str, value: int) -> str:
     if key == "bytes_per_day":
-        return f"{value // 1024} КБ" if value % 1024 == 0 else f"{value} Б"
+        return f"{value // 1024} КБ"
     return str(value)
 
 
 def parse_value(key: str, raw: str) -> int | None:
-    """A typed value: a plain integer, or for `bytes_per_day` also
-    `512k`/`2m` (KiB/MiB). None if it is not a number at all."""
+    """A typed value: a plain integer. `bytes_per_day` is typed in KB,
+    like it is shown (`512`), or with a unit (`512k`, `2m`). None if it
+    is not a number at all -- ASCII digits only: `str.isdigit` also
+    accepts `²`, which `int` then refuses."""
     raw = raw.strip().lower()
-    factor = 1
+    factor = 1024 if key == "bytes_per_day" else 1
     if key == "bytes_per_day" and raw[-1:] in ("k", "m", "к", "м"):
         factor = 1024 if raw[-1] in ("k", "к") else 1024 * 1024
         raw = raw[:-1]
-    if not raw.isdigit() or len(raw) > 9:
+    if not (raw.isascii() and raw.isdigit()) or len(raw) > 9:
         return None
     return int(raw) * factor
