@@ -6,6 +6,10 @@ stays as an alias everywhere below the surface — the package, env vars
 note labels, the plan files, and the Railway services. Only what the user
 sees says Echo.
 
+The mark (three circles, each smaller and fainter) is
+`app/web/static/icon.svg`; the Telegram avatar is
+`docs/brand/echo-avatar.png` (set it with BotFather's `/setuserpic`).
+
 ## Status
 
 Phases 1–6 are in the code on `main`, and so are the first two milestones of phase 8, the vault (phase 7, trackers and devices, has not started). Some of it is on by default; the

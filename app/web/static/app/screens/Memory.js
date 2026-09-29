@@ -52,9 +52,9 @@ const KIND_ORDER = ['identity', 'preference', 'event', 'rule', 'technique'];
 // finding).
 const SOURCE_LABELS = {
   user: 'от тебя',
-  extractor: 'Anchor запомнил',
+  extractor: 'Echo запомнил',
   adopt: 'техника',
-  consolidate: 'Anchor объединил',
+  consolidate: 'Echo объединил',
 };
 
 const DETAIL_MESSAGES = {

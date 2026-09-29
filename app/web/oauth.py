@@ -116,9 +116,9 @@ EXPIRED = "Запрос не найден или устарел. Начни по
 # app's (app/web/static/app.css), the mark is app/web/static/icon.svg.
 _MARK = (
     "<svg class=mark viewBox='0 0 32 32' aria-hidden=true><g fill=none stroke=currentColor "
-    "stroke-width=2.4 stroke-linecap=round stroke-linejoin=round>"
-    "<circle cx=16 cy=7 r=3.4 /><line x1=16 y1=10.4 x2=16 y2=27 />"
-    "<line x1=10 y1=14 x2=22 y2=14 /><path d='M6 17c0 6 4.5 10 10 10s10-4 10-10'/></g></svg>"
+    "stroke-width=2.4><circle cx=10 cy=16 r=8 />"
+    "<circle cx=21 cy=16 r=5 stroke-opacity=.55 />"
+    "<circle cx=27.6 cy=16 r=3 stroke-opacity=.3 /></g></svg>"
 )
 _STYLE = (
     ":root{color-scheme:light dark;--bg:#faf8f5;--surface:#fff;--text:#292524;"

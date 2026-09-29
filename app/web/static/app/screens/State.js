@@ -510,7 +510,7 @@ function PauseRow({ paused, onToggle }) {
     <li class="row">
       <div class="row-main">
         <span id="pause-heading" class="row-title">Пауза</span>
-        <span class="field-hint">${applying ? 'Применяется…' : 'Anchor ответит в чате'}</span>
+        <span class="field-hint">${applying ? 'Применяется…' : 'Echo ответит в чате'}</span>
       </div>
       <button
         type="button"

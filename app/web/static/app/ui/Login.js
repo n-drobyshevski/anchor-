@@ -89,7 +89,7 @@ export function Login({ stage }) {
         hidden=${stage === 'code'}
         onSubmit=${onPassphraseSubmit}
       >
-        <h1>Anchor</h1>
+        <h1>Echo</h1>
         <p class="login-hint">Введи пароль.</p>
         <label for="passphrase-input" class="sr-only">Пароль</label>
         <input
@@ -115,7 +115,7 @@ export function Login({ stage }) {
         hidden=${stage !== 'code'}
         onSubmit=${onCodeSubmit}
       >
-        <h1>Anchor</h1>
+        <h1>Echo</h1>
         <p class="login-hint">Код отправлен в Telegram.</p>
         <label for="code-input" class="sr-only">Код</label>
         <input

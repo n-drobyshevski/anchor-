@@ -207,7 +207,7 @@ async def test_render_dialogue_labels_roles_in_russian(sessionmaker, clock):
         await _add_message(session, scene_id, role="assistant", content="и тебе")
         rows = await summarizable_messages(session, scene_id)
 
-    assert render_dialogue(rows) == "Пользователь: привет\nAnchor: и тебе"
+    assert render_dialogue(rows) == "Пользователь: привет\nEcho: и тебе"
 
 
 # --- the job body ---

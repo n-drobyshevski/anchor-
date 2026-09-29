@@ -299,7 +299,7 @@ function CheckinForm({ form, today, onSubmit, onCancel }) {
       </div>
       <p class="inline-error" role="alert">${error}</p>
       <div class="card-footer">
-        <span class="field-hint">Anchor ответит в чате</span>
+        <span class="field-hint">Echo ответит в чате</span>
         <div class="card-footer-actions">
           ${onCancel
             ? html`<button type="button" class="btn btn-ghost" disabled=${busy} onClick=${onCancel}>Отмена</button>`
@@ -384,9 +384,9 @@ function TodaySection({ data, onSubmit }) {
   let body;
   let statusText = '';
   if (data.in_progress) {
-    statusText = 'Отправлено — Anchor ответит в чате.';
+    statusText = 'Отправлено — Echo ответит в чате.';
     body = html`
-      <p class="field-value">Отправлено — Anchor ответит в чате.</p>
+      <p class="field-value">Отправлено — Echo ответит в чате.</p>
       <a class="btn chat-link" href="#/chat">Открыть чат</a>
     `;
   } else if (doneToday && !redo) {
@@ -823,7 +823,7 @@ function JournalSection({ items, total, loaded, failed, loadingMore, todayKey, o
                   )}
                 </div>
               `
-            : html`<p class="field-hint">Журнал пока пуст — Anchor добавляет сюда заметки из разговоров.</p>`}
+            : html`<p class="field-hint">Журнал пока пуст — Echo добавляет сюда заметки из разговоров.</p>`}
       ${hasMore
         ? html`
             <div class="card-footer">
