@@ -26,6 +26,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core import claude_write_limits
 from app.core.clock import Clock
 from app.db.models import Job, VaultFile, VaultStatus
 from app.vault import errors
@@ -85,6 +86,10 @@ async def probe(
         state = UNAUTHORIZED if exc.code == errors.UNAUTHORIZED else UNREACHABLE
         return Health(state, last_ok_at=row.last_ok_at)
     await record_status(session, last_ok_at=now, ob_running_since=service.running_since)
+    # A cap change vaultd has not taken yet: retried here too, since the
+    # sync pass that normally reconciles does not run in `status` mode.
+    if await claude_write_limits.push_pending(session):
+        await claude_write_limits.reconcile(session, client_factory(settings))
     return Health(
         OK if service.sync_running else STOPPED,
         running_since=service.running_since,

@@ -2620,3 +2620,27 @@ not settings", **for these nine caps only**:
   cannot widen a cap by pasting a variable.
 - `/delete` wipes the overrides, and vaultd's `POST /v1/purge` resets
   its copy. `/export` includes the overrides.
+
+### Follow-up: keyboard, self-healing sync, review fixes
+
+- **Telegram keyboard.** `/claude limits` carries a ➖/➕ row per cap
+  (`cw:s:<key>:<value>`, the value the press sets, never a step, so a
+  doubled press is harmless) and «↺ Все по умолчанию» (`cw:r`). The
+  menu's vault section has «Claude: лимиты записи». Telegram only:
+  `cw:` joins `BLOCKED_CALLBACK_PREFIX`.
+- **Sync heals itself.** The pending flag alone could lie: a slow push
+  of old values landing after a newer one, a failed push in `status`
+  mode (no sync pass runs there), vaultd losing `limits.json`, or a
+  `/v1/purge` resetting it after a cap was set. Now every vault sync
+  pass calls `reconcile`: `GET /v1/limits`, push only when it differs.
+  The pending flag is cleared only when what vaultd holds matches what
+  the bot wants *after* the request. `/state`'s and `/vault`'s probe
+  retries while a change is pending, which covers `status` mode.
+- **`bytes_per_day` is whole KB.** It is shown and edited in KB
+  everywhere, so a byte count between two KB is refused; a plain
+  number in `/claude limits bytes_per_day N` means KB.
+- **Undo store.** Raising the move caps to their maxima (600 moved
+  files a day) lets `<undo_root>` hold up to about 1.7 GB of
+  pre-images over the 14-day TTL, against about 170 MB at the defaults.
+  Accepted: it only happens if you raise them.
+

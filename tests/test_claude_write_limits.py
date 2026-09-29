@@ -31,19 +31,33 @@ START = datetime.datetime(2026, 9, 29, 10, 0, tzinfo=datetime.timezone.utc)
 
 
 class _LimitsVault:
-    """Just `put_limits`: records what it was sent, or fails."""
+    """Just `/v1/limits`: holds vaultd's copy, records every PUT, or fails."""
 
     def __init__(self, *, down: bool = False) -> None:
         self.sent: list[dict] = []
+        self.gets = 0
         self.down = down
+        self.held = {k: limits.DEFAULTS.as_dict()[k] for k in limits.VAULT_KEYS}
+        self.during_put = None  # an async hook run while a PUT is "in flight"
 
     def __call__(self, _settings) -> "_LimitsVault":
         return self
 
-    async def put_limits(self, values: dict) -> None:
+    async def get_limits(self) -> dict:
+        if self.down:
+            raise VaultError(errors.UNAVAILABLE)
+        self.gets += 1
+        return dict(self.held)
+
+    async def put_limits(self, values: dict) -> dict:
         if self.down:
             raise VaultError(errors.UNAVAILABLE)
         self.sent.append(values)
+        if self.during_put is not None:
+            hook, self.during_put = self.during_put, None
+            await hook()
+        self.held = dict(values)
+        return dict(values)
 
 
 async def _pending(sessionmaker) -> bool:
@@ -113,6 +127,17 @@ def test_parse_value():
     assert limits.parse_value("bytes_per_day", "512k") == 512 * 1024
     assert limits.parse_value("bytes_per_day", "2M") == 2 * 1024 * 1024
     assert limits.parse_value("bytes_per_day", "-1") is None
+    # Typed in KB, like it is shown.
+    assert limits.parse_value("bytes_per_day", "512") == 512 * 1024
+    # `str.isdigit` accepts these; `int` would not.
+    assert limits.parse_value("creates_per_day", "²") is None
+    assert limits.parse_value("creates_per_day", "٣") is None
+
+
+def test_bytes_per_day_must_be_whole_kb():
+    limits.check_value("bytes_per_day", 1024)
+    with pytest.raises(limits.LimitError):
+        limits.check_value("bytes_per_day", 1500)
 
 
 # --- the push to vaultd ----------------------------------------------------------
@@ -167,26 +192,92 @@ async def test_vault_off_saves_and_leaves_the_push_pending(sessionmaker):
     assert await _pending(sessionmaker)
 
 
+async def _seed_state(sessionmaker, *, pending: bool = False) -> None:
+    from app.db.models import UserState
+
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1, timezone="Europe/Paris"))
+        session.add(VaultStatus(id=1, limits_push_pending=pending))
+        await session.commit()
+
+
 async def test_the_vault_sync_pass_retries_a_pending_push(sessionmaker):
     from app.vault.sync import run_vault_sync
     from tests.vault_fake import FakeVault
 
-    fake = FakeVault()
-    sent: list[dict] = []
-
-    async def put_limits(values):
-        sent.append(values)
-
-    fake.put_limits = put_limits
+    await _seed_state(sessionmaker, pending=True)
     async with sessionmaker() as session:
-        from app.db.models import UserState
-
-        session.add(UserState(id=1, chat_id=1, timezone="Europe/Paris"))
-        session.add(VaultStatus(id=1, limits_push_pending=True))
+        session.add(ClaudeWriteLimit(name="moves_per_day", value=9, updated_at=START))
         await session.commit()
+    fake = FakeVault()
     async with sessionmaker() as session:
         await run_vault_sync(session, settings(VAULT_MODE="mirror"), FrozenClock(START), fake)
-    assert sent and sent[0]["files_per_changeset"] == limits.FILES_PER_CHANGESET
+    assert fake.limit_puts and fake.limit_puts[-1]["moves_per_day"] == 9
+    assert not await _pending(sessionmaker)
+
+
+async def test_the_sync_pass_heals_a_vault_that_lost_its_copy(sessionmaker):
+    """Nothing pending, but vaultd reads as the defaults (a lost or
+    unreadable limits.json, or a /v1/purge that ran after the change):
+    the sync pass notices the difference and pushes again."""
+    from app.vault.sync import run_vault_sync
+    from tests.vault_fake import FakeVault
+
+    await _seed_state(sessionmaker, pending=False)
+    async with sessionmaker() as session:
+        session.add(ClaudeWriteLimit(name="undos_per_hour", value=2, updated_at=START))
+        await session.commit()
+    fake = FakeVault()
+    async with sessionmaker() as session:
+        await run_vault_sync(session, settings(VAULT_MODE="mirror"), FrozenClock(START), fake)
+    assert fake.limits["undos_per_hour"] == 2
+
+
+async def test_reconcile_sends_nothing_when_the_copies_match(sessionmaker):
+    vault = _LimitsVault()
+    async with sessionmaker() as session:
+        assert await limits.reconcile(session, vault) is True
+    assert vault.sent == [] and vault.gets == 1
+
+
+async def test_a_change_during_a_push_stays_pending(sessionmaker):
+    """The review's race: a push of the old values lands after the user
+    set a newer one. The pending mark must survive, and the next
+    reconcile must send the newer value."""
+    clock = FrozenClock(START)
+    vault = _LimitsVault()
+    async with sessionmaker() as session:
+        await limits.set_limit(session, clock, "moves_per_day", 5)
+
+    async def change_meanwhile():
+        async with sessionmaker() as other:
+            await limits.set_limit(other, clock, "moves_per_day", 6)
+
+    vault.during_put = change_meanwhile
+    async with sessionmaker() as session:
+        assert await limits.push(session, vault) is True
+    assert vault.held["moves_per_day"] == 5
+    assert await _pending(sessionmaker)
+    async with sessionmaker() as session:
+        assert await limits.reconcile(session, vault) is True
+    assert vault.held["moves_per_day"] == 6
+    assert not await _pending(sessionmaker)
+
+
+async def test_status_mode_probe_retries_a_pending_push(sessionmaker):
+    """The sync pass does not run in `status` mode, so the probe that
+    /state and /vault make retries a pending change instead."""
+    from app.vault import status as vault_status
+    from tests.vault_fake import FakeVault
+
+    await _seed_state(sessionmaker, pending=True)
+    async with sessionmaker() as session:
+        session.add(ClaudeWriteLimit(name="folders_per_day", value=1, updated_at=START))
+        await session.commit()
+    fake = FakeVault()
+    async with sessionmaker() as session:
+        await vault_status.probe(session, settings(VAULT_MODE="status"), FrozenClock(START), fake)
+    assert fake.limits["folders_per_day"] == 1
     assert not await _pending(sessionmaker)
 
 
@@ -253,9 +344,81 @@ async def test_claude_limits_set_reset_and_refuse(sessionmaker):
     assert "Нет такого лимита" in await world.command("/claude limits nope 3")
     assert "снова 40" in await world.command("/claude limits creates_per_day reset")
     await world.command("/claude limits moves_per_day 1")
-    assert "по умолчанию" in await world.command("/claude limits reset")
+    assert "по умолчанию" in await world.command("/claude limits Reset")
+    assert "допустимо" in await world.command("/claude limits creates_per_day ²")
     async with sessionmaker() as session:
         assert await limits.effective(session) == limits.DEFAULTS
+
+
+# --- Telegram: the +/- keyboard -------------------------------------------------
+
+
+def _buttons(markup) -> dict[str, str]:
+    return {b.callback_data: b.text for row in markup.inline_keyboard for b in row}
+
+
+async def test_claude_limits_carries_a_keyboard(sessionmaker):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    await world.command("/claude limits")
+    buttons = _buttons(world.tg_fake.sent[-1].reply_markup)
+    assert buttons["cw:s:creates_per_day:50"] == "➕ 50"
+    assert buttons["cw:s:creates_per_day:30"] == "➖ 30"
+    assert buttons["cw:s:bytes_per_day:655360"] == "➕ 640"
+    # At the bottom of its range a cap has no ➖ (files: 1..200, default 20 -> 15 is fine).
+    assert "cw:s:files_per_changeset:15" in buttons
+    # Nothing overridden yet: no reset button.
+    assert "cw:r" not in buttons
+
+
+async def test_a_press_sets_the_cap_and_redraws(sessionmaker):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    await world.press("cw:s:creates_per_day:50")
+    async with sessionmaker() as session:
+        assert (await limits.effective(session)).creates_per_day == 50
+    edit = world.tg_fake.edits[-1]
+    assert "по умолчанию 40" in edit.text
+    buttons = _buttons(edit.reply_markup)
+    assert buttons["cw:s:creates_per_day:60"] == "➕ 60"
+    assert "cw:r" in buttons
+    await world.press("cw:r")
+    async with sessionmaker() as session:
+        assert await limits.effective(session) == limits.DEFAULTS
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["cw:s:nope:1", "cw:s:files_per_changeset:999", "cw:s:files_per_changeset:x", "cw:s:bytes_per_day:1500", "cw:zz"],
+)
+async def test_a_forged_press_changes_nothing(sessionmaker, data):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    await world.press(data)
+    async with sessionmaker() as session:
+        assert (await session.execute(select(ClaudeWriteLimit))).first() is None
+    assert world.tg_fake.answered[-1].text == "Устарело."
+
+
+async def test_the_info_button_names_the_range(sessionmaker):
+    world = World(sessionmaker, settings())
+    await world.seed()
+    await world.press("cw:i:bytes_per_day")
+    assert world.tg_fake.answered[-1].text == "Объём текста в день: 0 КБ–8192 КБ"
+
+
+def test_the_keyboard_is_blocked_from_the_web_chat():
+    from app.web import ingress
+
+    assert "cw:s:creates_per_day:50".startswith(ingress.BLOCKED_CALLBACK_PREFIX)
+
+
+def test_the_menu_entry_is_telegram_only_and_needs_claude():
+    from app.tg import menu
+
+    assert menu.action_available("claude_limits", settings(), web=False)
+    assert not menu.action_available("claude_limits", settings(), web=True)
+    assert not menu.action_available("claude_limits", settings(CLAUDE_ACCESS_ENABLED=False), web=False)
 
 
 # --- web: POST /api/state/claude-limits --------------------------------------------

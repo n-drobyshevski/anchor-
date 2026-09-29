@@ -47,6 +47,11 @@ class FakeVault:
         # Raise this (once) instead of performing / after performing a PUT.
         self.crash_before_put: Exception | None = None
         self.crash_after_put: Exception | None = None
+        # vaultd's copy of Claude's write caps (`/v1/limits`); None
+        # means "vaultd's defaults", which the bot compares against its
+        # own. `limit_puts` records every PUT body.
+        self.limits: dict[str, int] | None = None
+        self.limit_puts: list[dict[str, int]] = []
 
     # The factory the sync pass takes.
     def __call__(self, settings) -> "FakeVault":
@@ -65,6 +70,20 @@ class FakeVault:
             last_exit_code=None,
             running_since=datetime.datetime(2026, 9, 25, 8, 0, tzinfo=datetime.timezone.utc),
         )
+
+    async def get_limits(self) -> dict[str, int]:
+        self._check()
+        if self.limits is None:
+            from app.core import claude_write_limits
+
+            return {k: claude_write_limits.DEFAULTS.as_dict()[k] for k in claude_write_limits.VAULT_KEYS}
+        return dict(self.limits)
+
+    async def put_limits(self, values: dict[str, int]) -> dict[str, int]:
+        self._check()
+        self.limit_puts.append(dict(values))
+        self.limits = dict(values)
+        return dict(values)
 
     async def manifest(self) -> Manifest:
         self.calls.append(("manifest", ""))
