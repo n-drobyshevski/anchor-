@@ -15,7 +15,7 @@ let typingTimer = null;
 
 // Buffers 'message'/'edit' events that arrive before the subscribing
 // screen's own initial history page has finished loading -- see
-// resetHistoryGate()/markHistoryReady() below, and the identical
+// close()/markHistoryReady() below, and the identical
 // comment this is ported from in the old app.js, for why this exists
 // (the SSE echo of this tab's own outgoing message routinely arrives
 // before GET /api/history's response does, and rendering it immediately
@@ -45,13 +45,6 @@ export function onMessage(cb) {
 export function onEdit(cb) {
   editListeners.add(cb);
   return () => editListeners.delete(cb);
-}
-
-// Called once per login (Chat.js's mount), before it starts loading
-// history, so nothing buffered from a previous session lingers.
-export function resetHistoryGate() {
-  historyReady = false;
-  pendingLive = [];
 }
 
 // Called once the subscribing screen's initial history page has
@@ -162,9 +155,9 @@ export function close() {
   sseErrorCount = 0;
   reconnectBanner.value = false;
   conn.value = 'down';
-  // Reset the history-load gate here too, not only in resetHistoryGate()
-  // (which Chat's mount effect no longer calls -- see that effect's own
-  // comment): on logout the gate is otherwise left open from the
+  // Reset the history-load gate here, the one place it is reset (Chat's
+  // mount effect deliberately does not -- see its own comment): on
+  // logout the gate is otherwise left open from the
   // previous session, and connect() on the next login can start
   // delivering live events before the freshly mounted Chat has
   // subscribed at all, losing them to an empty listener set instead of

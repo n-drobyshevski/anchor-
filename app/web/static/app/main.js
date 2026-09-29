@@ -7,7 +7,8 @@ import { effect } from '../vendor/signals.module.js';
 import { App } from './ui/App.js';
 import { start as startRouter } from './router.js';
 import { apiGet } from './api.js';
-import { auth, invalidate, proposalsBadge } from './store.js';
+import { load } from './lib/request.js';
+import { auth, invalidate, paused, proposalsBadge } from './store.js';
 import { close as closeSSE, connect as connectSSE } from './sse.js';
 
 // Opt-in looks (app.css, docs/brand/README.md): `?look=phosphor` or
@@ -46,42 +47,55 @@ effect(() => {
   else closeSSE();
 });
 
-// store.js's proposalsBadge (ui/SurfaceSwitcher.js's pip and the
-// «Предложения» count) has to stay right even while #/proposals itself
-// is never opened -- a proposal raised while the user reads #/chat
-// still needs to show up in the switcher. This effect is that path: refetch right after login,
-// and again on every invalidate("proposals"), independent of which
-// screen (if any) is mounted. screens/Proposals.js keeps its own copy
-// of this same call so the badge does not wait on this effect's own
-// round-trip when that screen is the one already fetching.
+// App-wide values that must stay right whichever screen is open (or
+// none that shows them): store.js's proposalsBadge (the switcher's pip
+// and the «Сегодня» count -- a proposal raised while the user
+// reads #/chat still has to show up) and `paused` (the toolbar's
+// pause/resume button). Refetched right after login, on every
+// invalidate of their topic ('*' is sse.js's reconnect resync, an
+// invalidate this tab may have missed while the stream was down), and
+// when a backgrounded tab comes back. screens/today/proposals.js and
+// screens/useAppState.js also set them from their own loads, so neither
+// waits on a second round-trip here when that screen is open.
 async function refreshProposalsBadge() {
-  const res = await apiGet('/api/proposals');
-  if (res.ok && res.data) proposalsBadge.value = res.data.pending ? 1 : 0;
+  const res = await load('/api/proposals');
+  if (res.ok) proposalsBadge.value = res.data.pending ? 1 : 0;
+}
+
+async function refreshPaused() {
+  const res = await load('/api/state');
+  if (res.ok) paused.value = !!res.data.paused;
+}
+
+function refreshAll() {
+  refreshProposalsBadge();
+  refreshPaused();
 }
 
 effect(() => {
-  if (auth.value === 'in') refreshProposalsBadge();
+  if (auth.value === 'in') refreshAll();
+  else paused.value = null;
 });
 
-effect(() => {
-  const current = invalidate.value;
-  // '*' is sse.js's SSE-reconnect resync (an invalidate this tab may
-  // have missed entirely while the stream was down) -- treated the
-  // same as a direct "proposals" hit, same reasoning as
-  // hooks.js's useAutoRefetch.
+// A plain subscription rather than an effect over both signals: an
+// effect reading `auth` too would also rerun on login, doubling the
+// fetch refreshAll() above already makes. `subscribe` calls back once
+// immediately with the last invalidate (skipped) -- only later ones
+// count.
+let skipFirstInvalidate = true;
+invalidate.subscribe((current) => {
+  if (skipFirstInvalidate) {
+    skipFirstInvalidate = false;
+    return;
+  }
   const topic = current && current.topic;
-  if (auth.value === 'in' && (topic === 'proposals' || topic === '*')) refreshProposalsBadge();
+  if (auth.peek() !== 'in' || !topic) return;
+  if (topic === 'proposals' || topic === '*') refreshProposalsBadge();
+  if (topic === 'state' || topic === '*') refreshPaused();
 });
 
-// The badge can also go stale with no SSE event at all: the stream
-// stays connected throughout, but this tab is backgrounded (another
-// app in front, the OS suspends the tab) for long enough that
-// whichever event arrived was never acted on the way a foregrounded
-// tab's screens act on it via useAutoRefetch's own visibilitychange
-// listener -- this is that same recovery for the badge, which is never
-// owned by a mounted screen when #/proposals itself is not open.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && auth.value === 'in') refreshProposalsBadge();
+  if (document.visibilityState === 'visible' && auth.value === 'in') refreshAll();
 });
 
 async function init() {

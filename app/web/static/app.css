@@ -109,7 +109,7 @@
 
 :root {
   color-scheme: light dark;
-  /* Planner's clean palette: warm neutrals and one warm-stone accent.
+  /* Warm neutrals and one accent, Echo's green (the mark's #2f6f4f).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
      offline dot only. State is never shown by colour alone. */
@@ -121,21 +121,21 @@
   --input-border: #e7e0d7;
   --muted-fill: #f2ede7;
   --muted-fill-text: #44403c;
-  --accent: #57534e;
+  --accent: #2f6f4f;
   --accent-text: #ffffff;
-  --focus: #57534e;
-  --bubble-user: #ede6dd;
+  --focus: #2f6f4f;
+  --bubble-user: #e3ede6;
   --bubble-user-text: #292524;
   --bubble-bot: #ffffff;
   --bubble-bot-text: #292524;
   --bubble-muted: #f2ede7;
   --bubble-muted-text: #44403c;
   --danger: #a11414;
-  --dot-ok: #57534e;
+  --dot-ok: #2f6f4f;
   --dot-warn: #a8a29e;
   --dot-bad: #a11414;
-  --chart-bar: #57534e;
-  --chart-bar-active: #292524;
+  --chart-bar: #2f6f4f;
+  --chart-bar-active: #1f4d36;
   --chart-grid: #e7e0d7;
   --chart-empty: #e7e0d7;
   --hairline: inset 0 0 0 1px rgb(41 37 36 / .10);
@@ -159,20 +159,20 @@
     --input-border: #423c37;
     --muted-fill: #3a3531;
     --muted-fill-text: #faf8f5;
-    --accent: #a8a29e;
+    --accent: #7fbf9a;
     --accent-text: #292524;
-    --focus: #a8a29e;
-    --bubble-user: #3a3531;
+    --focus: #7fbf9a;
+    --bubble-user: #2b3a31;
     --bubble-user-text: #faf8f5;
     --bubble-bot: #292524;
     --bubble-bot-text: #faf8f5;
     --bubble-muted: #3a3531;
     --bubble-muted-text: #faf8f5;
     --danger: #fca5a5;
-    --dot-ok: #a8a29e;
+    --dot-ok: #7fbf9a;
     --dot-warn: #78716c;
     --dot-bad: #fca5a5;
-    --chart-bar: #a8a29e;
+    --chart-bar: #7fbf9a;
     --chart-bar-active: #faf8f5;
     --chart-grid: #3a3531;
     --chart-empty: #3a3531;
@@ -191,20 +191,20 @@
   --input-border: #423c37;
   --muted-fill: #3a3531;
   --muted-fill-text: #faf8f5;
-  --accent: #a8a29e;
+  --accent: #7fbf9a;
   --accent-text: #292524;
-  --focus: #a8a29e;
-  --bubble-user: #3a3531;
+  --focus: #7fbf9a;
+  --bubble-user: #2b3a31;
   --bubble-user-text: #faf8f5;
   --bubble-bot: #292524;
   --bubble-bot-text: #faf8f5;
   --bubble-muted: #3a3531;
   --bubble-muted-text: #faf8f5;
   --danger: #fca5a5;
-  --dot-ok: #a8a29e;
+  --dot-ok: #7fbf9a;
   --dot-warn: #78716c;
   --dot-bad: #fca5a5;
-  --chart-bar: #a8a29e;
+  --chart-bar: #7fbf9a;
   --chart-bar-active: #faf8f5;
   --chart-grid: #3a3531;
   --chart-empty: #3a3531;
@@ -474,6 +474,8 @@ button, input, textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The containing block for #toast-region (ui/Shell.js). */
+  position: relative;
 }
 
 .icon {
@@ -1050,6 +1052,44 @@ button, input, textarea {
   gap: 14px;
 }
 
+/* Память: the tab strip (a .segmented group of role=tab buttons) and
+   each tab's body, a column of cards like .screen's own. */
+.memory-tabs { flex: none; }
+
+/* Three labels in a phone's width: each tab sized by its label, so
+   «Договорённости» fits whole. */
+.segmented.memory-tabs > button {
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-tabpanel,
+.memory-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* One-line add form under a list (Блокнот, Договорённости): the text
+   field takes the room, the select and button keep their size, and the
+   row wraps on a narrow screen. */
+.inline-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.inline-add input { flex: 1 1 12rem; min-width: 0; }
+.inline-add select { flex: 0 1 auto; }
+.inline-add .inline-error,
+.inline-add .char-counter { flex-basis: 100%; margin: 0; }
+
 /* Check-in only: from 900px up, two columns (the form | the chart and
    the journal) in a wider frame; every other panel stays one 42rem
    column. */
@@ -1061,8 +1101,9 @@ button, input, textarea {
   max-width: none;
 }
 
-.checkin-main,
-.checkin-side {
+/* Сегодня and Дневник: two columns of cards on a wide screen, one
+   stacked column below 900px. */
+.screen-column {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1070,7 +1111,7 @@ button, input, textarea {
 }
 
 @media (min-width: 900px) {
-  .screen-checkin {
+  .screen-columns {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: start;
@@ -1775,6 +1816,26 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   color: var(--text-muted);
 }
 
+/* A short bulleted list inside a card (the weekly review's wins,
+   misses, patterns and intentions). */
+.plain-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plain-list li::marker { color: var(--text-muted); }
+
+/* A decided review proposal's status, under its text: chip-sized, not
+   stretched across the stacked row. */
+.row-stacked > .status-chip { align-self: flex-start; }
+
+/* Фоновая работа's 24 ч / 7 дней switch: compact, beside the heading. */
+.segmented.digest-window { flex: none; }
+.segmented.digest-window > button { flex: none; height: 30px; padding: 0 10px; font-size: 13px; }
+
 .card h2[tabindex="-1"]:focus {
   outline: none;
   box-shadow: none;
@@ -1888,7 +1949,8 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 }
 
 .radio-input:checked + .radio-face,
-.segmented > button[aria-pressed="true"] {
+.segmented > button[aria-pressed="true"],
+.segmented > button[aria-selected="true"] {
   background: var(--muted-fill);
   box-shadow: inset 0 0 0 1.5px var(--accent);
   font-weight: 600;
