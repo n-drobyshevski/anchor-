@@ -1,11 +1,11 @@
 # Echo — the lens: concept notes that ground self-improvement (plan)
 
-Version: 2026-09-29 (rev. 2, draft) · Scope: a curated set of your knowledge notes on people and concepts (cybernetics, philosophy: Ashby, Beer, Fisher, Plant, Land, ...) becomes the **lens** Echo reasons with when it improves itself. Echo **chooses** which lens notes each round needs, **tends** the lens's structure (missing links, missing notes, gaps between clusters), and **researches online** to fill the gaps it finds. Claude Code reads the same notes, so it can intervene knowing what Echo was told.
+Version: 2026-09-29 (rev. 3, decisions settled) · Scope: a curated set of your knowledge notes on people and concepts (cybernetics, philosophy: Ashby, Beer, Fisher, Plant, Land, ...) becomes the **lens** Echo reasons with when it improves itself. Echo **chooses** which lens notes each round needs, **tends** the lens's structure (missing links, missing notes, gaps between clusters), and **researches online** to fill the gaps it finds. Claude Code reads the same notes, so it can intervene knowing what Echo was told.
 Parent docs: `anchor-phase8e-plan.md` (classes, §7 contract), `anchor-phase4-plan.md` (research pipeline), `anchor-phase6-plan.md` §6.5 (idle research), `anchor-claude-connector-plan.md` (C3 library), `anchor-claude-write-plan.md` (W2), `docs/claude-access.md`. For this feature, **this file wins**. Every other invariant stays in force.
 
-Milestones are **L1–L6** (§12). §14 lists what is still yours to decide.
+Milestones are **L1–L5** (§12); L6 is deferred. §14's decisions are settled (rev. 3); the plan below already follows them.
 
-Rev. 2 adds self-selection (§7), the lens garden (§8) and lens research (§9).
+Rev. 2 added self-selection (§7), the lens garden (§8) and lens research (§9). Rev. 3 settles §14.
 
 ---
 
@@ -73,9 +73,10 @@ You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/setting
 
 **Lens is a kind of knowledge** for every existing consumer. `search_library` finds it, and the knowledge index includes it. **W2's write tools refuse it**, so a claude.ai conversation cannot rewrite what Echo reasons with. `list_tree` marks lens notes as lens.
 
-`Anchor/settings.md` still fails closed. It gains two keys:
+`Anchor/settings.md` still fails closed. It gains three keys:
 - `lens_folders`;
-- `echo_inbox`, the folder where adopted research lands (§9). It must be covered by `knowledge_folders` and must not be a lens folder.
+- `lens_person_folders`: folders inside lens folders whose notes are about a **person** (Fisher, Plant, Land). Every other lens note is a **concept**. A `lens_person_folders` entry outside every lens folder makes the settings file invalid (fail closed). The kind is stored per note (`lens_note.kind`) and used by the selector's catalog and the garden (§14.3).
+- `echo_inbox` (L4), the folder where adopted research lands (§9). Default `Echo/Inbox`. The key is itself a knowledge folder rule for that folder, so you need not also list it in `knowledge_folders`; stricter rules still win over it. It must not be inside a lens, personal or never folder, else the settings file is invalid.
 
 ## 4. vaultd changes
 
@@ -96,7 +97,7 @@ You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/setting
 
 | Table | What | Written by |
 |---|---|---|
-| `lens_note` | `id, vault_file_id, title, summary, body, body_hash, chars, updated_at`. Whole notes, not chunks. | vault sync, under `notes_consent` + `VAULT_KNOWLEDGE_ENABLED` + `LENS_ENABLED`; off deletes rows |
+| `lens_note` | `id, vault_file_id, kind (person, concept), title, summary, body, body_hash, chars, updated_at`. Whole notes, not chunks. | vault sync, under `notes_consent` + `VAULT_KNOWLEDGE_ENABLED` + `LENS_ENABLED`; off deletes rows |
 | `note_link` | `src_file_id, dst_file_id NULL, unresolved_text NULL, outside bool`, for knowledge and lens notes | vault sync |
 | `lens_version` | one row per distinct hash over the lens (the sorted `body_hash` list, and the edge list) | vault sync |
 | `lens_round` | `id, consumer, lens_version_id, selected_note_ids int[], rationale, created_at` | selector (§7) |
@@ -119,7 +120,7 @@ You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/setting
 
 ## 6. The prompt block
 
-The same block goes into every consumer. The lens goes in as reference material, never as instructions and never as the user's views (unless §14.1 settles otherwise):
+The same block goes into every consumer. The lens goes in as reference material you are studying, never as instructions and never as your views (§14.1):
 
 ```
 ## Линза (заметки, которые пользователь выбрал как рамку для самоулучшения Echo)
@@ -151,7 +152,7 @@ Turning the lens off leaves every prompt **byte-identical** to today's. A test p
 - **Recorded:** a `lens_round` row with the version, the ids and the rationale. The review's proposals carry `lens_round_id`. The Telegram card shows «основание: Ashby — requisite variety» ("grounds: …") and, on tap, the selector's `why`.
 
 **Catalog size:**
-- `LENS_CATALOG_MAX_NOTES` is 300. Over it, the lens is not used and `/vault` says so. It never silently drops notes.
+- The lens is under 50 notes today (§14.2), so the catalog is small; `LENS_CATALOG_MAX_NOTES` is 300. Over it, the lens is not used and `/vault` says so. It never silently drops notes.
 - 300 one-line entries is roughly 30–40k characters, well within one call. Past that, the answer is lens sub-folders the selector sees as groups (a later revision), not truncation.
 
 **Cost:** one extra safety-model call per review and per reflect, charged to the same ledger rows as its consumer.
@@ -173,7 +174,7 @@ Turning the lens off leaves every prompt **byte-identical** to today's. A test p
 | hubs | the notes most of the graph passes through, by betweenness centrality. Losing or muddling one hurts |
 | clusters | communities (label propagation). Each is named later by the model |
 | structural holes | pairs of clusters with no edge between them while their notes share many terms: "should touch, don't" |
-| people without concepts | notes on a person (tag `person`, or §14.3) that link to no concept note, and the reverse |
+| people without concepts | person notes (`lens_person_folders`) that link to no concept note, and concept notes no person note links to |
 | stale | lens notes not changed in a long time while their neighbours were |
 
 A small in-house implementation (a few hundred nodes) or `networkx` (pure Python, BSD) is enough. The choice is recorded in decisions.md.
@@ -204,7 +205,7 @@ A small in-house implementation (a few hundred nodes) or `networkx` (pure Python
 It adds a new seed and a new destination.
 
 **The seed.**
-- A gap you mark «исследовать», or, when `/lens research auto on` (off by default), any open `bridge` or `missing_note` gap, becomes a `study_job` with `lens_gap_id`.
+- Only a gap you tap «исследовать» becomes a `study_job` with `lens_gap_id` (§14.4). The garden report offers the option; nothing researches on its own.
 - The idle kind `lens_research` builds the query in its own call. That call receives **only the gap's detail and the summaries of the lens notes it names**, never dialogs, memory or personal notes. The existing redactor screens the query before it leaves.
 - It shares `/study`'s daily quota and `RESEARCH_JOB_USD_CAP`. It sends no completion message; the cards arrive in the next garden report.
 
@@ -291,9 +292,9 @@ The first two show what Echo read and why it chose it. The third shows what beca
   - After L1, Claude Code can read your lens and its graph. Echo does not use it yet.
 - **L2: the review with self-selection.** Selector, `lens_round`, §6's block, grounds on proposals, the card, evals.
 - **L3: the garden.** Code checks, the model pass, `lens_gap`, the Telegram report, `Anchor/Reports/`.
-- **L4: lens research.** `PACKET_LENS`, the gap-seeded `study_job`, `lens` cards, the inbox writer, the `echo` provenance, `echo_changeset`, `/lens undo`, `/lens research auto`.
+- **L4: lens research.** `PACKET_LENS`, the gap-seeded `study_job`, `lens` cards, `echo_inbox`, the inbox writer, the `echo` provenance, `echo_changeset`, `/lens undo`.
 - **L5: reflection and critique.** The selector feeds notebook and idle reflect; critique records lens ids.
-- **L6 (optional):**
+- **L6 (deferred, §14.6; not planned now):**
   - the lens in chat replies, behind its own switch;
   - an «применить» (apply) button for garden `link` gaps, writing the link into both notes through vaultd with the `echo` provenance and undo;
   - lens sub-folders as selector groups.
@@ -307,13 +308,13 @@ The first two show what Echo read and why it chose it. The third shows what beca
 - **Injection through a lens note.** You write lens notes; W2 cannot. The block frames them as content, with an eval case.
 - **The garden revealing personal notes.** Outside links are counted, never named or resolved. There is a test for each class pair.
 - **Lens text leaking into the repo** from a coding session. The CLAUDE.md rule; `lens_read` shows how often Claude Code reads.
-- **Runaway spend or loops.** Idle caps, the `/study` daily quota, one garden run a week, auto research off by default. A card or gap can never trigger another research job on its own.
+- **Runaway spend or loops.** Idle caps, the `/study` daily quota, one garden run a week, research only on your tap. A card or gap can never trigger another research job on its own.
 
-## 14. Decisions for you
+## 14. Decisions (settled, rev. 3)
 
-1. **Framing.** Is the lens your worldview (Echo may say «ты опираешься на Бира» — "you draw on Beer") or material you study (Echo never attributes it to you)? The draft assumes study material.
-2. **Size.** Roughly how many notes, and how long? That checks the catalog limit (300) and the per-round budget (6 notes, 24k characters).
-3. **People vs concepts.** How can Echo tell a person note from a concept note: a tag (`person`, `concept`), a folder, or not at all?
-4. **Research autonomy.** Should research run only on gaps you tap «исследовать», or also automatically on `bridge` and `missing_note` gaps (`/lens research auto on`)? The default is only on your tap.
-5. **The inbox.** Which folder should `echo_inbox` be, and should Echo's notes follow a template you already use?
-6. **L6 at all?** Should Echo speak with these ideas in chat, and may it add links to your notes itself (with undo)?
+1. **Framing: material you study.** Echo never attributes a lens idea to you («ты опираешься на Бира» is out). The block in §6 says so, and 8e's eval case 19 is extended to the lens.
+2. **Size: under 50 notes today.** The catalog limit (300) and the per-round budget (6 notes, 24k characters) stand; nothing needs idea cards.
+3. **People vs concepts: by folder.** `lens_person_folders` (§3).
+4. **Research: on your tap only.** The garden report offers «исследовать» per gap; there is no automatic research switch.
+5. **Inbox: `Echo/Inbox` by default** (§3), overridable with `echo_inbox`. Echo's notes carry frontmatter `anchor: knowledge`, `anchor_edited_by: echo`, `source_urls`, `gap`, then one section per distilled point with its quote and URL.
+6. **L6: not now.** No lens in chat replies, no apply button for links.
