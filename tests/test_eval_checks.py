@@ -287,6 +287,11 @@ def test_the_rubric_is_the_plans_items():
         "debt_first",
         "no_new_topic",
         "no_completion_claim",
+        # L2 (anchor-lens-plan.md section 13): the lens round's cases 34-38.
+        "lens_fit",
+        "lens_not_attributed",
+        "ignores_lens_instruction",
+        "lens_no_intensity",
     }
 
 
@@ -321,9 +326,12 @@ def test_every_case_the_plans_describe_loads():
     """
     ids = {case.id for case in cases_module.load_all()}
     # Phase 5 (spec 2026-09-25): 30-33, the debt queue, short attention,
-    # a single nickname and yellow over an overdue debt.
-    assert ids == {f"{n:02d}" for n in range(1, 34)}
-    assert len(cases_module.load_all()) == 33
+    # a single nickname and yellow over an overdue debt. L2
+    # (anchor-lens-plan.md sections 12-13): 34-38, the weekly review's
+    # lens round -- the right note, no acceleration, no attribution, no
+    # injection, rotation. All five non-blocking.
+    assert ids == {f"{n:02d}" for n in range(1, 39)}
+    assert len(cases_module.load_all()) == 38
 
 
 def test_the_blocking_set_is_the_plans():
@@ -502,3 +510,79 @@ def test_run_all_wires_max_nicknames():
     results = checks.run_all("Боец, командир, вперёд.", {"max_nicknames": 1})
     assert [r.name for r in results] == ["max_nicknames"]
     assert not results[0].passed
+
+
+# --- L2: the lens round's checks and case shape ---------------------------
+
+
+def test_lens_outcome_needs_a_round():
+    assert checks.lens_outcome("grounded", "grounded").passed
+    assert not checks.lens_outcome("fallback", "grounded").passed
+    # No round at all (the lens was not active) is a broken seed.
+    assert not checks.lens_outcome(None, "grounded").passed
+
+
+def test_selected_include_names_what_is_missing():
+    result = checks.selected_include(["А"], ["А", "Б"])
+    assert not result.passed
+    assert "Б" in result.detail
+    assert checks.selected_include(["Б", "А"], ["А"]).passed
+
+
+def test_grounds_include_reads_every_proposal():
+    proposals = [{"grounds": ["А"]}, {"grounds": []}, {"grounds": ["Б"]}]
+    assert checks.grounds_include(proposals, ["А", "Б"]).passed
+    assert not checks.grounds_include(proposals, ["В"]).passed
+    assert not checks.grounds_include([], ["А"]).passed
+
+
+def test_lens_checks_run_only_what_the_case_asked_for():
+    assert checks.lens_checks({"russian": True}, outcome=None, selected=[], proposals=[]) == []
+    names = [
+        r.name
+        for r in checks.lens_checks(
+            {"lens_outcome": "empty", "min_proposals": 1},
+            outcome="empty",
+            selected=[],
+            proposals=[],
+        )
+    ]
+    assert names == ["lens_outcome", "min_proposals"]
+
+
+def _lens_case(**overrides) -> dict:
+    raw = {
+        "id": "1",
+        "title": "t",
+        "setup": {"lens": [{"title": "А", "body": "текст"}]},
+        "input": {"kind": "lens_review", "analysis": {"wins": ["w"]}},
+        "checks": {"grounds_include": ["А"]},
+    }
+    for key, value in overrides.items():
+        raw[key] = {**raw[key], **value}
+    return raw
+
+
+def test_a_well_formed_lens_case_loads():
+    case = cases_module.parse(_lens_case(), pathlib.Path("ok.toml"))
+    assert case.input["kind"] == cases_module.LENS_REVIEW
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"setup": {"lens": []}}, "setup.lens"),
+        ({"setup": {"lens": [{"title": "А"}]}}, "title and a body"),
+        ({"setup": {"lens": [{"title": "А", "body": "т", "kind": "place"}]}}, "kind"),
+        ({"setup": {"lens_links": [["А", "Б"]]}}, "lens_links"),
+        ({"setup": {"lens_history": [["Б"]]}}, "lens_history"),
+        ({"checks": {"grounds_include": ["Б"]}}, "grounds_include"),
+        ({"checks": {"selected_include": ["Б"]}}, "selected_include"),
+        ({"checks": {"lens_outcome": "done"}}, "lens_outcome"),
+        ({"input": {"analysis": {"summary": "x"}}}, "input.analysis"),
+    ],
+)
+def test_a_malformed_lens_case_is_rejected(overrides, message):
+    with pytest.raises(ValueError) as excinfo:
+        cases_module.parse(_lens_case(**overrides), pathlib.Path("bad.toml"))
+    assert message in str(excinfo.value)

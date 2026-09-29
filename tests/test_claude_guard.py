@@ -102,6 +102,11 @@ def test_hook_protocol_exit_code():
     # at the one role that may return note text, and at what it may call.
     assert "ANCHOR_LENS_DATABASE_URL" in blocked.stderr
     assert "lens.notes()" in blocked.stderr and "lens.graph()" in blocked.stderr
+    # L2: and the review's lens rounds, the third function on that role,
+    # which names the picked notes but never the selector's rationale.
+    assert "lens.rounds(n)" in blocked.stderr
+    assert "never its rationale" in blocked.stderr
+    assert "rationale for picking" not in blocked.stderr
 
     allowed = run({"tool_name": "Bash", "tool_input": {"command": "uv run pytest"}})
     assert allowed.returncode == 0
@@ -211,6 +216,7 @@ def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook()
         'psql "$ANCHOR_LENS_DATABASE_URL" -c "select title from lens.notes()"',
         'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, chars from lens.notes()"',
         "psql ${ANCHOR_LENS_DATABASE_URL} -c 'select * from lens.graph()'",
+        'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, titles from lens.rounds(10)"',
     ],
 )
 def test_allows_the_lens_role(command):

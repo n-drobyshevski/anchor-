@@ -62,6 +62,11 @@ CONTENT_COLUMNS = {
     "note_link": {"unresolved_text"},
     "lens_version": set(),
     "lens_read": set(),
+    # L2 (plan section 7): the selector's why is model text about the
+    # user's week and notes; a review proposal's text and reason are
+    # what the review told the user.
+    "lens_round": {"rationale"},
+    "review_proposal": {"text", "reason"},
 }
 
 

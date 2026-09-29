@@ -2753,3 +2753,84 @@ today; people and concepts by folder (`lens_person_folders`).
   fixtures, eval cases, logs or artifacts: it paraphrases from public
   knowledge and cites the note by id. `lens_read` shows how often it
   reads.
+
+## L2 — the review reads the lens
+
+`anchor-lens-plan.md` rev. 3, milestone L2: the weekly review picks
+lens notes for itself (§7), grounds its proposals in them (§6's
+block), and the card says which notes it leaned on. The lens is
+active for a round only while `LENS_ENABLED` is on and the lens holds
+between 1 and `LENS_CATALOG_MAX_NOTES` notes; otherwise the review
+makes the same single call with the same prompt and input as before,
+byte for byte, and records no round.
+
+- **Two extra single-shot calls, not a tool loop.** A loop would give
+  one context the week, the lens and the means to fetch more of either.
+  Instead pass 1 (the existing analysis, unchanged) runs first, then a
+  selector call picks notes, then a grounding call rewrites the
+  proposals. Each call has one input, one strict JSON schema and
+  temperature 0, on the model the review already uses; each output is
+  validated before the next call sees it. Every step can be audited
+  on its own, and none can act.
+- **The selector never sees the week.** Its input is pass 1's
+  validated analysis (wins, misses, patterns, intentions, proposals as
+  JSON) and the catalog: id, person or concept, title, summary (or the
+  first 300 characters of the body), linked lens titles, and
+  `rounds_since_used`. The grounding call gets the same analysis and
+  the selected bodies. Neither call gets the raw week input, so
+  `load_week`'s welfare exclusion needs no second copy, and a lens note
+  cannot pull a dialog line into a prompt it was never in.
+- **Grounded proposals replace pass 1's, not add to them.** The
+  grounding call returns the whole proposal list under the same kinds,
+  caps and screening as today, each with `grounds` (note titles, kept
+  only if selected). Adding would double the cards for one week and
+  invite the review to argue with itself; replacing keeps one set,
+  each proposal resting on the lens where it helps and standing alone
+  where it does not. The lens is framed as material the user studies,
+  never their views, and the review's own prohibitions (no raising
+  intensity, no punishments) outrank any note: a note arguing for
+  acceleration cannot become a proposal to push harder. The eval pins
+  both.
+- **The lens never fails the review.** A provider error, invalid JSON,
+  a schema miss or the spend cap on either extra call keeps pass 1's
+  proposals, and the round is recorded as `fallback` (with an empty
+  selection if the selector itself failed). An empty selection is a
+  real answer, recorded as `empty`: some weeks no idea fits. Both calls
+  are ledgered and capped exactly like the analysis call.
+- **`rounds_since_used` keeps the lens from collapsing onto two
+  favourites.** Each catalog line says how many review rounds have
+  passed since the note was last selected («никогда» if never), and
+  the prompt asks for at least one note unused for four or more rounds
+  when one is relevant. The count comes from `lens_round`, so it
+  needs no extra state.
+- **`lens_round` records every active round**: the lens version, the
+  selected ids, the selector's `why`, the outcome. `review_proposal`
+  carries `lens_round_id` and `lens_note_ids`, so the card can show
+  «основание: …» with the notes' current titles and answer «почему эти
+  заметки?» with the rationale. `debug.lens_round` has everything but
+  the rationale, and the new `debug.review_proposal` has ids, kind,
+  status, times, `lens_round_id`, `lens_note_ids` and the text's
+  length, never its text or reason; `lens.rounds(n)` gives Claude Code
+  the last rounds with their outcome and the picked notes' titles
+  through the `anchor_lens` role, logged in `lens_read` like the other
+  two functions. **The rationale is derived from the week**: the
+  selector writes it from the first pass's analysis of the user's
+  conversations, so it stays with the user -- Telegram only -- and
+  neither `lens.rounds(n)` nor `debug.lens_round` carry it (CLAUDE.md's
+  first rule: Claude Code never reads conversation data, and model text
+  written from it counts). The selector's prompt still keeps the week's
+  facts out of it, speaking of the notes and of what Echo should change,
+  as hygiene for what the user reads. The *selection* itself (which ids,
+  in what order, and an `empty` outcome) stays readable, in
+  `lens.rounds(n)` and as ids in `debug.lens_round` and
+  `debug.review_proposal`: it says which of the user's own lens notes
+  the model reached for, not anything about the week, and it is exactly
+  what Claude Code needs to see how the lens is used. `/delete` erases
+  `lens_round` and `/export` leaves it out, as for the other lens
+  tables. Only
+  `app/vault/lens.py` touches it; `app/core/lens_review.py` holds the
+  selector and grounding logic.
+- **Lens text now reaches the model provider**, during the weekly
+  review and only while `LENS_ENABLED` is on: the catalog's summaries
+  and the selected bodies go through OpenRouter like the review's own
+  input. `docs/privacy.md` says so.

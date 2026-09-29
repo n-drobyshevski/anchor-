@@ -164,6 +164,8 @@ async def test_an_empty_lens_still_counts_the_read(sessionmaker):
         "public.note_link",
         "public.lens_read",
         "public.lens_version",
+        "public.lens_round",
+        "public.review_proposal",
         "public.vault_file",
         "public.message",
         "public.memory",
@@ -171,6 +173,8 @@ async def test_an_empty_lens_still_counts_the_read(sessionmaker):
         "public.note_chunk_personal",
         "debug.lens_note",
         "debug.note_link",
+        "debug.lens_round",
+        "debug.review_proposal",
         "debug.message",
         "debug.vault_file",
     ],
@@ -211,7 +215,8 @@ async def test_lens_role_has_no_grant_outside_its_schema(sessionmaker):
             )
         ).all()
     assert tables == []
-    assert [tuple(r) for r in routines] == [("lens", "graph"), ("lens", "notes")]
+    # L2 (c6d2e8a4f917) adds lens.rounds(); tests/test_lens_round_db.py.
+    assert [tuple(r) for r in routines] == [("lens", "graph"), ("lens", "notes"), ("lens", "rounds")]
 
 
 async def test_the_functions_are_not_public(sessionmaker):

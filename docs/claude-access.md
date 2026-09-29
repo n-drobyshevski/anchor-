@@ -109,18 +109,26 @@ limits": **lens notes**, the knowledge notes the user marked
 `anchor: lens` or keeps under `lens_folders` (docs/vault-setup.md), may
 be read by Claude Code, so that a session changing Echo's
 self-improvement knows what Echo is told. Nothing else in the vault,
-and no other class.
+and no other class. Since L2 the door also returns, through
+`lens.rounds(n)`, which notes each weekly review round picked and how
+the round ended. Never the selector's rationale: it is model text
+written from the analysis of the user's week, so it is derived from
+the conversations and stays with the user (the Telegram card's
+«почему эти заметки?»). Neither `lens.rounds(n)` nor
+`debug.lens_round` carries it.
 
 **What the role can do.** Migration `e4c7a2d9b1f3` creates
 `anchor_lens` `NOLOGIN`, the same way `anchor_debug` is created, and a
-`lens` schema of two `SECURITY DEFINER` functions. The role has
-`EXECUTE` on those two and nothing else: no `public` table, no `debug`
+`lens` schema of `SECURITY DEFINER` functions (two in L1; L2's
+migration adds `lens.rounds(n)`). The role has `EXECUTE` on those and
+nothing else: no `public` table, no `debug`
 view, not even `lens_note` itself.
 
 | Function | Returns |
 |---|---|
 | `lens.notes()` | `id, kind (person, concept), title, summary, body, chars, updated_at`, one row per lens note |
 | `lens.graph()` | `src_title, dst_title, unresolved`: links between lens notes, and the targets of lens notes' links that name no note. Never a knowledge-only note, never a link to a note the bot may not see |
+| `lens.rounds(n)` | `id, consumer, outcome, created_at, titles`: the last `n` (at most 50) rounds in which Echo chose lens notes (L2: the weekly review), newest first, with the current titles of the notes it chose (a note no longer in the lens is skipped) |
 
 Each call inserts one `lens_read` row (function name, row count, time)
 before it returns. That row lives in the caller's transaction, so a
@@ -135,9 +143,12 @@ a client that does not is still seen. One false gap is possible: a
 Postgres crash can make a sequence skip ahead, and the `/lens` line
 names that as the other cause.
 
-The rows exist only while notes consent, `VAULT_KNOWLEDGE_ENABLED` and
-`LENS_ENABLED` are all on. The sync pass deletes them when any one is
-off, and the functions then return nothing.
+The notes exist only while notes consent, `VAULT_KNOWLEDGE_ENABLED`
+and `LENS_ENABLED` are all on. The sync pass deletes them when any one
+is off: `lens.notes()` and `lens.graph()` then return nothing, and
+`lens.rounds(n)` still lists past rounds (id, outcome, time) with empty
+`titles`, since a round is review history, not a note. `/delete` erases
+the rounds too.
 
 ### One-time setup
 
@@ -150,7 +161,7 @@ off, and the functions then return nothing.
    CREATE ROLE anchor_lens NOLOGIN;
    GRANT CONNECT ON DATABASE railway TO anchor_lens;
    GRANT USAGE ON SCHEMA lens TO anchor_lens;
-   GRANT EXECUTE ON FUNCTION lens.notes(), lens.graph() TO anchor_lens;
+   GRANT EXECUTE ON FUNCTION lens.notes(), lens.graph(), lens.rounds(int) TO anchor_lens;
    ```
 2. Give it a password, and nothing more: the role stays `NOLOGIN`
    until you open it in step 5. In the Railway Postgres service, open *Data →
@@ -186,7 +197,8 @@ The password stays set; the switch is `LOGIN`.
 - `/lens` shows whether the lens is on, how many notes it holds (people
   and concepts), a warning above `LENS_CATALOG_MAX_NOTES`, whether
   Claude Code may log in, how many reads there were today, and any read
-  whose record was rolled back (above).
+  whose record was rolled back (above), and «Последний разбор: <date>,
+  <outcome>» for the weekly review's last lens round (L2).
 
 If the bot's database user may not alter the role (no `CREATEROLE`), or
 the role does not exist, the command says so and points here. Any other
@@ -209,6 +221,8 @@ none. It is sent even with `CLAUDE_ACCESS_ENABLED` off, as long as
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, title, chars from lens.notes()"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select title, body from lens.notes() where id = 12"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select * from lens.graph()"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, created_at, titles from lens.rounds(10)"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_round order by created_at desc limit 10"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_read order by at desc limit 20"
 ```
 
@@ -216,7 +230,13 @@ Read only what the task needs: every call is a row the user sees
 counted. Use plain `-c` (autocommit); a call inside a transaction you
 roll back is still reported, as a read without a record. `debug.lens_note`, `debug.note_link`, `debug.lens_version` and
 `debug.lens_read` carry ids, hashes, lengths, booleans and counts only:
-no title, summary, body or link text.
+no title, summary, body or link text. `debug.lens_round` (L2) has every
+column but the selector's rationale. L2 also adds `debug.review_proposal`
+(new in L2): ids, kind, status, times, `lens_round_id`, `lens_note_ids`
+and `text_len`, never the proposal's text or reason. The titles are
+read through `lens.rounds(n)`, a logged read like the other two. The
+rationale is read by no role Claude Code has: only the user sees it,
+in Telegram.
 
 ### Lens text stays in the session
 

@@ -224,8 +224,9 @@ Then, in Telegram:
 `anchor-lens-plan.md`. The **lens** is a set of knowledge notes you
 pick as the frame for Echo's self-improvement: people and concepts
 (Ashby, Beer, requisite variety…). In L1 it is stored and Claude Code
-can read it (docs/claude-access.md → Lens notes); Echo does not use it
-yet.
+can read it (docs/claude-access.md → Lens notes); from L2 the weekly
+review picks lens notes and grounds its proposals in them while
+`LENS_ENABLED` is on (README, "Milestone L2").
 
 **Membership is always yours.** Two things make a note lens:
 

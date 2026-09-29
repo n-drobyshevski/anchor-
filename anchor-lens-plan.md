@@ -249,7 +249,7 @@ You edit it like the other packets. At most 12 domains.
 - The functions:
   - `lens.notes()`: id, title, summary, body, chars, updated_at;
   - `lens.graph()`: lens-to-lens edges and unresolved targets from lens notes;
-  - `lens.rounds(n)`: the last n selections, with rationale and titles;
+  - `lens.rounds(n)`: the last n selections, with titles and outcome — not the rationale, which is derived from the week;
   - `lens.gaps(n)`: the last n garden gaps, with detail.
 - Each call inserts a `lens_read` row before it returns.
 
@@ -265,11 +265,11 @@ psql "$ANCHOR_LENS_DATABASE_URL" -c "select * from lens.rounds(10)"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select id, kind, status, lens_note_ids from debug.review_proposal"
 ```
 
-The first two show what Echo read and why it chose it. The third shows what became of it: adopted or not, whether the trial passed.
+The first two show what Echo read and which notes each round picked (never the selector's rationale, §7). The third shows what became of it: adopted or not, whether the trial passed.
 
 **The CLAUDE.md bullet (draft):**
 
-> - Lens notes (and only lens notes) may be read, through
+> - Lens notes, and which of them each review round picked, may be read, through
 >   `psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.<fn>()"`.
 >   Lens text never leaves the session: not in commits, PR text, code
 >   comments, test fixtures, eval cases, logs or artifacts. Paraphrase
@@ -283,6 +283,8 @@ The first two show what Echo read and why it chose it. The third shows what beca
 - Nothing is loosened for the Echo connector, `anc`, Obsidian tools or Railway `http` logs.
 
 ## 12. Milestones
+
+Status: L1 (PR #56, open); L2 on the same branch.
 
 - **L1: class, pipe, graph, Claude Code.**
   - vaultd: `lens`, the settings keys, `/v1/knowledge/graph`, the write refusal.

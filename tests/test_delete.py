@@ -69,6 +69,7 @@ from app.db.models import (
     NoteChunkPersonal,
     LensNote,
     LensRead,
+    LensRound,
     LensVersion,
     NoteLink,
     VaultFile,
@@ -284,8 +285,18 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         )
         session.add(review)
         await session.flush()
+        # L2: the review's lens round, which the proposal names -- so the
+        # TRUNCATE must take review_proposal -> lens_round -> weekly_review
+        # in one statement.
+        lens_round = LensRound(
+            consumer="review", weekly_review_id=review.id, selected_note_ids=[1],
+            rationale="Эшби подходит к этой неделе.", outcome="grounded",
+        )
+        session.add(lens_round)
+        await session.flush()
         proposal = ReviewProposal(
-            review_id=review.id, kind="persona_note", text="меньше вопросов утром"
+            review_id=review.id, kind="persona_note", text="меньше вопросов утром",
+            lens_round_id=lens_round.id, lens_note_ids=[1],
         )
         session.add(proposal)
         await session.flush()

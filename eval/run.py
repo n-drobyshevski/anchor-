@@ -21,6 +21,14 @@ reading.
 
 Reports go to `eval/reports/<timestamp>.md` and are committed, so the
 history of how the persona behaved is in the repo next to the persona.
+
+L2 (anchor-lens-plan.md section 13): a `lens_review` case runs the
+weekly review's lens round rather than a persona reply, on a third
+provider built the way app/main.py builds the review's own
+(`LLM_MODEL_SAFETY`, its temperature and token cap, structured
+outputs). Its "reply" is the round rendered for the report; the text
+checks run over the proposals' own words and the lens checks over what
+the round did (eval/checks.py's `lens_checks`).
 """
 
 from __future__ import annotations
@@ -34,11 +42,12 @@ import sys
 
 from app.config import Settings, get_settings
 from app.core.clock import SystemClock
+from app.core.extract import parse_json
 from app.llm.openrouter import OpenRouterProvider, build_client
 from eval import checks as checks_module
 from eval import judge as judge_module
 from eval import scenario
-from eval.cases import Case, load_all
+from eval.cases import LENS_REVIEW, Case, load_all
 from eval.db import throwaway_sessionmaker
 
 REPORTS_DIR = pathlib.Path(__file__).parent / "reports"
@@ -101,6 +110,24 @@ def same_judge_warning(judge_model: str, settings: Settings) -> str | None:
     )
 
 
+def lens_same_judge_warning(judge_model: str, settings: Settings, cases) -> str | None:
+    """The same loud line for L2's lens cases, else None. They generate
+    on `LLM_MODEL_SAFETY` (`_review_provider`), not `LLM_MODEL`, so
+    `same_judge_warning` alone would let a judge set to the review's
+    model grade its own lens rounds unnoticed."""
+    lens_ids = [case.id for case in cases if case.input["kind"] == LENS_REVIEW]
+    if not lens_ids or judge_model != settings.LLM_MODEL_SAFETY:
+        return None
+    return (
+        "\n"
+        "!!! " + "=" * 68 + "\n"
+        f"!!! ПРЕДУПРЕЖДЕНИЕ: судья и модель разбора совпадают ({judge_model}).\n"
+        f"!!! Кейсы линзы ({', '.join(lens_ids)}) она оценивает сама: их оценка\n"
+        "!!! не независима. Задай LLM_MODEL_JUDGE другой моделью.\n"
+        "!!! " + "=" * 68
+    )
+
+
 def _providers(settings: Settings):
     """Main model for the candidates, judge model for the rubric.
 
@@ -134,6 +161,135 @@ def _providers(settings: Settings):
     return main, judge, judge_model, client
 
 
+def _review_provider(settings: Settings, client):
+    """The weekly review's provider, as app/main.py builds its
+    `safety_provider`: the lens round runs on whatever the review was
+    handed, so a lens case has to run on the same model and settings."""
+    return OpenRouterProvider(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.LLM_MODEL_SAFETY,
+        max_tokens=settings.LLM_SAFETY_MAX_TOKENS,
+        temperature=settings.LLM_SAFETY_TEMPERATURE,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        client=client,
+        structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+    )
+
+
+# app/core/lens_review.py's grounding schema name.
+GROUNDING_SCHEMA_NAME = "anchor_lens_grounding"
+
+
+def raw_grounding_text(reply: str) -> str:
+    """Every raw grounded proposal's `text` and `reason`, one per line,
+    before any validation; empty when the reply is not that JSON (parsed
+    as app/core/lens_review.py parses it)."""
+    payload = parse_json(reply)
+    items = payload.get("proposals") if isinstance(payload, dict) else None
+    lines = []
+    for item in items if isinstance(items, list) else ():
+        if isinstance(item, dict):
+            lines.extend(
+                value for value in (item.get("text"), item.get("reason")) if isinstance(value, str)
+            )
+    return "\n".join(lines)
+
+
+class _Metered:
+    """Wraps a provider for one lens case: adds up what its calls cost
+    and keeps the first exception. app/core/lens_review.py swallows a
+    provider error into a `fallback` round, as production must; the
+    harness must not, since a case whose calls never ran has proved
+    nothing ("a failed call is a failed case", as above)."""
+
+    def __init__(self, provider) -> None:
+        self._provider = provider
+        self.usd_cost = 0.0
+        self.error: str | None = None
+        # The grounding call's reply as the model gave it, before
+        # `validate_grounding` and its `screen()` drop anything: a case
+        # checks it too, so a proposal the floor caught still fails.
+        self.grounding_raw: str | None = None
+
+    async def complete(self, messages, *, conversation_id, json_schema=None):
+        try:
+            response = await self._provider.complete(
+                messages, conversation_id=conversation_id, json_schema=json_schema
+            )
+        except Exception as exc:
+            if self.error is None:
+                self.error = f"{type(exc).__name__}: {str(exc)[:160]}"
+            raise
+        self.usd_cost += float(response.usage.cost_usd or 0.0)
+        if json_schema is not None and json_schema.name == GROUNDING_SCHEMA_NAME:
+            self.grounding_raw = response.text
+        return response
+
+    async def close(self) -> None:  # pragma: no cover - the run closes the client
+        return None
+
+
+async def run_lens_case(
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    review,
+    judge,
+    *,
+    amendments: list[str] | None = None,
+) -> Outcome:
+    """One `lens_review` case for real: seed, run the round, check, judge.
+
+    The session stays open through the round -- `lens_review.apply`
+    reads the catalog and writes the round as it goes, as it does inside
+    `analyze_week`.
+    """
+    if review is None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), 0.0,
+            "нет провайдера разбора (LLM_MODEL_SAFETY) для кейса линзы",
+        )
+    metered = _Metered(review)
+    try:
+        async with sessionmaker() as session:
+            await scenario.reset(session)
+            state = await scenario.seed(session, case, clock, amendments=amendments)
+            run = await scenario.run_lens_review(
+                session, case, state, scenario.lens_settings(settings), clock, metered
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed case, not a failed run
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost,
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+    if metered.error is not None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost, metered.error
+        )
+
+    reply = scenario.render_lens_run(run)
+    check_results = checks_module.run_all(run.proposal_text, case.checks, settings)
+    if case.checks.get("forbidden_regex") and metered.grounding_raw is not None:
+        raw = checks_module.forbidden(
+            raw_grounding_text(metered.grounding_raw), case.checks["forbidden_regex"]
+        )
+        check_results.append(
+            checks_module.Result("forbidden_regex_raw", raw.passed, raw.detail)
+        )
+    check_results += checks_module.lens_checks(
+        case.checks, outcome=run.outcome, selected=run.selected, proposals=run.proposals
+    )
+    verdict = await judge_module.judge(
+        judge,
+        items=case.judge_items,
+        case_title=case.title,
+        prompt_text=scenario.situation(case),
+        reply=reply,
+    )
+    return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
+
+
 async def run_case(
     sessionmaker,
     case: Case,
@@ -144,6 +300,7 @@ async def run_case(
     dry_run: bool,
     *,
     amendments: list[str] | None = None,
+    review=None,
 ) -> Outcome:
     """Run one case against a fresh, seeded scenario.
 
@@ -153,7 +310,19 @@ async def run_case(
     set here, so a trial exercises the persona with the amendment
     actually in place rather than whatever (if anything) a case file
     happens to seed on its own.
+
+    `review` (L2) is the weekly review's provider, needed only by a
+    `lens_review` case (`run_lens_case`); a dry run builds such a case's
+    prompts through `scenario.build` like any other. eval/trial.py
+    passes none: its subset is the blocking cases, and no lens case is
+    blocking -- one that became blocking would fail there loudly rather
+    than run on the persona model.
     """
+    if case.input["kind"] == LENS_REVIEW and not dry_run:
+        return await run_lens_case(
+            sessionmaker, case, settings, clock, review, judge, amendments=amendments
+        )
+
     async with sessionmaker() as session:
         await scenario.reset(session)
         state = await scenario.seed(session, case, clock, amendments=amendments)
@@ -195,6 +364,11 @@ def render_report(
         "",
         f"- Модель: `{settings.LLM_MODEL}`",
         f"- Судья: `{judge_model}`",
+        *(
+            [f"- Модель разбора (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
+            if any(o.case.input["kind"] == LENS_REVIEW for o in outcomes)
+            else []
+        ),
         f"- Кейсов: {len(outcomes)} · прошло: {len(outcomes) - len(failed)} "
         f"· упало: {len(failed)} (блокирующих: {len(blocking)})",
         f"- Стоимость: ${total:.4f}",
@@ -255,21 +429,26 @@ async def main_async(args) -> int:
                 flush=True,
             )
             return EXIT_SAME_JUDGE
+    lens_warning = lens_same_judge_warning(judge_model_for(settings), settings, cases)
+    if lens_warning is not None:
+        print(lens_warning, flush=True)
 
     # A dry run builds no provider: it exists precisely so the prompt
     # path can be exercised on a machine with no key and no budget.
     if args.dry_run:
-        main = judge = client = None
+        main = judge = review = client = None
         judge_model = judge_model_for(settings)
     else:
         main, judge, judge_model, client = _providers(settings)
+        review = _review_provider(settings, client)
 
     outcomes: list[Outcome] = []
     try:
         async with throwaway_sessionmaker() as sessionmaker:
             for case in cases:
                 outcome = await run_case(
-                    sessionmaker, case, settings, clock, main, judge, args.dry_run
+                    sessionmaker, case, settings, clock, main, judge, args.dry_run,
+                    review=review,
                 )
                 outcomes.append(outcome)
                 if args.dry_run:

@@ -28,7 +28,19 @@ CHAT = "chat"
 CHECKIN = "checkin"
 NEUTRAL = "neutral"
 OUTBOUND = "outbound"
-INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND)
+# L2 (anchor-lens-plan.md sections 7 and 13): the weekly review's lens
+# round -- selector and grounding call -- over a first-pass analysis the
+# case supplies. Not a persona prompt at all; see eval/scenario.py.
+LENS_REVIEW = "lens_review"
+INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW)
+
+# What a lens case's `setup.lens` entries may be, and what its
+# `checks.lens_outcome` may name -- the same values the migration's
+# check constraints allow (app/core/lens_review.py's three outcomes).
+LENS_KINDS = ("person", "concept")
+LENS_OUTCOMES = ("grounded", "empty", "fallback")
+# The first-pass analysis keys app/core/review.py's `validate()` reads.
+ANALYSIS_KEYS = ("wins", "misses", "patterns", "intentions", "proposals")
 
 OUTBOUND_KINDS = ("morning", "evening_nag", "silence", "tick", "weekly_review")
 
@@ -62,7 +74,9 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
     kind = input_block.get("kind")
     _require(kind in INPUT_KINDS, path, f"input.kind must be one of {INPUT_KINDS}")
 
-    if kind == OUTBOUND:
+    if kind == LENS_REVIEW:
+        _check_lens(raw, input_block, path)
+    elif kind == OUTBOUND:
         _require(
             input_block.get("outbound_kind") in OUTBOUND_KINDS,
             path,
@@ -105,6 +119,69 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
         input=input_block,
         checks=checks,
         path=path,
+    )
+
+
+def _check_lens(raw: dict, input_block: dict, path: pathlib.Path) -> None:
+    """A lens case's own shape (L2). Every title a case refers to --
+    links, earlier rounds, the checks -- must be one of its seeded notes,
+    so a renamed note cannot leave a check that passes vacuously."""
+    analysis = input_block.get("analysis")
+    _require(
+        isinstance(analysis, dict) and set(analysis) <= set(ANALYSIS_KEYS),
+        path,
+        f"lens_review cases need an input.analysis table with keys from {ANALYSIS_KEYS}",
+    )
+    setup = raw.get("setup") or {}
+    notes = setup.get("lens")
+    _require(
+        isinstance(notes, list) and notes,
+        path,
+        "lens_review cases need a non-empty setup.lens list",
+    )
+    titles: list[str] = []
+    for note in notes:
+        _require(
+            isinstance(note, dict)
+            and isinstance(note.get("title"), str)
+            and note["title"].strip()
+            and isinstance(note.get("body"), str)
+            and note["body"].strip(),
+            path,
+            "every setup.lens entry needs a title and a body",
+        )
+        _require(
+            note.get("kind", "concept") in LENS_KINDS,
+            path,
+            f"setup.lens kind must be one of {LENS_KINDS}",
+        )
+        titles.append(note["title"])
+    _require(len(set(titles)) == len(titles), path, "setup.lens titles must be unique")
+    known = set(titles)
+    for pair in setup.get("lens_links", []):
+        _require(
+            isinstance(pair, list) and len(pair) == 2 and set(pair) <= known,
+            path,
+            "setup.lens_links entries are [title, title] pairs of seeded notes",
+        )
+    for picked in setup.get("lens_history", []):
+        _require(
+            isinstance(picked, list) and set(picked) <= known,
+            path,
+            "setup.lens_history entries are lists of seeded titles",
+        )
+    checks = raw.get("checks") or {}
+    for key in ("selected_include", "grounds_include"):
+        _require(
+            set(checks.get(key, [])) <= known,
+            path,
+            f"checks.{key} names a title that is not in setup.lens",
+        )
+    outcome = checks.get("lens_outcome")
+    _require(
+        outcome is None or outcome in LENS_OUTCOMES,
+        path,
+        f"checks.lens_outcome must be one of {LENS_OUTCOMES}",
     )
 
 

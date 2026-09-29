@@ -18,9 +18,12 @@
   the database. vaultd's tests use a temp directory and a fake `ob`; the
   vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_*`) are secrets like
   the others above.
-- Lens notes (and only lens notes) may be read, through
+- Lens notes may be read, through
   `psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.<fn>()"`
-  (`lens.notes()`, `lens.graph()`). Every call is logged in `lens_read`
+  (`lens.notes()`, `lens.graph()`, `lens.rounds(n)`). `lens.rounds(n)`
+  returns which notes each weekly review round picked and its outcome,
+  never the rationale (written from the week, so it stays with the
+  user). Every call is logged in `lens_read`
   and counted in the user's daily digest; use plain autocommit `-c`,
   never a transaction you roll back (that is still detected, and shown
   to the user as a read without a record). Lens text never leaves the

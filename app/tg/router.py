@@ -147,8 +147,11 @@ PRIVACY_TEXT = (
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
     "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
     "при /claude library write on — и менять (откат: /claude undo). "
-    "Заметки линзы (и только их) при /lens code on может читать Claude Code "
-    "(прочитанное уходит в Anthropic). "
+    "Заметки линзы при /lens code on может читать Claude Code (прочитанное уходит в Anthropic) — "
+    "вместе с тем, какие из них выбрал еженедельный разбор, но не с объяснением почему: "
+    "оно написано по твоей неделе и видно только тебе. Пока линза включена, еженедельный разбор отправляет модели "
+    "каталог линзы (названия, краткие описания или начало текста, связи) и выбранные "
+    "заметки целиком — как справочный материал. "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -2268,6 +2271,18 @@ def build_router(
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("lr:"))
+    async def lens_round_why(callback: CallbackQuery) -> None:
+        """L2: `lr:w:<lens_round id>` -- a grounded review card's
+        [почему эти заметки?] (app/tg/review.py)."""
+        await review_ui.handle_why_callback(
+            sessionmaker,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
             data=callback.data,
         )
 

@@ -9,7 +9,8 @@ into it: every foreign key in the schema either stays inside that list
 (message -> telegram_update, message -> scene, memory -> memory,
 study_card -> study_clip -> study_job, study_card -> memory,
 note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
-vault_file -> memory,
+vault_file -> memory, lens_round -> weekly_review / lens_version,
+review_proposal -> lens_round,
 vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
@@ -220,6 +221,11 @@ PURGED_TABLES = (
     "note_link",
     "lens_version",
     "lens_read",
+    # L2 (plan section 7): the review's lens rounds. `rationale` is the
+    # selector's own words about this user's week and notes; the ids
+    # point at lens_note, lens_version and weekly_review, all purged in
+    # this statement, and review_proposal.lens_round_id points here.
+    "lens_round",
     "vault_file",
     "vault_hold",
     "vault_status",

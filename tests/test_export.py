@@ -485,6 +485,10 @@ NOT_EXPORTED = {
     "note_link": "the links between the user's own notes, rebuildable from the vault",
     "lens_version": "hashes and counts of the lens, no content",
     "lens_read": "a derived log of Claude Code's lens reads: a function name and a row count",
+    # L2 (plan section 7): which lens notes a review drew on, and the
+    # selector's why. The exported review_proposal rows carry the round
+    # id and the note ids each proposal rests on.
+    "lens_round": "a derived record of which lens notes a review drew on, and the selector's why",
 }
 
 

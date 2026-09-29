@@ -22,7 +22,8 @@ every module in app/, eval/ and scripts/:
 - **L1, the lens** (anchor-lens-plan.md section 5): `app.vault.lens` is
   a third access module, owning `lens_note`, `note_link`,
   `lens_version` and `lens_read`. Its importers are named one by one --
-  the sync pass and /lens -- not "the rest of app/vault/".
+  the sync pass and /lens -- not "the rest of app/vault/". L2 adds
+  `lens_round` to what it owns.
 """
 
 from __future__ import annotations
@@ -63,10 +64,22 @@ ALLOWED_IMPORTERS = {
     # lens tables, and /lens reads counts from them and flips Claude
     # Code's switch (the daily Claude digest asks app/tg/lens.py for its
     # line, and does not import this module itself). Nothing in Echo
-    # reads a lens note's text in L1; L2 adds the review's selector here.
-    # The scheduler asks only whether the door is open or was read
-    # through, so a digest is queued even with both flags off.
-    "app.vault.lens": ("app/vault/sync.py", "app/tg/lens.py", "app/core/scheduler.py"),
+    # reads a lens note's text in L1. The scheduler asks only whether the
+    # door is open or was read through, so a digest is queued even with
+    # both flags off. L2: the weekly review's selector and grounding call
+    # (plan sections 7 and 10: the review reaches the lens, via the
+    # selector); app/core/review.py itself goes through it, never here.
+    # The eval harness seeds its synthetic lens notes through this
+    # module's own writers and reads the round back through its catalog
+    # (L2's lens cases, plan section 13) -- a throwaway database, never
+    # a runtime consumer, and still no table named outside this module.
+    "app.vault.lens": (
+        "app/vault/sync.py",
+        "app/tg/lens.py",
+        "app/core/scheduler.py",
+        "app/core/lens_review.py",
+        "eval/scenario.py",
+    ),
 }
 
 # The one exception to FORBIDDEN_IMPORTERS' "app/web/" below, and only
@@ -98,7 +111,21 @@ TABLES = {
     "note_link": ("app/vault/lens.py", ("note_link", "NoteLink")),
     "lens_version": ("app/vault/lens.py", ("lens_version", "LensVersion")),
     "lens_read": ("app/vault/lens.py", ("lens_read", "LensRead")),
+    # L2: the review's rounds (plan section 7), the same module's.
+    "lens_round": ("app/vault/lens.py", ("lens_round", "LensRound")),
 }
+# L2: words that contain a lens table's name without meaning the table.
+# review_proposal's two new columns hold ids, never a note's text, and
+# review code and the card read and write them by name; the two
+# settings bound a round (app/config.py, app/core/lens_review.py). Only
+# these exact words are set aside before the substring match below; any
+# other word containing a table's name still counts.
+NOT_TABLE_WORDS = (
+    "lens_round_id",
+    "lens_note_ids",
+    "lens_round_max_notes",
+    "lens_round_max_chars",
+)
 # Named by the list, each for a reason: the models define the tables,
 # purge truncates them (/delete), export's comments explain why they
 # are left out (/export), and the measurement script (milestone 8d,
@@ -208,6 +235,7 @@ def _named_tables(tree: ast.AST) -> set[str]:
             words = [node.value]
         else:
             continue
+        words = [word for word in words if word.lower() not in NOT_TABLE_WORDS]
         for table, (_owner, names) in TABLES.items():
             if any(name.lower() in word.lower() for word in words for name in names):
                 named.add(table)
@@ -322,6 +350,9 @@ TABLE_SAMPLES = [
     "q = 'select body from lens_note'\n",
     "q = 'select unresolved_text from note_link'\n",
     "q = 'insert into lens_read (fn, rows) values (1, 2)'\n",
+    "from app.db.models import LensRound\n",
+    "q = 'select rationale from lens_round'\n",
+    "proposal.lens_round_ids\n",
     "from app.db.models import NoteChunkPersonal\n",
     "from app.db import models\nmodels.NoteChunkKnowledge\n",
     "q = 'select text from note_chunk_personal'\n",
@@ -335,6 +366,19 @@ def test_the_table_check_catches_models_and_sql(tmp_path, code):
     path = tmp_path / "sample.py"
     path.write_text(code)
     assert _table_violations(path, "app/core/grants.py")
+
+
+def test_id_columns_and_round_settings_are_not_table_names(tmp_path):
+    """L2: review code stores and the card reads a proposal's round id and
+    note ids by name, and the selector reads its two bounds; those words
+    alone are not the lens tables."""
+    path = tmp_path / "sample.py"
+    path.write_text(
+        "def f(proposal):\n"
+        "    return ReviewProposal(lens_round_id=1, lens_note_ids=[2]), "
+        "proposal.lens_round_id, proposal.lens_note_ids, settings.LENS_ROUND_MAX_NOTES\n"
+    )
+    assert _table_violations(path, "app/tg/review.py") == []
 
 
 def test_the_table_check_ignores_docstrings_but_not_other_strings(tmp_path):
@@ -371,6 +415,17 @@ def test_sync_imports_the_lens_module_and_tg_lens_does_too():
     for rel in ("app/vault/sync.py", "app/tg/lens.py"):
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
         assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens"), rel
+
+
+def test_the_review_reaches_the_lens_only_through_lens_review(tmp_path):
+    """L2: the selector module is the review's one door to the lens, and
+    it does use it; the review module itself is still refused."""
+    tree = ast.parse((ROOT / "app/core/lens_review.py").read_text(encoding="utf-8"))
+    assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens")
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    assert _import_violations(path, "app/core/lens_review.py") == []
+    assert _import_violations(path, "app/core/review.py")
 
 
 def test_an_unrelated_lens_attribute_is_not_an_import(tmp_path):

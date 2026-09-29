@@ -13,9 +13,12 @@ docs/claude-access.md.
 
 One content door is open on purpose (anchor-lens-plan.md section 11,
 L1): the lens. ANCHOR_LENS_DATABASE_URL logs in as `anchor_lens`, a
-role whose only rights are EXECUTE on `lens.notes()` and `lens.graph()`,
-SECURITY DEFINER functions that return lens notes (and nothing else in
-the vault) and log every call in `lens_read`. It is allowed the same way
+role whose only rights are EXECUTE on `lens.notes()`, `lens.graph()`
+and (L2) `lens.rounds(n)`, SECURITY DEFINER functions that return lens
+notes and which notes the review's lens rounds picked, with their
+outcome -- never the selector's rationale, which is written from the
+user's week -- (and nothing else in the vault) and log every call in
+`lens_read`. It is allowed the same way
 as ANCHOR_DEBUG_DATABASE_URL: by not being on the secret list, and by
 the look-behind that keeps a longer name from matching DATABASE_URL.
 The boundary is again the role, not this hook; the user switches its
@@ -114,8 +117,10 @@ RAILWAY_LOGS = "mcp__Railway__get-logs"
 HINT = (
     " Debug with Railway get-logs / deployment status, or query the content-free"
     ' views: psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select ... from debug.<table>".'
-    " Lens notes, and only they, are read through their own role:"
-    ' psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.notes()" (or lens.graph()).'
+    " Lens notes, and which of them the weekly review picked"
+    " (lens.rounds(n), never its rationale), are read through their own role:"
+    ' psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.notes()"'
+    " (or lens.graph(), lens.rounds(n))."
 )
 
 

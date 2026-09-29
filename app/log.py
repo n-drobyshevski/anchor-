@@ -124,6 +124,10 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # cookie or client id.
     "connection_id",
     "request_id",
+    # L2: the weekly review's lens round id only (app/vault/lens.py) --
+    # its outcome goes under "event" and its note count under "count";
+    # never a note title, body or the selector's why.
+    "lens_round_id",
 )
 
 

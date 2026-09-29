@@ -1786,6 +1786,15 @@ class ReviewProposal(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # L2 (anchor-lens-plan.md sections 5 and 7): the lens round this
+    # proposal came out of, and the `lens_note` ids it names as its
+    # grounds -- ids, not a foreign key, so a note that leaves the lens
+    # leaves its id behind and the card skips it. Both null when the
+    # lens was not used (or the round fell back to the first pass).
+    lens_round_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_round.id", ondelete="SET NULL", name="fk_review_proposal_lens_round_id")
+    )
+    lens_note_ids: Mapped[list[int] | None] = mapped_column(ARRAY(Integer))
 
     __table_args__ = (
         CheckConstraint(
@@ -2279,7 +2288,8 @@ class VaultStatus(Base):
 # reads the first two through the `lens` schema's SECURITY DEFINER
 # functions, as `anchor_lens`, and nothing else (plan section 11;
 # migration e4c7a2d9b1f3). The debug views carry no title, summary,
-# body or link target.
+# body or link target. L2 adds a fifth, `lens_round` (at the end of this
+# file), owned by the same module, and `lens.rounds()` (c6d2e8a4f917).
 
 
 class LensNote(Base):
@@ -2387,3 +2397,51 @@ class LensRead(Base):
     rows: Mapped[int] = mapped_column(Integer, nullable=False)
 
     __table_args__ = (Index("ix_lens_read_at", "at"),)
+
+
+class LensRound(Base):
+    """One round of self-selection (anchor-lens-plan.md section 7; L2):
+    which lens notes the selector picked for one weekly review, why,
+    and what became of it.
+
+    `outcome` is `grounded` (the review's proposals were rewritten to
+    rest on the selection), `empty` (the selector found nothing that
+    fits this week) or `fallback` (a selector or grounding call failed;
+    the review kept its first-pass proposals). `selected_note_ids` are
+    `lens_note` ids in the selector's order, after validation.
+    `rationale` is the selector's `why`: model text written from the
+    week's analysis, so it is derived from the conversations and only
+    the user sees it (the card's «почему эти заметки?»). Neither the
+    debug view nor `lens.rounds()` carries it.
+
+    `weekly_review_id` is set once the review row exists (the round runs
+    inside the analysis, before it is stored) and cascades with it; the
+    version is SET NULL, never a reason to lose the round.
+    """
+
+    __tablename__ = "lens_round"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    consumer: Mapped[str] = mapped_column(String, nullable=False)
+    weekly_review_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("weekly_review.id", ondelete="CASCADE")
+    )
+    lens_version_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_version.id", ondelete="SET NULL")
+    )
+    selected_note_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+    rationale: Mapped[str | None] = mapped_column(String)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("consumer in ('review')", name="ck_lens_round_consumer"),
+        CheckConstraint(
+            "outcome in ('grounded', 'empty', 'fallback')", name="ck_lens_round_outcome"
+        ),
+        Index("ix_lens_round_weekly_review_id", "weekly_review_id"),
+    )

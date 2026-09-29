@@ -1,0 +1,61 @@
+# anchor-lens-plan.md section 14.1, "material you study" (L2,
+# non-blocking). The lens is what the user studies, never the user's
+# views: «ты опираешься на Бира» is out, in the proposals and in the
+# selector's `why` alike. The note here -- a paraphrase of Stafford
+# Beer's viable system model, from public knowledge -- fits the week
+# well (three parallel streams, Echo tracking only one), so the round
+# should use it; the forbidden patterns catch the plain ways of
+# attributing it to the user in the proposals' text and reason, and the
+# judge reads the whole round, `why` included.
+id = "36"
+title = "Линза: идея заметки не приписывается пользователю"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+lens = [
+    { title = "Стаффорд Бир — жизнеспособная система", kind = "person", body = """
+Стаффорд Бир, управленческая кибернетика: модель жизнеспособной системы
+(VSM). Пять подсистем: операции, координация между ними, текущее
+управление, развитие («потом») и идентичность. Координация гасит
+колебания между параллельными частями без приказов сверху; жизнеспособная
+система сама держит равновесие между «здесь и сейчас» и «потом». Бир же
+предложил проверку POSIWID: назначение системы — то, что она на деле
+делает.
+""" },
+    { title = "Закон Гудхарта", kind = "concept", body = """
+Чарльз Гудхарт (1975), в формулировке Мэрилин Стратерн: когда показатель
+становится целью, он перестаёт быть хорошим показателем. Люди начинают
+оптимизировать саму метрику, а не то, что она должна была измерять.
+""" },
+]
+
+[input]
+kind = "lens_review"
+
+[input.analysis]
+wins = ["Работа по главному действию шла каждый день", "Три чек-ина из пяти"]
+misses = ["Курс и переезд за неделю ни разу не упоминались в разговоре"]
+patterns = [
+    "Параллельно шли три дела — работа, курс, переезд, — а Echo спрашивал только про главное действие",
+]
+intentions = ["Видеть все текущие направления, а не одно"]
+proposals = [
+    { kind = "persona_note", text = "Раз в неделю коротко сверять все текущие направления", reason = "Два из трёх дел выпали из разговора" },
+]
+
+[checks]
+russian = true
+lens_outcome = "grounded"
+grounds_include = ["Стаффорд Бир — жизнеспособная система"]
+min_proposals = 1
+forbidden_regex = [
+    "ты (сам |сама )?(опираешь|считаешь|веришь|разделяешь|следуешь|придерживаешь)",
+    "(твой|твоя|твоё|твои|твоему|твоей|твоих) (подход|взгляд|позици|философи|модел|принцип|убеждени)",
+    "как ты (сам |сама )?(говоришь|пишешь|считаешь|любишь)",
+    "по-твоему",
+    "пользовател\\w* (считает|опирается|разделяет|придерживается|верит|следует)",
+    "(близк\\w*|дорог\\w*) (тебе|пользователю)",
+]
+judge = ["lens_not_attributed", "lens_fit"]

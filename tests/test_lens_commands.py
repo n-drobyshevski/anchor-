@@ -136,6 +136,10 @@ async def test_code_on_and_off_flip_the_role(sessionmaker, nologin_after):
 
     reply = await lens_ui.command(sessionmaker, Settings(), FrozenClock(NOW), "code on")
     assert reply == lens_ui.CODE_SET_ON
+    # L2: the consent reply names every door the role opens, lens.rounds()
+    # included, and says the review's rationale is not one of them.
+    assert "lens.rounds()" in reply and "какие заметки выбрал еженедельный разбор" in reply
+    assert "но не объяснение почему" in reply and "видно только тебе" in reply
     assert await _can_login(sessionmaker) is True
     status = await lens_ui.command(sessionmaker, Settings(), FrozenClock(NOW), None)
     assert lens_ui.CODE_ON_LINE in status.splitlines()

@@ -705,6 +705,14 @@ class Settings(BaseSettings):
     # not use the lens at all rather than silently dropping notes. In L1
     # only /lens reads it, to warn.
     LENS_CATALOG_MAX_NOTES: int = 300
+    # --- L2: the weekly review's lens round (plan section 7) ---
+    #
+    # The most notes one round may carry into the grounding call, and
+    # the most characters of their bodies together. Notes are kept in
+    # the selector's order until either is reached; a note that would
+    # overflow the budget ends the list (app/core/lens_review.py).
+    LENS_ROUND_MAX_NOTES: int = 6
+    LENS_ROUND_MAX_CHARS: int = 24000
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -993,6 +1001,11 @@ NOTES_IN_PROMPT_MAX = 5
 # 2000 nodes (knowledge and lens together), so a larger limit could
 # never be reached honestly.
 LENS_CATALOG_MAX_NOTES_CEILING = 2000
+# L2: the bounds on a round's selection. More than 12 notes or 100k
+# characters is not a frame any more, it is the library; under 2000
+# characters not even one ordinary note fits.
+ROUND_MAX_NOTES_RANGE = (1, 12)
+ROUND_MAX_CHARS_RANGE = (2000, 100000)
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1173,6 +1186,13 @@ def check_vault_settings(settings: Settings) -> None:
             f"LENS_CATALOG_MAX_NOTES must be between 1 and {LENS_CATALOG_MAX_NOTES_CEILING}, "
             f"got {settings.LENS_CATALOG_MAX_NOTES}."
         )
+    for name, (low, high) in (
+        ("LENS_ROUND_MAX_NOTES", ROUND_MAX_NOTES_RANGE),
+        ("LENS_ROUND_MAX_CHARS", ROUND_MAX_CHARS_RANGE),
+    ):
+        value = getattr(settings, name)
+        if not low <= value <= high:
+            raise SystemExit(f"{name} must be between {low} and {high}, got {value}.")
     mode = settings.VAULT_MODE
     if mode not in VALID_VAULT_MODES:
         raise SystemExit(

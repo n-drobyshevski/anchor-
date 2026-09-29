@@ -45,3 +45,21 @@ def test_the_lens_clause_is_in_both_places():
     assert "/lens code on" in PRIVACY_TEXT and "/lens code on" in doc
     assert "прочитанное уходит в Anthropic" in PRIVACY_TEXT
     assert "what it reads goes to Anthropic" in doc
+
+
+def test_the_lens_review_clause_is_in_both_places():
+    """L2: which notes the review picked, which Claude Code can read, the
+    rationale it cannot (written from the week, so only the user sees
+    it), and what the weekly review sends the model while the lens is
+    on, in both copies."""
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
+    assert "какие из них выбрал еженедельный разбор" in PRIVACY_TEXT
+    assert "но не с объяснением почему" in PRIVACY_TEXT and "видно только тебе" in PRIVACY_TEXT
+    assert "which of them the weekly review picked" in doc
+    assert "but not its explanation of" in doc and "only you see" in doc
+    assert "объяснениями еженедельного разбора" not in PRIVACY_TEXT
+    assert "explanations of why it picked them" not in doc
+    assert "еженедельный разбор отправляет модели каталог линзы" in PRIVACY_TEXT
+    assert "review sends the model the lens catalog" in doc
+    assert "начало текста, связи" in PRIVACY_TEXT and "start of the text, links" in doc
+    assert "(и только их)" not in PRIVACY_TEXT and "and only they" not in doc

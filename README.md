@@ -31,7 +31,7 @@ no model call, no outbound).
 | Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows; knowledge notes through a standing `/claude library on` switch (C3) | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https); the library also needs `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED` |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
-| The lens (L1): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. Echo does not use them yet | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300) only warns in `/lens`; Claude Code's access is `/lens code on` |
+| The lens (L1, L2): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. The weekly review picks the notes that fit its week and grounds its proposals in them (L2) | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300): above it the review does not use the lens and `/lens` warns; `LENS_ROUND_MAX_NOTES` (6, 1–12) and `LENS_ROUND_MAX_CHARS` (24000, 2000–100000) cap what one review round reads; Claude Code's access is `/lens code on` |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -70,8 +70,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
-| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today | — (the lens itself: `LENS_ENABLED`) |
-| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, and only them / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
+| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round | — (the lens itself: `LENS_ENABLED`) |
+| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes and which of them each review round picked (never the review's explanation) / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -1209,13 +1209,13 @@ is the only request 8e adds.
 This is the contract. A later phase that adds a consumer of notes cites
 it, and extends the isolation tests.
 
-| Where | Personal notes | Knowledge notes | Lens notes (L1) |
+| Where | Personal notes | Knowledge notes | Lens notes (L1, L2) |
 |---|---|---|---|
 | The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge |
 | The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never | never |
 | The notebook, `/mind` | never | never | never in L1 |
 | Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never | never in L1 |
-| The weekly review | never | never | never in L1 |
+| The weekly review | never | never | **yes, via the selector (L2)**: the catalog and the notes it picks, never with the week's own input |
 | Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never in L1 |
 | `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e | never |
 | Claude connector's `search_library` (C3) | never | yes, under `/claude library on` | yes, as knowledge |
@@ -1301,6 +1301,56 @@ gap in the row ids, reported as a read without a record. `/lens code off` closes
 sessions. CLAUDE.md keeps lens text out of the repo. Setup:
 [docs/claude-access.md](docs/claude-access.md), "Lens notes"; why it is
 built this way: docs/decisions.md, "L1 — the lens".
+
+## Milestone L2 — the review reads the lens
+
+With the lens on (`LENS_ENABLED`, and 1 to `LENS_CATALOG_MAX_NOTES`
+notes), the weekly review picks the lens notes that fit its week and
+grounds its proposals in them (`anchor-lens-plan.md` §6, §7). With it
+off, the review is exactly what it was.
+
+### How a round runs
+
+1. The review's own analysis, unchanged: same model, prompt and input.
+2. **The selector**, one call on the same model: it sees that
+   analysis and a one-line catalog of the lens (title, person or
+   concept, summary, linked lens notes, rounds since last used), never
+   the week itself. It picks at most `LENS_ROUND_MAX_NOTES` (6) notes,
+   within `LENS_ROUND_MAX_CHARS` (24000) of bodies, and says why. It is
+   asked to include a note unused for four rounds or more when one
+   fits, so the lens does not shrink to two favourites. Picking none is
+   allowed.
+3. **Grounding**, one more call, when it picked any: the analysis plus
+   the picked notes, as reference material and never as your views.
+   It rewrites the proposals, each naming the notes it rests on. They
+   replace the first pass's proposals, under the same kinds, caps and
+   screening. The review's prohibitions (no raising intensity, no
+   punishments) outrank any note.
+
+Each round is a `lens_round` row (the notes picked, the selector's
+reason, `grounded`, `empty` or `fallback`). If either extra call fails
+(provider error, bad JSON, the spend cap), the review keeps its first
+proposals and records `fallback`: the lens never fails a review. Both
+calls are charged to the review's ledger category and cap.
+
+### What you see
+
+- The proposal card shows «основание: A, B», the current titles of the
+  notes a proposal rests on, and a button «почему эти заметки?» that
+  answers with the selector's reason.
+- `/lens` adds «последний разбор: <date>, <outcome>».
+- Claude Code can read the rounds, with their outcome and the picked
+  notes' titles, through `lens.rounds(n)` on the `anchor_lens` role,
+  counted like any lens read. Never the reason: it is written from
+  your week, so only you see it; `debug.lens_round` has everything but
+  the reason too.
+- The lens's summaries and the picked notes now go to the model
+  provider during the review, only while `LENS_ENABLED` is on
+  (docs/privacy.md). `/delete` erases `lens_round` with the other lens
+  tables, and `/export` leaves it out, as it leaves them out.
+
+Why it is built this way: docs/decisions.md, "L2 — the review reads the
+lens".
 
 ## Web UI
 
@@ -1536,8 +1586,8 @@ the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
 a role that can read only the content-free `debug.*` views. The one
 content door is the lens (L1): `ANCHOR_LENS_DATABASE_URL` logs in as
-`anchor_lens`, which can call `lens.notes()` and `lens.graph()` and
-nothing else, only while `/lens code on`, and every call is counted. See
+`anchor_lens`, which can call `lens.notes()`, `lens.graph()` and
+`lens.rounds(n)` and nothing else, only while `/lens code on`, and every call is counted. See
 [docs/claude-access.md](docs/claude-access.md).
 
 ### Grok (opt-in)

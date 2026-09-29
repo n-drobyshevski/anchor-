@@ -7,7 +7,9 @@ L1 has two commands:
   LENS_CATALOG_MAX_NOTES (the selector, from L2, will not use an
   oversized lens at all rather than drop notes silently), whether
   Claude Code may log in as `anchor_lens`, and how many times the
-  `lens` functions were read today.
+  `lens` functions were read today. L2 adds when the newest lens round
+  ran (the weekly review's self-selection, app/core/lens_review.py) and
+  how it ended -- the outcome, never the selector's `why` or a title.
 - `/lens code on|off` flips the role's LOGIN. Off also ends the
   sessions already open. When the bot's database user may not alter
   the role, or the role does not exist, the reply says so and points
@@ -44,6 +46,14 @@ CODE_ON_LINE = "Claude Code: доступ к линзе открыт (роль a
 CODE_OFF_LINE = "Claude Code: доступ к линзе закрыт."
 CODE_MISSING_LINE = "Claude Code: роли anchor_lens нет — см. docs/claude-access.md."
 READS_LINE = "Чтений сегодня: {n}."
+# L2: the newest `lens_round`, in the user's local date; one outcome
+# phrase per ck_lens_round_outcome value (app/vault/lens.py's ROUND_OUTCOMES).
+LAST_ROUND_LINE = "Последний разбор: {date}, {outcome}."
+ROUND_OUTCOME_TEXT = {
+    "grounded": "предложения опираются на линзу",
+    "empty": "подходящих заметок не нашлось",
+    "fallback": "линза не сработала, предложения без неё",
+}
 UNRECORDED_LINE = (
     "Чтений без записи: {n} — транзакция чтения была откачена (или база упала и сбила "
     "счётчик). Такое чтение могло вернуть заметки; см. docs/claude-access.md."
@@ -55,8 +65,10 @@ USAGE = (
 )
 
 CODE_SET_ON = (
-    "Доступ открыт: Claude Code может читать линзу — только её, через lens.notes() и "
-    "lens.graph(). Каждое чтение считается. Закрыть: /lens code off"
+    "Доступ открыт: Claude Code может читать линзу через lens.notes(), lens.graph() и "
+    "lens.rounds() — последнее отдаёт, какие заметки выбрал еженедельный разбор, но не "
+    "объяснение почему: оно написано по твоей неделе и видно только тебе. Больше ничего "
+    "из заметок. Каждое чтение считается. Закрыть: /lens code off"
 )
 CODE_SET_OFF = "Доступ закрыт."
 CODE_SET_OFF_TERMINATED = "Доступ закрыт, оборвано сессий: {n}."
@@ -98,6 +110,7 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
         start, end = _day_bounds(clock_module.local_date(clock, timezone), timezone)
         reads = await lens.reads_between(session, start, end)
         unrecorded = await lens.unrecorded_reads(session)
+        last = await lens.last_round(session)
     people, concepts = per_kind.get("person", 0), per_kind.get("concept", 0)
     lines = [
         ON_LINE if settings.LENS_ENABLED else OFF_LINE,
@@ -110,6 +123,13 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
     else:
         lines.append(CODE_ON_LINE if can_login else CODE_OFF_LINE)
     lines.append(READS_LINE.format(n=reads))
+    if last is not None:
+        lines.append(
+            LAST_ROUND_LINE.format(
+                date=clock_module.local_date_of(last.created_at, timezone).strftime("%d.%m.%Y"),
+                outcome=ROUND_OUTCOME_TEXT.get(last.outcome, last.outcome),
+            )
+        )
     if unrecorded:
         lines.append(UNRECORDED_LINE.format(n=unrecorded))
     return "\n".join(lines)
