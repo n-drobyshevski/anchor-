@@ -131,6 +131,9 @@ async def _build_state_dto(session, settings, clock) -> dict:
         },
         "limits": {"due_max_len": commands_core.DUE_ACTION_MAX_LEN},
         "claude_write_limits": await _claude_limits_dto(session, settings),
+        "claude_counters_reset_at": (
+            _iso(await write_limits.counters_reset_at(session)) if settings.CLAUDE_ACCESS_ENABLED else None
+        ),
     }
 
 
@@ -419,6 +422,34 @@ async def post_claude_limits(request: web.Request) -> web.Response:
     return _json(200, {"state": dto, "vault_pending": pushed is False})
 
 
+# --- POST /api/state/claude-counters/reset --------------------------------
+
+
+async def post_claude_counters_reset(request: web.Request) -> web.Response:
+    """Zero Claude's hourly and daily write counters -- the web's
+    «Обнулить счётчики», the same `reset_counters_and_push` as
+    `/claude limits counters`. The caps themselves stay as they are.
+    No body. 404 while Claude access is off, like claude-limits."""
+    if not await _session_token_valid(request):
+        return _json(401, {"error": "unauthenticated"})
+    settings, sessionmaker, clock, _bot = _cookie_settings(request)
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        return _json(404, {"error": "not_found"})
+    limiter: WebRateLimiter = request.app["web_rate_limiter"]
+    hub: WebHub = request.app["web_hub"]
+
+    retry = limiter.check_panel_write()
+    if retry is not None:
+        return _rate_limited(retry)
+
+    async with sessionmaker() as session:
+        pushed = await write_limits.reset_counters_and_push(session, settings, clock)
+        dto = await _build_state_dto(session, settings, clock)
+
+    hub.publish_invalidate("state")
+    return _json(200, {"state": dto, "vault_pending": pushed is False})
+
+
 # --- POST /api/state/pause ------------------------------------------------
 
 
@@ -489,3 +520,4 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/state/timezone", post_timezone)
     app.router.add_post("/api/state/pause", post_pause)
     app.router.add_post("/api/state/claude-limits", post_claude_limits)
+    app.router.add_post("/api/state/claude-counters/reset", post_claude_counters_reset)

@@ -2644,3 +2644,32 @@ not settings", **for these nine caps only**:
   pre-images over the 14-day TTL, against about 170 MB at the defaults.
   Accepted: it only happens if you raise them.
 
+## Claude write counters can be reset
+
+Hitting a daily cap (say, 40 new notes) meant waiting until midnight
+or raising the cap. Your decision: a «сбросить счётчики» that starts
+every hourly and daily count over, without touching the caps.
+
+- **Telegram:** `/claude limits counters`, or «🔄 Обнулить счётчики»
+  (`cw:c`) under `/claude limits`. **Web app:** «Обнулить счётчики» in
+  the «Лимиты записи Claude» card (`POST
+  /api/state/claude-counters/reset`), which also shows when they were
+  last reset. Like the caps, the web may do this: a stolen web session
+  could keep handing Claude fresh budgets (each reset is one panel
+  write, rate-limited like the rest), but could already raise the caps
+  themselves, and still cannot turn writing on.
+- **How:** a moment, not a deletion. `vault_status.claude_counters_reset_at`
+  is stamped (whole seconds); every hourly/daily count -- changesets,
+  undos, creates, bytes, folders, moves -- only counts changesets
+  started at or after it. The next write opens a fresh changeset, so
+  the per-changeset caps start over too. The ledger is untouched, so
+  undo and the digest still see everything.
+- **vaultd** gets the same moment as `counters_reset_at` (unix
+  seconds) in `PUT /v1/limits`, through the same push and self-healing
+  reconcile as the caps, and applies it to its own hourly and rolling
+  24h counters. The bot sends the key only once a reset has happened,
+  so a vaultd that predates it keeps working until then (a reset
+  pushed to it is refused and stays pending; the bot's own counters
+  are reset either way).
+- `/delete` leaves the moment in place: it is a timestamp, no content.
+

@@ -2257,6 +2257,12 @@ class VaultStatus(Base):
     limits_push_pending: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
+    # The user's last «сбросить счётчики» for Claude's writes: every
+    # hourly/daily cap counts only changesets started since (app/core/
+    # claude_write_limits.py's `reset_counters`). NULL = never.
+    claude_counters_reset_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_vault_status_singleton"),

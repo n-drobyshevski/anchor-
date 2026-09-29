@@ -1,6 +1,7 @@
 // The state screen (#/state, nav label "Состояние"): read/write the
 // StateDTO the W2 HTTP contract defines (GET /api/state, POST
-// /api/state/{due,focus,quiet,timezone,pause,claude-limits}). Three cards (Действие,
+// /api/state/{due,focus,quiet,timezone,pause,claude-limits,
+// claude-counters/reset}). Three cards (Действие,
 // Режим's rows, Траты) and a quiet metadata line; each field's card or
 // row owns its own edit/busy/error state; the screen component
 // itself only owns the fetched StateDTO and the plumbing every card's
@@ -711,7 +712,21 @@ function LimitRow({ item, onSet }) {
   `;
 }
 
-function ClaudeLimitsCard({ limits, onSet }) {
+// «Обнулить счётчики» (POST /api/state/claude-counters/reset; Telegram's
+// /claude limits counters): every hourly and daily count starts over,
+// the caps themselves stay as they are.
+function ClaudeLimitsCard({ limits, resetAt, timezone, onSet, onResetCounters }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function resetCounters() {
+    setBusy(true);
+    setError('');
+    const result = await onResetCounters();
+    setBusy(false);
+    if (result !== true) setError(result);
+  }
+
   return html`
     <section class="card" aria-labelledby="claude-limits-heading">
       <h2 id="claude-limits-heading">Лимиты записи Claude</h2>
@@ -719,6 +734,14 @@ function ClaudeLimitsCard({ limits, onSet }) {
       <ul class="card-list">
         ${limits.map((item) => html`<${LimitRow} key=${item.key} item=${item} onSet=${onSet} />`)}
       </ul>
+      <div class="card-footer">
+        ${error
+          ? html`<p class="inline-error" role="alert">${error}</p>`
+          : resetAt
+            ? html`<span class="field-hint">счётчики обнулены ${dayWordInTz(resetAt, timezone)} в <span class="mono">${formatHmInTz(resetAt, timezone)}</span></span>`
+            : html`<span></span>`}
+        <button type="button" class="btn" disabled=${busy} onClick=${resetCounters}>Обнулить счётчики</button>
+      </div>
     </section>
   `;
 }
@@ -814,8 +837,8 @@ export function State() {
   const toggleFocus = (on) => applyMutation('/api/state/focus', { on });
   const setQuiet = (until) => applyMutation('/api/state/quiet', { until });
   const changeTz = (tz) => applyMutation('/api/state/timezone', { tz });
-  const setClaudeLimit = async (key, value) => {
-    const res = await apiPost('/api/state/claude-limits', { key, value });
+  const claudeLimitsPost = async (path, body) => {
+    const res = await apiPost(path, body);
     if (res.status === 200 && res.data && res.data.state) {
       setState(res.data.state);
       pushToast(res.data.vault_pending ? 'Сохранено, vault обновится позже.' : 'Сохранено.');
@@ -835,6 +858,8 @@ export function State() {
     }
     return 'Не сохранено.';
   };
+  const setClaudeLimit = (key, value) => claudeLimitsPost('/api/state/claude-limits', { key, value });
+  const resetClaudeCounters = () => claudeLimitsPost('/api/state/claude-counters/reset', {});
 
   // Pause has no `state` in its response (202 {}) -- the toggle's own
   // paint (PauseCard's aria-checked) only catches up once the tail's
@@ -898,7 +923,13 @@ export function State() {
         />
         <${SpendCard} spend=${state.spend} />
         ${state.claude_write_limits
-          ? html`<${ClaudeLimitsCard} limits=${state.claude_write_limits} onSet=${setClaudeLimit} />`
+          ? html`<${ClaudeLimitsCard}
+              limits=${state.claude_write_limits}
+              resetAt=${state.claude_counters_reset_at}
+              timezone=${state.timezone}
+              onSet=${setClaudeLimit}
+              onResetCounters=${resetClaudeCounters}
+            />`
           : null}
         <${MetaLine} state=${state} />
       </div>

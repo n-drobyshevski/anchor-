@@ -2447,7 +2447,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("cw:"))
     async def claude_limits_callback(callback: CallbackQuery) -> None:
-        """`cw:s:<key>:<value>` / `cw:r` / `cw:i:<key>` -- `/claude
+        """`cw:s:<key>:<value>` / `cw:r` / `cw:c` / `cw:i:<key>` -- `/claude
         limits`' own +/- keyboard. Telegram only, like `cl:`/`cu:`: the
         web app has its own card for the same caps
         (POST /api/state/claude-limits)."""
