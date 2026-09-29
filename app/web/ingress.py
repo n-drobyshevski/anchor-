@@ -58,7 +58,9 @@ from app.web.hub import WebHub
 # (app/tg/grok.py), which must only ever be shown in Telegram. `claude`
 # joins it because `/claude connect <code>` *approves* an OAuth
 # connection (app/tg/claude.py): Telegram is the only approval channel.
-BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude"})
+# `lens` joins it for the same reason: `/lens code on` opens a database
+# login for Claude Code (app/tg/lens.py, anchor-lens-plan.md section 11).
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude", "lens"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather

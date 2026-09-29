@@ -15,10 +15,22 @@ import re
 from typing import Callable
 
 from app.vault import errors
-from app.vault.client import FileContent, Manifest, ManifestEntry, NotesSummary, ServiceStatus
+from app.vault.client import (
+    FileContent,
+    Graph,
+    GraphEdge,
+    GraphNode,
+    Manifest,
+    ManifestEntry,
+    NotesSummary,
+    ServiceStatus,
+)
 from app.vault.errors import VaultError
 
 WRITABLE = re.compile(r"^Anchor/(Memory|Journal)/[^/]+\.md$")
+# L1: `[[target]]`, `[[target|label]]`, `[[target#heading]]` -- enough
+# of vaultd's links.py for the fake graph. Embeds are skipped.
+WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#]*)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 
 def sha(data: str) -> str:
@@ -52,6 +64,15 @@ class FakeVault:
         # own. `limit_puts` records every PUT body.
         self.limits: dict[str, int] | None = None
         self.limit_puts: list[dict[str, int]] = []
+        # L1 (lens plan sections 3-4): a lens note's kind, path -> person
+        # or concept (a lens note missing here is a concept), frontmatter
+        # summaries the graph reports, a graph to return instead of the
+        # one computed from `notes`, and an error to raise from the
+        # graph route.
+        self.lens_kinds: dict[str, str] = {}
+        self.summaries: dict[str, str] = {}
+        self.graph: Graph | None = None
+        self.graph_error: VaultError | None = None
 
     # The factory the sync pass takes.
     def __call__(self, settings) -> "FakeVault":
@@ -94,10 +115,57 @@ class FakeVault:
             if WRITABLE.match(path)
         ]
         entries += [
-            ManifestEntry(path, sha(content), len(content.encode()), "note", note_class)
+            ManifestEntry(
+                path,
+                sha(content),
+                len(content.encode()),
+                "note",
+                note_class,
+                self.lens_kinds.get(path, "concept") if note_class == "lens" else None,
+            )
             for path, (note_class, content) in sorted(self.notes.items())
         ]
         return Manifest(entries, self.summary)
+
+    async def knowledge_graph(self) -> Graph:
+        """vaultd's graph over `notes`: knowledge and lens nodes; a link to
+        another of those is `dst`, to a personal note `outside` (nothing
+        named), to nothing `unresolved`."""
+        self.calls.append(("graph", ""))
+        self._check()
+        if self.graph_error is not None:
+            raise self.graph_error
+        if self.graph is not None:
+            return self.graph
+        by_title = {
+            path.rsplit("/", 1)[-1].removesuffix(".md"): path for path in sorted(self.notes)
+        }
+        nodes, edges = [], []
+        for path, (note_class, content) in sorted(self.notes.items()):
+            if note_class not in ("knowledge", "lens"):
+                continue
+            nodes.append(
+                GraphNode(
+                    path=path,
+                    title=path.rsplit("/", 1)[-1].removesuffix(".md"),
+                    note_class=note_class,
+                    lens_kind=self.lens_kinds.get(path, "concept") if note_class == "lens" else None,
+                    aliases=(),
+                    tags=(),
+                    summary=self.summaries.get(path),
+                    chars=len(content),
+                )
+            )
+            for match in WIKILINK.finditer(content):
+                target = match.group(1).strip()
+                dst = by_title.get(target.rsplit("/", 1)[-1])
+                if dst is None:
+                    edges.append(GraphEdge(src=path, unresolved=target))
+                elif self.notes[dst][0] in ("knowledge", "lens"):
+                    edges.append(GraphEdge(src=path, dst=dst))
+                else:
+                    edges.append(GraphEdge(src=path, outside=True))
+        return Graph(nodes=nodes, edges=edges, truncated=False)
 
     async def get_file(self, path: str) -> FileContent:
         self.calls.append(("get", path))

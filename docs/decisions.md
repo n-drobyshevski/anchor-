@@ -2673,3 +2673,83 @@ every hourly and daily count over, without touching the caps.
   are reset either way).
 - `/delete` leaves the moment in place: it is a timestamp, no content.
 
+## L1 — the lens
+
+`anchor-lens-plan.md` rev. 3, milestone L1: the `lens` class, the
+graph, the bot's copy of the lens, and Claude Code's read-only door to
+it. Echo itself does not use the lens yet (L2). Your decisions (§14):
+the lens is material Echo studies, never your views; under 50 notes
+today; people and concepts by folder (`lens_person_folders`).
+
+- **Claude Code reads through a role and two functions, not a view.**
+  `anchor_lens` has `EXECUTE` on `lens.notes()` and `lens.graph()` and
+  nothing else. A view cannot write, so a `SELECT` on one leaves no
+  trace; a `SECURITY DEFINER` function inserts its `lens_read` row
+  before it returns. That count feeds `/lens` and the digest line,
+  «Claude Code прочитал линзу: N раз». The row is in the caller's
+  transaction, so a rollback removes it; each call therefore takes the
+  row's id first, from the table's sequence, which no rollback undoes,
+  and `/lens` (and the digest) report the gaps as reads without a
+  record. Not an autonomous write (no `dblink` extension to depend on),
+  but no read goes unseen. The functions pin `search_path` and are
+  revoked from `PUBLIC`. The door is `LOGIN`, which you flip with
+  `/lens code on|off`; the password is set once by hand, as for
+  `anchor_debug`, so the bot never holds it.
+- **Lens is below knowledge in strictness** (`never > personal >
+  knowledge > lens`). Lens is a kind of knowledge, so every existing
+  consumer (the index, `search_library`) keeps working unchanged, and
+  "stricter wins" can only ever make the lens *smaller*:
+  - `anchor: knowledge` on one note in a lens folder excludes that note;
+  - `anchor: lens` inside a personal or never folder is not lens;
+
+  Two shapes make the settings file invalid (fail closed), like any
+  other settings error, because each is a mistake you would never see:
+  - a lens folder nested in a knowledge, personal or never folder.
+    Stricter wins would turn all of it into the outer class: a lens
+    that is silently empty, and under a knowledge folder writable by
+    Claude. (The first draft let it resolve to knowledge; review found
+    that the plan's own example, `Library/Lens` under `Library`, hit
+    exactly this.)
+  - a `lens_person_folders` entry outside every lens folder: a person
+    rule that covers nothing.
+- **W2 cannot write lens notes.** `PUT /v1/knowledge` and
+  `POST /v1/knowledge/rename` refuse a lens note as the source, and a
+  write or move whose destination would be lens, with the existing
+  "not knowledge" refusal. The lens is what Echo will reason with when
+  it changes itself. A claude.ai chat, or text it read that carries
+  instructions, must not be able to reshape it; a move into a lens
+  folder would be a model choosing lens membership, which is yours
+  alone. Only you change the lens. `list_tree` marks lens notes so
+  Claude knows before it tries.
+- **The graph never names an outside note.** A link from a knowledge
+  or lens note to a note that exists but is personal, never,
+  unclassified or under `Anchor/` becomes `{"outside": true}`: no path,
+  no title, not even the link's own target text, because `[[Name]]`
+  *is* the name. It is counted so the graph's shape stays honest.
+  Existence and name of a hidden note are its content, as 8e already
+  holds for `/vault` ("invisible notes are counts, never paths"). A link
+  to no note at all keeps its target text (`unresolved`): that text is
+  written in a note the bot may already read. `frontmatter`'s
+  `aliases`, `tags` and `summary` are read for knowledge and lens notes
+  only.
+- **Storage.** `lens_note` holds each lens note whole, only while notes
+  consent, `VAULT_KNOWLEDGE_ENABLED` and `LENS_ENABLED` are all on; any
+  one off deletes the rows on the next pass, as the knowledge index
+  does. `note_link` (knowledge and lens links, from the graph) follows
+  the knowledge gates. `lens_version` gets a row only when the hash over
+  the sorted body hashes and lens-to-lens edges is new. Only
+  `app/vault/lens.py` touches the four tables, pinned by
+  `tests/test_vault_notes_isolation.py`. Their debug views carry ids,
+  hashes, lengths, booleans and counts; `debug.note_link` has
+  `unresolved` as a boolean, never the text.
+- **The digest runs with `LENS_ENABLED` alone.** Lens reads need no
+  connector, so the daily Claude digest is queued when either
+  `CLAUDE_ACCESS_ENABLED` or `LENS_ENABLED` is on, and still sends
+  nothing on a day with nothing to report.
+- **`/lens` is Telegram-only**, like `/claude`: opening a database door
+  is an access decision a web session must not make.
+- **Lens text stays out of the repo.** CLAUDE.md lets Claude Code read
+  lens notes and forbids copying their text into commits, PRs, code,
+  fixtures, eval cases, logs or artifacts: it paraphrases from public
+  knowledge and cites the note by id. `lens_read` shows how often it
+  reads.

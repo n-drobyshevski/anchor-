@@ -67,6 +67,10 @@ from app.db.models import (
     WeeklyReview,
     NoteChunkKnowledge,
     NoteChunkPersonal,
+    LensNote,
+    LensRead,
+    LensVersion,
+    NoteLink,
     VaultFile,
     VaultHold,
     VaultStatus,
@@ -410,6 +414,17 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         await session.flush()
         session.add(NoteChunkPersonal(file_id=note.id, ord=0, heading="Бег", text="Бегаю по утрам в парке."))
         session.add(NoteChunkKnowledge(file_id=library.id, ord=0, heading="CCRU", text="Hyperstition."))
+        # L1: the lens -- the knowledge note kept whole, a link out of
+        # it, a version and one Claude Code read.
+        session.add(
+            LensNote(
+                vault_file_id=library.id, kind="concept", title="CCRU", body="Hyperstition.",
+                body_hash="h" * 64, chars=13,
+            )
+        )
+        session.add(NoteLink(src_file_id=library.id, unresolved_text="Land"))
+        session.add(LensVersion(hash="v" * 64, note_count=1))
+        session.add(LensRead(fn="notes", rows=1))
         session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 

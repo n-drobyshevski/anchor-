@@ -252,7 +252,9 @@ TOOLS = {
             "the most specific existing folder that fits, match the existing naming style, and "
             "create a new subfolder (inside a knowledge folder only) only when it groups several "
             "related notes -- never at the top level. Use rename_note to reorganise; moves have "
-            "their own budget. Only while the write switch is on."
+            "their own budget. Each note carries its class: a `lens` note is the user's own lens "
+            "and is read-only -- update_note and rename_note refuse it. Only while the write "
+            "switch is on."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _WRITE_READ_ONLY,

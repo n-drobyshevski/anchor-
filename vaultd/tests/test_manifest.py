@@ -73,3 +73,28 @@ def test_losing_the_opt_in_drops_the_note(vault: Path) -> None:
     assert manifest.scan().entries == []
     path.unlink()
     assert manifest.scan().entries == []
+
+
+def test_lens_kind_follows_the_settings_without_rereading_notes(vault: Path) -> None:
+    """Lens plan section 3: the kind, like the class, is recomputed from
+    the cached mark on every scan, so moving a folder rule re-sorts
+    people and concepts with no note read again."""
+    settings = "---\nanchor: settings\nlens_folders: [Lens]\n{extra}---\n"
+    write(vault, "Anchor/settings.md", settings.format(extra=""))
+    write(vault, "Lens/People/Fisher.md", "Текст.\n")
+    write(vault, "Library/Note.md", "---\nanchor: knowledge\n---\n")
+    manifest = Manifest(vault)
+    first = [e.as_json() for e in manifest.scan().entries]
+    assert [(e["path"], e["class"], e.get("lens_kind")) for e in first] == [
+        ("Lens/People/Fisher.md", "lens", "concept"),
+        ("Library/Note.md", "knowledge", None),
+    ]
+    assert "lens_kind" not in first[1]
+
+    write(vault, "Anchor/settings.md", settings.format(extra="lens_person_folders: [Lens/People]\n"))
+    second = manifest.scan()
+    assert manifest.last_reads == 0
+    assert [(e.path, e.lens_kind) for e in second.entries] == [
+        ("Lens/People/Fisher.md", "person"),
+        ("Library/Note.md", None),
+    ]

@@ -66,7 +66,7 @@ A new effective class, `lens`, sits below `knowledge` in 8e's "stricter wins" or
 never > personal > knowledge > lens
 ```
 
-You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/settings.md` (`lens_folders: [Library/Lens]`). Because stricter wins:
+You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/settings.md` (`lens_folders: [Lens]`; a lens folder inside a knowledge, personal or never folder makes the settings file invalid, since the stricter rule would silently empty it). Because stricter wins:
 
 - A note in a lens folder that says `anchor: knowledge` is not lens. That is how you exclude one note.
 - A note that says `anchor: lens` inside `personal_folders` or `never_folders` is not lens.

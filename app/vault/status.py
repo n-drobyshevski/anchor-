@@ -109,6 +109,9 @@ class NotesOverview:
     legacy_read: int
     unknown_value: int
     settings: str
+    # L1: lens notes, already counted in `knowledge` above -- lens is a
+    # kind of knowledge (anchor-lens-plan.md section 3).
+    lens: int = 0
 
 
 async def notes_overview(
@@ -134,11 +137,12 @@ async def notes_overview(
     summary = manifest.summary
     return NotesOverview(
         personal=classes.count("personal"),
-        knowledge=classes.count("knowledge"),
+        knowledge=classes.count("knowledge") + classes.count("lens"),
         conflict=summary.conflict,
         legacy_read=summary.legacy_read,
         unknown_value=summary.unknown_value,
         settings=summary.settings,
+        lens=classes.count("lens"),
     )
 
 

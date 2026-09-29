@@ -11,6 +11,16 @@ This is a guardrail, not a sandbox: the hard boundary is that the
 `anchor_debug` role cannot select from any public table. See
 docs/claude-access.md.
 
+One content door is open on purpose (anchor-lens-plan.md section 11,
+L1): the lens. ANCHOR_LENS_DATABASE_URL logs in as `anchor_lens`, a
+role whose only rights are EXECUTE on `lens.notes()` and `lens.graph()`,
+SECURITY DEFINER functions that return lens notes (and nothing else in
+the vault) and log every call in `lens_read`. It is allowed the same way
+as ANCHOR_DEBUG_DATABASE_URL: by not being on the secret list, and by
+the look-behind that keeps a longer name from matching DATABASE_URL.
+The boundary is again the role, not this hook; the user switches its
+LOGIN with `/lens code on|off`.
+
 Two more doors, both about reads that leave through a side channel:
 
 - **Anchor's own connector** (anchor-claude-connector-plan.md section
@@ -51,7 +61,8 @@ SECRET_NAMES = (
 _SECRET = "|".join(SECRET_NAMES)
 # A secret read out of the environment: $NAME, ${NAME}, os.environ["NAME"],
 # getenv("NAME"), printenv NAME. The (?<![A-Z0-9_]) keeps
-# ANCHOR_DEBUG_DATABASE_URL from matching DATABASE_URL.
+# ANCHOR_DEBUG_DATABASE_URL and ANCHOR_LENS_DATABASE_URL (L1) from
+# matching DATABASE_URL.
 SECRET_REF = re.compile(
     rf"(?<![A-Za-z0-9_])(?:\$\{{?|printenv\s+|environ(?:\.get)?\(?\[?\s*['\"]|getenv\(\s*['\"])"
     rf"(?:{_SECRET})(?![A-Za-z0-9_])"
@@ -103,6 +114,8 @@ RAILWAY_LOGS = "mcp__Railway__get-logs"
 HINT = (
     " Debug with Railway get-logs / deployment status, or query the content-free"
     ' views: psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select ... from debug.<table>".'
+    " Lens notes, and only they, are read through their own role:"
+    ' psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.notes()" (or lens.graph()).'
 )
 
 

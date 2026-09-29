@@ -2270,3 +2270,120 @@ class VaultStatus(Base):
             "jsonb_typeof(forgets_window) = 'array'", name="ck_vault_status_forgets_array"
         ),
     )
+
+
+# --- L1: the lens (anchor-lens-plan.md section 5) ---------------------------
+#
+# Four tables, and one module that names them from Python:
+# app/vault/lens.py (tests/test_vault_notes_isolation.py). Claude Code
+# reads the first two through the `lens` schema's SECURITY DEFINER
+# functions, as `anchor_lens`, and nothing else (plan section 11;
+# migration e4c7a2d9b1f3). The debug views carry no title, summary,
+# body or link target.
+
+
+class LensNote(Base):
+    """One lens note, kept whole (plan section 5): the text Echo's
+    self-improvement loops will read from L2, and Claude Code reads now.
+
+    A derived copy of a note the user put in the lens, like the chunk
+    tables: rebuildable from the vault, purged by /delete, cascaded away
+    with its `vault_file` row by `/vault notes off`, omitted from
+    /export. Written only while notes consent, VAULT_KNOWLEDGE_ENABLED
+    and LENS_ENABLED are all on; any of them off deletes the rows.
+    """
+
+    __tablename__ = "lens_note"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vault_file_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("vault_file.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    # From the manifest's `lens_kind`: under a `lens_person_folders`
+    # entry, or not (plan section 3).
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    # The frontmatter `summary`, as vaultd's graph reports it (<= 300).
+    summary: Mapped[str | None] = mapped_column(String)
+    # The note as app/vault/notes_text.prepare_body leaves it: no
+    # frontmatter, no %% comments %%, no code, secrets masked.
+    body: Mapped[str] = mapped_column(String, nullable=False)
+    body_hash: Mapped[str] = mapped_column(String, nullable=False)
+    chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind in ('person', 'concept')", name="ck_lens_note_kind"),
+        CheckConstraint("chars >= 0", name="ck_lens_note_chars"),
+    )
+
+
+class NoteLink(Base):
+    """One wikilink out of a knowledge or lens note (plan sections 4-5),
+    from vaultd's `GET /v1/knowledge/graph`.
+
+    Exactly one of three shapes: to a visible knowledge/lens note
+    (`dst_file_id`), to no note at all (`unresolved_text`, the link's
+    own target text), or to a note that exists but is not the bot's to
+    see (`outside`) -- counted, never named: vaultd sends nothing that
+    identifies it, and there is nothing here to hold it either.
+    """
+
+    __tablename__ = "note_link"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    src_file_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("vault_file.id", ondelete="CASCADE"), nullable=False
+    )
+    dst_file_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("vault_file.id", ondelete="CASCADE")
+    )
+    unresolved_text: Mapped[str | None] = mapped_column(String)
+    outside: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.text("false")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(dst_file_id is not null)::int + (unresolved_text is not null)::int"
+            " + outside::int = 1",
+            name="ck_note_link_one_target",
+        ),
+        Index("ix_note_link_src_file_id", "src_file_id"),
+        Index("ix_note_link_dst_file_id", "dst_file_id"),
+    )
+
+
+class LensVersion(Base):
+    """One row per distinct state of the lens (plan section 5): a hash
+    over the sorted `body_hash` list and the sorted lens-to-lens edges.
+    Content-free; L2's `lens_round` will point at it."""
+
+    __tablename__ = "lens_version"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    note_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LensRead(Base):
+    """One call of a `lens` schema function (plan section 11): which
+    function and how many rows it returned. Inserted by the function
+    itself, as its owner, before it returns; read by /lens and the
+    daily digest («Claude Code прочитал линзу: N раз»)."""
+
+    __tablename__ = "lens_read"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    fn: Mapped[str] = mapped_column(String, nullable=False)
+    rows: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (Index("ix_lens_read_at", "at"),)

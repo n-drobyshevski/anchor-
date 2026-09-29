@@ -12,11 +12,23 @@
 - Tests and eval run against a throwaway local database (see README →
   Tests); synthetic data there is fine to read.
 - Logs must never carry message text (app/log.py); keep it that way.
-- Never read the Obsidian vault, and never connect Obsidian tools to it
-  (MCP servers, the Local REST API, `ob`). It holds the same data as the
-  database. vaultd's tests use a temp directory and a fake `ob`; the
+- Never read the Obsidian vault, except lens notes, through the
+  `anchor_lens` role (next bullet), and never connect Obsidian tools to
+  it (MCP servers, the Local REST API, `ob`). It holds the same data as
+  the database. vaultd's tests use a temp directory and a fake `ob`; the
   vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_*`) are secrets like
   the others above.
+- Lens notes (and only lens notes) may be read, through
+  `psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.<fn>()"`
+  (`lens.notes()`, `lens.graph()`). Every call is logged in `lens_read`
+  and counted in the user's daily digest; use plain autocommit `-c`,
+  never a transaction you roll back (that is still detected, and shown
+  to the user as a read without a record). Lens text never leaves the
+  session: not in commits, PR text, code comments, test fixtures, eval
+  cases, logs or artifacts. Paraphrase the idea from public knowledge
+  ("Ashby's requisite variety") and cite the lens note by id.
+  Everything else in the vault stays off limits, as above. See
+  docs/claude-access.md → Lens notes.
 - Never call Anchor's own connector, even if its tools appear in your
   session (`mcp__Anchor__...`, `mcp__claude_ai_Anchor__...`, the same
   under the new name Echo (`mcp__Echo__...`), or any

@@ -98,6 +98,10 @@ def test_hook_protocol_exit_code():
     blocked = run({"tool_name": "Bash", "tool_input": {"command": "railway variables"}})
     assert blocked.returncode == 2
     assert "ANCHOR_DEBUG_DATABASE_URL" in blocked.stderr
+    # L1: the hint names the lens door too, so a blocked read is pointed
+    # at the one role that may return note text, and at what it may call.
+    assert "ANCHOR_LENS_DATABASE_URL" in blocked.stderr
+    assert "lens.notes()" in blocked.stderr and "lens.graph()" in blocked.stderr
 
     allowed = run({"tool_name": "Bash", "tool_input": {"command": "uv run pytest"}})
     assert allowed.returncode == 0
@@ -196,3 +200,49 @@ def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook()
     assert "mcp__anc" in deny and "mcp__claude_ai_anc" in deny
     matchers = [entry["matcher"] for entry in settings["hooks"]["PreToolUse"]]
     assert any("mcp__.*" in matcher.split("|") for matcher in matchers)
+
+
+# --- L1: the lens, through the anchor_lens role (anchor-lens-plan.md section 11) ---
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'psql "$ANCHOR_LENS_DATABASE_URL" -c "select title from lens.notes()"',
+        'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, chars from lens.notes()"',
+        "psql ${ANCHOR_LENS_DATABASE_URL} -c 'select * from lens.graph()'",
+    ],
+)
+def test_allows_the_lens_role(command):
+    assert guard.check("Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The lens door opens nothing else: the production URL, the
+        # admin URL, the vault's credentials and a literal Railway URL
+        # stay blocked, in the same command as a lens read too.
+        'psql "$DATABASE_URL" -c "select title from lens.notes()"',
+        'psql "$ANCHOR_ADMIN_DATABASE_URL" -c "select body from lens_note"',
+        'psql "$ANCHOR_LENS_DATABASE_URL" -c "select 1"; echo $DATABASE_URL',
+        'psql "$ANCHOR_LENS_DATABASE_URL" && echo $VAULT_API_TOKEN',
+        "psql postgresql://anchor_lens:pw@monorail.proxy.rlwy.net:12345/railway",
+    ],
+)
+def test_the_lens_role_loosens_nothing_else(command):
+    assert guard.check("Bash", {"command": command}) is not None
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "mcp__Echo__search_library",
+        "mcp__claude_ai_Echo__list_tree",
+        "mcp__anc__get_memory",
+        "mcp__claude_ai_anc__search_library",
+        "mcp__Anchor__get_note",
+    ],
+)
+def test_the_lens_role_leaves_the_connector_blocked(tool):
+    assert guard.check(tool, {}) is not None

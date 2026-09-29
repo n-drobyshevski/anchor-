@@ -692,6 +692,19 @@ class Settings(BaseSettings):
     VAULT_PERSONAL_ENABLED: bool = False
     VAULT_KNOWLEDGE_IN_PROMPT: int = 2
     VAULT_PERSONAL_IN_PROMPT: int = 2
+    # --- L1: the lens (anchor-lens-plan.md sections 3, 5 and 11) ---
+    #
+    # A third switch on top of notes consent and VAULT_KNOWLEDGE_ENABLED:
+    # while all three are on, the sync pass keeps every lens note whole
+    # in `lens_note` (app/vault/lens.py), where Claude Code can read it
+    # through the `anchor_lens` role. Off deletes those rows on the next
+    # pass. Lens notes are still indexed as knowledge either way -- lens
+    # is a kind of knowledge for every existing consumer.
+    LENS_ENABLED: bool = False
+    # Plan section 7: over this many lens notes the selector (L2) does
+    # not use the lens at all rather than silently dropping notes. In L1
+    # only /lens reads it, to warn.
+    LENS_CATALOG_MAX_NOTES: int = 300
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -976,6 +989,10 @@ VAULT_TOKEN_MIN_CHARS = 32
 # 8e: the most note chunks of one class a prompt may ever carry. A
 # constant, so a deploy cannot paste a variable that floods the prompt.
 NOTES_IN_PROMPT_MAX = 5
+# L1: the ceiling on LENS_CATALOG_MAX_NOTES. vaultd's graph stops at
+# 2000 nodes (knowledge and lens together), so a larger limit could
+# never be reached honestly.
+LENS_CATALOG_MAX_NOTES_CEILING = 2000
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1151,6 +1168,11 @@ def check_vault_settings(settings: Settings) -> None:
         value = getattr(settings, name)
         if not 0 <= value <= NOTES_IN_PROMPT_MAX:
             raise SystemExit(f"{name} must be between 0 and {NOTES_IN_PROMPT_MAX}, got {value}.")
+    if not 1 <= settings.LENS_CATALOG_MAX_NOTES <= LENS_CATALOG_MAX_NOTES_CEILING:
+        raise SystemExit(
+            f"LENS_CATALOG_MAX_NOTES must be between 1 and {LENS_CATALOG_MAX_NOTES_CEILING}, "
+            f"got {settings.LENS_CATALOG_MAX_NOTES}."
+        )
     mode = settings.VAULT_MODE
     if mode not in VALID_VAULT_MODES:
         raise SystemExit(

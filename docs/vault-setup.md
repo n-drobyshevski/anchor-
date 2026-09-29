@@ -176,6 +176,7 @@ check the classification.
 | `never` | Invisible, even inside a folder a rule would include. | nowhere |
 | `personal` | About you: your life, health, relationships, plans, feelings. | only the conversation with you |
 | `knowledge` | Generic, true whoever reads it: a note on CCRU, on GCP IAM. | the conversation, as reference material |
+| `lens` | Knowledge you chose as Echo's frame: people and concepts (L1, section 8). | wherever knowledge goes, except Claude's write tools; with `LENS_ENABLED`, Claude Code through its own role |
 
 Two things set a class:
 
@@ -183,8 +184,8 @@ Two things set a class:
   or `anchor: never`, exactly, at the top level of its properties;
 - **a folder rule** in `Anchor/settings.md`. Copy
   `docs/vault/settings.md` into the vault as `Anchor/settings.md` and
-  edit the three lists. A rule covers its folder and everything below
-  it.
+  edit the lists (section 8 adds the two lens ones). A rule covers its
+  folder and everything below it.
 
 When the two disagree, **the stricter class wins**: `never` beats
 `personal`, which beats `knowledge`. A note marked `knowledge` inside a
@@ -217,6 +218,59 @@ Then, in Telegram:
   cannot see.
 - `/vault notes off`: forget everything read from notes. `/delete` does
   the same and turns notes off.
+
+## 8. The lens: notes Echo reasons with (L1)
+
+`anchor-lens-plan.md`. The **lens** is a set of knowledge notes you
+pick as the frame for Echo's self-improvement: people and concepts
+(Ashby, Beer, requisite variety…). In L1 it is stored and Claude Code
+can read it (docs/claude-access.md → Lens notes); Echo does not use it
+yet.
+
+**Membership is always yours.** Two things make a note lens:
+
+- the property `anchor: lens` on the note;
+- a folder rule in `Anchor/settings.md`: `lens_folders: [Lens]`.
+
+`lens` is the **least strict** class: `never` > `personal` >
+`knowledge` > `lens`. So:
+
+- `anchor: knowledge` on a note inside a lens folder keeps that one
+  note out of the lens;
+- `anchor: lens` inside a personal or never folder is not lens;
+- a lens folder **inside** a knowledge, personal or never folder
+  makes the whole settings file invalid, and `/vault` says so: the
+  stricter rule would otherwise turn every note in it into its own
+  class and leave the lens silently empty. Use `Lens`, not
+  `Library/Lens` when `Library` is a knowledge folder.
+
+**People and concepts, by folder.** `lens_person_folders: [Lens/People]`
+lists folders whose notes are about a person; every other lens note is
+a concept. Each entry must be inside (or equal to) a `lens_folders`
+entry, or the settings file is invalid and, as with any error there,
+every note is hidden until you fix it.
+
+For everything that already reads knowledge, a lens note **is**
+knowledge: it is indexed with the knowledge notes, and Claude's
+`search_library` finds it. The difference is writing: **Claude's write
+tools refuse lens notes**, as source or as destination, so a claude.ai
+chat cannot change what Echo reasons with. Only you change the lens.
+`list_tree` marks lens notes as lens.
+
+**The bot stores the lens whole only when `LENS_ENABLED` is set**, on
+top of `/vault notes on` and `VAULT_KNOWLEDGE_ENABLED`. Then every sync
+pass keeps each lens note (title, person or concept, the frontmatter
+`summary`, the text) and the links between knowledge and lens notes.
+A link to a note the bot may not see is counted, never named. Turn any
+of the three off and the next pass deletes the stored lens.
+
+In Telegram:
+
+- `/lens`: on or off, how many notes (people, concepts), a warning if
+  there are more than `LENS_CATALOG_MAX_NOTES` (300), whether Claude
+  Code may read it, and how many reads today.
+- `/lens code on`, `/lens code off`: open or close Claude Code's access
+  (docs/claude-access.md → Lens notes has the one-time setup).
 
 ## Turning it off
 

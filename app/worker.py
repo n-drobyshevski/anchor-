@@ -842,8 +842,8 @@ async def _heartbeat_loop(
             # C3: the library's once-a-day digest, same cadence and same
             # "not inside heartbeat()" reasoning as every sweep above --
             # see app/core/scheduler.py's maybe_enqueue_library_digest
-            # for the extra gate (CLAUDE_ACCESS_ENABLED,
-            # CLAUDE_LIBRARY_DIGEST_TIME) this one alone checks.
+            # for the extra gate (CLAUDE_ACCESS_ENABLED, LENS_ENABLED or
+            # the lens door, CLAUDE_LIBRARY_DIGEST_TIME) this one alone checks.
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_library_digest(session, settings, clock, state.timezone)

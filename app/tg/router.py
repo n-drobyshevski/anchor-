@@ -87,6 +87,7 @@ from app.tg import data as data_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
+from app.tg import lens as lens_ui
 from app.tg import memory as memory_ui
 from app.tg import menu
 from app.tg import notebook as notebook_ui
@@ -146,6 +147,8 @@ PRIVACY_TEXT = (
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
     "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
     "при /claude library write on — и менять (откат: /claude undo). "
+    "Заметки линзы (и только их) при /lens code on может читать Claude Code "
+    "(прочитанное уходит в Anthropic). "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -213,6 +216,8 @@ BOT_COMMANDS = [
     BotCommand(command="done", description="Отметить задачу сделанной"),
     # 8a (phase-8 plan section 8): the Obsidian vault's status.
     BotCommand(command="vault", description="Хранилище Obsidian"),
+    # L1 (anchor-lens-plan.md section 11): the lens and Claude Code's door.
+    BotCommand(command="lens", description="Линза и доступ Claude Code"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1169,6 +1174,28 @@ def build_router(
         await send_keyboard(message.bot, message.chat.id, text, keyboard)
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/claude]", scene_id=scene_id
+        )
+
+    @router.message(Command("lens"))
+    async def lens_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """The lens (anchor-lens-plan.md section 11): status, and
+        `/lens code on|off`, Claude Code's database door.
+
+        Telegram only, like /claude: `code on` opens a login to the
+        database, and a web chat must never be able to type it.
+        """
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        text = await lens_ui.command(sessionmaker, settings, clock, command.args)
+        await send_keyboard(message.bot, message.chat.id, text, None)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/lens]", scene_id=scene_id
         )
 
     @router.message(Command("revoke"))

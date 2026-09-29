@@ -283,14 +283,21 @@ async def test_list_tree_happy_path(sessionmaker):
     world, vault = await _world(sessionmaker)
     vault.tree = Tree(
         folders=["Library", "Library/Philosophy"],
-        notes=[TreeNote(path="Library/CCRU.md", title="CCRU")],
+        notes=[
+            TreeNote(path="Library/CCRU.md", title="CCRU"),
+            # L1 (anchor-lens-plan.md section 3): list_tree marks lens notes.
+            TreeNote(path="Lens/Beer.md", title="Beer", note_class="lens"),
+        ],
         truncated=False,
     )
     async with TestClient(TestServer(world.app)) as client:
         tokens = await _connect_and_open(world, client)
         payload = await _tool_payload(world, client, tokens["access_token"], "list_tree", {})
     assert payload["folders"] == ["Library", "Library/Philosophy"]
-    assert payload["notes"] == [{"path": "Library/CCRU.md", "title": "CCRU"}]
+    assert payload["notes"] == [
+        {"path": "Library/CCRU.md", "title": "CCRU", "class": "knowledge"},
+        {"path": "Lens/Beer.md", "title": "Beer", "class": "lens"},
+    ]
     assert payload["truncated"] is False
 
 

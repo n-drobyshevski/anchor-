@@ -8,7 +8,8 @@ data landed in; 4d adds the cancel step -- see `cancel_research_jobs`.
 into it: every foreign key in the schema either stays inside that list
 (message -> telegram_update, message -> scene, memory -> memory,
 study_card -> study_clip -> study_job, study_card -> memory,
-note_chunk_personal / note_chunk_knowledge -> vault_file -> memory,
+note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
+vault_file -> memory,
 vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
@@ -209,6 +210,16 @@ PURGED_TABLES = (
     # notes_consent (reset_values), or the next pass would rebuild them.
     "note_chunk_personal",
     "note_chunk_knowledge",
+    # L1 (anchor-lens-plan.md section 5): the lens tables. lens_note and
+    # note_link are derived copies of the user's own notes and their
+    # links (both reference vault_file, so they go in this statement);
+    # lens_version and lens_read are content-free (hashes, counts,
+    # times), but still a record of this user's lens and of Claude
+    # Code's reads of it.
+    "lens_note",
+    "note_link",
+    "lens_version",
+    "lens_read",
     "vault_file",
     "vault_hold",
     "vault_status",

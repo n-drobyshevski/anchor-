@@ -31,6 +31,7 @@ no model call, no outbound).
 | Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows; knowledge notes through a standing `/claude library on` switch (C3) | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https); the library also needs `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED` |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
+| The lens (L1): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. Echo does not use them yet | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300) only warns in `/lens`; Claude Code's access is `/lens code on` |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -69,6 +70,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
+| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today | — (the lens itself: `LENS_ENABLED`) |
+| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, and only them / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -1206,19 +1209,22 @@ is the only request 8e adds.
 This is the contract. A later phase that adds a consumer of notes cites
 it, and extends the isolation tests.
 
-| Where | Personal notes | Knowledge notes |
-|---|---|---|
-| The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) |
-| The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never |
-| The notebook, `/mind` | never | never |
-| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never |
-| Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it |
-| `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e |
-| Web panels | not shown in 8e | not shown in 8e |
-| Becoming a memory fact | never automatically | never automatically |
-| Encrypted backups | included; deleted by `/delete` | same |
-| `/export` | left out (derived from the vault) | left out |
-| Claude Code | never: the vault is off-limits as a whole | never |
+| Where | Personal notes | Knowledge notes | Lens notes (L1) |
+|---|---|---|---|
+| The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge |
+| The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never | never |
+| The notebook, `/mind` | never | never | never in L1 |
+| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never | never in L1 |
+| The weekly review | never | never | never in L1 |
+| Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never in L1 |
+| `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e | never |
+| Claude connector's `search_library` (C3) | never | yes, under `/claude library on` | yes, as knowledge |
+| Claude's write tools (W2) | never | yes, under `/claude library write on` | read as knowledge (`get_note`, `list_tree`); written **never**: only you change the lens |
+| Web panels | not shown in 8e | not shown in 8e | not shown |
+| Becoming a memory fact | never automatically | never automatically | never automatically |
+| Encrypted backups | included; deleted by `/delete` | same | same |
+| `/export` | left out (derived from the vault) | left out | left out |
+| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` |
 
 If notes ever reach `/grok`, personal and knowledge will be separate
 scopes, both off by default.
@@ -1244,6 +1250,57 @@ by a deliberate edit that made it fail, then reverted.
   an Anchor entry that carries one, and a manifest without a valid
   summary. An old vaultd behind a new bot therefore fails closed until
   the vault service redeploys.
+
+## Milestone L1 — the lens
+
+A handful of your knowledge notes, on people and concepts (Ashby,
+Beer, requisite variety…), are the frame Echo will reason with when it
+improves itself. L1 builds the pipe: the class, the graph, the bot's
+copy, and Claude Code's door. Echo does not read the lens yet (L2). The
+spec is `anchor-lens-plan.md`; for this feature it wins.
+
+### You decide what is lens
+
+`anchor: lens` on a note, or `lens_folders: [...]` in
+`Anchor/settings.md` (docs/vault-setup.md, section 8). `lens` is the
+least strict class: `never > personal > knowledge > lens`, so stricter
+wins can only shrink the lens, never grow it. `lens_person_folders`
+names the folders of notes about people; every other lens note is a
+concept, and an entry outside every lens folder makes the settings file
+invalid, which hides every note. For every existing reader, a lens note
+is knowledge: it is indexed and `search_library` finds it. Claude's
+write tools refuse it, as a source or a destination.
+
+### The graph
+
+vaultd's `GET /v1/knowledge/graph` returns the knowledge and lens notes
+(title, class, person or concept, frontmatter `aliases`, `tags`,
+`summary`, length) and the links between them, parsed by `links.py`.
+A link to a note that does not exist keeps its target text. A link to
+a note that exists but is not the bot's to see is `{"outside": true}`,
+with nothing that names it. At most 2000 nodes, as for the tree.
+
+### The bot's copy
+
+While notes consent, `VAULT_KNOWLEDGE_ENABLED` and `LENS_ENABLED` are
+all on, each sync pass keeps every lens note whole in `lens_note`,
+refreshes `note_link` from the graph, and records a `lens_version`
+when the lens changed. Turn any of them off and the next pass deletes
+the copy. `app/vault/lens.py` is the only module that touches these
+tables (`tests/test_vault_notes_isolation.py`), and their debug views
+carry ids, hashes, lengths and counts, never a title or text.
+
+### Claude Code reads it, and you see each read
+
+The `anchor_lens` role, `NOLOGIN` until you say `/lens code on`, may
+call two `SECURITY DEFINER` functions and nothing else: `lens.notes()`
+and `lens.graph()`. Each call writes a `lens_read` row, which `/lens`
+counts for today and the daily Claude digest reports as «Claude Code
+прочитал линзу: N раз»; a call whose row was rolled back still leaves a
+gap in the row ids, reported as a read without a record. `/lens code off` closes the login and ends open
+sessions. CLAUDE.md keeps lens text out of the repo. Setup:
+[docs/claude-access.md](docs/claude-access.md), "Lens notes"; why it is
+built this way: docs/decisions.md, "L1 — the lens".
 
 ## Web UI
 
@@ -1477,7 +1534,10 @@ project's `.claude/settings.json` and `.claude/hooks/guard_private_data.py`
 block the Railway tools that reveal the database URL or the bot token,
 the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
-a role that can read only the content-free `debug.*` views. See
+a role that can read only the content-free `debug.*` views. The one
+content door is the lens (L1): `ANCHOR_LENS_DATABASE_URL` logs in as
+`anchor_lens`, which can call `lens.notes()` and `lens.graph()` and
+nothing else, only while `/lens code on`, and every call is counted. See
 [docs/claude-access.md](docs/claude-access.md).
 
 ### Grok (opt-in)

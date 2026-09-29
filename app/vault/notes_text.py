@@ -145,6 +145,15 @@ def _mask(text: str) -> str:
     return "".join(pieces)
 
 
+def would_mask(text: str) -> bool:
+    """Whether `_mask` would change `text`: it holds something secret-shaped.
+
+    For short texts kept outside the chunk pipeline -- a link's
+    unresolved target in `note_link` (app/vault/sync.py) -- where
+    dropping the whole text is simpler than storing a masked stub."""
+    return _mask(text) != text
+
+
 def _heading_path(title: str, stack: list[str]) -> str:
     parts = [title, *[level for level in stack if level]]
     path = " › ".join(parts)
@@ -215,6 +224,19 @@ def _chunk_section(text: str, limit: int) -> list[str]:
     if buffer:
         pieces.append(buffer)
     return pieces
+
+
+def prepare_body(content: str) -> str:
+    """Steps 1-4 of the pipeline, without the chunking: the whole note as
+    one cleaned, masked text (L1, anchor-lens-plan.md section 5's
+    `lens_note.body`). The same text `prepare` cuts into chunks, so a
+    lens note never carries a `%% private aside %%`, a code block or an
+    unmasked secret that its knowledge chunks would not."""
+    body = _strip_frontmatter(content)
+    body = _strip_comments(body)
+    body = _drop_code_fences(body)
+    body = _resolve_wikilinks(body)
+    return _mask(body).strip()
 
 
 def prepare(content: str, title: str) -> list[Chunk]:

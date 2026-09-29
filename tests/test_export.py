@@ -479,6 +479,12 @@ NOT_EXPORTED = {
     "note_chunk_personal": "a derived copy of the user's own personal notes, rebuildable from the vault",
     "note_chunk_knowledge": "a derived copy of the user's own library notes, rebuildable from the vault",
     "vault_status": "operational timestamps, no content",
+    # L1 (anchor-lens-plan.md section 5): derived from the vault, like
+    # the chunk tables, or content-free counters.
+    "lens_note": "a derived whole copy of the user's own lens notes, rebuildable from the vault",
+    "note_link": "the links between the user's own notes, rebuildable from the vault",
+    "lens_version": "hashes and counts of the lens, no content",
+    "lens_read": "a derived log of Claude Code's lens reads: a function name and a row count",
 }
 
 

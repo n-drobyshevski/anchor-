@@ -37,3 +37,11 @@ def test_the_notes_line_is_in_both_places():
     assert "Obsidian" in PRIVACY_TEXT and "Obsidian" in doc
     assert "никогда для поиска или исследований" in PRIVACY_TEXT
     assert "never for search or research" in doc
+
+
+def test_the_lens_clause_is_in_both_places():
+    """L1: Claude Code's read of the lens, and where it goes, in both copies."""
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
+    assert "/lens code on" in PRIVACY_TEXT and "/lens code on" in doc
+    assert "прочитанное уходит в Anthropic" in PRIVACY_TEXT
+    assert "what it reads goes to Anthropic" in doc

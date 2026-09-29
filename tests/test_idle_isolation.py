@@ -63,6 +63,10 @@ FORBIDDEN_IMPORTS = {
     # knowledge note text does not in 8e either.
     "app.vault.notes_personal": "personal vault notes reach only the persona's turn",
     "app.vault.notes_knowledge": "knowledge vault notes reach only the persona's turn in 8e",
+    # L1 (anchor-lens-plan.md section 5): nothing in Echo reads the lens
+    # yet. L3-L5 allow it in the two new idle kinds and in reflect, each
+    # by name, when they land.
+    "app.vault.lens": "the lens reaches no idle kind in L1",
     # 6d: `app.research.jobs` is deliberately no longer banned.
     # app/core/idle/research.py (and, for its own gate fact,
     # app/core/idle/facts.py) calls `run_research_job`/`study_quota_used`

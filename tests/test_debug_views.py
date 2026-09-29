@@ -54,6 +54,14 @@ CONTENT_COLUMNS = {
     "note_chunk_knowledge": {"heading", "text", "tsv"},
     # Timestamps only; forgets_window is a JSON array of them.
     "vault_status": set(),
+    # L1 (anchor-lens-plan.md section 5): a lens note's title, summary
+    # and body are the user's notes; a link's target text names a note.
+    # lens_version (hashes, counts) and lens_read (a function name and
+    # a row count) carry nothing else.
+    "lens_note": {"title", "summary", "body"},
+    "note_link": {"unresolved_text"},
+    "lens_version": set(),
+    "lens_read": set(),
 }
 
 
