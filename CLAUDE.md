@@ -29,3 +29,5 @@
   Never read Railway's `http` log stream either: request paths carry
   Grok's capability token. The guard hook blocks both; do not work
   around it.
+- Visual and UI work (web UI, mark, avatar) starts from
+  docs/brand/README.md.
