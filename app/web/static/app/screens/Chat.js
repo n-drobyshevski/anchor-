@@ -51,7 +51,7 @@ function ReconnectBanner() {
 }
 
 function TypingIndicator() {
-  return html`<p id="typing-indicator" hidden=${!typing.value}>Anchor печатает…</p>`;
+  return html`<p id="typing-indicator" hidden=${!typing.value}>Echo печатает…</p>`;
 }
 
 // Module-level (not inside Chat()) so its identity is stable across

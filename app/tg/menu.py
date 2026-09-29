@@ -206,7 +206,7 @@ ACTIONS: dict[str, str] = {
     "quiet_off": "🔔 Снять тишину",
     # mem
     "memories": "Что я помню",
-    "mind": "Заметки Anchor",
+    "mind": "Заметки Echo",
     "amendments": "Поправки к стилю",
     "notes": "Карточки исследований",
     "interests": "Темы для поиска",

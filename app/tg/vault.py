@@ -46,7 +46,7 @@ UNAUTHORIZED_LINE = (
 )
 FACTS_SUFFIX = " · фактов {count}"
 MIRROR_NOTE = (
-    "Правки в хранилище пока не применяются: следующее изменение факта в Anchor перезапишет файл."
+    "Правки в хранилище пока не применяются: следующее изменение факта в Echo перезапишет файл."
 )
 
 STATE_OFF = "Хранилище: выключено"
@@ -72,11 +72,11 @@ NOTES_UNREAD = " · не прочитано: неизвестная метка {
 # The plan's text, without its Markdown backticks: every reply is plain
 # text (app/tg/send.py).
 NOTES_ON_REPLY = (
-    "Anchor будет читать заметки с меткой anchor: personal или anchor: knowledge "
+    "Echo будет читать заметки с меткой anchor: personal или anchor: knowledge "
     "(и папки из Anchor/settings.md). Личные — только для разговора; знания — ещё и как "
     "справка. /vault notes off — забыть всё прочитанное."
 )
-NOTES_OFF_REPLY = "Заметки выключены: всё, что Anchor прочитал из заметок, удалено."
+NOTES_OFF_REPLY = "Заметки выключены: всё, что Echo прочитал из заметок, удалено."
 VAULT_USAGE = "Команды: /vault — состояние, /vault notes on — читать заметки, /vault notes off — забыть их."
 
 UNKNOWN = "—"

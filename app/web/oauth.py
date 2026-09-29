@@ -88,11 +88,11 @@ _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
-TITLE = "Anchor · подключение Claude"
+TITLE = "Echo · подключение Claude"
 WAITING_HEADING = "Подтверди в Telegram"
 WAITING_HTML = (
     "<ol class=steps>"
-    "<li>Открой бота Anchor в Telegram.</li>"
+    "<li>Открой бота Echo в Telegram.</li>"
     "<li>Отправь ему команду:</li>"
     "</ol>"
     "<p class=command>/claude connect {code}</p>"
@@ -116,9 +116,9 @@ EXPIRED = "Запрос не найден или устарел. Начни по
 # app's (app/web/static/app.css), the mark is app/web/static/icon.svg.
 _MARK = (
     "<svg class=mark viewBox='0 0 32 32' aria-hidden=true><g fill=none stroke=currentColor "
-    "stroke-width=2.4 stroke-linecap=round stroke-linejoin=round>"
-    "<circle cx=16 cy=7 r=3.4 /><line x1=16 y1=10.4 x2=16 y2=27 />"
-    "<line x1=10 y1=14 x2=22 y2=14 /><path d='M6 17c0 6 4.5 10 10 10s10-4 10-10'/></g></svg>"
+    "stroke-width=2.4><circle cx=10 cy=16 r=8 />"
+    "<circle cx=21 cy=16 r=5 stroke-opacity=.55 />"
+    "<circle cx=27.6 cy=16 r=3 stroke-opacity=.3 /></g></svg>"
 )
 _STYLE = (
     ":root{color-scheme:light dark;--bg:#faf8f5;--surface:#fff;--text:#292524;"
@@ -212,7 +212,7 @@ def _page(
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         f"{meta}<title>{TITLE}</title><style>{_STYLE}</style></head>"
-        f"<body><main><div class=brand>{_MARK}<div><b>Anchor</b>"
+        f"<body><main><div class=brand>{_MARK}<div><b>Echo</b>"
         "<span>подключение Claude</span></div></div>"
         f"<div class=card><h1>{html.escape(heading)}</h1>{body_html}</div></main>{tail}"
         "</body></html>"

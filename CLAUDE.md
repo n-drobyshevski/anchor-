@@ -1,4 +1,4 @@
-# Anchor: rules for Claude Code
+# Echo (formerly Anchor): rules for Claude Code
 
 - Never read the user's conversation data: message text, update
   payloads, memory, journal, summaries, check-in notes. Do not try to
@@ -18,7 +18,8 @@
   vault's credentials (`VAULT_API_TOKEN`, `OBSIDIAN_*`) are secrets like
   the others above.
 - Never call Anchor's own connector, even if its tools appear in your
-  session (`mcp__Anchor__...`, `mcp__claude_ai_Anchor__...`, or any
+  session (`mcp__Anchor__...`, `mcp__claude_ai_Anchor__...`, the same
+  under the new name Echo (`mcp__Echo__...`), or any
   tool named `get_memory`, `get_journal`, `get_dialogs`, `get_state`,
   `search_library`, `update_note`, `create_note`, `rename_note`,
   `get_note`, `list_changes`, `undo_changeset`, `list_tree`): it

@@ -1,4 +1,4 @@
-/* Anchor web chat: styles.
+/* Echo web chat: styles.
    Tokens on :root, redefined for dark under prefers-color-scheme.
    No `style=` attributes anywhere (grep-enforced) — everything here or
    set via CSSOM (element.style.x) from app.js, which the page's CSP

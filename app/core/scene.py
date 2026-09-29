@@ -73,7 +73,7 @@ SUMMARY_PROMPT = (
 # summarizer sees. Role-tagged plain text rather than real user/
 # assistant turns on purpose: handed a genuine transcript, a roleplay
 # model continues the roleplay instead of describing it.
-_ROLE_LABELS = {"user": "Пользователь", "assistant": "Anchor"}
+_ROLE_LABELS = {"user": "Пользователь", "assistant": "Echo"}
 
 
 async def get_open_scene(session: AsyncSession) -> Scene | None:

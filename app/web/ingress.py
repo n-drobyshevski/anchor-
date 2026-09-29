@@ -204,7 +204,7 @@ def build_callback_update(
                 "message_id": message_id,
                 "date": 0,
                 "chat": {"id": chat_id, "type": "private"},
-                "from": {"id": chat_id, "is_bot": True, "first_name": "Anchor"},
+                "from": {"id": chat_id, "is_bot": True, "first_name": "Echo"},
                 "text": text,
             },
             "chat_instance": "web",

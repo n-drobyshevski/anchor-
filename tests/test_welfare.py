@@ -461,7 +461,7 @@ async def test_the_plan_prompts_are_carried_verbatim(sessionmaker):
     assert "При любом упоминании самоповреждения — `real`" in welfare.CLASSIFIER_PROMPT
     assert "Если сомневаешься между scene и real — выбирай real" in welfare.CLASSIFIER_PROMPT
 
-    assert welfare.WELFARE_PROMPT.startswith("Роль Anchor выключена.")
+    assert welfare.WELFARE_PROMPT.startswith("Роль Echo выключена.")
     assert "3114" in welfare.WELFARE_PROMPT
     assert "112" in welfare.WELFARE_PROMPT
     assert "Никаких заданий, давления и прозвищ" in welfare.WELFARE_PROMPT
@@ -507,5 +507,5 @@ async def test_the_classifier_sees_recent_context_and_the_new_text(sessionmaker)
     assert [m.role for m in messages] == ["system", "user"]
     assert messages[0].content == welfare.CLASSIFIER_PROMPT
     assert messages[1].content == (
-        "Пользователь: давай ещё раз\nAnchor: три пункта\nПользователь: мне реально плохо"
+        "Пользователь: давай ещё раз\nEcho: три пункта\nПользователь: мне реально плохо"
     )

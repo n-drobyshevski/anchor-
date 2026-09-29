@@ -94,7 +94,7 @@ CLASSIFIER_PROMPT = (
 # that is where the user is; they are part of the prompt rather than
 # config because getting them wrong is not a tuning mistake.
 WELFARE_PROMPT = (
-    "Роль Anchor выключена. Похоже, пользователю по-настоящему плохо — не в рамках игры. "
+    "Роль Echo выключена. Похоже, пользователю по-настоящему плохо — не в рамках игры. "
     "Ответь просто и тепло, 2–4 предложения, на его языке: спроси, как он на самом деле, "
     "скажи, что всё на паузе и можно просто поговорить или отдохнуть. Никаких заданий, "
     "давления и прозвищ. Если есть признаки риска для жизни или самоповреждения — мягко "
@@ -192,7 +192,7 @@ def build_messages(context: list, user_text: str) -> list[LLMMessage]:
     """
     lines = []
     for row in context:
-        who = "Пользователь" if row.role == "user" else "Anchor"
+        who = "Пользователь" if row.role == "user" else "Echo"
         lines.append(f"{who}: {row.content}")
     lines.append(f"Пользователь: {user_text}")
     return [

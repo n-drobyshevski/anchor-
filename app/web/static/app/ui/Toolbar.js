@@ -4,7 +4,7 @@
 // Chat's own #chat-header, so #pause-button and #logout-button now live
 // here, and the page's single <h1> is the toolbar title.
 //
-// Title block: on #/chat, "Anchor" with the SSE connection state under
+// Title block: on #/chat, "Echo" with the SSE connection state under
 // it (a dot plus its text label -- never colour alone); on every other
 // screen, that screen's name plus an optional subtitle a screen can set
 // through store.js's screenSubtitle.
@@ -38,7 +38,7 @@ export function Toolbar() {
     <header id="toolbar" class="toolbar">
       <${SurfaceSwitcher} />
       <div class="toolbar-title">
-        <h1>${isChat ? 'Anchor' : item.label}</h1>
+        <h1>${isChat ? 'Echo' : item.label}</h1>
         ${isChat ? html`<${ConnStatus} />` : html`<${Subtitle} />`}
       </div>
       <div class="toolbar-trailing">
