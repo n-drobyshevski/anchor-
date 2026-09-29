@@ -1,6 +1,6 @@
 // The state screen (#/state, nav label "Состояние"): read/write the
 // StateDTO the W2 HTTP contract defines (GET /api/state, POST
-// /api/state/{due,focus,quiet,timezone,pause}). Three cards (Действие,
+// /api/state/{due,focus,quiet,timezone,pause,claude-limits}). Three cards (Действие,
 // Режим's rows, Траты) and a quiet metadata line; each field's card or
 // row owns its own edit/busy/error state; the screen component
 // itself only owns the fetched StateDTO and the plumbing every card's
@@ -603,6 +603,112 @@ function SpendCard({ spend }) {
   `;
 }
 
+// ---------- Лимиты записи Claude ----------
+// Claude's write caps (POST /api/state/claude-limits; the same values
+// `/claude limits` shows in Telegram). `bytes_per_day` is edited in КБ
+// and sent in bytes; every other cap is a plain count.
+
+const LIMIT_DETAIL_MESSAGES = {
+  out_of_range: 'Вне допустимого диапазона',
+  unknown_key: 'Нет такого лимита',
+};
+
+function toShown(item, v) {
+  return item.unit === 'bytes' ? Math.floor(v / 1024) : v;
+}
+
+function fromShown(item, v) {
+  return item.unit === 'bytes' ? v * 1024 : v;
+}
+
+function LimitRow({ item, onSet }) {
+  const [draft, setDraft] = useState(String(toShown(item, item.value)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const inputId = `limit-${item.key}`;
+  const unit = item.unit === 'bytes' ? ' КБ' : '';
+
+  // A value set elsewhere (Telegram, another tab) replaces the draft.
+  useEffect(() => {
+    setDraft(String(toShown(item, item.value)));
+  }, [item.value]);
+
+  const parsed = /^\d+$/.test(draft.trim()) ? Number(draft.trim()) : null;
+  const dirty = parsed !== toShown(item, item.value);
+
+  async function send(value) {
+    setBusy(true);
+    setError('');
+    const result = await onSet(item.key, value);
+    setBusy(false);
+    if (result !== true) setError(result);
+  }
+
+  function save() {
+    const lo = toShown(item, item.min);
+    const hi = toShown(item, item.max);
+    if (parsed === null || parsed < lo || parsed > hi) {
+      setError(`Допустимо от ${lo} до ${hi}${unit}`);
+      return;
+    }
+    send(fromShown(item, parsed));
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (!busy && dirty) save();
+    }
+  }
+
+  return html`
+    <li class="row row-stacked">
+      <label for=${inputId} class="row-title">${item.label}</label>
+      <div class="limit-controls">
+        <input
+          id=${inputId}
+          class="limit-input mono"
+          type="number"
+          inputmode="numeric"
+          min=${toShown(item, item.min)}
+          max=${toShown(item, item.max)}
+          step="1"
+          disabled=${busy}
+          value=${draft}
+          onInput=${(e) => setDraft(e.target.value)}
+          onKeyDown=${onKeyDown}
+        />
+        <span class="field-hint">
+          ${unit ? `${unit.trim()} · ` : ''}${toShown(item, item.min)}–${toShown(item, item.max)}${item.value !== item.default
+            ? ` · по умолчанию ${toShown(item, item.default)}`
+            : ''}
+        </span>
+        <div class="card-footer-actions">
+          ${item.value !== item.default
+            ? html`<button type="button" class="btn btn-ghost" disabled=${busy} onClick=${() => send(null)}>
+                По умолчанию
+              </button>`
+            : null}
+          <button type="button" class="btn" disabled=${busy || !dirty} onClick=${save}>Сохранить</button>
+        </div>
+      </div>
+      ${error ? html`<p class="inline-error" role="alert">${error}</p>` : null}
+    </li>
+  `;
+}
+
+function ClaudeLimitsCard({ limits, onSet }) {
+  return html`
+    <section class="card" aria-labelledby="claude-limits-heading">
+      <h2 id="claude-limits-heading">Лимиты записи Claude</h2>
+      <p class="field-hint">Сколько Claude может менять в заметках-знаниях. То же, что /claude limits в Telegram.</p>
+      <ul class="card-list">
+        ${limits.map((item) => html`<${LimitRow} key=${item.key} item=${item} onSet=${onSet} />`)}
+      </ul>
+    </section>
+  `;
+}
+
 // ---------- metadata line ----------
 // The streak and the counters, quietly: Planner's DESIGN.md forbids
 // gamification, so no big numbers -- one muted line each.
@@ -694,6 +800,27 @@ export function State() {
   const toggleFocus = (on) => applyMutation('/api/state/focus', { on });
   const setQuiet = (until) => applyMutation('/api/state/quiet', { until });
   const changeTz = (tz) => applyMutation('/api/state/timezone', { tz });
+  const setClaudeLimit = async (key, value) => {
+    const res = await apiPost('/api/state/claude-limits', { key, value });
+    if (res.status === 200 && res.data && res.data.state) {
+      setState(res.data.state);
+      pushToast(res.data.vault_pending ? 'Сохранено, vault обновится позже.' : 'Сохранено.');
+      return true;
+    }
+    if (res.status === 422) {
+      const detail = res.data && res.data.detail;
+      return LIMIT_DETAIL_MESSAGES[detail] || 'Неверное значение.';
+    }
+    if (res.status === 401) {
+      forceLogout();
+      return 'Сессия истекла.';
+    }
+    if (res.status === 429) {
+      pushToast(minutesText(res.data && res.data.retry_after));
+      return 'Слишком много попыток.';
+    }
+    return 'Не сохранено.';
+  };
 
   // Pause has no `state` in its response (202 {}) -- the toggle's own
   // paint (PauseCard's aria-checked) only catches up once the tail's
@@ -756,6 +883,9 @@ export function State() {
           onTimezone=${changeTz}
         />
         <${SpendCard} spend=${state.spend} />
+        ${state.claude_write_limits
+          ? html`<${ClaudeLimitsCard} limits=${state.claude_write_limits} onSet=${setClaudeLimit} />`
+          : null}
         <${MetaLine} state=${state} />
       </div>
       <${Toasts} />

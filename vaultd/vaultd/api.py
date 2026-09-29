@@ -37,7 +37,8 @@ from typing import Any, Callable, Protocol
 from aiohttp import web
 
 from vaultd import classes, frontmatter, knowledge, paths
-from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES, UNDOS_PER_HOUR
+from vaultd import limits as limits_mod
+from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
 from vaultd.store import Conflict, Missing, Store
 from vaultd.undo import CapExceeded, FileEntry, UndoStore
@@ -491,7 +492,8 @@ async def undo_changeset(request: web.Request) -> web.Response:
         if kind == "undo":
             _log_refused(request, "undo_of_undo")
             return _refused()
-        if await asyncio.to_thread(undo_store.count_recent, "undo") >= UNDOS_PER_HOUR:
+        undos_per_hour = (await asyncio.to_thread(undo_store.limits.get)).undos_per_hour
+        if await asyncio.to_thread(undo_store.count_recent, "undo") >= undos_per_hour:
             _log_refused(request, "cap_undos")
             return _refused()
         entries = await asyncio.to_thread(undo_store.files_of, changeset)
@@ -522,6 +524,38 @@ async def undo_changeset(request: web.Request) -> web.Response:
             await asyncio.to_thread(undo_store.mark_undone, changeset)
     logger.info("knowledge_undo", extra={"event": "knowledge_undo", "count": restored})
     return web.json_response({"restored": restored, "refused": refused})
+
+
+def _limits_json(current: limits_mod.Limits) -> dict:
+    return {
+        "values": current.as_json(),
+        "defaults": limits_mod.DEFAULTS.as_json(),
+        "bounds": {k: [spec.min, spec.max] for k, spec in limits_mod.SPECS.items()},
+    }
+
+
+async def get_limits(request: web.Request) -> web.Response:
+    current = await asyncio.to_thread(request.app[UNDO_KEY].limits.get)
+    return web.json_response(_limits_json(current))
+
+
+async def put_limits(request: web.Request) -> web.Response:
+    """Replace the caps with the body's keys over the defaults (never
+    over the stored values): the bot always sends its full set, so a
+    key it leaves out is a key it wants back at the default."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    try:
+        new = limits_mod.validate(raw)
+    except limits_mod.Invalid:
+        return _json_error("bad_body", 400)
+    store = request.app[UNDO_KEY].limits
+    async with request.app[LOCK_KEY]:
+        await asyncio.to_thread(store.put, new)
+    logger.info("limits_set", extra={"event": "limits_set"})
+    return web.json_response(_limits_json(new))
 
 
 def make_app(
@@ -558,4 +592,6 @@ def make_app(
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/changes", get_changes)
     app.router.add_post("/v1/undo", undo_changeset)
+    app.router.add_get("/v1/limits", get_limits)
+    app.router.add_put("/v1/limits", put_limits)
     return app

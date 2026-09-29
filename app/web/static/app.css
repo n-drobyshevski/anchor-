@@ -1217,6 +1217,16 @@ select:focus-visible {
   box-shadow: var(--hairline), 0 0 0 3px color-mix(in oklab, var(--focus) 50%, transparent);
 }
 
+/* Claude write caps (State screen): a number field, its range, actions. */
+.limit-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.limit-input { width: 7.5em; }
+
 /* ---------- Inputs ---------- */
 
 input:not([type="radio"]):not([type="checkbox"]),

@@ -1305,6 +1305,22 @@ class ClaudeLibraryRead(Base):
     __table_args__ = (CheckConstraint("count >= 0", name="ck_claude_library_read_count"),)
 
 
+class ClaudeWriteLimit(Base):
+    """A user-set override of one of Claude's write caps
+    (app/core/claude_write_limits.py's `SPECS`), set from `/claude
+    limits` or the web app's state screen. One row per overridden cap;
+    no row means the default. Only a cap name and a number -- no
+    content. `/delete` truncates it."""
+
+    __tablename__ = "claude_write_limit"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (CheckConstraint("value >= 0", name="ck_claude_write_limit_value"),)
+
+
 class ClaudeChangeset(Base):
     """One row per changeset of Claude's writes to the vault (W2b,
     anchor-claude-write-plan.md sections 6.3 and 7).
@@ -2234,6 +2250,12 @@ class VaultStatus(Base):
     # Timestamps of vault-driven forgets, for 8c's rolling-hour cap.
     forgets_window: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
+    # Claude's write caps changed and vaultd's copy has not taken the
+    # new values yet (app/core/claude_write_limits.py's `push`); the
+    # vault sync pass retries while this is set.
+    limits_push_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
 
     __table_args__ = (

@@ -2574,3 +2574,49 @@ topic in one go. Your decision:
 - Unchanged: 4 changesets an hour, 4 undos an hour, 64 KB per file,
   512 KB per connection per day, the folder and move budgets.
 - They stay code constants, never environment variables.
+
+## Claude write caps become settings (Telegram and the web app)
+
+Raising the caps by hand meant a code change and a deploy every time
+(the section above). Your decision: the rate/volume caps become
+settings you tune yourself, from Telegram and from the web app. This
+supersedes "they stay code constants" above, and "8c" / "constants,
+not settings", **for these nine caps only**:
+
+| key | default | bounds |
+|---|---|---|
+| `files_per_changeset` | 20 | 1–200 |
+| `changesets_per_hour` | 4 | 0–60 |
+| `creates_per_day` (bot only) | 40 | 0–500 |
+| `bytes_per_day` (bot only) | 512 KB | 0–8 MB |
+| `undos_per_hour` | 4 | 0–60 |
+| `folders_per_changeset` | 3 | 0–20 |
+| `folders_per_day` | 10 | 0–100 |
+| `move_files_per_changeset` | 20 | 1–200 |
+| `moves_per_day` | 60 | 0–600 |
+
+- **Defaults are the old constants**, so nothing changes until you edit
+  a value. 0 means none allowed.
+- **Telegram:** `/claude limits` lists them; `/claude limits KEY N` sets
+  one; `/claude limits KEY reset` and `/claude limits reset` restore
+  defaults. `bytes_per_day` also takes `512k` / `2m`.
+- **Web app:** a «Лимиты записи Claude» card on the state screen
+  (`POST /api/state/claude-limits`). The web may **raise as well as
+  lower** a cap. That is a deliberate exception to "Claude settings are
+  Telegram-only": a stolen web session can now widen how much Claude
+  may write per hour/day, but not turn writing on, open a window, or
+  connect Claude -- those stay Telegram-only.
+- **Storage:** the bot is the source of truth (`claude_write_limit`, one
+  row per override, no content). vaultd keeps its own copy of its seven
+  caps in `<undo_root>/limits.json`, outside the vault, set by
+  `PUT /v1/limits` with the same bearer token. vaultd holds each value
+  to the same bounds, so no push can set a nonsense number. The bot
+  pushes on every change; a failed push sets
+  `vault_status.limits_push_pending` and the vault sync pass retries
+  it. While the copies disagree, the stricter one wins.
+- **Still constants:** 64 KB per note (it touches vaultd's body and read
+  caps), folder depth 4, the 14-day undo TTL and the 10-minute
+  changeset window. Nothing comes from the environment: a deploy still
+  cannot widen a cap by pasting a variable.
+- `/delete` wipes the overrides, and vaultd's `POST /v1/purge` resets
+  its copy. `/export` includes the overrides.

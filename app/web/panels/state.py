@@ -59,6 +59,7 @@ import uuid
 from aiohttp import web
 
 from app.core import checkin as checkin_core
+from app.core import claude_write_limits as write_limits
 from app.core import commands as commands_core
 from app.core import memory as memory_core
 from app.core import proposal as proposal_core
@@ -129,7 +130,28 @@ async def _build_state_dto(session, settings, clock) -> dict:
             "search_today": search_ok + search_fail,
         },
         "limits": {"due_max_len": commands_core.DUE_ACTION_MAX_LEN},
+        "claude_write_limits": await _claude_limits_dto(session, settings),
     }
+
+
+async def _claude_limits_dto(session, settings) -> list[dict] | None:
+    """Claude's write caps (app/core/claude_write_limits.py), or None
+    while Claude access is off -- the screen hides the section then."""
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        return None
+    current = (await write_limits.effective(session)).as_dict()
+    return [
+        {
+            "key": key,
+            "label": spec.label,
+            "value": current[key],
+            "default": spec.default,
+            "min": spec.min,
+            "max": spec.max,
+            "unit": "bytes" if key == "bytes_per_day" else "count",
+        }
+        for key, spec in write_limits.SPECS.items()
+    ]
 
 
 async def _expire_proposal_in_txn(session, clock, field: str) -> proposal_core.Proposal | None:
@@ -349,6 +371,54 @@ async def post_timezone(request: web.Request) -> web.Response:
     return _json(200, {"state": dto})
 
 
+# --- POST /api/state/claude-limits ----------------------------------------
+
+
+async def post_claude_limits(request: web.Request) -> web.Response:
+    """Set one of Claude's write caps, or put it back to its default
+    (`value: null`) -- the same `set_and_push` `/claude limits` calls,
+    raising as well as lowering (docs/decisions.md, "Claude write caps
+    become settings"). 404 while Claude access is off, like the routes
+    that feature adds. No `clear_awaiting` (step 3): the caps are not a
+    `user_state` field and no Telegram command handler touches them
+    other than `/claude`, which the web never runs."""
+    if not await _session_token_valid(request):
+        return _json(401, {"error": "unauthenticated"})
+    settings, sessionmaker, clock, _bot = _cookie_settings(request)
+    if not settings.CLAUDE_ACCESS_ENABLED:
+        return _json(404, {"error": "not_found"})
+    limiter: WebRateLimiter = request.app["web_rate_limiter"]
+    hub: WebHub = request.app["web_hub"]
+
+    body, error = await _read_body(request)
+    if error is not None:
+        return error
+    key, value = body.get("key"), body.get("value")
+    if not isinstance(key, str) or "value" not in body:
+        return _json(400, {"error": "bad_request"})
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        return _json(400, {"error": "bad_request"})
+    try:
+        if value is None:
+            if key not in write_limits.SPECS:
+                raise write_limits.LimitError("unknown_key")
+        else:
+            write_limits.check_value(key, value)
+    except write_limits.LimitError as exc:
+        return _json(422, {"error": "invalid", "detail": exc.code})
+
+    retry = limiter.check_panel_write()
+    if retry is not None:
+        return _rate_limited(retry)
+
+    async with sessionmaker() as session:
+        _new, pushed = await write_limits.set_and_push(session, settings, clock, key, value)
+        dto = await _build_state_dto(session, settings, clock)
+
+    hub.publish_invalidate("state")
+    return _json(200, {"state": dto, "vault_pending": pushed is False})
+
+
 # --- POST /api/state/pause ------------------------------------------------
 
 
@@ -418,3 +488,4 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/state/quiet", post_quiet)
     app.router.add_post("/api/state/timezone", post_timezone)
     app.router.add_post("/api/state/pause", post_pause)
+    app.router.add_post("/api/state/claude-limits", post_claude_limits)

@@ -262,6 +262,7 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 last_write_at=now,
             )
         )
+        session.add(models.ClaudeWriteLimit(name="creates_per_day", value=5, updated_at=now))
         await session.commit()
 
 
