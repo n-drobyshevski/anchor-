@@ -112,8 +112,8 @@
   /* The "wired" palette from the visual reference (docs/brand/README.md):
      a white diagram sheet with black ink by day, a soft black screen with
      phosphor green by night -- the mark's colours, toned down for
-     long reading. Neutral greys, hard
-     square edges, flat surfaces (the hairline carries the edge; only
+     long reading. Neutral greys, softly
+     rounded corners, flat surfaces (the hairline carries the edge; only
      popovers keep a shadow).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
@@ -148,9 +148,9 @@
   --hairline: inset 0 0 0 1px rgb(10 10 10 / .22);
   --shadow-soft: 0 0 0 transparent;
   --shadow-soft-lg: 0 6px 16px rgb(10 10 10 / .14);
-  --radius: 0;
-  --radius-card: 0;
-  --radius-pill: 0;
+  --radius: 6px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
   --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);

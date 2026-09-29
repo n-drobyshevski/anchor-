@@ -46,8 +46,9 @@ the dread.
 
 - Black-and-white ground in neutral greys (not warm ones), with one
   phosphor-green signal.
-- Hard, square edges, and flat surfaces where a hairline carries the
-  edge instead of a soft shadow.
+- Softly rounded corners (tighter than the old warm palette's), and
+  flat surfaces where a hairline carries the edge instead of a soft
+  shadow.
 - System text (times, states, counts) in the mono face, like a terminal
   line.
 - Charts drawn as a diagram would draw them: plain bars, nodes, arrows.
@@ -86,7 +87,7 @@ Change all three together.
 
 The web UI's palette is **wired**, the whole board: a black screen with
 phosphor green by night, a white diagram sheet with black ink by day.
-It uses neutral greys (not warm ones), square corners everywhere, and
+It uses neutral greys (not warm ones), softly rounded corners, and
 flat surfaces. It lives in the token blocks at the top of
 `app/web/static/app.css`, and the OAuth page (`_STYLE` in
 `app/web/oauth.py`) mirrors it, so change both together. (A gentler
@@ -109,7 +110,7 @@ alone. Keep it that way.
 | `--text-muted` | `#555753` (6.6:1) | `#999c95` (6.4:1) |
 | `--accent` | `#146c34` (5.9:1 on `--bg`) | `#56c882` phosphor (8.4:1) |
 | `--accent-text` | `#ffffff` (6.5:1) | `#161917` (8.4:1) |
-| `--radius`, `--radius-card`, `--radius-pill` | `0` | same |
+| `--radius` (controls) / `--radius-card` (cards, bubbles) / `--radius-pill` | `6px` / `10px` / `999px` | same |
 | Shadows | none on cards (the hairline carries the edge); popovers keep a short one | same |
 
 Only dots and avatars stay round (`border-radius: 50%`); every other
