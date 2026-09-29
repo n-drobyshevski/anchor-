@@ -82,39 +82,21 @@ The geometry is on a 32-unit grid and is shared by:
 
 Change all three together.
 
-## Web UI looks
+## Web UI palette
 
-`app/web/static/app.css` keeps today's palette as the default and adds
-two opt-in looks. They only reassign existing tokens. Try them in the
-web UI:
+The web UI's palette is **wired**, the whole board: a black screen with
+phosphor green by night, a white diagram sheet with black ink by day.
+It uses neutral greys (not warm ones), square corners everywhere, and
+flat surfaces. It lives in the token blocks at the top of
+`app/web/static/app.css`, and the OAuth page (`_STYLE` in
+`app/web/oauth.py`) mirrors it, so change both together. (A gentler
+`phosphor` look, the previous palette with a green accent, was tried as
+an option and dropped when wired became the default.)
 
-- `/?look=phosphor`
-- `/?look=wired`
-- `/?look=default` goes back (the choice is remembered in the browser).
-
-Every text and accent pair below is at least 4.5:1 (WCAG AA). `--danger`
-stays red in both looks. Red and green are hard to tell apart for
-colour-blind eyes, which is acceptable only because the UI never shows
-state by colour alone. Keep it that way.
-
-### `phosphor`: the smallest step
-
-Today's palette (warm neutrals, green-tinted bubbles), with its muted
-Echo green (`#2f6f4f`, dark `#7fbf9a`) swapped for brighter CRT green.
-Only `--accent`, `--focus`, `--dot-ok` and `--chart-bar` change, plus
-`--chart-bar-active` in light mode, so the selected bar still stands
-out against the green ones.
-
-| Token | Light | Dark |
-|---|---|---|
-| `--accent` | `#146c34` (6.1:1 on `--bg`) | `#5fe08a` (10.4:1 on `--bg`) |
-| `--accent-text` | `#ffffff` (6.5:1) | `#1c1917` (10.4:1) |
-| `--chart-bar-active` | `#292524` | unchanged (`#faf8f5`) |
-
-### `wired`: the whole board
-
-A black screen with phosphor green by night; a white diagram sheet with
-black ink by day.
+Every text and accent pair is at least 4.5:1 (WCAG AA). `--danger`
+stays red. Red and green are hard to tell apart for colour-blind eyes,
+which is acceptable only because the UI never shows state by colour
+alone. Keep it that way.
 
 | Token | Light | Dark |
 |---|---|---|
@@ -127,6 +109,9 @@ black ink by day.
 | `--radius`, `--radius-card`, `--radius-pill` | `0` | same |
 | Shadows | none on cards (the hairline carries the edge); popovers keep a short one | same |
 
+Only dots and avatars stay round (`border-radius: 50%`); every other
+corner goes through the radius tokens.
+
 ## Next steps (not done yet)
 
 - **Fonts with Cyrillic.** Geist Mono is Latin-only, so Russian system
@@ -134,8 +119,3 @@ black ink by day.
   or IBM Plex Mono) for `--font-mono`, and possibly a stricter grotesque
   for `--font`, can be vendored through `_FONT_PACKAGES` in
   `scripts/vendor_web.py` like the current fonts.
-- **Tokenize the remaining hard-coded radii** in `app.css` (about ten
-  `border-radius` values: bubbles, chips, the composer), so `wired` can
-  square them too.
-- **Pick a default.** Once a look has been lived with, promote it to
-  `:root` and drop the switch.

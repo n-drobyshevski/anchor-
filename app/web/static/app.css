@@ -109,155 +109,16 @@
 
 :root {
   color-scheme: light dark;
-  /* Warm neutrals and one accent, Echo's green (the first mark's
-     #2f6f4f; the current mark and the opt-in looks below are in
-     docs/brand/README.md).
+  /* The "wired" palette from the visual reference (docs/brand/README.md):
+     a white diagram sheet with black ink by day, a black screen with
+     phosphor green by night -- the mark's colours. Neutral greys, hard
+     square edges, flat surfaces (the hairline carries the edge; only
+     popovers keep a shadow).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
-     offline dot only. State is never shown by colour alone. */
-  --bg: #faf8f5;
-  --surface: #ffffff;
-  --text: #292524;
-  --text-muted: #57514b;
-  --border: #e7e0d7;
-  --input-border: #e7e0d7;
-  --muted-fill: #f2ede7;
-  --muted-fill-text: #44403c;
-  --accent: #2f6f4f;
-  --accent-text: #ffffff;
-  --focus: #2f6f4f;
-  --bubble-user: #e3ede6;
-  --bubble-user-text: #292524;
-  --bubble-bot: #ffffff;
-  --bubble-bot-text: #292524;
-  --bubble-muted: #f2ede7;
-  --bubble-muted-text: #44403c;
-  --danger: #a11414;
-  --dot-ok: #2f6f4f;
-  --dot-warn: #a8a29e;
-  --dot-bad: #a11414;
-  --chart-bar: #2f6f4f;
-  --chart-bar-active: #1f4d36;
-  --chart-grid: #e7e0d7;
-  --chart-empty: #e7e0d7;
-  --hairline: inset 0 0 0 1px rgb(41 37 36 / .10);
-  --shadow-soft: 0 1px 2px rgb(28 25 23 / .06), 0 4px 12px rgb(28 25 23 / .06);
-  --shadow-soft-lg: 0 2px 6px rgb(28 25 23 / .07), 0 12px 28px rgb(28 25 23 / .08);
-  --radius: 12px;
-  --radius-card: 16.8px;
-  --radius-pill: 999px;
-  --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #1c1917;
-    --surface: #292524;
-    --text: #faf8f5;
-    --text-muted: #bcb3aa;
-    --border: #3a3531;
-    --input-border: #423c37;
-    --muted-fill: #3a3531;
-    --muted-fill-text: #faf8f5;
-    --accent: #7fbf9a;
-    --accent-text: #292524;
-    --focus: #7fbf9a;
-    --bubble-user: #2b3a31;
-    --bubble-user-text: #faf8f5;
-    --bubble-bot: #292524;
-    --bubble-bot-text: #faf8f5;
-    --bubble-muted: #3a3531;
-    --bubble-muted-text: #faf8f5;
-    --danger: #fca5a5;
-    --dot-ok: #7fbf9a;
-    --dot-warn: #78716c;
-    --dot-bad: #fca5a5;
-    --chart-bar: #7fbf9a;
-    --chart-bar-active: #faf8f5;
-    --chart-grid: #3a3531;
-    --chart-empty: #3a3531;
-    --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
-    --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
-    --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
-  }
-}
-
-:root[data-theme="dark"] {
-  --bg: #1c1917;
-  --surface: #292524;
-  --text: #faf8f5;
-  --text-muted: #bcb3aa;
-  --border: #3a3531;
-  --input-border: #423c37;
-  --muted-fill: #3a3531;
-  --muted-fill-text: #faf8f5;
-  --accent: #7fbf9a;
-  --accent-text: #292524;
-  --focus: #7fbf9a;
-  --bubble-user: #2b3a31;
-  --bubble-user-text: #faf8f5;
-  --bubble-bot: #292524;
-  --bubble-bot-text: #faf8f5;
-  --bubble-muted: #3a3531;
-  --bubble-muted-text: #faf8f5;
-  --danger: #fca5a5;
-  --dot-ok: #7fbf9a;
-  --dot-warn: #78716c;
-  --dot-bad: #fca5a5;
-  --chart-bar: #7fbf9a;
-  --chart-bar-active: #faf8f5;
-  --chart-grid: #3a3531;
-  --chart-empty: #3a3531;
-  --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
-  --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
-  --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
-}
-
-/* Opt-in looks from the visual reference, the "cybersyn" board
-   (docs/brand/README.md). app/main.js sets <html data-look> from
-   `?look=phosphor|wired` and remembers it; without one, the palette
-   above is the only one in use. Each look repeats the three-block
-   pattern above and only reassigns existing tokens, winning on source
-   order at equal specificity. --danger stays red in both; red and green
-   are close for colour-blind eyes, which is fine only because state is
-   never shown by colour alone (see :root). Contrast (WCAG): every
-   text/accent pair here is >= 4.5:1. */
-
-/* phosphor: today's palette, its muted green swapped for CRT green. */
-:root[data-look="phosphor"] {
-  --accent: #146c34;
-  --accent-text: #ffffff;
-  --focus: #146c34;
-  --dot-ok: #146c34;
-  --chart-bar: #146c34;
-  --chart-bar-active: #292524;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root[data-look="phosphor"]:not([data-theme="light"]) {
-    --accent: #5fe08a;
-    --accent-text: #1c1917;
-    --focus: #5fe08a;
-    --dot-ok: #5fe08a;
-    --chart-bar: #5fe08a;
-  }
-}
-
-:root[data-look="phosphor"][data-theme="dark"] {
-  --accent: #5fe08a;
-  --accent-text: #1c1917;
-  --focus: #5fe08a;
-  --dot-ok: #5fe08a;
-  --chart-bar: #5fe08a;
-}
-
-/* wired: the whole board. A black screen with phosphor green by night,
-   a white diagram sheet with black ink by day. Neutral greys instead of
-   warm ones, hard square edges, flat surfaces (the hairline carries the
-   edge; only popovers keep a shadow). */
-:root[data-look="wired"] {
+     offline dot only. Red and green are close for colour-blind eyes, so
+     state is never shown by colour alone. Contrast (WCAG): every
+     text/accent pair is >= 4.5:1. */
   --bg: #f4f4f1;
   --surface: #ffffff;
   --text: #0a0a0a;
@@ -275,8 +136,10 @@
   --bubble-bot-text: #0a0a0a;
   --bubble-muted: #e9e9e4;
   --bubble-muted-text: #262626;
+  --danger: #a11414;
   --dot-ok: #146c34;
   --dot-warn: #9a9a94;
+  --dot-bad: #a11414;
   --chart-bar: #146c34;
   --chart-bar-active: #0a0a0a;
   --chart-grid: #d6d6d0;
@@ -287,10 +150,13 @@
   --radius: 0;
   --radius-card: 0;
   --radius-pill: 0;
+  --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root[data-look="wired"]:not([data-theme="light"]) {
+  :root:not([data-theme="light"]) {
     --bg: #0a0a0a;
     --surface: #121412;
     --text: #e6e6e1;
@@ -308,8 +174,10 @@
     --bubble-bot-text: #e6e6e1;
     --bubble-muted: #1b1d1b;
     --bubble-muted-text: #e6e6e1;
+    --danger: #fca5a5;
     --dot-ok: #5fe08a;
     --dot-warn: #5c5f5c;
+    --dot-bad: #fca5a5;
     --chart-bar: #5fe08a;
     --chart-bar-active: #e6e6e1;
     --chart-grid: #262826;
@@ -320,7 +188,7 @@
   }
 }
 
-:root[data-look="wired"][data-theme="dark"] {
+:root[data-theme="dark"] {
   --bg: #0a0a0a;
   --surface: #121412;
   --text: #e6e6e1;
@@ -338,8 +206,10 @@
   --bubble-bot-text: #e6e6e1;
   --bubble-muted: #1b1d1b;
   --bubble-muted-text: #e6e6e1;
+  --danger: #fca5a5;
   --dot-ok: #5fe08a;
   --dot-warn: #5c5f5c;
+  --dot-bad: #fca5a5;
   --chart-bar: #5fe08a;
   --chart-bar-active: #e6e6e1;
   --chart-grid: #262826;
@@ -613,7 +483,7 @@ button, input, textarea {
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-text);
 }
@@ -681,7 +551,7 @@ button, input, textarea {
   gap: 10px;
   min-height: 44px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   color: var(--text);
   text-decoration: none;
   font-size: 14px;
@@ -779,14 +649,14 @@ button, input, textarea {
 .role-user .bubble {
   background: var(--bubble-user);
   color: var(--bubble-user-text);
-  border-radius: 16px 16px 6px 16px;
+  border-radius: var(--radius-card);
 }
 
 .role-assistant .bubble {
   background: var(--bubble-bot);
   color: var(--bubble-bot-text);
   box-shadow: var(--hairline);
-  border-radius: 16px 16px 16px 6px;
+  border-radius: var(--radius-card);
 }
 
 /* System and check-in rows (canned replies, welfare notes, system
@@ -808,7 +678,7 @@ button, input, textarea {
 .msg-row[data-kind="checkin"] .bubble {
   min-height: 24px;
   padding: 3px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--bubble-muted);
   color: var(--bubble-muted-text);
   box-shadow: none;
@@ -1806,7 +1676,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 }
 
 .confirm-dialog::backdrop {
-  background: rgb(28 25 23 / .4);
+  background: rgb(10 10 10 / .5);
 }
 
 /* ---------- Check-in (screens/Checkin.js) ---------- */
@@ -2065,7 +1935,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   max-width: 100%;
   overflow: visible;
   touch-action: pan-y;
-  border-radius: 6px;
+  border-radius: var(--radius);
 }
 
 .chart-svg:focus {
