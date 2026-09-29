@@ -213,6 +213,135 @@
   --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
 }
 
+/* Opt-in looks from the Cybersyn visual reference (docs/brand/README.md).
+   app/main.js sets <html data-look> from `?look=signal|opsroom` and
+   remembers it; without one, the palette above is the only one in use.
+   Each look repeats the three-block pattern above and only reassigns
+   existing tokens, winning on source order at equal specificity.
+   --danger stays red in both so it never reads as the orange accent.
+   Contrast (WCAG): every text/accent pair here is >= 4.5:1. */
+
+/* signal: today's palette, the stone accent swapped for Cybersyn orange. */
+:root[data-look="signal"] {
+  --accent: #b8430f;
+  --accent-text: #ffffff;
+  --focus: #b8430f;
+  --dot-ok: #b8430f;
+  --chart-bar: #b8430f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-look="signal"]:not([data-theme="light"]) {
+    --accent: #f07f3c;
+    --accent-text: #292524;
+    --focus: #f07f3c;
+    --dot-ok: #f07f3c;
+    --chart-bar: #f07f3c;
+  }
+}
+
+:root[data-look="signal"][data-theme="dark"] {
+  --accent: #f07f3c;
+  --accent-text: #292524;
+  --focus: #f07f3c;
+  --dot-ok: #f07f3c;
+  --chart-bar: #f07f3c;
+}
+
+/* opsroom: the whole room. Paper and ink by day, walnut and fiberglass
+   white by night, one orange signal, squarer corners, flat surfaces
+   (the hairline carries the edge; only popovers keep a shadow). */
+:root[data-look="opsroom"] {
+  --bg: #f4efe6;
+  --surface: #fbf8f2;
+  --text: #1a1714;
+  --text-muted: #5c554d;
+  --border: #ddd4c6;
+  --input-border: #cfc5b5;
+  --muted-fill: #ebe4d8;
+  --muted-fill-text: #3a342e;
+  --accent: #b8430f;
+  --accent-text: #ffffff;
+  --focus: #b8430f;
+  --bubble-user: #ebe4d8;
+  --bubble-user-text: #1a1714;
+  --bubble-bot: #fbf8f2;
+  --bubble-bot-text: #1a1714;
+  --bubble-muted: #ebe4d8;
+  --bubble-muted-text: #3a342e;
+  --dot-ok: #b8430f;
+  --dot-warn: #a39a8e;
+  --chart-bar: #b8430f;
+  --chart-bar-active: #1a1714;
+  --chart-grid: #ddd4c6;
+  --chart-empty: #ddd4c6;
+  --hairline: inset 0 0 0 1px rgb(26 23 20 / .14);
+  --shadow-soft: 0 0 0 transparent;
+  --shadow-soft-lg: 0 6px 16px rgb(26 23 20 / .12);
+  --radius: 4px;
+  --radius-card: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-look="opsroom"]:not([data-theme="light"]) {
+    --bg: #161412;
+    --surface: #201d1a;
+    --text: #ece6da;
+    --text-muted: #a39a8e;
+    --border: #332e29;
+    --input-border: #3d3731;
+    --muted-fill: #2a2622;
+    --muted-fill-text: #ece6da;
+    --accent: #f07f3c;
+    --accent-text: #161412;
+    --focus: #f07f3c;
+    --bubble-user: #2a2622;
+    --bubble-user-text: #ece6da;
+    --bubble-bot: #201d1a;
+    --bubble-bot-text: #ece6da;
+    --bubble-muted: #2a2622;
+    --bubble-muted-text: #ece6da;
+    --dot-ok: #f07f3c;
+    --dot-warn: #6f675e;
+    --chart-bar: #f07f3c;
+    --chart-bar-active: #ece6da;
+    --chart-grid: #332e29;
+    --chart-empty: #332e29;
+    --hairline: inset 0 0 0 1px rgb(236 230 218 / .12);
+    --shadow-soft: 0 0 0 transparent;
+    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .4);
+  }
+}
+
+:root[data-look="opsroom"][data-theme="dark"] {
+  --bg: #161412;
+  --surface: #201d1a;
+  --text: #ece6da;
+  --text-muted: #a39a8e;
+  --border: #332e29;
+  --input-border: #3d3731;
+  --muted-fill: #2a2622;
+  --muted-fill-text: #ece6da;
+  --accent: #f07f3c;
+  --accent-text: #161412;
+  --focus: #f07f3c;
+  --bubble-user: #2a2622;
+  --bubble-user-text: #ece6da;
+  --bubble-bot: #201d1a;
+  --bubble-bot-text: #ece6da;
+  --bubble-muted: #2a2622;
+  --bubble-muted-text: #ece6da;
+  --dot-ok: #f07f3c;
+  --dot-warn: #6f675e;
+  --chart-bar: #f07f3c;
+  --chart-bar-active: #ece6da;
+  --chart-grid: #332e29;
+  --chart-empty: #332e29;
+  --hairline: inset 0 0 0 1px rgb(236 230 218 / .12);
+  --shadow-soft: 0 0 0 transparent;
+  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .4);
+}
+
 * { box-sizing: border-box; }
 
 /* The UA stylesheet's `[hidden] { display: none }` loses to *any*

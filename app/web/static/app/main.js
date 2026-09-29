@@ -10,6 +10,26 @@ import { apiGet } from './api.js';
 import { auth, invalidate, proposalsBadge } from './store.js';
 import { close as closeSSE, connect as connectSSE } from './sse.js';
 
+// Opt-in looks (app.css, docs/brand/README.md): `?look=signal` or
+// `?look=opsroom` switches and remembers, `?look=default` forgets.
+// Storage can throw (private mode, blocked site data); the look asked
+// for in the URL then still applies, it just isn't remembered.
+const LOOKS = ['signal', 'opsroom'];
+function applyLook() {
+  const asked = new URLSearchParams(location.search).get('look');
+  let look = asked;
+  try {
+    if (asked === 'default') localStorage.removeItem('echo.look');
+    else if (LOOKS.includes(asked)) localStorage.setItem('echo.look', asked);
+    else look = localStorage.getItem('echo.look');
+  } catch {
+    // keep `look` as asked
+  }
+  if (LOOKS.includes(look)) document.documentElement.dataset.look = look;
+  else delete document.documentElement.dataset.look;
+}
+applyLook();
+
 startRouter();
 render(html`<${App} />`, document.getElementById('root'));
 

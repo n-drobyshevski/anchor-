@@ -9,6 +9,8 @@ sees says Echo.
 The mark (three circles, each smaller and fainter) is
 `app/web/static/icon.svg`; the Telegram avatar is
 `docs/brand/echo-avatar.png` (set it with BotFather's `/setuserpic`).
+The visual reference (Cybersyn) and the web UI's opt-in looks are in
+[docs/brand/README.md](docs/brand/README.md).
 
 ## Status
 
