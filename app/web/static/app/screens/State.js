@@ -711,21 +711,7 @@ function LimitRow({ item, onSet }) {
   `;
 }
 
-// «Все по умолчанию» (`key: "*"`) shows only while some cap is
-// overridden, like Telegram's «↺ Все по умолчанию» under /claude limits.
 function ClaudeLimitsCard({ limits, onSet }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const anyOverridden = limits.some((item) => item.value !== item.default);
-
-  async function resetAll() {
-    setBusy(true);
-    setError('');
-    const result = await onSet('*', null);
-    setBusy(false);
-    if (result !== true) setError(result);
-  }
-
   return html`
     <section class="card" aria-labelledby="claude-limits-heading">
       <h2 id="claude-limits-heading">Лимиты записи Claude</h2>
@@ -733,14 +719,6 @@ function ClaudeLimitsCard({ limits, onSet }) {
       <ul class="card-list">
         ${limits.map((item) => html`<${LimitRow} key=${item.key} item=${item} onSet=${onSet} />`)}
       </ul>
-      ${anyOverridden
-        ? html`
-            <div class="card-footer">
-              ${error ? html`<p class="inline-error" role="alert">${error}</p>` : html`<span></span>`}
-              <button type="button" class="btn" disabled=${busy} onClick=${resetAll}>↺ Все по умолчанию</button>
-            </div>
-          `
-        : null}
     </section>
   `;
 }

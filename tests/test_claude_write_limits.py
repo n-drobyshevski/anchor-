@@ -473,21 +473,6 @@ async def test_web_can_raise_lower_and_reset(sessionmaker):
         assert rows["creates_per_day"]["value"] == 40
 
 
-async def test_web_can_reset_every_cap(sessionmaker):
-    app, fake = await _web(sessionmaker)
-    async with TestClient(TestServer(app)) as client:
-        cookies = await _log_in(client, fake)
-        for key, value in (("creates_per_day", 3), ("moves_per_day", 123)):
-            resp = await _post(client, "/api/state/claude-limits", {"key": key, "value": value}, cookies)
-            assert resp.status == 200
-        resp = await _post(client, "/api/state/claude-limits", {"key": "*", "value": None}, cookies)
-        assert resp.status == 200
-        rows = (await resp.json())["state"]["claude_write_limits"]
-    assert all(row["value"] == row["default"] for row in rows)
-    async with sessionmaker() as session:
-        assert (await session.execute(select(ClaudeWriteLimit))).first() is None
-
-
 async def test_web_needs_a_session(sessionmaker):
     app, _fake = await _web(sessionmaker)
     async with TestClient(TestServer(app)) as client:
@@ -504,7 +489,6 @@ async def test_web_needs_a_session(sessionmaker):
         ({"key": "creates_per_day", "value": 501}, 422, "out_of_range"),
         ({"key": "nope", "value": 1}, 422, "unknown_key"),
         ({"key": "nope", "value": None}, 422, "unknown_key"),
-        ({"key": "*", "value": 5}, 422, "out_of_range"),
     ],
 )
 async def test_web_refuses_bad_bodies(sessionmaker, body, status, detail):
