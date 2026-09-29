@@ -54,6 +54,10 @@ export const reconnectBanner = signal(false);
 // screen that wants to know it. See router.js for how it is written.
 export const route = signal(location.hash || '#/chat');
 
+// The optional query after the route (`tab=notebook` in
+// `#/memory?tab=notebook`), written by router.js.
+export const routeQuery = signal('');
+
 // Toast queue, oldest first: [{id, text}]. Toasts.js renders it and
 // nothing else mutates it directly -- always go through pushToast().
 export const toasts = signal([]);

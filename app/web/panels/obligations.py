@@ -26,12 +26,10 @@ from app.core import obligations as obligations_core
 from app.db.models import Obligation
 from app.web.hub import WebHub
 from app.web.http import _cookie_settings, _json, _rate_limited, _session_token_valid
+from app.web.panels._common import path_id
 from app.web.ratelimit import WebRateLimiter
 
 logger = logging.getLogger(__name__)
-
-# Postgres bigint's max: any larger path id is a 404, never a query.
-_MAX_BIGINT = 2**63 - 1
 
 _STATUS_BY_ACTION = {"done": obligations_core.DONE, "drop": obligations_core.DROPPED}
 
@@ -45,14 +43,6 @@ def _obligation_dto(row: Obligation) -> dict:
         "opened_at": row.opened_at.isoformat(),
         "due_local_date": row.due_local_date.isoformat() if row.due_local_date else None,
     }
-
-
-def _parse_id(request: web.Request) -> int | None:
-    try:
-        value = int(request.match_info["id"])
-    except ValueError:
-        return None
-    return value if 0 < value <= _MAX_BIGINT else None
 
 
 async def get_obligations(request: web.Request) -> web.Response:
@@ -75,7 +65,7 @@ async def _close(request: web.Request, action: str) -> web.Response:
     limiter: WebRateLimiter = request.app["web_rate_limiter"]
     hub: WebHub = request.app["web_hub"]
 
-    obligation_id = _parse_id(request)
+    obligation_id = path_id(request)
     if obligation_id is None:
         return _json(404, {"error": "not_found"})
 

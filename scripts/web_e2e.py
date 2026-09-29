@@ -630,6 +630,49 @@ async def scenario_debts_and_intensity(page, ctx: Ctx) -> None:
         ctx.ok("debts/intensity writes sent nothing to Telegram")
 
 
+async def scenario_memory_tabs(page, ctx: Ctx) -> None:
+    """Память's Блокнот and Договорённости tabs: add an intention, add
+    an order and retire it again (the seeded order stays, the check-in
+    scenarios answer it). All silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/memory"):
+        ctx.fail("#/memory missing from nav; cannot run the tab actions")
+        return
+    sent_before = ctx.harness.sent_count
+    stamp = f"{datetime.datetime.now(datetime.timezone.utc):%H%M%S}"
+    try:
+        await page.click("#memory-tab-notebook")
+        await page.wait_for_function("() => location.hash === '#/memory?tab=notebook'", timeout=5_000)
+        intention = f"e2e намерение {stamp}"
+        await page.fill("#notebook-add", intention)
+        await page.locator("form.inline-add button", has_text="Добавить").click()
+        await page.locator("#memory-tabpanel li", has_text=intention).wait_for(state="visible", timeout=10_000)
+        ctx.ok("Notebook: added an intention")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Notebook add did not appear: {exc}")
+    await page.screenshot(path=str(ctx.screenshot_path("memory_notebook")))
+
+    try:
+        await page.click("#memory-tab-orders")
+        order = f"e2e договорённость {stamp}"
+        await page.fill("#order-add", order)
+        await page.select_option("#order-cadence", "weekly:3")
+        await page.locator("form.inline-add button", has_text="Добавить").click()
+        row = page.locator("#memory-tabpanel li", has_text=order)
+        await row.wait_for(state="visible", timeout=10_000)
+        await page.screenshot(path=str(ctx.screenshot_path("memory_orders")))
+        await row.locator("button", has_text="Снять").click()
+        await page.locator("dialog.confirm-dialog button.btn-danger", has_text="Снять").click()
+        await row.wait_for(state="detached", timeout=10_000)
+        ctx.ok("Orders: added a weekly order and retired it")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Orders add/retire failed: {exc}")
+
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("notebook/orders writes caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("notebook/orders writes sent nothing to Telegram")
+
+
 async def scenario_memory_add(page, ctx: Ctx) -> None:
     if not await _goto_screen(page, ctx, "#/memory"):
         ctx.fail("#/memory missing from nav; cannot run the Memory panel action")
@@ -875,6 +918,7 @@ async def run_pass(
             await scenario_state_due_action(page, ctx)
             await scenario_memory_add(page, ctx)
             await scenario_debts_and_intensity(page, ctx)
+            await scenario_memory_tabs(page, ctx)
         await scenario_nav_screens(page, ctx)
         if do_actions:
             await scenario_checkin(page, ctx)

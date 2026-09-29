@@ -1,25 +1,30 @@
-// The memory screen (#/memory, nav label "Память"): the W3 HTTP
-// contract's memories list (GET /api/memories), plus pin/unpin,
-// "Исправить" (an inline edit that supersedes the row, exactly like
-// Telegram's correction path) and "Забыть" (hard delete, behind a
-// native <dialog> confirmation) and an add form. One set of rules for
-// Telegram and the web, per the plan: every mutation here calls the
-// same app/core/memory.py functions Telegram calls, and is silent in
-// Telegram (audit source "web", no send).
+// Память (#/memory): three tabs, the tab kept in the hash
+// (`#/memory?tab=notebook`) so a reload stays on it.
 //
-// Unlike State.js/Proposals.js, this screen paginates
-// (offset/limit, "Показать ещё") -- see reload()'s own comment for how
-// that interacts with the tail's invalidate-triggered refetch.
+//   Факты          - memories, below (FactsTab).
+//   Блокнот        - Echo's notebook, screens/memory/notebook.js.
+//   Договорённости - standing orders, screens/memory/orders.js.
+//
+// Факты is the W3 HTTP contract's memories list (GET /api/memories),
+// plus pin/unpin, "Исправить" (an inline edit that supersedes the row,
+// exactly like Telegram's correction path), "Забыть" (hard delete,
+// behind a confirmation) and an add form. Every mutation calls the same
+// app/core/memory.py functions Telegram calls, and is silent in
+// Telegram (audit source "web", no send). The list pages (offset/limit,
+// «Показать ещё") through hooks.js's usePagedResource.
 import { html } from '../html.js';
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
-import { pushToast } from '../store.js';
+import { pushToast, routeQuery } from '../store.js';
+import { setRouteQuery } from '../router.js';
+import { NotebookTab } from './memory/notebook.js';
+import { OrdersTab } from './memory/orders.js';
 import { usePagedResource } from '../hooks.js';
 import { send } from '../lib/request.js';
-import { formatDateTime } from '../lib/format.js';
+import { formatDateTime, pluralRu } from '../lib/format.js';
 import { CharCounter } from '../ui/CharCounter.js';
 import { ConfirmDialog } from '../ui/ConfirmDialog.js';
 import { Icon } from '../ui/Icon.js';
-import { LoadError, ScreenError, ScreenLoading } from '../ui/ScreenState.js';
+import { LoadError } from '../ui/ScreenState.js';
 import { useInlineEdit } from '../ui/inlineEdit.js';
 
 // Mirrors app/core/memory.py's MEMORY_TEXT_MAX. Unlike State.js's
@@ -254,7 +259,7 @@ function AddForm({ open, onClose, onAdd }) {
   `;
 }
 
-export function Memory() {
+function FactsTab() {
   const [kindFilter, setKindFilter] = useState(null); // null = "Все"
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [search, setSearch] = useState('');
@@ -404,7 +409,7 @@ export function Memory() {
   const hasActiveFilter = Boolean(kindFilter) || pinnedOnly || Boolean(search.trim());
   const emptyText = hasActiveFilter ? 'Ничего не найдено' : 'Пока ничего не запомнено';
 
-  if (!loaded) return failed ? html`<${ScreenError} onRetry=${list.reload} />` : html`<${ScreenLoading} />`;
+  if (!loaded) return failed ? html`<${LoadError} onRetry=${list.reload} />` : html`<div aria-busy="true"></div>`;
 
   let listBody;
   if (failed && !items.length) {
@@ -432,11 +437,10 @@ export function Memory() {
   }
 
   return html`
-    <div class="screen-wrap">
-      <div class="screen screen-memory">
+    <div class="memory-tab">
         <div class="card-row">
           <p class="memory-counter${overCap ? ' char-counter-over' : ''}" aria-live="polite">
-            <span class="mono">${total}</span> записей · закреплено
+            <span class="mono">${total}</span> ${pluralRu(total, ['запись', 'записи', 'записей'])} · закреплено
             <span class="mono">${pinnedCount}/${pinnedMax}</span>
           </p>
           <button
@@ -504,7 +508,6 @@ export function Memory() {
               </button>
             `
           : null}
-      </div>
       <${ConfirmDialog}
         target=${forgetTarget}
         busy=${forgetBusy}
@@ -527,3 +530,70 @@ export function Memory() {
     </div>
   `;
 }
+
+// ---------- the screen: tabs ----------
+
+const TABS = [
+  { id: 'facts', label: 'Факты' },
+  { id: 'notebook', label: 'Блокнот' },
+  { id: 'orders', label: 'Договорённости' },
+];
+
+export function Memory() {
+  const params = new URLSearchParams(routeQuery.value);
+  const current = TABS.some((t) => t.id === params.get('tab')) ? params.get('tab') : 'facts';
+
+  function choose(id) {
+    setRouteQuery(id === 'facts' ? '' : `tab=${id}`);
+  }
+
+  // Arrow keys move between tabs (the WAI-ARIA tabs pattern); only the
+  // selected tab is in the Tab order.
+  function onKeyDown(e) {
+    const i = TABS.findIndex((t) => t.id === current);
+    let next = null;
+    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length];
+    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length];
+    else if (e.key === 'Home') next = TABS[0];
+    else if (e.key === 'End') next = TABS[TABS.length - 1];
+    if (!next) return;
+    e.preventDefault();
+    choose(next.id);
+    const el = document.getElementById(`memory-tab-${next.id}`);
+    if (el) el.focus();
+  }
+
+  let panel;
+  if (current === 'notebook') panel = html`<${NotebookTab} />`;
+  else if (current === 'orders') panel = html`<${OrdersTab} />`;
+  else panel = html`<${FactsTab} />`;
+
+  return html`
+    <div class="screen-wrap">
+      <div class="screen screen-memory">
+        <div class="segmented memory-tabs" role="tablist" aria-label="Память" onKeyDown=${onKeyDown}>
+          ${TABS.map(
+            (t) => html`
+              <button
+                key=${t.id}
+                id=${`memory-tab-${t.id}`}
+                type="button"
+                role="tab"
+                aria-selected=${t.id === current ? 'true' : 'false'}
+                aria-controls="memory-tabpanel"
+                tabindex=${t.id === current ? '0' : '-1'}
+                onClick=${() => choose(t.id)}
+              >
+                ${t.label}
+              </button>
+            `,
+          )}
+        </div>
+        <div id="memory-tabpanel" role="tabpanel" aria-labelledby=${`memory-tab-${current}`} class="memory-tabpanel">
+          ${panel}
+        </div>
+      </div>
+    </div>
+  `;
+}
+

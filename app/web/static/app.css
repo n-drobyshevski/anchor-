@@ -919,6 +919,44 @@ button, input, textarea {
   gap: 14px;
 }
 
+/* Память: the tab strip (a .segmented group of role=tab buttons) and
+   each tab's body, a column of cards like .screen's own. */
+.memory-tabs { flex: none; }
+
+/* Three labels in a phone's width: each tab sized by its label, so
+   «Договорённости» fits whole. */
+.segmented.memory-tabs > button {
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-tabpanel,
+.memory-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* One-line add form under a list (Блокнот, Договорённости): the text
+   field takes the room, the select and button keep their size, and the
+   row wraps on a narrow screen. */
+.inline-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.inline-add input { flex: 1 1 12rem; min-width: 0; }
+.inline-add select { flex: 0 1 auto; }
+.inline-add .inline-error,
+.inline-add .char-counter { flex-basis: 100%; margin: 0; }
+
 /* Check-in only: from 900px up, two columns (the form | the chart and
    the journal) in a wider frame; every other panel stays one 42rem
    column. */
@@ -1758,7 +1796,8 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 }
 
 .radio-input:checked + .radio-face,
-.segmented > button[aria-pressed="true"] {
+.segmented > button[aria-pressed="true"],
+.segmented > button[aria-selected="true"] {
   background: var(--muted-fill);
   box-shadow: inset 0 0 0 1.5px var(--accent);
   font-weight: 600;
