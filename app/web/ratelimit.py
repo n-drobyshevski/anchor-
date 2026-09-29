@@ -99,6 +99,11 @@ class _SlidingWindow:
         self._events.append(now)
         return len(self._events)
 
+    def count(self, now: float) -> int:
+        """The count now in-window, recording nothing."""
+        self._evict(now)
+        return len(self._events)
+
     def clear(self) -> None:
         self._events.clear()
 
@@ -169,6 +174,11 @@ class WebRateLimiter:
         return self._send_day.hit(now)
 
     # --- POST /api/press: 30/min ---
+
+    def sends_today(self) -> int:
+        """Web sends in the last 24 hours (SEND_PER_DAY_LIMIT's window),
+        without recording one: the Лимиты screen's read-only view."""
+        return self._send_day.count(self._now())
 
     def check_press(self) -> float | None:
         return self._press_minute.hit(self._now())

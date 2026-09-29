@@ -4,6 +4,7 @@
 import { html } from '../../html.js';
 import { useEffect, useMemo, useState } from '../../../vendor/hooks.module.js';
 import { dayWordInTz, formatHmInTz, timezoneOptions } from '../../lib/tz.js';
+import { getPrefs, setDensity, setTheme } from '../../lib/prefs.js';
 
 function TimezoneRow({ tz, onChange }) {
   const [busy, setBusy] = useState(false);
@@ -104,6 +105,12 @@ function LimitRow({ item, onSet }) {
 
   const overridden = item.value !== item.default;
   const range = `${toShown(item, item.min)}–${toShown(item, item.max)}${unit}`;
+  // How much of an hourly or daily cap is already used (null for the
+  // per-changeset caps, which keep no running total).
+  const used =
+    item.used === null || item.used === undefined
+      ? ''
+      : `${item.key.endsWith('_per_hour') ? 'за час' : 'сегодня'} ${toShown(item, item.used)}${unit} · `;
 
   // One compact row per cap: label and range on the left, the number on
   // the right. «Сохранить» appears only once the draft differs, and
@@ -114,7 +121,7 @@ function LimitRow({ item, onSet }) {
       <div class="row-main">
         <label for=${inputId} class="row-title">${item.label}</label>
         <span class="field-hint" id=${`${inputId}-hint`}>
-          ${range}${overridden
+          ${used}${range}${overridden
             ? html` · по умолчанию ${toShown(item, item.default)}${unit} ·${' '}<button
                   type="button"
                   class="link-button"
@@ -181,6 +188,67 @@ export function ClaudeLimitsCard({ limits, resetAt, timezone, onSet, onResetCoun
             : html`<span></span>`}
         <button type="button" class="btn" disabled=${busy} onClick=${resetCounters}>Обнулить счётчики</button>
       </div>
+    </section>
+  `;
+}
+
+// ---------- Оформление ----------
+// Theme and density for this browser only (lib/prefs.js, localStorage):
+// nothing here touches the server, so the card works even when
+// /api/state does not.
+
+const THEME_OPTIONS = [
+  ['system', 'Системная'],
+  ['light', 'Светлая'],
+  ['dark', 'Тёмная'],
+];
+const DENSITY_OPTIONS = [
+  ['comfortable', 'Обычная'],
+  ['compact', 'Компактная'],
+];
+
+function Choice({ id, label, options, value, onChoose }) {
+  return html`
+    <div class="appearance-choice">
+      <span class="row-title" id=${id}>${label}</span>
+      <div class="segmented" role="group" aria-labelledby=${id}>
+        ${options.map(
+          ([key, text]) => html`
+            <button key=${key} type="button" aria-pressed=${key === value ? 'true' : 'false'} onClick=${() => onChoose(key)}>
+              ${text}
+            </button>
+          `,
+        )}
+      </div>
+    </div>
+  `;
+}
+
+export function AppearanceCard() {
+  const [prefs, setPrefs] = useState(getPrefs);
+
+  function chooseTheme(theme) {
+    setTheme(theme);
+    setPrefs((p) => ({ ...p, theme }));
+  }
+
+  function chooseDensity(density) {
+    setDensity(density);
+    setPrefs((p) => ({ ...p, density }));
+  }
+
+  return html`
+    <section class="card" aria-labelledby="appearance-heading">
+      <h2 id="appearance-heading">Оформление</h2>
+      <p class="field-hint">Хранится в этом браузере.</p>
+      <${Choice} id="theme-label" label="Тема" options=${THEME_OPTIONS} value=${prefs.theme} onChoose=${chooseTheme} />
+      <${Choice}
+        id="density-label"
+        label="Плотность"
+        options=${DENSITY_OPTIONS}
+        value=${prefs.density}
+        onChoose=${chooseDensity}
+      />
     </section>
   `;
 }

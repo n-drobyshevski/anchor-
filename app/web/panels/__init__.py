@@ -30,6 +30,7 @@ from app.web.panels import proposals as proposals_panel
 from app.web.panels import review as review_panel
 from app.web.panels import settings as settings_panel
 from app.web.panels import state as state_panel
+from app.web.panels import usage as usage_panel
 
 
 def register(app: web.Application) -> None:
@@ -42,3 +43,4 @@ def register(app: web.Application) -> None:
     orders_panel.register(app)
     review_panel.register(app)
     settings_panel.register(app)
+    usage_panel.register(app)

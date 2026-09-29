@@ -21,6 +21,7 @@ import { Today } from '../screens/Today.js';
 import { Memory } from '../screens/Memory.js';
 import { Journal } from '../screens/Journal.js';
 import { Settings } from '../screens/Settings.js';
+import { Usage } from '../screens/Usage.js';
 import { route } from '../store.js';
 import { Toasts } from './Toasts.js';
 import { Toolbar } from './Toolbar.js';
@@ -32,6 +33,7 @@ const OTHER_SCREENS = {
   '#/today': Today,
   '#/memory': Memory,
   '#/journal': Journal,
+  '#/usage': Usage,
   '#/settings': Settings,
 };
 

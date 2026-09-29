@@ -134,6 +134,76 @@ async def _counting_day_start(session: AsyncSession, clock: Clock) -> datetime.d
     return limits.since(await _local_day_start(session, clock), await limits.counters_reset_at(session))
 
 
+_UNSET = object()
+
+
+async def _hour_count(
+    session: AsyncSession, clock: Clock, connection_id: int, kind: str, *, reset_at=_UNSET
+) -> int:
+    """Changesets of `kind` ("write" or "undo") this connection opened in
+    the last hour (or since the last counter reset): CHANGESETS_PER_HOUR
+    and UNDOS_PER_HOUR count this, and so does the web's Лимиты screen."""
+    if reset_at is _UNSET:
+        reset_at = await limits.counters_reset_at(session)
+    return await session.scalar(
+        select(func.count())
+        .select_from(ClaudeChangeset)
+        .where(
+            ClaudeChangeset.connection_id == connection_id,
+            ClaudeChangeset.kind == kind,
+            ClaudeChangeset.created_at >= limits.since(clock.now_utc() - datetime.timedelta(hours=1), reset_at),
+        )
+    )
+
+
+async def _day_totals(session: AsyncSession, clock: Clock, connection_id: int) -> dict[str, int]:
+    """This connection's write totals since local midnight (or the last
+    counter reset), keyed like the day caps they are checked against."""
+    day_start = await _counting_day_start(session, clock)
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(ClaudeChangeset.bytes), 0),
+                func.coalesce(func.sum(ClaudeChangeset.created), 0),
+                func.coalesce(func.sum(ClaudeChangeset.folders), 0),
+                func.coalesce(func.sum(ClaudeChangeset.moves), 0),
+            ).where(
+                ClaudeChangeset.connection_id == connection_id,
+                ClaudeChangeset.kind == "write",
+                ClaudeChangeset.created_at >= day_start,
+            )
+        )
+    ).one()
+    return {
+        "bytes_per_day": int(row[0]),
+        "creates_per_day": int(row[1]),
+        "folders_per_day": int(row[2]),
+        "moves_per_day": int(row[3]),
+    }
+
+
+USAGE_KEYS = (
+    "changesets_per_hour",
+    "undos_per_hour",
+    "bytes_per_day",
+    "creates_per_day",
+    "folders_per_day",
+    "moves_per_day",
+)
+
+
+async def usage(session: AsyncSession, clock: Clock, connection_id: int) -> dict[str, int]:
+    """How much of each hourly/daily cap this connection has used, from
+    the same queries the caps themselves run. The per-changeset caps
+    (files, folders, moves in one changeset) have no running total and
+    are left out."""
+    return {
+        "changesets_per_hour": await _hour_count(session, clock, connection_id, "write"),
+        "undos_per_hour": await _hour_count(session, clock, connection_id, "undo"),
+        **await _day_totals(session, clock, connection_id),
+    }
+
+
 async def _open_changeset(
     session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
 ) -> ClaudeChangeset:
@@ -161,15 +231,7 @@ async def _open_changeset(
     ):
         return row
 
-    count = await session.scalar(
-        select(func.count())
-        .select_from(ClaudeChangeset)
-        .where(
-            ClaudeChangeset.connection_id == connection_id,
-            ClaudeChangeset.kind == "write",
-            ClaudeChangeset.created_at >= limits.since(now - datetime.timedelta(hours=1), reset_at),
-        )
-    )
+    count = await _hour_count(session, clock, connection_id, "write", reset_at=reset_at)
     if count >= caps.changesets_per_hour:
         raise Refused("cap_changesets")
 
@@ -201,18 +263,8 @@ async def _check_day_caps(
     new_bytes: int,
     is_create: bool,
 ) -> None:
-    day_start = await _counting_day_start(session, clock)
-    totals = (
-        await session.execute(
-            select(func.coalesce(func.sum(ClaudeChangeset.bytes), 0), func.coalesce(func.sum(ClaudeChangeset.created), 0))
-            .where(
-                ClaudeChangeset.connection_id == connection_id,
-                ClaudeChangeset.kind == "write",
-                ClaudeChangeset.created_at >= day_start,
-            )
-        )
-    ).one()
-    bytes_so_far, creates_so_far = totals
+    totals = await _day_totals(session, clock, connection_id)
+    bytes_so_far, creates_so_far = totals["bytes_per_day"], totals["creates_per_day"]
     if bytes_so_far + new_bytes > caps.bytes_per_day:
         raise Refused("cap_bytes_day")
     if is_create and creates_so_far >= caps.creates_per_day:
@@ -226,14 +278,7 @@ async def _check_day_folder_cap(
     `_check_day_caps` rejects CREATES_PER_DAY -- a local check against
     the ledger's sum so far, before ever calling vaultd. vaultd enforces
     the authoritative copy of this same cap on its own changeset."""
-    day_start = await _counting_day_start(session, clock)
-    folders_so_far = await session.scalar(
-        select(func.coalesce(func.sum(ClaudeChangeset.folders), 0)).where(
-            ClaudeChangeset.connection_id == connection_id,
-            ClaudeChangeset.kind == "write",
-            ClaudeChangeset.created_at >= day_start,
-        )
-    )
+    folders_so_far = (await _day_totals(session, clock, connection_id))["folders_per_day"]
     if folders_so_far >= caps.folders_per_day:
         raise Refused("cap_folders_day")
 
@@ -242,14 +287,7 @@ async def _check_day_move_cap(
     session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
 ) -> None:
     """Rev. 3's MOVES_PER_DAY, same shape as `_check_day_folder_cap`."""
-    day_start = await _counting_day_start(session, clock)
-    moves_so_far = await session.scalar(
-        select(func.coalesce(func.sum(ClaudeChangeset.moves), 0)).where(
-            ClaudeChangeset.connection_id == connection_id,
-            ClaudeChangeset.kind == "write",
-            ClaudeChangeset.created_at >= day_start,
-        )
-    )
+    moves_so_far = (await _day_totals(session, clock, connection_id))["moves_per_day"]
     if moves_so_far >= caps.moves_per_day:
         raise Refused("cap_moves_day")
 
@@ -511,16 +549,7 @@ async def undo_changeset(
     row = await session.get(ClaudeChangeset, changeset_id)
     if row is None or row.connection_id != connection_id or row.kind != "write" or row.undone_at is not None:
         raise Refused("no_such_changeset")
-    count = await session.scalar(
-        select(func.count())
-        .select_from(ClaudeChangeset)
-        .where(
-            ClaudeChangeset.connection_id == connection_id,
-            ClaudeChangeset.kind == "undo",
-            ClaudeChangeset.created_at
-            >= limits.since(clock.now_utc() - datetime.timedelta(hours=1), await limits.counters_reset_at(session)),
-        )
-    )
+    count = await _hour_count(session, clock, connection_id, "undo")
     if count >= (await limits.effective(session)).undos_per_hour:
         raise Refused("cap_undos")
     try:
