@@ -10,11 +10,11 @@ import { apiGet } from './api.js';
 import { auth, invalidate, proposalsBadge } from './store.js';
 import { close as closeSSE, connect as connectSSE } from './sse.js';
 
-// Opt-in looks (app.css, docs/brand/README.md): `?look=signal` or
-// `?look=opsroom` switches and remembers, `?look=default` forgets.
+// Opt-in looks (app.css, docs/brand/README.md): `?look=phosphor` or
+// `?look=wired` switches and remembers, `?look=default` forgets.
 // Storage can throw (private mode, blocked site data); the look asked
 // for in the URL then still applies, it just isn't remembered.
-const LOOKS = ['signal', 'opsroom'];
+const LOOKS = ['phosphor', 'wired'];
 function applyLook() {
   const asked = new URLSearchParams(location.search).get('look');
   let look = asked;

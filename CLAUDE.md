@@ -30,5 +30,4 @@
   Grok's capability token. The guard hook blocks both; do not work
   around it.
 - Visual and UI work (web UI, mark, avatar) starts from
-  docs/brand/README.md. Its mood board is a secret Pinterest board in
-  a public repo: never commit the board's link.
+  docs/brand/README.md.

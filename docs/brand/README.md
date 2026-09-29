@@ -5,41 +5,63 @@ here.
 
 ## Source
 
-The mood board is the owner's Pinterest board **"cybersyn"**. It is a
-secret board, and this repository is public, so it is **not linked
-here on purpose**. Ask the owner for access, and never commit its link
-(the share link carries an invite code). The description below is
-written from Project Cybersyn itself (Chile, 1971–73, Stafford Beer's
-cybernetic management project; the operations room was designed by Gui
-Bonsiepe's team), which is what the board collects.
+The owner's Pinterest mood board **"cybersyn"**:
+<https://www.pinterest.com/marystue/cybersyn/> (58 pins as of
+2026-09-29). The notes below were written from the pins themselves.
+If the board grows in a new direction, update this page with it.
+
+The name is a nod to cybernetics (Ross Ashby's *An Introduction to
+Cybernetics* is pinned), but the board isn't about the Chilean
+operations room. It's about the machine as something almost sacred:
+"divine machinery", "Computers = Electrical Spiritual Devices".
 
 ## The aesthetic
 
-- **The operations room.** A hexagonal room with dark walnut walls and
-  seven white fiberglass swivel chairs upholstered in orange, facing
-  rear-projected screens. Nothing on the desks: every control sits
-  in the armrests.
-- **Diagrams, not decoration.** Flat, bold pictograms and hand-drawn
-  flow and feedback diagrams (Beer's Viable System Model). Data shows
-  up as simple bars, lights and indicators.
-- **Type.** Helvetica-style neo-grotesque. Uppercase labels, tight
-  hierarchy, generous space.
-- **Mood.** Calm control: "a room for deciding". 1970s modernism,
-  optimistic and exact, never kitsch.
+- **Palette.** Mostly black and near-black, with stark white and 1-bit
+  dithered or halftone greys. One colour carries the signal: **phosphor
+  green**, from CRT terminals, an ECG monitor, green "Online" labels over
+  a block of flats, and circuit boards. Blue shows up rarely (a BSOD
+  wall, a Win98 selection bar, a CRT glow) and never as the lead.
+- **Imagery.** Angels and machines together; tangled cables; CRT screens;
+  circuit boards; posthuman figures; surveillance cameras and eyes.
+- **Diagrams.** Annotated technical drawings, node-and-arrow flowcharts,
+  orbit plots, a CCRU numogram, "Everything is connected", lab notes
+  pinned together with lines. The drawing is often the whole picture.
+- **Type.** Terminal monospace and pixel CRT type ("ARE YOU EXPANDING
+  YOUR MIND?", "What you see, you become."). Heavy grotesques on
+  posters ("DE-HUMANIZATION", "Discredit the witnesses"). Wide,
+  letterspaced capitals. A Times-style serif for the academic or occult
+  register. ASCII art.
+- **Texture.** Dither noise, scanlines, glitch and datamosh, Win98 window
+  chrome.
+- **Mood.** Late at night, alone with the screen: the Wired from Serial
+  Experiments Lain. Transcendence through the machine, with an edge of
+  being watched.
 
 ## What Echo takes from it
 
-- One warm orange signal colour on neutral ground: paper and ink by day,
-  walnut and fiberglass white by night.
-- Squarer corners, and flat surfaces where a hairline carries the edge
-  instead of a soft shadow.
-- Metadata (times, counts, states) set small and uppercase in the mono
-  face, like a panel label.
-- Charts as plain bars and dots, the way the room's screens showed them.
+Echo is a private companion, so it takes the calm half of the board
+(the terminal, the diagram sheet, the single green light) and leaves
+the dread.
 
-What it doesn't take: retro pastiche, film grain or textures, or
-skeuomorphic chrome. The text is Russian first, so any typeface has to
-cover Cyrillic properly.
+- Black-and-white ground in neutral greys (not warm ones), with one
+  phosphor-green signal.
+- Hard, square edges, and flat surfaces where a hairline carries the
+  edge instead of a soft shadow.
+- System text (times, states, counts) in the mono face, like a terminal
+  line.
+- Charts drawn as a diagram would draw them: plain bars, nodes, arrows.
+
+What it doesn't take:
+
+- Glitch, scanlines or datamosh on anything you read. It costs
+  legibility, and motion is a problem for some eyes.
+- Surveillance imagery. Echo holds private conversations, and nothing
+  in it should make the user feel watched.
+- Gore, anxiety posters, or religious iconography in the interface.
+
+The text is Russian first, so any typeface has to cover Cyrillic
+properly.
 
 ## Web UI looks
 
@@ -47,45 +69,54 @@ cover Cyrillic properly.
 two opt-in looks. They only reassign existing tokens. Try them in the
 web UI:
 
-- `/?look=signal`
-- `/?look=opsroom`
+- `/?look=phosphor`
+- `/?look=wired`
 - `/?look=default` goes back (the choice is remembered in the browser).
 
 Every text and accent pair below is at least 4.5:1 (WCAG AA). `--danger`
-stays red in both looks, so an error never reads as the orange accent.
+stays red in both looks. Red and green are hard to tell apart for
+colour-blind eyes, which is acceptable only because the UI never shows
+state by colour alone. Keep it that way.
 
-### `signal`: the smallest step
+### `phosphor`: the smallest step
 
-Today's warm neutrals, with the stone accent swapped for Cybersyn
-orange. Only `--accent`, `--focus`, `--dot-ok` and `--chart-bar` change.
-
-| Token | Light | Dark |
-|---|---|---|
-| `--accent` | `#b8430f` (5.15:1 on `--bg`) | `#f07f3c` (6.5:1 on `--bg`) |
-| `--accent-text` | `#ffffff` (5.46:1) | `#292524` (5.64:1) |
-
-### `opsroom`: the whole room
+Today's warm neutrals, with the stone accent swapped for CRT green. Only
+`--accent`, `--focus`, `--dot-ok` and `--chart-bar` change.
 
 | Token | Light | Dark |
 |---|---|---|
-| `--bg` | `#f4efe6` paper | `#161412` walnut |
-| `--surface` | `#fbf8f2` | `#201d1a` |
-| `--text` | `#1a1714` (15.6:1) | `#ece6da` fiberglass (14.8:1) |
-| `--text-muted` | `#5c554d` (6.4:1) | `#a39a8e` (6.6:1) |
-| `--accent` | `#b8430f` (4.8:1 on `--bg`) | `#f07f3c` (6.8:1) |
-| `--accent-text` | `#ffffff` (5.46:1) | `#161412` (6.8:1) |
-| `--radius` / `--radius-card` | `4px` / `6px` | same |
+| `--accent` | `#146c34` (6.1:1 on `--bg`) | `#5fe08a` (10.4:1 on `--bg`) |
+| `--accent-text` | `#ffffff` (6.5:1) | `#1c1917` (10.4:1) |
+
+### `wired`: the whole board
+
+A black screen with phosphor green by night; a white diagram sheet with
+black ink by day.
+
+| Token | Light | Dark |
+|---|---|---|
+| `--bg` | `#f4f4f1` sheet | `#0a0a0a` screen |
+| `--surface` | `#ffffff` | `#121412` |
+| `--text` | `#0a0a0a` (18.0:1) | `#e6e6e1` (15.8:1) |
+| `--text-muted` | `#555753` (6.6:1) | `#9a9a94` (7.0:1) |
+| `--accent` | `#146c34` (5.9:1 on `--bg`) | `#5fe08a` phosphor (11.8:1) |
+| `--accent-text` | `#ffffff` (6.5:1) | `#0a0a0a` (11.8:1) |
+| `--radius`, `--radius-card`, `--radius-pill` | `0` | same |
 | Shadows | none on cards (the hairline carries the edge); popovers keep a short one | same |
 
 ## Next steps (not done yet)
 
-- **A grotesque with Cyrillic** (e.g. Golos or Inter), vendored through
-  `_FONT_PACKAGES` in `scripts/vendor_web.py` like the current fonts,
-  as `--font` for `opsroom`.
+- **Fonts with Cyrillic.** Geist Mono is Latin-only, so Russian system
+  text falls back to Manrope. A mono with Cyrillic (e.g. JetBrains Mono
+  or IBM Plex Mono) for `--font-mono`, and possibly a stricter grotesque
+  for `--font`, can be vendored through `_FONT_PACKAGES` in
+  `scripts/vendor_web.py` like the current fonts.
 - **Tokenize the remaining hard-coded radii** in `app.css` (about ten
-  `border-radius` values: bubbles, chips, the composer), so a look
-  can square them too.
-- **The mark and avatar**: redraw `app/web/static/icon.svg` and
-  `echo-avatar.svg`/`.png` here as a flat pictogram in the orange.
-- **Pick a default**: once a look has been lived with, promote it to
+  `border-radius` values: bubbles, chips, the composer), so `wired` can
+  square them too.
+- **The mark and avatar.** The three circles already read as a node
+  diagram. Redraw `app/web/static/icon.svg` and
+  `echo-avatar.svg`/`.png` in 1-bit black and white, with one node in
+  phosphor green.
+- **Pick a default.** Once a look has been lived with, promote it to
   `:root` and drop the switch.

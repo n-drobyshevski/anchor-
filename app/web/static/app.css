@@ -213,133 +213,137 @@
   --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
 }
 
-/* Opt-in looks from the Cybersyn visual reference (docs/brand/README.md).
-   app/main.js sets <html data-look> from `?look=signal|opsroom` and
-   remembers it; without one, the palette above is the only one in use.
-   Each look repeats the three-block pattern above and only reassigns
-   existing tokens, winning on source order at equal specificity.
-   --danger stays red in both so it never reads as the orange accent.
-   Contrast (WCAG): every text/accent pair here is >= 4.5:1. */
+/* Opt-in looks from the visual reference, the "cybersyn" board
+   (docs/brand/README.md). app/main.js sets <html data-look> from
+   `?look=phosphor|wired` and remembers it; without one, the palette
+   above is the only one in use. Each look repeats the three-block
+   pattern above and only reassigns existing tokens, winning on source
+   order at equal specificity. --danger stays red in both; red and green
+   are close for colour-blind eyes, which is fine only because state is
+   never shown by colour alone (see :root). Contrast (WCAG): every
+   text/accent pair here is >= 4.5:1. */
 
-/* signal: today's palette, the stone accent swapped for Cybersyn orange. */
-:root[data-look="signal"] {
-  --accent: #b8430f;
+/* phosphor: today's palette, the stone accent swapped for CRT green. */
+:root[data-look="phosphor"] {
+  --accent: #146c34;
   --accent-text: #ffffff;
-  --focus: #b8430f;
-  --dot-ok: #b8430f;
-  --chart-bar: #b8430f;
+  --focus: #146c34;
+  --dot-ok: #146c34;
+  --chart-bar: #146c34;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root[data-look="signal"]:not([data-theme="light"]) {
-    --accent: #f07f3c;
-    --accent-text: #292524;
-    --focus: #f07f3c;
-    --dot-ok: #f07f3c;
-    --chart-bar: #f07f3c;
+  :root[data-look="phosphor"]:not([data-theme="light"]) {
+    --accent: #5fe08a;
+    --accent-text: #1c1917;
+    --focus: #5fe08a;
+    --dot-ok: #5fe08a;
+    --chart-bar: #5fe08a;
   }
 }
 
-:root[data-look="signal"][data-theme="dark"] {
-  --accent: #f07f3c;
-  --accent-text: #292524;
-  --focus: #f07f3c;
-  --dot-ok: #f07f3c;
-  --chart-bar: #f07f3c;
+:root[data-look="phosphor"][data-theme="dark"] {
+  --accent: #5fe08a;
+  --accent-text: #1c1917;
+  --focus: #5fe08a;
+  --dot-ok: #5fe08a;
+  --chart-bar: #5fe08a;
 }
 
-/* opsroom: the whole room. Paper and ink by day, walnut and fiberglass
-   white by night, one orange signal, squarer corners, flat surfaces
-   (the hairline carries the edge; only popovers keep a shadow). */
-:root[data-look="opsroom"] {
-  --bg: #f4efe6;
-  --surface: #fbf8f2;
-  --text: #1a1714;
-  --text-muted: #5c554d;
-  --border: #ddd4c6;
-  --input-border: #cfc5b5;
-  --muted-fill: #ebe4d8;
-  --muted-fill-text: #3a342e;
-  --accent: #b8430f;
+/* wired: the whole board. A black screen with phosphor green by night,
+   a white diagram sheet with black ink by day. Neutral greys instead of
+   warm ones, hard square edges, flat surfaces (the hairline carries the
+   edge; only popovers keep a shadow). */
+:root[data-look="wired"] {
+  --bg: #f4f4f1;
+  --surface: #ffffff;
+  --text: #0a0a0a;
+  --text-muted: #555753;
+  --border: #d6d6d0;
+  --input-border: #b9b9b2;
+  --muted-fill: #e9e9e4;
+  --muted-fill-text: #262626;
+  --accent: #146c34;
   --accent-text: #ffffff;
-  --focus: #b8430f;
-  --bubble-user: #ebe4d8;
-  --bubble-user-text: #1a1714;
-  --bubble-bot: #fbf8f2;
-  --bubble-bot-text: #1a1714;
-  --bubble-muted: #ebe4d8;
-  --bubble-muted-text: #3a342e;
-  --dot-ok: #b8430f;
-  --dot-warn: #a39a8e;
-  --chart-bar: #b8430f;
-  --chart-bar-active: #1a1714;
-  --chart-grid: #ddd4c6;
-  --chart-empty: #ddd4c6;
-  --hairline: inset 0 0 0 1px rgb(26 23 20 / .14);
+  --focus: #146c34;
+  --bubble-user: #e9e9e4;
+  --bubble-user-text: #0a0a0a;
+  --bubble-bot: #ffffff;
+  --bubble-bot-text: #0a0a0a;
+  --bubble-muted: #e9e9e4;
+  --bubble-muted-text: #262626;
+  --dot-ok: #146c34;
+  --dot-warn: #9a9a94;
+  --chart-bar: #146c34;
+  --chart-bar-active: #0a0a0a;
+  --chart-grid: #d6d6d0;
+  --chart-empty: #d6d6d0;
+  --hairline: inset 0 0 0 1px rgb(10 10 10 / .22);
   --shadow-soft: 0 0 0 transparent;
-  --shadow-soft-lg: 0 6px 16px rgb(26 23 20 / .12);
-  --radius: 4px;
-  --radius-card: 6px;
+  --shadow-soft-lg: 0 6px 16px rgb(10 10 10 / .14);
+  --radius: 0;
+  --radius-card: 0;
+  --radius-pill: 0;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root[data-look="opsroom"]:not([data-theme="light"]) {
-    --bg: #161412;
-    --surface: #201d1a;
-    --text: #ece6da;
-    --text-muted: #a39a8e;
-    --border: #332e29;
-    --input-border: #3d3731;
-    --muted-fill: #2a2622;
-    --muted-fill-text: #ece6da;
-    --accent: #f07f3c;
-    --accent-text: #161412;
-    --focus: #f07f3c;
-    --bubble-user: #2a2622;
-    --bubble-user-text: #ece6da;
-    --bubble-bot: #201d1a;
-    --bubble-bot-text: #ece6da;
-    --bubble-muted: #2a2622;
-    --bubble-muted-text: #ece6da;
-    --dot-ok: #f07f3c;
-    --dot-warn: #6f675e;
-    --chart-bar: #f07f3c;
-    --chart-bar-active: #ece6da;
-    --chart-grid: #332e29;
-    --chart-empty: #332e29;
-    --hairline: inset 0 0 0 1px rgb(236 230 218 / .12);
+  :root[data-look="wired"]:not([data-theme="light"]) {
+    --bg: #0a0a0a;
+    --surface: #121412;
+    --text: #e6e6e1;
+    --text-muted: #9a9a94;
+    --border: #262826;
+    --input-border: #333633;
+    --muted-fill: #1b1d1b;
+    --muted-fill-text: #e6e6e1;
+    --accent: #5fe08a;
+    --accent-text: #0a0a0a;
+    --focus: #5fe08a;
+    --bubble-user: #1b1d1b;
+    --bubble-user-text: #e6e6e1;
+    --bubble-bot: #121412;
+    --bubble-bot-text: #e6e6e1;
+    --bubble-muted: #1b1d1b;
+    --bubble-muted-text: #e6e6e1;
+    --dot-ok: #5fe08a;
+    --dot-warn: #5c5f5c;
+    --chart-bar: #5fe08a;
+    --chart-bar-active: #e6e6e1;
+    --chart-grid: #262826;
+    --chart-empty: #262826;
+    --hairline: inset 0 0 0 1px rgb(230 230 225 / .14);
     --shadow-soft: 0 0 0 transparent;
-    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .4);
+    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .6);
   }
 }
 
-:root[data-look="opsroom"][data-theme="dark"] {
-  --bg: #161412;
-  --surface: #201d1a;
-  --text: #ece6da;
-  --text-muted: #a39a8e;
-  --border: #332e29;
-  --input-border: #3d3731;
-  --muted-fill: #2a2622;
-  --muted-fill-text: #ece6da;
-  --accent: #f07f3c;
-  --accent-text: #161412;
-  --focus: #f07f3c;
-  --bubble-user: #2a2622;
-  --bubble-user-text: #ece6da;
-  --bubble-bot: #201d1a;
-  --bubble-bot-text: #ece6da;
-  --bubble-muted: #2a2622;
-  --bubble-muted-text: #ece6da;
-  --dot-ok: #f07f3c;
-  --dot-warn: #6f675e;
-  --chart-bar: #f07f3c;
-  --chart-bar-active: #ece6da;
-  --chart-grid: #332e29;
-  --chart-empty: #332e29;
-  --hairline: inset 0 0 0 1px rgb(236 230 218 / .12);
+:root[data-look="wired"][data-theme="dark"] {
+  --bg: #0a0a0a;
+  --surface: #121412;
+  --text: #e6e6e1;
+  --text-muted: #9a9a94;
+  --border: #262826;
+  --input-border: #333633;
+  --muted-fill: #1b1d1b;
+  --muted-fill-text: #e6e6e1;
+  --accent: #5fe08a;
+  --accent-text: #0a0a0a;
+  --focus: #5fe08a;
+  --bubble-user: #1b1d1b;
+  --bubble-user-text: #e6e6e1;
+  --bubble-bot: #121412;
+  --bubble-bot-text: #e6e6e1;
+  --bubble-muted: #1b1d1b;
+  --bubble-muted-text: #e6e6e1;
+  --dot-ok: #5fe08a;
+  --dot-warn: #5c5f5c;
+  --chart-bar: #5fe08a;
+  --chart-bar-active: #e6e6e1;
+  --chart-grid: #262826;
+  --chart-empty: #262826;
+  --hairline: inset 0 0 0 1px rgb(230 230 225 / .14);
   --shadow-soft: 0 0 0 transparent;
-  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .4);
+  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .6);
 }
 
 * { box-sizing: border-box; }
