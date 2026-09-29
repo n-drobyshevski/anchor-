@@ -109,7 +109,7 @@
 
 :root {
   color-scheme: light dark;
-  /* Planner's clean palette: warm neutrals and one warm-stone accent.
+  /* Warm neutrals and one accent, Echo's green (the mark's #2f6f4f).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
      offline dot only. State is never shown by colour alone. */
@@ -121,21 +121,21 @@
   --input-border: #e7e0d7;
   --muted-fill: #f2ede7;
   --muted-fill-text: #44403c;
-  --accent: #57534e;
+  --accent: #2f6f4f;
   --accent-text: #ffffff;
-  --focus: #57534e;
-  --bubble-user: #ede6dd;
+  --focus: #2f6f4f;
+  --bubble-user: #e3ede6;
   --bubble-user-text: #292524;
   --bubble-bot: #ffffff;
   --bubble-bot-text: #292524;
   --bubble-muted: #f2ede7;
   --bubble-muted-text: #44403c;
   --danger: #a11414;
-  --dot-ok: #57534e;
+  --dot-ok: #2f6f4f;
   --dot-warn: #a8a29e;
   --dot-bad: #a11414;
-  --chart-bar: #57534e;
-  --chart-bar-active: #292524;
+  --chart-bar: #2f6f4f;
+  --chart-bar-active: #1f4d36;
   --chart-grid: #e7e0d7;
   --chart-empty: #e7e0d7;
   --hairline: inset 0 0 0 1px rgb(41 37 36 / .10);
@@ -159,20 +159,20 @@
     --input-border: #423c37;
     --muted-fill: #3a3531;
     --muted-fill-text: #faf8f5;
-    --accent: #a8a29e;
+    --accent: #7fbf9a;
     --accent-text: #292524;
-    --focus: #a8a29e;
-    --bubble-user: #3a3531;
+    --focus: #7fbf9a;
+    --bubble-user: #2b3a31;
     --bubble-user-text: #faf8f5;
     --bubble-bot: #292524;
     --bubble-bot-text: #faf8f5;
     --bubble-muted: #3a3531;
     --bubble-muted-text: #faf8f5;
     --danger: #fca5a5;
-    --dot-ok: #a8a29e;
+    --dot-ok: #7fbf9a;
     --dot-warn: #78716c;
     --dot-bad: #fca5a5;
-    --chart-bar: #a8a29e;
+    --chart-bar: #7fbf9a;
     --chart-bar-active: #faf8f5;
     --chart-grid: #3a3531;
     --chart-empty: #3a3531;
@@ -191,20 +191,20 @@
   --input-border: #423c37;
   --muted-fill: #3a3531;
   --muted-fill-text: #faf8f5;
-  --accent: #a8a29e;
+  --accent: #7fbf9a;
   --accent-text: #292524;
-  --focus: #a8a29e;
-  --bubble-user: #3a3531;
+  --focus: #7fbf9a;
+  --bubble-user: #2b3a31;
   --bubble-user-text: #faf8f5;
   --bubble-bot: #292524;
   --bubble-bot-text: #faf8f5;
   --bubble-muted: #3a3531;
   --bubble-muted-text: #faf8f5;
   --danger: #fca5a5;
-  --dot-ok: #a8a29e;
+  --dot-ok: #7fbf9a;
   --dot-warn: #78716c;
   --dot-bad: #fca5a5;
-  --chart-bar: #a8a29e;
+  --chart-bar: #7fbf9a;
   --chart-bar-active: #faf8f5;
   --chart-grid: #3a3531;
   --chart-empty: #3a3531;

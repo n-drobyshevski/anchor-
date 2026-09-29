@@ -122,10 +122,10 @@ _MARK = (
 )
 _STYLE = (
     ":root{color-scheme:light dark;--bg:#faf8f5;--surface:#fff;--text:#292524;"
-    "--muted:#57514b;--border:#e7e0d7;--fill:#f2ede7;--accent:#57534e;"
+    "--muted:#57514b;--border:#e7e0d7;--fill:#f2ede7;--accent:#2f6f4f;"
     "--shadow:0 2px 6px rgb(28 25 23/.07),0 12px 28px rgb(28 25 23/.08)}"
     "@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--surface:#292524;--text:#faf8f5;"
-    "--muted:#bcb3aa;--border:#3a3531;--fill:#3a3531;--accent:#a8a29e;"
+    "--muted:#bcb3aa;--border:#3a3531;--fill:#3a3531;--accent:#7fbf9a;"
     "--shadow:0 2px 6px rgb(0 0 0/.25),0 12px 28px rgb(0 0 0/.35)}}"
     "*{box-sizing:border-box}[hidden]{display:none!important}"
     "body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;"
