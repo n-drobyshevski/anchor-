@@ -35,7 +35,7 @@ export async function logout() {
 // first GET /api/state lands. Kept app-wide by main.js (after login,
 // on invalidate("state"), on tab focus) and by the State screen's own
 // loads, so the toolbar's pause/resume button (ui/Toolbar.js) shows
-// the right action on every screen, not only on #/state.
+// the right action on every screen, not only on Сегодня.
 export const paused = signal(null);
 
 // An optional second line under the toolbar's screen title (for
@@ -91,14 +91,14 @@ export function pushToast(text) {
 export const invalidate = signal(null);
 
 // 1 when a proposal is awaiting a decision, 0 otherwise -- the
-// switcher's pip and the «Предложения» item's count
+// switcher's pip and the «Сегодня» item's count
 // (ui/SurfaceSwitcher.js). Populated from two places, both
 // GET /api/proposals responses: main.js, right after login and on
 // every SSE invalidate("proposals") *regardless of which screen is
 // open* (the plan's "not only when the screen is open" rule -- a
 // proposal raised while the user sits on #/chat still needs to show
-// up here), and screens/Proposals.js's own reload while that screen is
-// mounted, which would otherwise wait on a second, redundant
+// up here), and screens/today/proposals.js's own loads while Сегодня or
+// Дневник is mounted, which would otherwise wait on a second, redundant
 // round-trip from main.js's listener for the exact same event.
 export const proposalsBadge = signal(0);
 

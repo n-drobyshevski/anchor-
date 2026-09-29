@@ -4,11 +4,12 @@
 // reads `route` and maps it to a screen -- so adding a screen later
 // only means adding it to routes.js (and its component to Shell.js).
 import { route } from './store.js';
-import { DEFAULT_ROUTE, ROUTES } from './routes.js';
+import { DEFAULT_ROUTE, LEGACY_ROUTES, ROUTES } from './routes.js';
 
 const KNOWN_ROUTES = ROUTES.map((r) => r.route);
 
 function normalize(hash) {
+  if (LEGACY_ROUTES[hash]) return LEGACY_ROUTES[hash];
   return KNOWN_ROUTES.includes(hash) ? hash : DEFAULT_ROUTE;
 }
 

@@ -508,10 +508,20 @@ async def _goto_screen(page, ctx: Ctx, route: str) -> bool:
         return False
     if await page.locator(f'#surface-menu a[href="{route}"]').count() == 0:
         return False
-    if await page.locator("#surface-menu").is_hidden():
-        await page.locator("#surface-button").click()
-    link = page.locator(f'#surface-menu a[href="{route}"]')
-    await link.first.click()
+    link = page.locator(f'#surface-menu a[href="{route}"]').first
+    # The menu closes as soon as focus leaves it, and a screen can move
+    # focus on its own a moment after an action (the check-in section
+    # focuses its heading once a submit's reload lands) -- so open it
+    # and click, retrying if it closed in between.
+    for attempt in range(3):
+        if await page.locator("#surface-menu").is_hidden():
+            await page.locator("#surface-button").click()
+        try:
+            await link.click(timeout=2_000)
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 2:
+                raise
     await page.wait_for_function(
         "route => location.hash === route", arg=route, timeout=5_000
     )
@@ -521,11 +531,11 @@ async def _goto_screen(page, ctx: Ctx, route: str) -> bool:
 
 async def scenario_nav_screens(page, ctx: Ctx) -> None:
     for route, selector in (
+        ("#/today", ".screen-today"),
         ("#/chat", "#chat"),
-        ("#/state", ".screen-state"),
         ("#/memory", ".screen-memory"),
-        ("#/proposals", ".screen"),
-        ("#/checkin", ".screen"),
+        ("#/journal", ".screen-journal"),
+        ("#/settings", ".screen-settings"),
     ):
         present = await _goto_screen(page, ctx, route)
         if not present:
@@ -540,10 +550,10 @@ async def scenario_nav_screens(page, ctx: Ctx) -> None:
 
 
 async def scenario_state_due_action(page, ctx: Ctx) -> None:
-    if not await _goto_screen(page, ctx, "#/state"):
-        ctx.fail("#/state missing from nav; cannot run the State panel action")
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail("#/today missing from nav; cannot run the State panel action")
         return
-    await page.wait_for_selector(".screen-state", state="visible", timeout=10_000)
+    await page.wait_for_selector(".screen-today", state="visible", timeout=10_000)
 
     sent_before = ctx.harness.sent_count
     edit_button = page.locator('button[aria-label="Изменить действие на сегодня"]')
@@ -551,12 +561,13 @@ async def scenario_state_due_action(page, ctx: Ctx) -> None:
     await edit_button.click()
 
     due_text = f"e2e due action {datetime.datetime.now(datetime.timezone.utc):%H:%M:%S}"
-    textarea = page.locator(".screen-state textarea.field-edit")
+    due_card = page.locator('.screen-today section[aria-labelledby="due-heading"]')
+    textarea = due_card.locator("textarea.field-edit")
     await textarea.fill(due_text)
-    await page.locator(".screen-state button.btn-primary", has_text="Сохранить").click()
+    await due_card.locator("button.btn-primary", has_text="Сохранить").click()
 
     try:
-        await page.locator(".screen-state .field-value", has_text=due_text).wait_for(
+        await due_card.locator(".field-value", has_text=due_text).wait_for(
             state="visible", timeout=10_000
         )
         ctx.ok("State: set due-today action")
@@ -625,8 +636,8 @@ async def _checkin_once(
     arrive in #/chat over SSE, and verify it in the database. Failures
     go to ctx.fail (real failures -- the screen exists now)."""
     harness = ctx.harness
-    if not await _goto_screen(page, ctx, "#/checkin"):
-        ctx.fail(f"{step}: #/checkin missing from nav")
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail(f"{step}: #/today missing from nav")
         return
     if redo:
         redo_button = page.locator(".screen button", has_text="Пройти заново")
@@ -662,7 +673,7 @@ async def _checkin_once(
     # Either the in-flight state or (if the worker already finished) the
     # done summary -- never the form with an error.
     try:
-        await page.locator(".screen", has_text="Anchor ответит в чате").or_(
+        await page.locator(".screen", has_text="Echo ответит в чате").or_(
             page.locator(".screen", has_text="Чек-ин на сегодня пройден")
         ).first.wait_for(state="visible", timeout=10_000)
     except Exception as exc:  # noqa: BLE001
@@ -723,7 +734,7 @@ async def _checkin_once(
         ctx.ok(f"{step}: finished in the DB (rating, due, note, streak {row['streak']})")
 
     # Back on the screen: the done summary, with the note if any.
-    await _goto_screen(page, ctx, "#/checkin")
+    await _goto_screen(page, ctx, "#/today")
     try:
         await page.locator(".screen", has_text="Чек-ин на сегодня пройден").wait_for(
             state="visible", timeout=10_000
@@ -732,9 +743,9 @@ async def _checkin_once(
             await page.locator(".checkin-summary", has_text=note).wait_for(
                 state="visible", timeout=10_000
             )
-        ctx.ok(f"{step}: #/checkin shows the done summary")
+        ctx.ok(f"{step}: #/today shows the done summary")
     except Exception as exc:  # noqa: BLE001
-        ctx.fail(f"{step}: #/checkin did not show the done summary: {exc}")
+        ctx.fail(f"{step}: #/today did not show the done summary: {exc}")
 
 
 async def scenario_checkin(page, ctx: Ctx) -> None:
@@ -755,18 +766,18 @@ async def scenario_checkin(page, ctx: Ctx) -> None:
 
 
 async def scenario_checkin_views(page, ctx: Ctx) -> None:
-    """Screenshots of #/checkin with the seeded history: the whole page,
+    """Screenshots of #/journal with the seeded history: the whole page,
     and the chart tooltip driven from the keyboard."""
-    if not await _goto_screen(page, ctx, "#/checkin"):
-        ctx.fail("#/checkin missing from nav")
+    if not await _goto_screen(page, ctx, "#/journal"):
+        ctx.fail("#/journal missing from nav")
         return
     try:
         await page.locator(".chart-svg").wait_for(state="visible", timeout=10_000)
         await page.locator(".journal-item").first.wait_for(state="visible", timeout=10_000)
         bars = await page.locator(".chart-svg .chart-bar, .chart-svg rect").count()
-        ctx.ok(f"#/checkin chart + journal rendered ({bars} rects)")
+        ctx.ok(f"#/journal chart + journal rendered ({bars} rects)")
     except Exception as exc:  # noqa: BLE001
-        ctx.fail(f"#/checkin chart/journal did not render: {exc}")
+        ctx.fail(f"#/journal chart/journal did not render: {exc}")
     # The app scrolls inside its own container, so full_page captures
     # only the viewport: grow the viewport to the content's height for
     # one whole-screen shot, then restore it.
@@ -788,7 +799,7 @@ async def scenario_checkin_views(page, ctx: Ctx) -> None:
         await page.wait_for_timeout(200)
         tip = page.locator(".chart-tip")
         if not await tip.is_visible():
-            ctx.fail("#/checkin chart tooltip not visible after keyboard focus")
+            ctx.fail("#/journal chart tooltip not visible after keyboard focus")
         box = await page.locator(".chart").bounding_box()
         if box:
             await page.screenshot(

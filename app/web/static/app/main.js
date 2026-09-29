@@ -29,13 +29,13 @@ effect(() => {
 
 // App-wide values that must stay right whichever screen is open (or
 // none that shows them): store.js's proposalsBadge (the switcher's pip
-// and the «Предложения» count -- a proposal raised while the user
+// and the «Сегодня» count -- a proposal raised while the user
 // reads #/chat still has to show up) and `paused` (the toolbar's
 // pause/resume button). Refetched right after login, on every
 // invalidate of their topic ('*' is sse.js's reconnect resync, an
 // invalidate this tab may have missed while the stream was down), and
-// when a backgrounded tab comes back. screens/Proposals.js and
-// screens/State.js also set them from their own loads, so neither
+// when a backgrounded tab comes back. screens/today/proposals.js and
+// screens/useAppState.js also set them from their own loads, so neither
 // waits on a second round-trip here when that screen is open.
 async function refreshProposalsBadge() {
   const res = await load('/api/proposals');

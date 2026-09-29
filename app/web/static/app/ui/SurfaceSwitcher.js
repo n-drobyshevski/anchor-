@@ -35,9 +35,9 @@ export function SurfaceSwitcher() {
 
   const current = currentNavItem();
   const badge = proposalsBadge.value;
-  // The pip only nags while you are somewhere else: on #/proposals
-  // itself the pending card is already in front of you.
-  const showPip = badge > 0 && route.value !== '#/proposals';
+  // The pip only nags while you are somewhere else: on #/today the
+  // pending card is already in front of you.
+  const showPip = badge > 0 && route.value !== '#/today';
   const buttonLabel = showPip
     ? `Раздел: ${current.label}. Предложений: ${badge}`
     : `Раздел: ${current.label}`;
@@ -147,10 +147,10 @@ export function SurfaceSwitcher() {
       >
         ${NAV_ITEMS.map((item) => {
           const isCurrent = route.value === item.route;
-          // Only #/proposals carries a count today (store.js's
-          // proposalsBadge). A later screen that wants one reads its
-          // own signal here the same way.
-          const count = item.route === '#/proposals' ? badge : 0;
+          // Only Сегодня carries a count (store.js's proposalsBadge:
+          // a proposal waiting there). A later screen that wants one
+          // reads its own signal here the same way.
+          const count = item.route === '#/today' ? badge : 0;
           return html`
             <a
               key=${item.route}

@@ -930,8 +930,9 @@ button, input, textarea {
   max-width: none;
 }
 
-.checkin-main,
-.checkin-side {
+/* Сегодня and Дневник: two columns of cards on a wide screen, one
+   stacked column below 900px. */
+.screen-column {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -939,7 +940,7 @@ button, input, textarea {
 }
 
 @media (min-width: 900px) {
-  .screen-checkin {
+  .screen-columns {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: start;

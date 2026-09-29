@@ -1,15 +1,12 @@
-// The proposals screen (#/proposals, nav label "Предложения"): the
-// pending proposal (if any), with Accept/Reject, and the last 20
-// decided ones below it. This is also the only place `store.js`'s
-// `proposalsBadge` signal gets its numbers from besides main.js's own
-// after-login fetch -- see that module's comment for why both exist.
-import { html } from '../html.js';
-import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { proposalsBadge, pushToast } from '../store.js';
-import { useMountedRef, useResource } from '../hooks.js';
-import { send } from '../lib/request.js';
-import { formatDateTime } from '../lib/format.js';
-import { ScreenError, ScreenLoading } from '../ui/ScreenState.js';
+// Proposals (a change Echo suggests to the state, decided with
+// Принять/Отклонить), moved out of the old Proposals screen: the
+// pending card now sits on Сегодня, the decided history on Дневник.
+import { html } from '../../html.js';
+import { useEffect, useState } from '../../../vendor/hooks.module.js';
+import { proposalsBadge, pushToast } from '../../store.js';
+import { useMountedRef, useResource } from '../../hooks.js';
+import { send } from '../../lib/request.js';
+import { formatDateTime } from '../../lib/format.js';
 
 // focus_on values arrive raw ("on", "вкл", ...); show them the way
 // app/core/proposal.py's parse_focus reads them.
@@ -29,7 +26,7 @@ const STATUS_LABELS = {
   expired: 'истекло',
 };
 
-function PendingCard({ proposal, onDecide }) {
+export function PendingCard({ proposal, onDecide }) {
   const [busy, setBusy] = useState(false);
   // A successful decision's invalidate("proposals") can replace (and
   // unmount) this card before the request's own await resolves.
@@ -61,7 +58,7 @@ function PendingCard({ proposal, onDecide }) {
   `;
 }
 
-function HistoryRow({ item }) {
+export function HistoryRow({ item }) {
   return html`
     <li class="row">
       <div class="row-main">
@@ -73,11 +70,13 @@ function HistoryRow({ item }) {
   `;
 }
 
-export function Proposals() {
+// GET /api/proposals, shared by Сегодня (the pending card) and Дневник
+// (the decided history): {data, failed, reload, decide}. Also keeps
+// store.js's proposalsBadge in step with its own loads, so the badge
+// does not wait on main.js's round-trip for the same event.
+export function useProposals() {
   const { data, failed, reload } = useResource('/api/proposals', 'proposals');
 
-  // Kept in sync here too (not only by main.js), so the badge is right
-  // the instant this screen's own load lands.
   useEffect(() => {
     if (data) proposalsBadge.value = data.pending ? 1 : 0;
   }, [data]);
@@ -86,8 +85,7 @@ export function Proposals() {
     const res = await send(`/api/proposals/${id}/${action}`, {});
     if (res.status === 200) {
       // No reload here: the endpoint publishes invalidate("proposals"),
-      // which refetches this screen (and main.js's badge) once. An
-      // explicit reload on top of it made three identical GETs.
+      // which refetches (and main.js's badge) once.
       pushToast(action === 'accept' ? 'Принято.' : 'Отклонено.');
       return;
     }
@@ -106,25 +104,5 @@ export function Proposals() {
     if (res.status !== 401) pushToast(res.status === 429 ? res.error : 'Не удалось сохранить.');
   }
 
-  if (!data) return failed ? html`<${ScreenError} onRetry=${reload} />` : html`<${ScreenLoading} />`;
-
-  return html`
-    <div class="screen-wrap">
-      <div class="screen screen-proposals">
-        ${data.pending
-          ? html`<${PendingCard} key=${data.pending.id} proposal=${data.pending} onDecide=${decide} />`
-          : html`<p class="empty-hint">Сейчас предложений нет</p>`}
-        <section class="card" aria-labelledby="proposals-history-heading">
-          <h2 id="proposals-history-heading">История</h2>
-          ${data.recent.length
-            ? html`
-                <ul class="card-list">
-                  ${data.recent.map((item) => html`<${HistoryRow} key=${item.id} item=${item} />`)}
-                </ul>
-              `
-            : html`<p class="field-hint">Пока пусто</p>`}
-        </section>
-      </div>
-    </div>
-  `;
+  return { data, failed, reload, decide };
 }

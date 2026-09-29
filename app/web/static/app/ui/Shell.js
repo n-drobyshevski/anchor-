@@ -17,10 +17,10 @@
 // each already refetches on mount via hooks.js's useAutoRefetch.
 import { html } from '../html.js';
 import { Chat } from '../screens/Chat.js';
-import { State } from '../screens/State.js';
+import { Today } from '../screens/Today.js';
 import { Memory } from '../screens/Memory.js';
-import { Checkin } from '../screens/Checkin.js';
-import { Proposals } from '../screens/Proposals.js';
+import { Journal } from '../screens/Journal.js';
+import { Settings } from '../screens/Settings.js';
 import { route } from '../store.js';
 import { Toasts } from './Toasts.js';
 import { Toolbar } from './Toolbar.js';
@@ -29,10 +29,10 @@ import { Toolbar } from './Toolbar.js';
 // should behave like State/Memory/Proposals (mount only while active)
 // adds its row to routes.js and its component here.
 const OTHER_SCREENS = {
-  '#/state': State,
+  '#/today': Today,
   '#/memory': Memory,
-  '#/checkin': Checkin,
-  '#/proposals': Proposals,
+  '#/journal': Journal,
+  '#/settings': Settings,
 };
 
 export function Shell() {
