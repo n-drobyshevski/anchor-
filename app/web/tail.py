@@ -32,15 +32,19 @@ from app.core import proposal as proposal_core
 from app.db.models import (
     Checkin,
     CheckinOrderResult,
+    IdleRun,
     Journal,
     Memory,
     Message,
     NotebookEntry,
+    OauthConnection,
     Obligation,
     PersonaAmendment,
+    PlannerCredential,
     ReviewProposal,
     StandingOrder,
     StateChange,
+    UserState,
     WeeklyReview,
 )
 from app.web.hub import WebHub
@@ -531,6 +535,10 @@ async def _tail_checkin_once(
 #              weekly review, /mind's ✖, thread expiry.
 #   orders   - app/core/orders.py: /order, an accepted proposal, /orders'
 #              [Снять], the once-order expiry.
+#   settings - Настройки's switches and the idle digest: notes consent
+#              (/vault notes), the planner's sync switch (/planner),
+#              Claude's library switches (/claude library), and idle
+#              runs (a new one, or one undone).
 #   review   - app/core/review.py and amendments.py: a review stored or
 #              regenerated (new proposals, message_id set once sent),
 #              a proposal decided or expired, an amendment adopted,
@@ -547,6 +555,13 @@ _LIVE_ROWS = {
         (WeeklyReview, WeeklyReview.message_id.is_not(None)),
         (ReviewProposal, ReviewProposal.status == "pending"),
         (PersonaAmendment, PersonaAmendment.status == "active"),
+    ),
+    "settings": (
+        (UserState, UserState.notes_consent.is_(True)),
+        (PlannerCredential, PlannerCredential.enabled.is_(True)),
+        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_read.is_(True)),
+        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_write.is_(True)),
+        (IdleRun, IdleRun.undone_at.is_(None)),
     ),
 }
 

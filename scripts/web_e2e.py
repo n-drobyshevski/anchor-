@@ -276,6 +276,12 @@ async def seed_history(raw_url: str) -> None:
             "VALUES ('Выключать экран в 23:30', 'daily', 'proposed', 'review', $1)",
             proposal_id,
         )
+        # One undoable idle run for Настройки's «Фоновая работа» card.
+        await conn.execute(
+            "INSERT INTO idle_run (kind, local_date, status, reversible, summary) "
+            "VALUES ('consolidate', $1, 'done', true, $2::jsonb)",
+            today, json.dumps({"merged": 2, "contradicted": 0}),
+        )
         # Two open debts for Сегодня's «Долги» card.
         await conn.execute(
             "INSERT INTO obligation (text, kind, source, opened_at) VALUES "
@@ -720,6 +726,72 @@ async def scenario_review(page, ctx: Ctx) -> None:
         ctx.ok("review decision sent nothing to Telegram")
 
 
+async def scenario_digest_undo(page, ctx: Ctx) -> None:
+    """Настройки: the seeded idle run is listed under «Фоновая работа»
+    and undone from the web; 7 дней switches the window. Silent in
+    Telegram."""
+    if not await _goto_screen(page, ctx, "#/settings"):
+        ctx.fail("#/settings missing from nav; cannot run the digest action")
+        return
+    sent_before = ctx.harness.sent_count
+    card = page.locator('section[aria-labelledby="digest-heading"]')
+    try:
+        row = card.locator("li", has_text="Память: объединено 2")
+        await row.wait_for(state="visible", timeout=10_000)
+        await card.locator("button", has_text="7 дней").click()
+        await card.locator("p", has_text="Фоновая работа за 7 дн.").wait_for(state="visible", timeout=10_000)
+        await page.screenshot(path=str(ctx.screenshot_path("settings_digest")))
+        await card.locator("li", has_text="Память: объединено 2").locator("button", has_text="Отменить").click()
+        await card.locator("li", has_text="Память: объединено 2").wait_for(state="detached", timeout=10_000)
+        ctx.ok("Digest: undid an idle run from Настройки")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Digest undo failed: {exc}")
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("digest undo caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("digest undo sent nothing to Telegram")
+
+
+async def scenario_integrations_render(page, ctx: Ctx) -> None:
+    """Настройки's «Подключения» card, with every integration on. The
+    harness runs with vault/planner/Claude off (the card is hidden
+    then), so GET /api/settings is answered here with a synthetic body:
+    this checks the card renders each section and that turning notes
+    off asks first -- the endpoints themselves are covered by
+    tests/test_web_panel_settings.py."""
+    body = {
+        "vault": {"mode": "sync", "notes_consent": True, "knowledge_enabled": True,
+                  "last_ok_at": None, "last_unavailable_at": None},
+        "planner": {"linked": True, "status": "active", "enabled": True},
+        "claude": {"connected": True, "expires_at": "2026-12-01T10:00:00+00:00",
+                   "library_read": True, "library_write": False},
+        "idle": {"enabled": True, "undo_days": 7},
+    }
+
+    async def fulfil(route):
+        await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    await page.route("**/api/settings", fulfil)
+    try:
+        if not await _goto_screen(page, ctx, "#/settings"):
+            ctx.fail("#/settings missing from nav; cannot check the integrations card")
+            return
+        card = page.locator('section[aria-labelledby="integrations-heading"]')
+        await card.wait_for(state="visible", timeout=10_000)
+        for text in ("Заметки Obsidian", "Планер", "Claude"):
+            await card.locator(".row-title", has_text=text).wait_for(state="visible", timeout=5_000)
+        await card.locator('button[aria-labelledby="notes-switch-label"]').click()
+        dialog = page.locator("dialog.confirm-dialog", has_text="Перестать читать заметки?")
+        await dialog.wait_for(state="visible", timeout=5_000)
+        await page.screenshot(path=str(ctx.screenshot_path("settings_integrations")))
+        await dialog.locator("button", has_text="Отмена").click()
+        ctx.ok("Settings: integrations card renders; notes off asks first")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"integrations card did not render as expected: {exc}")
+    finally:
+        await page.unroute("**/api/settings", fulfil)
+
+
 async def scenario_memory_add(page, ctx: Ctx) -> None:
     if not await _goto_screen(page, ctx, "#/memory"):
         ctx.fail("#/memory missing from nav; cannot run the Memory panel action")
@@ -967,6 +1039,8 @@ async def run_pass(
             await scenario_debts_and_intensity(page, ctx)
             await scenario_memory_tabs(page, ctx)
             await scenario_review(page, ctx)
+            await scenario_digest_undo(page, ctx)
+            await scenario_integrations_render(page, ctx)
         await scenario_nav_screens(page, ctx)
         if do_actions:
             await scenario_checkin(page, ctx)

@@ -108,6 +108,21 @@ export function useResource(path, topics, { accept = () => true } = {}) {
   }
 
   useAutoRefetch(topics, reload);
+
+  // A new path (a query parameter the screen changed, e.g. Фоновая
+  // работа's window) is a new resource: fetch it now. The sequence
+  // guard drops the old path's response if it lands later. Skipped on
+  // mount, which useAutoRefetch already covers.
+  const firstPathRef = useRef(true);
+  useEffect(() => {
+    if (firstPathRef.current) {
+      firstPathRef.current = false;
+      return;
+    }
+    reload();
+    // eslint-disable-next-line
+  }, [path]);
+
   return { data: state.data, failed: state.failed, reload, replace };
 }
 

@@ -28,6 +28,7 @@ from app.web.panels import obligations as obligations_panel
 from app.web.panels import orders as orders_panel
 from app.web.panels import proposals as proposals_panel
 from app.web.panels import review as review_panel
+from app.web.panels import settings as settings_panel
 from app.web.panels import state as state_panel
 
 
@@ -40,3 +41,4 @@ def register(app: web.Application) -> None:
     notebook_panel.register(app)
     orders_panel.register(app)
     review_panel.register(app)
+    settings_panel.register(app)

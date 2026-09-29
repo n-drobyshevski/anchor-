@@ -872,7 +872,7 @@ async def test_simple_fingerprints_start_empty(sessionmaker):
     from app.web.tail import _simple_fingerprints
 
     async with sessionmaker() as session:
-        assert await _simple_fingerprints(session) == {"debts": (0, 0), "notebook": (0, 0), "orders": (0, 0), "review": (0, 0, 0, 0, 0, 0)}
+        assert await _simple_fingerprints(session) == {"debts": (0, 0), "notebook": (0, 0), "orders": (0, 0), "review": (0, 0, 0, 0, 0, 0), "settings": (0,) * 10}
 
 
 async def test_debts_fingerprint_moves_on_open_and_close(sessionmaker):

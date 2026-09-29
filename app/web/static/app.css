@@ -1699,6 +1699,10 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
    stretched across the stacked row. */
 .row-stacked > .status-chip { align-self: flex-start; }
 
+/* Фоновая работа's 24 ч / 7 дней switch: compact, beside the heading. */
+.segmented.digest-window { flex: none; }
+.segmented.digest-window > button { flex: none; height: 30px; padding: 0 10px; font-size: 13px; }
+
 .card h2[tabindex="-1"]:focus {
   outline: none;
   box-shadow: none;

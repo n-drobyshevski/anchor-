@@ -191,3 +191,37 @@ W1 adds no features: it's a pure port. That makes it easy to check parity with t
 - Streaming LLM tokens (the provider isn't streaming).
 - PWA and offline mode. A manifest can be added later with no effect on CSP.
 - Multiple users or roles.
+
+## 9. W6: restructure and Telegram parity (after W1–W4)
+
+W5 (research) has not been built. Instead the web was regrouped and
+caught up with Telegram, in six steps:
+
+1. **One shared data layer.** `lib/` (format, tz, dates, request),
+   `useResource`/`usePagedResource`, one route table (`routes.js`),
+   shared UI pieces, toasts rendered once, and the bugs that turned up
+   (stale responses overwriting fresh writes, double fetches, stuck
+   «Отправлено», failed loads that looked empty).
+2. **Five pages** instead of five screens: Сегодня, Чат, Память,
+   Дневник, Настройки. The dropdown switcher stays (the bottom tab bar
+   in §2 was dropped); old hashes redirect to `#/today`.
+3. **Debts and intensity:** `/api/obligations`, `/api/state/intensity`.
+4. **Notebook and standing orders** as Память tabs: `/api/notebook`,
+   `/api/orders`. The tab lives in the hash (`#/memory?tab=…`).
+5. **Weekly review and amendments** on Дневник: `/api/review`,
+   `/api/amendments`. Deciding a proposal goes through
+   `app/core/review_actions.py`, which Telegram's buttons now use too.
+   «Провести обзор» enqueues a synthetic `/review` (no second LLM path).
+6. **Настройки:** `/api/settings` (Obsidian notes consent, the
+   planner's sync switch, Claude's connection shown read-only) and
+   `/api/digest` with undo.
+
+**Decisions.**
+- Claude's library switches stay Telegram-only (as `/claude` itself):
+  the web only shows them.
+- New invalidate topics: `debts`, `notebook`, `orders`, `review`,
+  `settings`. The tail watches each through a small (max id, live
+  count) fingerprint per table (`app/web/tail.py`'s `_LIVE_ROWS`).
+- Web-created standing orders use source `user`: the web user is the
+  user, and the column allows only anchor/user/review.
+
