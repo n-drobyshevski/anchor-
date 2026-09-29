@@ -63,6 +63,25 @@ What it doesn't take:
 The text is Russian first, so any typeface has to cover Cyrillic
 properly.
 
+## The mark
+
+Three circles, each smaller and fainter (the echo), and a wire routing
+the last one back into the first, the way a feedback loop is drawn in a
+block diagram: what goes out comes back. The first node is solid
+phosphor green (`#5fe08a`), the other two are fading rings, and the
+wire is off-white (`#e6e6e1` at 75%) on a black square (`#0a0a0a`).
+The geometry is on a 32-unit grid and is shared by:
+
+- `app/web/static/icon.svg`: the favicon, on its black tile, which
+  reads the same on light and dark browser tabs.
+- `docs/brand/echo-avatar.svg`: the Telegram avatar, scaled to fit
+  Telegram's round crop. `echo-avatar.png` is the same SVG rendered at
+  exactly 640×640 (set it with BotFather's `/setuserpic`).
+- `_MARK` in `app/web/oauth.py`: a one-colour copy in `currentColor`,
+  with no tile, so it takes the page's accent.
+
+Change all three together.
+
 ## Web UI looks
 
 `app/web/static/app.css` keeps today's palette as the default and adds
@@ -114,9 +133,5 @@ black ink by day.
 - **Tokenize the remaining hard-coded radii** in `app.css` (about ten
   `border-radius` values: bubbles, chips, the composer), so `wired` can
   square them too.
-- **The mark and avatar.** The three circles already read as a node
-  diagram. Redraw `app/web/static/icon.svg` and
-  `echo-avatar.svg`/`.png` in 1-bit black and white, with one node in
-  phosphor green.
 - **Pick a default.** Once a look has been lived with, promote it to
   `:root` and drop the switch.

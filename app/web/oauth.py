@@ -115,10 +115,13 @@ EXPIRED = "Запрос не найден или устарел. Начни по
 # nothing else, so no fonts, images or scripts. The palette is the web
 # app's (app/web/static/app.css), the mark is app/web/static/icon.svg.
 _MARK = (
-    "<svg class=mark viewBox='0 0 32 32' aria-hidden=true><g fill=none stroke=currentColor "
-    "stroke-width=2.4><circle cx=10 cy=16 r=8 />"
-    "<circle cx=21 cy=16 r=5 stroke-opacity=.55 />"
-    "<circle cx=27.6 cy=16 r=3 stroke-opacity=.3 /></g></svg>"
+    "<svg class=mark viewBox='0 0 32 32' aria-hidden=true>"
+    "<g fill=currentColor stroke=currentColor>"
+    "<path d='M27.4 14.4V7.6H10v1.6' fill=none stroke-width=1.4 stroke-opacity=.75 />"
+    "<path d='M7.9 9.2h4.2L10 11.4z' stroke=none fill-opacity=.75 />"
+    "<circle cx=10 cy=17.4 r=5.4 stroke=none />"
+    "<g fill=none stroke-width=2.2><circle cx=20.4 cy=17.4 r=3 stroke-opacity=.6 />"
+    "<circle cx=27.4 cy=17.4 r=1.6 stroke-opacity=.35 /></g></g></svg>"
 )
 _STYLE = (
     ":root{color-scheme:light dark;--bg:#faf8f5;--surface:#fff;--text:#292524;"

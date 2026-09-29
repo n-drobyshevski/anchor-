@@ -6,7 +6,8 @@ stays as an alias everywhere below the surface — the package, env vars
 note labels, the plan files, and the Railway services. Only what the user
 sees says Echo.
 
-The mark (three circles, each smaller and fainter) is
+The mark (three circles, each smaller and fainter, with a wire
+feeding the last back into the first) is
 `app/web/static/icon.svg`; the Telegram avatar is
 `docs/brand/echo-avatar.png` (set it with BotFather's `/setuserpic`).
 The visual reference (the "cybersyn" mood board) and the web UI's
