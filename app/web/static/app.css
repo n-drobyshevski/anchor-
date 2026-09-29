@@ -110,8 +110,9 @@
 :root {
   color-scheme: light dark;
   /* The "wired" palette from the visual reference (docs/brand/README.md):
-     a white diagram sheet with black ink by day, a black screen with
-     phosphor green by night -- the mark's colours. Neutral greys, hard
+     a white diagram sheet with black ink by day, a soft black screen with
+     phosphor green by night -- the mark's colours, toned down for
+     long reading. Neutral greys, hard
      square edges, flat surfaces (the hairline carries the edge; only
      popovers keep a shadow).
      --accent is the only accent (primary action, focus, active,
@@ -157,66 +158,66 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0a0a0a;
-    --surface: #121412;
-    --text: #e6e6e1;
-    --text-muted: #9a9a94;
-    --border: #262826;
-    --input-border: #333633;
-    --muted-fill: #1b1d1b;
-    --muted-fill-text: #e6e6e1;
-    --accent: #5fe08a;
-    --accent-text: #0a0a0a;
-    --focus: #5fe08a;
-    --bubble-user: #1b1d1b;
-    --bubble-user-text: #e6e6e1;
-    --bubble-bot: #121412;
-    --bubble-bot-text: #e6e6e1;
-    --bubble-muted: #1b1d1b;
-    --bubble-muted-text: #e6e6e1;
-    --danger: #fca5a5;
-    --dot-ok: #5fe08a;
-    --dot-warn: #5c5f5c;
-    --dot-bad: #fca5a5;
-    --chart-bar: #5fe08a;
-    --chart-bar-active: #e6e6e1;
-    --chart-grid: #262826;
-    --chart-empty: #262826;
-    --hairline: inset 0 0 0 1px rgb(230 230 225 / .14);
+    --bg: #161917;
+    --surface: #1d201e;
+    --text: #c8cbc4;
+    --text-muted: #999c95;
+    --border: #2d312e;
+    --input-border: #3b403c;
+    --muted-fill: #252926;
+    --muted-fill-text: #c8cbc4;
+    --accent: #56c882;
+    --accent-text: #161917;
+    --focus: #56c882;
+    --bubble-user: #252926;
+    --bubble-user-text: #c8cbc4;
+    --bubble-bot: #1d201e;
+    --bubble-bot-text: #c8cbc4;
+    --bubble-muted: #252926;
+    --bubble-muted-text: #c8cbc4;
+    --danger: #f2a3a3;
+    --dot-ok: #56c882;
+    --dot-warn: #6b6f6a;
+    --dot-bad: #f2a3a3;
+    --chart-bar: #56c882;
+    --chart-bar-active: #c8cbc4;
+    --chart-grid: #2d312e;
+    --chart-empty: #2d312e;
+    --hairline: inset 0 0 0 1px rgb(200 203 196 / .12);
     --shadow-soft: 0 0 0 transparent;
-    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .6);
+    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .5);
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #0a0a0a;
-  --surface: #121412;
-  --text: #e6e6e1;
-  --text-muted: #9a9a94;
-  --border: #262826;
-  --input-border: #333633;
-  --muted-fill: #1b1d1b;
-  --muted-fill-text: #e6e6e1;
-  --accent: #5fe08a;
-  --accent-text: #0a0a0a;
-  --focus: #5fe08a;
-  --bubble-user: #1b1d1b;
-  --bubble-user-text: #e6e6e1;
-  --bubble-bot: #121412;
-  --bubble-bot-text: #e6e6e1;
-  --bubble-muted: #1b1d1b;
-  --bubble-muted-text: #e6e6e1;
-  --danger: #fca5a5;
-  --dot-ok: #5fe08a;
-  --dot-warn: #5c5f5c;
-  --dot-bad: #fca5a5;
-  --chart-bar: #5fe08a;
-  --chart-bar-active: #e6e6e1;
-  --chart-grid: #262826;
-  --chart-empty: #262826;
-  --hairline: inset 0 0 0 1px rgb(230 230 225 / .14);
+  --bg: #161917;
+  --surface: #1d201e;
+  --text: #c8cbc4;
+  --text-muted: #999c95;
+  --border: #2d312e;
+  --input-border: #3b403c;
+  --muted-fill: #252926;
+  --muted-fill-text: #c8cbc4;
+  --accent: #56c882;
+  --accent-text: #161917;
+  --focus: #56c882;
+  --bubble-user: #252926;
+  --bubble-user-text: #c8cbc4;
+  --bubble-bot: #1d201e;
+  --bubble-bot-text: #c8cbc4;
+  --bubble-muted: #252926;
+  --bubble-muted-text: #c8cbc4;
+  --danger: #f2a3a3;
+  --dot-ok: #56c882;
+  --dot-warn: #6b6f6a;
+  --dot-bad: #f2a3a3;
+  --chart-bar: #56c882;
+  --chart-bar-active: #c8cbc4;
+  --chart-grid: #2d312e;
+  --chart-empty: #2d312e;
+  --hairline: inset 0 0 0 1px rgb(200 203 196 / .12);
   --shadow-soft: 0 0 0 transparent;
-  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .6);
+  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .5);
 }
 
 * { box-sizing: border-box; }

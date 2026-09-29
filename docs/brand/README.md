@@ -93,19 +93,22 @@ flat surfaces. It lives in the token blocks at the top of
 `phosphor` look, the previous palette with a green accent, was tried as
 an option and dropped when wired became the default.)
 
-Every text and accent pair is at least 4.5:1 (WCAG AA). `--danger`
+Dark mode is deliberately softer than the mark's pure black and bright
+green (text about 11:1 instead of 16:1), which is easier on the eyes
+for long reading at night. Every text and accent pair is still at least
+4.5:1 (WCAG AA). `--danger`
 stays red. Red and green are hard to tell apart for colour-blind eyes,
 which is acceptable only because the UI never shows state by colour
 alone. Keep it that way.
 
 | Token | Light | Dark |
 |---|---|---|
-| `--bg` | `#f4f4f1` sheet | `#0a0a0a` screen |
-| `--surface` | `#ffffff` | `#121412` |
-| `--text` | `#0a0a0a` (18.0:1) | `#e6e6e1` (15.8:1) |
-| `--text-muted` | `#555753` (6.6:1) | `#9a9a94` (7.0:1) |
-| `--accent` | `#146c34` (5.9:1 on `--bg`) | `#5fe08a` phosphor (11.8:1) |
-| `--accent-text` | `#ffffff` (6.5:1) | `#0a0a0a` (11.8:1) |
+| `--bg` | `#f4f4f1` sheet | `#161917` screen |
+| `--surface` | `#ffffff` | `#1d201e` |
+| `--text` | `#0a0a0a` (18.0:1) | `#c8cbc4` (10.8:1) |
+| `--text-muted` | `#555753` (6.6:1) | `#999c95` (6.4:1) |
+| `--accent` | `#146c34` (5.9:1 on `--bg`) | `#56c882` phosphor (8.4:1) |
+| `--accent-text` | `#ffffff` (6.5:1) | `#161917` (8.4:1) |
 | `--radius`, `--radius-card`, `--radius-pill` | `0` | same |
 | Shadows | none on cards (the hairline carries the edge); popovers keep a short one | same |
 
