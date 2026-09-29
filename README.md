@@ -1,6 +1,10 @@
-# Anchor
+# Echo
 
-A private, single-user Telegram companion.
+A private, single-user Telegram companion. Formerly **Anchor**: that name
+stays as an alias everywhere below the surface — the package, env vars
+(`ANCHOR_*`), database roles, the vault's `Anchor/` folder and `anchor:`
+note labels, the plan files, and the Railway services. Only what the user
+sees says Echo.
 
 ## Status
 

@@ -51,7 +51,7 @@ CONFIRM_TEXT = "Удалить все данные и все резервные 
 # a month (Plus: a year); the user is on Standard. Shown only when a
 # vault is configured -- a vault line with no vault would be a lie too.
 CONFIRM_VAULT_LINE = (
-    "Файлы Anchor в хранилище тоже удалятся. Obsidian Sync хранит их "
+    "Файлы Echo в хранилище тоже удалятся. Obsidian Sync хранит их "
     "в истории версий ещё до месяца, зашифрованными."
 )
 CONFIRM_YES = "Да, удалить"

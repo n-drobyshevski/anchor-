@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 NON_TEXT_REPLY = "Пока только текст."
 
 START_TEXT = (
-    "Я — Anchor. Здесь по-русски, коротко и по делу.\n"
+    "Я — Echo. Здесь по-русски, коротко и по делу.\n"
     "Выйти из роли можно командой /out или словом «пурпурный»."
 )
 
@@ -142,7 +142,7 @@ PRIVACY_TEXT = (
     "еженедельных копий, остальные удаляются.\n"
     "Текст страниц, найденных при поиске, хранится 30 дней, потом "
     "стирается — карточки и ссылки остаются.\n"
-    "Заметки из Obsidian Anchor читает только с твоей меткой: личные — только для "
+    "Заметки из Obsidian Echo читает только с твоей меткой: личные — только для "
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
     "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
     "при /claude library write on — и менять (откат: /claude undo). "
@@ -186,7 +186,7 @@ BOT_COMMANDS = [
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
     # 5b (phase-5 plan section 6).
-    BotCommand(command="mind", description="Заметки Anchor"),
+    BotCommand(command="mind", description="Заметки Echo"),
     # 5c (phase-5 plan section 7).
     BotCommand(command="order", description="Новая договорённость"),
     BotCommand(command="orders", description="Список договорённостей"),

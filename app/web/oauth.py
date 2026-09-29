@@ -88,11 +88,11 @@ _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
-TITLE = "Anchor · подключение Claude"
+TITLE = "Echo · подключение Claude"
 WAITING_HEADING = "Подтверди в Telegram"
 WAITING_HTML = (
     "<ol class=steps>"
-    "<li>Открой бота Anchor в Telegram.</li>"
+    "<li>Открой бота Echo в Telegram.</li>"
     "<li>Отправь ему команду:</li>"
     "</ol>"
     "<p class=command>/claude connect {code}</p>"
@@ -212,7 +212,7 @@ def _page(
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         f"{meta}<title>{TITLE}</title><style>{_STYLE}</style></head>"
-        f"<body><main><div class=brand>{_MARK}<div><b>Anchor</b>"
+        f"<body><main><div class=brand>{_MARK}<div><b>Echo</b>"
         "<span>подключение Claude</span></div></div>"
         f"<div class=card><h1>{html.escape(heading)}</h1>{body_html}</div></main>{tail}"
         "</body></html>"

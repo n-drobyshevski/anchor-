@@ -91,7 +91,7 @@ _DISALLOWED_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
 # `_valid_shape` carries the identical regex for the same reason.
 _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
-CODE_MESSAGE = "Код входа в веб-Anchor: {code} ({minutes} мин). Если это не ты — /weblogout"
+CODE_MESSAGE = "Код входа в веб-Echo: {code} ({minutes} мин). Если это не ты — /weblogout"
 
 BLOCKED_SEND_REPLY = {"error": "blocked"}
 
