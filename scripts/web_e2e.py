@@ -498,14 +498,19 @@ async def scenario_chat(page, ctx: Ctx) -> None:
 
 
 async def _goto_screen(page, ctx: Ctx, route: str) -> bool:
-    """Navigates to `route` via the nav bar (never a raw location.hash
-    assignment, so this exercises router.js the way a user would).
-    Returns False (and records nothing as a failure) if the route is
-    not in the nav at all.
+    """Navigates to `route` via the section switcher (never a raw
+    location.hash assignment, so this exercises router.js the way a
+    user would): open #surface-button's menu, click the item. Returns
+    False (and records nothing as a failure) if the route is not in the
+    menu at all.
     """
-    link = page.locator(f'#nav a[href="{route}"]')
-    if await link.count() == 0:
+    if await page.locator("#surface-button").count() == 0:
         return False
+    if await page.locator(f'#surface-menu a[href="{route}"]').count() == 0:
+        return False
+    if await page.locator("#surface-menu").is_hidden():
+        await page.locator("#surface-button").click()
+    link = page.locator(f'#surface-menu a[href="{route}"]')
     await link.first.click()
     await page.wait_for_function(
         "route => location.hash === route", arg=route, timeout=5_000
