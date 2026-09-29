@@ -1683,6 +1683,22 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   color: var(--text-muted);
 }
 
+/* A short bulleted list inside a card (the weekly review's wins,
+   misses, patterns and intentions). */
+.plain-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plain-list li::marker { color: var(--text-muted); }
+
+/* A decided review proposal's status, under its text: chip-sized, not
+   stretched across the stacked row. */
+.row-stacked > .status-chip { align-self: flex-start; }
+
 .card h2[tabindex="-1"]:focus {
   outline: none;
   box-shadow: none;

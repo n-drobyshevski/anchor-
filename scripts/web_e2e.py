@@ -49,6 +49,7 @@ import argparse
 import asyncio
 import contextlib
 import datetime
+import json
 import os
 import random
 import ssl
@@ -252,6 +253,29 @@ async def seed_history(raw_url: str) -> None:
                 "INSERT INTO journal (local_date, text) VALUES ($1, $2)",
                 today - datetime.timedelta(days=back), text,
             )
+        # A weekly review with one standing-order proposal (and its
+        # proposed order) for Дневник's «Обзор недели» card.
+        review_id = await conn.fetchval(
+            "INSERT INTO weekly_review (week_start, analysis) VALUES ($1, $2::jsonb) RETURNING id",
+            today - datetime.timedelta(days=today.weekday()),
+            json.dumps({
+                "wins": ["Гулял пять дней из семи."],
+                "misses": ["Дважды лёг после часа ночи."],
+                "patterns": ["К пятнице устаёт сильнее."],
+                "intentions": ["Ложиться до полуночи."],
+                "proposals": [],
+            }),
+        )
+        proposal_id = await conn.fetchval(
+            "INSERT INTO review_proposal (review_id, kind, text, reason) "
+            "VALUES ($1, 'standing_order', 'Выключать экран в 23:30', 'сон страдает') RETURNING id",
+            review_id,
+        )
+        await conn.execute(
+            "INSERT INTO standing_order (text, cadence, status, source, review_proposal_id) "
+            "VALUES ('Выключать экран в 23:30', 'daily', 'proposed', 'review', $1)",
+            proposal_id,
+        )
         # Two open debts for Сегодня's «Долги» card.
         await conn.execute(
             "INSERT INTO obligation (text, kind, source, opened_at) VALUES "
@@ -673,6 +697,29 @@ async def scenario_memory_tabs(page, ctx: Ctx) -> None:
         ctx.ok("notebook/orders writes sent nothing to Telegram")
 
 
+async def scenario_review(page, ctx: Ctx) -> None:
+    """Дневник: the seeded weekly review shows, and its order proposal
+    is accepted from the web. Silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/journal"):
+        ctx.fail("#/journal missing from nav; cannot run the review action")
+        return
+    sent_before = ctx.harness.sent_count
+    card = page.locator("#review-card")
+    try:
+        await card.locator("li", has_text="Гулял пять дней").wait_for(state="visible", timeout=10_000)
+        row = card.locator("li", has_text="Выключать экран в 23:30")
+        await row.locator("button", has_text="Принять").click()
+        await row.locator(".status-chip", has_text="принято").wait_for(state="visible", timeout=10_000)
+        ctx.ok("Review: accepted the order proposal from Дневник")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Review card / accept failed: {exc}")
+    await page.screenshot(path=str(ctx.screenshot_path("journal_review")))
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("review decision caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("review decision sent nothing to Telegram")
+
+
 async def scenario_memory_add(page, ctx: Ctx) -> None:
     if not await _goto_screen(page, ctx, "#/memory"):
         ctx.fail("#/memory missing from nav; cannot run the Memory panel action")
@@ -919,6 +966,7 @@ async def run_pass(
             await scenario_memory_add(page, ctx)
             await scenario_debts_and_intensity(page, ctx)
             await scenario_memory_tabs(page, ctx)
+            await scenario_review(page, ctx)
         await scenario_nav_screens(page, ctx)
         if do_actions:
             await scenario_checkin(page, ctx)

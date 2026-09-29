@@ -37,8 +37,11 @@ from app.db.models import (
     Message,
     NotebookEntry,
     Obligation,
+    PersonaAmendment,
+    ReviewProposal,
     StandingOrder,
     StateChange,
+    WeeklyReview,
 )
 from app.web.hub import WebHub
 
@@ -528,20 +531,33 @@ async def _tail_checkin_once(
 #              weekly review, /mind's ✖, thread expiry.
 #   orders   - app/core/orders.py: /order, an accepted proposal, /orders'
 #              [Снять], the once-order expiry.
-SimpleFingerprint = tuple[int, int]
+#   review   - app/core/review.py and amendments.py: a review stored or
+#              regenerated (new proposals, message_id set once sent),
+#              a proposal decided or expired, an amendment adopted,
+#              activated or revoked.
+SimpleFingerprint = tuple[int, ...]
 
+# topic -> the (model, live-row filter) pairs whose (max id, live
+# count) make up its fingerprint.
 _LIVE_ROWS = {
-    "debts": (Obligation, Obligation.status == "open"),
-    "notebook": (NotebookEntry, NotebookEntry.active.is_(True)),
-    "orders": (StandingOrder, StandingOrder.status == "active"),
+    "debts": ((Obligation, Obligation.status == "open"),),
+    "notebook": ((NotebookEntry, NotebookEntry.active.is_(True)),),
+    "orders": ((StandingOrder, StandingOrder.status == "active"),),
+    "review": (
+        (WeeklyReview, WeeklyReview.message_id.is_not(None)),
+        (ReviewProposal, ReviewProposal.status == "pending"),
+        (PersonaAmendment, PersonaAmendment.status == "active"),
+    ),
 }
 
 
 async def _simple_fingerprint(session: AsyncSession, topic: str) -> SimpleFingerprint:
-    model, live = _LIVE_ROWS[topic]
-    result = await session.execute(select(func.max(model.id), func.count().filter(live)))
-    max_id, live_count = result.one()
-    return (max_id or 0, live_count or 0)
+    parts: list[int] = []
+    for model, live in _LIVE_ROWS[topic]:
+        result = await session.execute(select(func.max(model.id), func.count().filter(live)))
+        max_id, live_count = result.one()
+        parts.extend((max_id or 0, live_count or 0))
+    return tuple(parts)
 
 
 async def _simple_fingerprints(session: AsyncSession) -> dict[str, SimpleFingerprint]:

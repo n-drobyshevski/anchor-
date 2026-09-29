@@ -1,11 +1,13 @@
-// Дневник (#/journal): looking back -- the 30-day rating chart with the
-// check-in history, the journal feed, and the proposals already
-// decided. Moved out of the old Check-in and Proposals screens.
+// Дневник (#/journal): looking back -- the weekly review (with its
+// proposals and «Провести обзор»), the 30-day rating chart with the
+// check-in history, the journal feed, the proposals already decided,
+// and the persona amendments in force. Moved out of the old Check-in and Proposals screens.
 import { html } from '../html.js';
 import { usePagedResource, useResource } from '../hooks.js';
 import { LoadError } from '../ui/ScreenState.js';
 import { JournalSection } from './journal/journalFeed.js';
 import { CHART_DAYS, MonthSection } from './journal/ratingChart.js';
+import { AmendmentsCard, ReviewCard } from './journal/review.js';
 import { HistoryRow, useProposals } from './today/proposals.js';
 
 const JOURNAL_PAGE = 30;
@@ -52,8 +54,10 @@ export function Journal() {
         <div class="screen-column">
           <${MonthSection} range=${range.data} failed=${range.failed} onRetry=${range.reload} />
           <${ProposalsHistory} proposals=${proposals} />
+          <${AmendmentsCard} />
         </div>
         <div class="screen-column">
+          <${ReviewCard} />
           <${JournalSection}
             items=${journal.items}
             total=${journal.total}
