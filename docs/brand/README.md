@@ -65,11 +65,11 @@ properly.
 
 ## The mark
 
-Three circles, each smaller and fainter (the echo), and a wire routing
-the last one back into the first, the way a feedback loop is drawn in a
-block diagram: what goes out comes back. The first node is solid
-phosphor green (`#5fe08a`), the other two are fading rings, and the
-wire is off-white (`#e6e6e1` at 75%) on a black square (`#0a0a0a`).
+Three circles, each smaller and fainter: a signal and its echo, drawn
+as the nodes of a diagram. The first node is solid phosphor green
+(`#5fe08a`) and the other two are fading rings, on a black square
+(`#0a0a0a`). The mark has no wire or arrow on purpose: the owner tried
+a feedback-loop wire over the circles and turned it down.
 The geometry is on a 32-unit grid and is shared by:
 
 - `app/web/static/icon.svg`: the favicon, on its black tile, which
