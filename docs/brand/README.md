@@ -99,13 +99,17 @@ state by colour alone. Keep it that way.
 
 ### `phosphor`: the smallest step
 
-Today's warm neutrals, with the stone accent swapped for CRT green. Only
-`--accent`, `--focus`, `--dot-ok` and `--chart-bar` change.
+Today's palette (warm neutrals, green-tinted bubbles), with its muted
+Echo green (`#2f6f4f`, dark `#7fbf9a`) swapped for brighter CRT green.
+Only `--accent`, `--focus`, `--dot-ok` and `--chart-bar` change, plus
+`--chart-bar-active` in light mode, so the selected bar still stands
+out against the green ones.
 
 | Token | Light | Dark |
 |---|---|---|
 | `--accent` | `#146c34` (6.1:1 on `--bg`) | `#5fe08a` (10.4:1 on `--bg`) |
 | `--accent-text` | `#ffffff` (6.5:1) | `#1c1917` (10.4:1) |
+| `--chart-bar-active` | `#292524` | unchanged (`#faf8f5`) |
 
 ### `wired`: the whole board
 

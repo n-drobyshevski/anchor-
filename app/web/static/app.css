@@ -109,7 +109,9 @@
 
 :root {
   color-scheme: light dark;
-  /* Warm neutrals and one accent, Echo's green (the mark's #2f6f4f).
+  /* Warm neutrals and one accent, Echo's green (the first mark's
+     #2f6f4f; the current mark and the opt-in looks below are in
+     docs/brand/README.md).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
      offline dot only. State is never shown by colour alone. */
@@ -223,13 +225,14 @@
    never shown by colour alone (see :root). Contrast (WCAG): every
    text/accent pair here is >= 4.5:1. */
 
-/* phosphor: today's palette, the stone accent swapped for CRT green. */
+/* phosphor: today's palette, its muted green swapped for CRT green. */
 :root[data-look="phosphor"] {
   --accent: #146c34;
   --accent-text: #ffffff;
   --focus: #146c34;
   --dot-ok: #146c34;
   --chart-bar: #146c34;
+  --chart-bar-active: #292524;
 }
 
 @media (prefers-color-scheme: dark) {
