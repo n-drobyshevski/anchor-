@@ -376,7 +376,8 @@ async def post_timezone(request: web.Request) -> web.Response:
 
 async def post_claude_limits(request: web.Request) -> web.Response:
     """Set one of Claude's write caps, or put it back to its default
-    (`value: null`) -- the same `set_and_push` `/claude limits` calls,
+    (`value: null`), or every cap at once (`key: "*"`, `value: null`,
+    the web's «Все по умолчанию») -- the same `set_and_push` `/claude limits` calls,
     raising as well as lowering (docs/decisions.md, "Claude write caps
     become settings"). 404 while Claude access is off, like the routes
     that feature adds. No `clear_awaiting` (step 3): the caps are not a
@@ -399,7 +400,10 @@ async def post_claude_limits(request: web.Request) -> web.Response:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
         return _json(400, {"error": "bad_request"})
     try:
-        if value is None:
+        if key == "*":
+            if value is not None:
+                raise write_limits.LimitError("out_of_range")
+        elif value is None:
             if key not in write_limits.SPECS:
                 raise write_limits.LimitError("unknown_key")
         else:
