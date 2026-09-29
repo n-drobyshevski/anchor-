@@ -65,11 +65,11 @@ properly.
 
 ## The mark
 
-Three circles, each smaller and fainter: a signal and its echo, drawn
-as the nodes of a diagram. The first node is solid phosphor green
-(`#5fe08a`) and the other two are fading rings, on a black square
-(`#0a0a0a`). The mark has no wire or arrow on purpose: the owner tried
-a feedback-loop wire over the circles and turned it down.
+Three rings, each smaller and fainter, overlapping a little: a signal
+and its echo. It keeps the original mark's geometry, redrawn in
+phosphor green (`#5fe08a`) on a black square (`#0a0a0a`). Two
+variations were tried and turned down: a solid first node, and a
+feedback-loop wire with an arrow over the circles.
 The geometry is on a 32-unit grid and is shared by:
 
 - `app/web/static/icon.svg`: the favicon, on its black tile, which
