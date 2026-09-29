@@ -489,6 +489,10 @@ NOT_EXPORTED = {
     # selector's why. The exported review_proposal rows carry the round
     # id and the note ids each proposal rests on.
     "lens_round": "a derived record of which lens notes a review drew on, and the selector's why",
+    # L3 (plan section 8): the garden's derived proposals about the lens,
+    # already in the vault as the Anchor/Reports note.
+    "lens_garden_run": "a derived weekly run of the lens garden: ids, scores and clusters",
+    "lens_gap": "derived proposals about how the lens is organised, also in the vault's report",
 }
 
 

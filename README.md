@@ -32,6 +32,7 @@ no model call, no outbound).
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
 | The lens (L1, L2): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. The weekly review picks the notes that fit its week and grounds its proposals in them (L2) | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300): above it the review does not use the lens and `/lens` warns; `LENS_ROUND_MAX_NOTES` (6, 1–12) and `LENS_ROUND_MAX_CHARS` (24000, 2000–100000) cap what one review round reads; Claude Code's access is `/lens code on` |
+| The lens garden (L3): once a week an idle job looks for gaps in the lens (missing links, missing notes, tensions, bridges), sends one Telegram message with a button row per gap, and writes a report to `Anchor/Reports` | **off** | `LENS_GARDEN_ENABLED` (on top of `LENS_ENABLED`, and `VAULT_MODE` `mirror` or `sync`); `GARDEN_MAX_TOKENS` (2000, 1000–8000) caps the model's answer. Deploy the vault service first (docs/vault-setup.md) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -70,8 +71,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
-| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round | — (the lens itself: `LENS_ENABLED`) |
-| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes and which of them each review round picked (never the review's explanation) / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
+| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; with the garden, «Сад: <дата>, открыто N» | — (the lens itself: `LENS_ENABLED`) |
+| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -935,9 +936,9 @@ lockfile, `Dockerfile` and tests. It imports nothing from `app`, and
 It is the enforcement point in the same way the `anchor_debug` role is:
 whatever the bot's code does, the vault itself refuses
 
-- **a write anywhere except a `.md` directly inside `Anchor/Memory/` or
-  `Anchor/Journal/`.** Not a subfolder, not another extension, not a
-  dot-file;
+- **a write anywhere except a `.md` directly inside `Anchor/Memory/`,
+  `Anchor/Journal/` or (L3) `Anchor/Reports/`.** Not a subfolder, not
+  another extension, not a dot-file;
 - **a read of any note that does not say `anchor: read`** in its
   properties. The 404 for such a note is byte-for-byte the 404 for a
   note that does not exist, so the bot cannot probe;
@@ -1209,12 +1210,14 @@ is the only request 8e adds.
 This is the contract. A later phase that adds a consumer of notes cites
 it, and extends the isolation tests.
 
-| Where | Personal notes | Knowledge notes | Lens notes (L1, L2) |
+| Where | Personal notes | Knowledge notes | Lens notes (L1–L3) |
 |---|---|---|---|
 | The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge |
 | The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never | never |
 | The notebook, `/mind` | never | never | never in L1 |
-| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never | never in L1 |
+| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never | never |
+| The lens garden, an idle job (L3) | never | never: a knowledge note is an anonymous id in its graph, and its title is only matched locally, never sent | **yes, weekly, while `LENS_GARDEN_ENABLED` is on**: titles, catalog summaries (or the start of the text, as in L2), lens links and counts of knowledge links go to the model, never a whole body |
+| `Anchor/Reports` in the vault (L3) | never | never named | titles, as `[[links]]` to lens notes |
 | The weekly review | never | never | **yes, via the selector (L2)**: the catalog and the notes it picks, never with the week's own input |
 | Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never in L1 |
 | `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e | never |
@@ -1224,7 +1227,7 @@ it, and extends the isolation tests.
 | Becoming a memory fact | never automatically | never automatically | never automatically |
 | Encrypted backups | included; deleted by `/delete` | same | same |
 | `/export` | left out (derived from the vault) | left out | left out |
-| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` |
+| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` (L3: also the garden's gaps, `lens.gaps(n)`) |
 
 If notes ever reach `/grok`, personal and knowledge will be separate
 scopes, both off by default.
@@ -1351,6 +1354,65 @@ calls are charged to the review's ledger category and cap.
 
 Why it is built this way: docs/decisions.md, "L2 — the review reads the
 lens".
+
+## Milestone L3 — the lens garden
+
+Once a week Echo looks at the lens as a graph and proposes what is
+missing (`anchor-lens-plan.md` §8). Off by default: set
+`LENS_GARDEN_ENABLED=true` on top of `LENS_ENABLED`, with `VAULT_MODE`
+`mirror` or `sync`, **after** the vault service is redeployed with
+`Anchor/Reports/` writable (docs/vault-setup.md).
+
+1. **An idle job, `lens_garden`,** runs at most once per local ISO week
+   and 168 hours after the last run, only with 3 to
+   `LENS_CATALOG_MAX_NOTES` lens notes, and not at all when the lens
+   has not changed since the last run and no gap is marked done.
+2. **Step 1 is deterministic** (`app/core/lens_graph.py`, stdlib only):
+   orphans, dead ends, wanted notes (links to nothing), unlinked
+   mentions, hubs, clusters, holes between clusters, people without
+   concepts, stale notes.
+3. **Step 2 is one model call** (`LLM_MODEL_SAFETY`, temperature 0, at
+   most `GARDEN_MAX_TOKENS`): it gets step 1's findings, the involved
+   notes' titles, catalog summaries (or the start of the text) and lens
+   links, never a whole body, a knowledge title, a dialog or memory, and
+   proposes up to ten gaps: a link, a missing note, a tension, a bridge
+   between clusters. An empty answer is fine. A failure writes nothing and retries tomorrow.
+4. **Dedup and recheck.** A gap is keyed by its kind and its notes'
+   titles, so one you dismissed does not come back, even after a move.
+   Each run rechecks open and done gaps: one that now holds (the link
+   exists, the note was written) is closed; one you marked done that
+   still fails comes back, marked «снова».
+
+### What you see
+
+- **One Telegram message per run**, after the vault pass has written
+  the report: the week, how many gaps are new, back again and still
+  open from earlier weeks, the report's path, then the gaps, numbered
+  (kind, notes, proposed title, one sentence of detail, «снова» if it
+  came back). Each open gap has a row of two buttons, «N · сделал» and
+  «N · не нужно». A tap marks that gap in the same message («—
+  отмечено: сделал (проверю в следующем саду)» or «— отмечено: не
+  нужно») and removes its row; the keyboard goes when no row is left.
+  The message waits for quiet hours, `/quiet`, a pause and the welfare
+  cooldown to pass. Telegram's 4096-character limit may shorten the
+  details; the report has them whole.
+- **The report, `Anchor/Reports/Lens garden <week>-<epoch>.md`**: the
+  gaps by kind with their status, «Ещё открыто» from earlier weeks,
+  and «Структура» (hubs, named clusters, orphans, dead ends, wanted
+  notes). It links only to lens notes; everything the model wrote is
+  escaped, so it can hold no link, tag or embed. Edits there are not
+  read: mark gaps in Telegram. Edit the file and Echo stops touching
+  it; delete it (in `sync`) and it is not recreated.
+- `/lens` adds «Сад: <дата>, открыто N»; `/digest` «Сад линзы: новых
+  N, решено M».
+- Claude Code can read the gaps through `lens.gaps(n)`, counted like
+  any lens read, with a resolved gap shown as `closed`.
+- The lens's titles and summaries go to the model provider weekly while
+  the garden is on (docs/privacy.md). Turning notes consent, the
+  knowledge index or the lens off deletes the garden; `/delete` erases
+  it and the reports; `/export` leaves it out.
+
+Why it is built this way: docs/decisions.md, "L3 — the lens garden".
 
 ## Web UI
 
@@ -1586,8 +1648,8 @@ the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
 a role that can read only the content-free `debug.*` views. The one
 content door is the lens (L1): `ANCHOR_LENS_DATABASE_URL` logs in as
-`anchor_lens`, which can call `lens.notes()`, `lens.graph()` and
-`lens.rounds(n)` and nothing else, only while `/lens code on`, and every call is counted. See
+`anchor_lens`, which can call `lens.notes()`, `lens.graph()`,
+`lens.rounds(n)` and `lens.gaps(n)` and nothing else, only while `/lens code on`, and every call is counted. See
 [docs/claude-access.md](docs/claude-access.md).
 
 ### Grok (opt-in)

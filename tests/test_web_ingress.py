@@ -179,6 +179,20 @@ async def test_press_rejects_delete_callback_prefix(sessionmaker):
             await press(session, hub, settings=_settings(), message_id=-1, data="d:yes:1")
 
 
+async def test_press_rejects_the_lens_garden_buttons(sessionmaker):
+    """L3: the garden's «сделал» / «не нужно» are Telegram's alone, refused
+    before the allowlist even when a keyboard somehow carried them."""
+    hub = WebHub()
+    buttons = ["lg:d:1:k3f7qa", "lg:n:1:k3f7qa", "lg:r:1:k3f7qa"]
+    hub.register_keyboard(-1, [[{"text": data, "data": data} for data in buttons]])
+    async with sessionmaker() as session:
+        for data in buttons:
+            with pytest.raises(BlockedCommand):
+                await press(session, hub, settings=_settings(), message_id=-1, data=data)
+    async with sessionmaker() as session:
+        assert (await session.execute(select(TelegramUpdate))).scalars().all() == []
+
+
 async def test_press_rejects_data_not_on_allowlist(sessionmaker):
     hub = WebHub()
     hub.register_keyboard(-1, [[{"text": "Я в порядке", "data": "w:resume"}]])

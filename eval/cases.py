@@ -32,7 +32,11 @@ OUTBOUND = "outbound"
 # round -- selector and grounding call -- over a first-pass analysis the
 # case supplies. Not a persona prompt at all; see eval/scenario.py.
 LENS_REVIEW = "lens_review"
-INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW)
+# L3 (anchor-lens-plan.md section 8; the L3 spec section 9): the lens
+# garden's step 1 and its one model call over synthetic notes the case
+# seeds. Not a persona prompt either; see eval/scenario.py.
+LENS_GARDEN = "lens_garden"
+INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN)
 
 # What a lens case's `setup.lens` entries may be, and what its
 # `checks.lens_outcome` may name -- the same values the migration's
@@ -76,6 +80,8 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
 
     if kind == LENS_REVIEW:
         _check_lens(raw, input_block, path)
+    elif kind == LENS_GARDEN:
+        _check_garden(raw, path)
     elif kind == OUTBOUND:
         _require(
             input_block.get("outbound_kind") in OUTBOUND_KINDS,
@@ -132,12 +138,59 @@ def _check_lens(raw: dict, input_block: dict, path: pathlib.Path) -> None:
         path,
         f"lens_review cases need an input.analysis table with keys from {ANALYSIS_KEYS}",
     )
+    known = _check_seeded_notes(raw, path, LENS_REVIEW)
+    setup = raw.get("setup") or {}
+    for picked in setup.get("lens_history", []):
+        _require(
+            isinstance(picked, list) and set(picked) <= known,
+            path,
+            "setup.lens_history entries are lists of seeded titles",
+        )
+    checks = raw.get("checks") or {}
+    for key in ("selected_include", "grounds_include"):
+        _require(
+            set(checks.get(key, [])) <= known,
+            path,
+            f"checks.{key} names a title that is not in setup.lens",
+        )
+    outcome = checks.get("lens_outcome")
+    _require(
+        outcome is None or outcome in LENS_OUTCOMES,
+        path,
+        f"checks.lens_outcome must be one of {LENS_OUTCOMES}",
+    )
+
+
+def _check_garden(raw: dict, path: pathlib.Path) -> None:
+    """A garden case's own shape (L3): seeded notes as for a lens case,
+    at least the three the garden's gate asks for, and a `garden_link`
+    check naming two of them."""
+    known = _check_seeded_notes(raw, path, LENS_GARDEN)
+    _require(len(known) >= 3, path, "lens_garden cases need at least three setup.lens notes")
+    checks = raw.get("checks") or {}
+    pair = checks.get("garden_link")
+    _require(
+        pair is None
+        or (isinstance(pair, list) and len(pair) == 2 and len(set(pair)) == 2 and set(pair) <= known),
+        path,
+        "checks.garden_link must be two distinct titles from setup.lens",
+    )
+    minimum = checks.get("min_gaps")
+    _require(
+        minimum is None or (isinstance(minimum, int) and minimum >= 0),
+        path,
+        "checks.min_gaps must be a non-negative integer",
+    )
+
+
+def _check_seeded_notes(raw: dict, path: pathlib.Path, kind: str) -> set[str]:
+    """The seeded notes shared by lens and garden cases; returns their titles."""
     setup = raw.get("setup") or {}
     notes = setup.get("lens")
     _require(
         isinstance(notes, list) and notes,
         path,
-        "lens_review cases need a non-empty setup.lens list",
+        f"{kind} cases need a non-empty setup.lens list",
     )
     titles: list[str] = []
     for note in notes:
@@ -164,25 +217,7 @@ def _check_lens(raw: dict, input_block: dict, path: pathlib.Path) -> None:
             path,
             "setup.lens_links entries are [title, title] pairs of seeded notes",
         )
-    for picked in setup.get("lens_history", []):
-        _require(
-            isinstance(picked, list) and set(picked) <= known,
-            path,
-            "setup.lens_history entries are lists of seeded titles",
-        )
-    checks = raw.get("checks") or {}
-    for key in ("selected_include", "grounds_include"):
-        _require(
-            set(checks.get(key, [])) <= known,
-            path,
-            f"checks.{key} names a title that is not in setup.lens",
-        )
-    outcome = checks.get("lens_outcome")
-    _require(
-        outcome is None or outcome in LENS_OUTCOMES,
-        path,
-        f"checks.lens_outcome must be one of {LENS_OUTCOMES}",
-    )
+    return known
 
 
 def load_all(directory: pathlib.Path = CASES_DIR) -> list[Case]:

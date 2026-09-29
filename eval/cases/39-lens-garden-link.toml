@@ -1,0 +1,55 @@
+# The L3 spec section 9, case 39 (non-blocking): the lens garden's first
+# property. Two related notes without a link must yield a valid `link`
+# gap. «Норберт Винер» names «обратная связь» in its own summary and
+# body without linking the note of that name -- step 1 reports it as an
+# unlinked mention (app/core/lens_graph.py's `mentions`), and a garden
+# that is worth running proposes the link. The other two notes are
+# already linked, so they are no candidate.
+#
+# `garden_link` passes only on a link gap between exactly these two
+# notes that survived `validate()`: an id outside the input, a link
+# that already exists or a missing detail would have been dropped. The
+# judge reads the whole run for whether the gaps follow from the notes.
+#
+# The notes are synthetic, written from public knowledge -- never from
+# the user's lens (plan section 11). The model sees titles and
+# summaries only (the L3 spec section 6); the bodies feed step 1.
+id = "39"
+title = "Сад линзы: две связанные заметки без ссылки дают пробел link"
+blocking = false
+
+[setup]
+lens = [
+    { title = "Норберт Винер", kind = "person", summary = "Норберт Винер, «Кибернетика» (1948): управление и связь в животном и машине; обратная связь как основа целенаправленного поведения.", body = """
+Норберт Винер, «Кибернетика, или управление и связь в животном и машине»
+(1948). Главная идея — обратная связь: система сравнивает результат с
+целью и поправляет следующее действие. Так устроены и зенитный прицел, и
+рука, тянущаяся к стакану.
+""" },
+    { title = "Обратная связь", kind = "concept", summary = "Выход системы возвращается на её вход и меняет поведение: отрицательная обратная связь стабилизирует, положительная раскачивает.", body = """
+Выход системы возвращается на её вход. Отрицательная обратная связь
+гасит отклонение от цели и стабилизирует систему; положительная усиливает
+отклонение и раскачивает её.
+""" },
+    { title = "Росс Эшби", kind = "person", summary = "У. Росс Эшби, «Введение в кибернетику» (1956): гомеостат и закон необходимого разнообразия.", body = """
+У. Росс Эшби, британский психиатр и кибернетик. Построил гомеостат —
+прибор, который сам находит устойчивое состояние, — и сформулировал
+закон необходимого разнообразия.
+""" },
+    { title = "Закон необходимого разнообразия", kind = "concept", summary = "Регулятор справляется, только если разнообразие его ответов не меньше разнообразия ситуаций.", body = """
+Только разнообразие может поглотить разнообразие: регулятор удерживает
+систему в пределах, только если его ответов не меньше, чем возмущений.
+""" },
+]
+lens_links = [
+    ["Росс Эшби", "Закон необходимого разнообразия"],
+]
+
+[input]
+kind = "lens_garden"
+
+[checks]
+russian = true
+min_gaps = 1
+garden_link = ["Норберт Винер", "Обратная связь"]
+judge = ["garden_fit"]

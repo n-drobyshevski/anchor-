@@ -23,6 +23,12 @@ over what the round did rather than over text -- `lens_checks`:
 - `selected_include` -- did the selector pick these notes (rotation)?
 - `grounds_include`  -- does some proposal name each of these notes?
 - `min_proposals`    -- did at least this many proposals survive?
+
+L3 adds two for a garden case (the L3 spec section 9), over the gaps
+that survived `validate()` -- `garden_checks`:
+
+- `garden_link` -- is there a link gap between exactly these two notes?
+- `min_gaps`    -- did at least this many gaps survive?
 """
 
 from __future__ import annotations
@@ -328,4 +334,37 @@ def lens_checks(
         results.append(grounds_include(proposals, spec["grounds_include"]))
     if "min_proposals" in spec:
         results.append(min_proposals(proposals, spec["min_proposals"]))
+    return results
+
+
+# --- L3: the lens garden ------------------------------------------------------
+
+
+def garden_link(gaps: list[dict], pair: list[str]) -> Result:
+    """Some surviving gap is a `link` between exactly these two notes,
+    in either order: case 39's "two related notes without a link must
+    yield a valid link gap"."""
+    wanted = set(pair)
+    found = any(gap["kind"] == "link" and set(gap["titles"]) == wanted for gap in gaps)
+    shown = "; ".join(f"{gap['kind']}: {' / '.join(gap['titles'])}" for gap in gaps) or "(нет)"
+    return Result("garden_link", found, f"пробелы: {shown}")
+
+
+def min_gaps(gaps: list[dict], minimum: int) -> Result:
+    """At least `minimum` gaps survived validation."""
+    return Result(
+        "min_gaps", len(gaps) >= minimum, f"пробелов: {len(gaps)} (нужно не меньше {minimum})"
+    )
+
+
+def garden_checks(spec: dict, *, gaps: list[dict] | None) -> list[Result]:
+    """The garden checks a case asked for. `gaps` None means the reply
+    did not parse, which fails every one of them."""
+    results: list[Result] = []
+    if gaps is None:
+        return [Result("garden_parsed", False, "ответ модели не разобран")]
+    if spec.get("garden_link"):
+        results.append(garden_link(gaps, spec["garden_link"]))
+    if "min_gaps" in spec:
+        results.append(min_gaps(gaps, spec["min_gaps"]))
     return results

@@ -120,7 +120,8 @@ class Store:
                 os.close(dir_fd)
 
     def purge(self) -> int:
-        """Delete every regular `.md` directly inside Anchor's two folders.
+        """Delete every regular `.md` directly inside Anchor's folders
+        (`paths.ANCHOR_DIRS`: Memory, Journal and, since lens L3, Reports).
 
         Idempotent. Skips dot-files, subfolders and symlinks: none of
         those is a file Anchor wrote, and the purge must not be the one

@@ -107,6 +107,8 @@ def test_hook_protocol_exit_code():
     assert "lens.rounds(n)" in blocked.stderr
     assert "never its rationale" in blocked.stderr
     assert "rationale for picking" not in blocked.stderr
+    # L3: and the lens garden's proposals, the fourth function.
+    assert "lens.gaps(n)" in blocked.stderr
 
     allowed = run({"tool_name": "Bash", "tool_input": {"command": "uv run pytest"}})
     assert allowed.returncode == 0
@@ -217,6 +219,7 @@ def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook()
         'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, chars from lens.notes()"',
         "psql ${ANCHOR_LENS_DATABASE_URL} -c 'select * from lens.graph()'",
         'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, titles from lens.rounds(10)"',
+        'psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, week, kind, status, detail from lens.gaps(20)"',
     ],
 )
 def test_allows_the_lens_role(command):

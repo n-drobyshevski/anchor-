@@ -2834,3 +2834,161 @@ byte for byte, and records no round.
   review and only while `LENS_ENABLED` is on: the catalog's summaries
   and the selected bodies go through OpenRouter like the review's own
   input. `docs/privacy.md` says so.
+
+## L3 — the lens garden
+
+`anchor-lens-plan.md` rev. 3, milestone L3 (§8): once a week Echo
+reads the lens as a graph and proposes gaps (a missing link, a missing
+note, a tension, a bridge between clusters), in Telegram and as a note
+in the vault. Echo never edits a note here. The L3 spec settled the
+details; you amended two of them (one message per run, and
+`lens.gaps` showing `closed`).
+
+- **An idle kind, `lens_garden`, not a new job.** The idle gate,
+  budget, preemption and `/digest` line come with it. `KIND_DAILY_MAX`
+  is 1, and the job's own gate adds what a daily cap cannot: the flag
+  (`LENS_GARDEN_ENABLED`, off by default, on top of `LENS_ENABLED`,
+  the knowledge index and a sync `VAULT_MODE`), 3 to
+  `LENS_CATALOG_MAX_NOTES` notes, 168 hours and a new local ISO week
+  since the last run (`iso_week` is unique, which also covers DST), and
+  a lens that changed since that run or a gap marked done. Without the
+  last rule a static lens would get marginal gaps every week. A failed
+  run (provider error, bad JSON, the spend cap) writes nothing and
+  retries tomorrow; there is no templated fallback, because the model
+  is the filter on step 1's recall. **This amends phase 6 §8**: idle
+  may now write two tables, `lens_garden_run` and `lens_gap`, through
+  `app.vault.lens` only (`tests/test_idle_isolation.py` allows that one
+  module to that one file, and still bans `app.tg`).
+- **Step 1 is in-house, stdlib only; no networkx.** Orphans, dead ends,
+  wanted notes, unlinked mentions, Brandes betweenness, label
+  propagation, TF-IDF holes, people without concepts and staleness
+  come to about 80 lines over a graph of at most a few hundred nodes,
+  deterministic by construction (ascending ids, ties to the smallest
+  label). A dependency the bot would carry for one weekly job, whose
+  community detection is randomised unless seeded, bought nothing.
+  **Known weakness, kept as specced:** label propagation in place, in
+  ascending id order, with ties to the smallest label, lets the lowest
+  label flood a connected component. Two cliques joined by one edge are
+  one cluster (unless their ids interleave), so in practice clusters
+  are mostly the connected components, they depend on how sync numbered
+  the rows, and holes and bridges appear only between components.
+  `tests/test_lens_graph.py` pins the two-clique case, so replacing it
+  (a greedy seeding pass, or a deterministic modularity pass) is a
+  deliberate change. A hole is "not joined" by exactly the bridge
+  recheck's test (a path of length 2 or less in `G_all`, through any
+  note), so the model is never pointed at a hole the code would refuse.
+- **Step 2 sees the lens only.** One call on `LLM_MODEL_SAFETY` with its
+  own provider and `GARDEN_MAX_TOKENS` (2000): the shared safety
+  provider's 400-token cap would truncate ten gaps in Russian. Its
+  input is the findings, and for the involved notes their title, kind,
+  catalog summary (the frontmatter summary, else the start of the text,
+  as in the L2 catalog), lens links and a count of knowledge
+  neighbours; never a whole body, a knowledge note's title, a dialog or
+  memory, nor the count of links to notes the bot may not see (step 1
+  uses it in code only, and `lens.graph()` never shows it). A knowledge note appears in the graph as
+  an anonymous id, and its title is only matched locally (a proposed
+  missing note that already exists is dropped). This narrows §10's
+  "titles, for context", and it is what makes `lens.gaps(n)` safe
+  below.
+- **Dedup by a title signature, not by ids.** A gap's key is
+  `sha256("v1|kind|" + sorted normalised titles)`: the note pair, the
+  proposed title, or the bridge's anchors. `_index_notes` keys rows by
+  path, so a moved note gets new ids, and an id key would re-raise
+  every gap you dismissed. A partial unique index (status other than
+  `resolved`) makes a live signature impossible to raise twice; only a
+  resolved one may recur. The cost: renaming a note resolves its gaps
+  (the recheck no longer finds the title), which may then return under
+  the new name, and two notes with one basename collide. Every run
+  rechecks open and done gaps by title: one that now holds, or whose
+  note is gone, is resolved; one you marked done that still fails is
+  reopened, moved to the new run and shown again with «снова».
+- **Delivery rides the vault pass, not the idle job.** The idle job
+  sends nothing (idle never reaches Telegram). A sibling of the vault
+  pass's own update hook sends the run once the pass has written the
+  report, so the header can name the note, and retries an unsent run
+  every minute. It waits for quiet hours, `/quiet`, a pause and the
+  welfare cooldown, like the weekly review, and it is an
+  out-of-character report: no `Outbound` row, no counters.
+- **One message per run** (your amendment; the spec had one card per
+  gap, up to ~15 at once). The header has the week, the counts of new,
+  reopened and older open gaps, and the report's path; then the gaps,
+  numbered. The keyboard has a row per open gap, «N · сделал» and «N ·
+  не нужно» (`lg:d:<id>:<epoch>` and `lg:n:<id>:<epoch>`; the epoch
+  makes a pre-`/delete` button stale). A tap updates that gap and
+  edits the same message: the item gains «— отмечено: …», its row
+  goes, and the keyboard goes with the last row. Each gap stores the
+  message id, and the run stores the gaps it was sent with, so the
+  numbering holds when the message is re-rendered, with each gap's
+  «снова» count as sent (`sent_reopened`), so a later run reopening one
+  of them never rewrites the old message's counts. A run still unsent
+  when the next is recorded (a /quiet renewed for a week, a pause,
+  failed sends) hands its open gaps to the new run, which carries them
+  in its message, and is marked sent with nothing sent: otherwise those
+  gaps would never get a row while their signatures blocked them from
+  being raised again. The header names the report only once vaultd has
+  confirmed the create (`disk_sha256` set). Telegram's 4096
+  characters may shorten details; the report has them whole.
+  «Исследовать» waits for L4: a dead button is worse than none, and a
+  tap must not become paid research under pre-L4 terms (`lg:r:` is
+  reserved, and stale).
+- **The report is a third writable folder, `Anchor/Reports/`.** vaultd's
+  writable set and purge gain it (deploy the vault service first; the
+  bot catches an old vaultd's `REFUSED`, counts it as
+  `reports_refused`, and never lets it roll back the pass). The path
+  is `Lens garden <week>-<epoch>.md`: with no epoch, a pre-`/delete`
+  copy re-uploaded by an offline device would take the name and leave
+  the row `NAME_TAKEN` for good. It is written like a journal day:
+  create-only, then compare-and-swap on the digest; a hand edit makes
+  it `diverged`, a deletion (sync) `dismissed`, and neither is written
+  again. Only the latest run with gaps is rendered, after the notes
+  index so it cannot starve it. The note says edits there are not read
+  -- the buttons are the interface -- and `FACT_PATH_RE` never ingests
+  it. It links only to lens notes (W2 cannot rename those), leaves
+  proposed and wanted titles as plain text, escapes everything the
+  model wrote (no `[[`, `]]`, `|`, `#`, link, HTML or line break), and
+  stays under 60 KiB by dropping «Структура» first.
+- **`lens.gaps(n)` for Claude Code, with `resolved` shown as `closed`**
+  (your amendment). The function returns the last gaps with their
+  week, kind, titles, proposed title, detail, reopened count and
+  times, logged in `lens_read` like the other three. Its text is safe
+  where `lens_round.rationale` is not: the model that wrote it saw lens
+  notes only (above), which `lens.notes()` and `lens.graph()` already
+  expose, and a test pins that input. The status is `open`, `done`,
+  `dismissed` or `closed`, and there is no `resolved_at`: a resolved
+  missing note would otherwise tell Claude Code that a note with that
+  title now exists, perhaps a knowledge note it may not see. L4's
+  `researched` is `closed` too. `debug.lens_gap` maps the status the
+  same way and carries no text, recheck payload or signature (a hash of
+  a few short titles can be guessed); one inference remains, a closed
+  gap whose notes still exist was resolved by the recheck.
+  The word alone was not enough for a missing note: its sources still
+  in the lens and no lens note by that title, `closed` would still mean
+  "a knowledge note (or a lens alias) by that name exists". So a closed
+  `missing_note` comes back with no title and no detail. **Chosen: the
+  minimal fix.** An open missing note's proposed title is still shown,
+  so Claude Code can join an earlier read to a later "closed" by id;
+  the stronger fix (never returning a missing note's proposed title)
+  stays available if that correlation matters. And like `lens.rounds`,
+  `lens.gaps` forgets a note that left the lens: `titles` are current
+  titles (a departed note skipped), and a gap any of whose notes has
+  left comes back without title and detail, which may name it. A note
+  moved within the lens gets a new id, so its gaps lose their text
+  too: the cautious side.
+- **Aliases are stored now** (`lens_note.aliases`, for mention matching
+  and missing-note checks): taken from the graph, dropped when the
+  notes mask would change them, kept from the last pass when the graph
+  is missing or truncated, and left out of the version hash. Tags are
+  not stored.
+- **The garden dies with the lens.** `lens.delete_garden` runs wherever
+  `lens_note` is emptied: the knowledge index or the lens turned off
+  (next pass), and notes consent off, in the same transaction as the
+  consent change, because that path deletes the notes by cascade and
+  the garden has no key to a file. `/delete` truncates both tables and
+  purges `Reports/`; `/export` leaves them out like the other lens
+  tables. Logs carry ids and counts, never a title, alias, term,
+  detail, path or signature.
+- **Lens text reaches the model weekly while the garden is on**:
+  titles, catalog summaries (or the start of the text), lens links and
+  counts of links to knowledge notes, through OpenRouter.
+  `/privacy` and `docs/privacy.md` say so, and that Claude Code can read
+  the proposals.

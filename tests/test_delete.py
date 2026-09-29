@@ -68,6 +68,8 @@ from app.db.models import (
     NoteChunkKnowledge,
     NoteChunkPersonal,
     LensNote,
+    LensGap,
+    LensGardenRun,
     LensRead,
     LensRound,
     LensVersion,
@@ -434,8 +436,20 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
             )
         )
         session.add(NoteLink(src_file_id=library.id, unresolved_text="Land"))
-        session.add(LensVersion(hash="v" * 64, note_count=1))
+        version = LensVersion(hash="v" * 64, note_count=1)
+        session.add(version)
         session.add(LensRead(fn="notes", rows=1))
+        await session.flush()
+        # L3: a garden run on that version, and one gap it raised.
+        garden = LensGardenRun(iso_week="2026-W40", lens_version_id=version.id, findings={"wanted": ["Land"]})
+        session.add(garden)
+        await session.flush()
+        session.add(
+            LensGap(
+                garden_run_id=garden.id, kind="missing_note", note_ids=[1], titles=["CCRU"],
+                title="Land", detail="Стоит ли завести заметку?", signature="0" * 64,
+            )
+        )
         session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 

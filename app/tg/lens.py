@@ -10,6 +10,8 @@ L1 has two commands:
   `lens` functions were read today. L2 adds when the newest lens round
   ran (the weekly review's self-selection, app/core/lens_review.py) and
   how it ended -- the outcome, never the selector's `why` or a title.
+  L3 adds the lens garden (app/tg/garden.py): «Сад: <дата>, открыто N»,
+  the newest run's local date and the open gaps across all runs.
 - `/lens code on|off` flips the role's LOGIN. Off also ends the
   sessions already open. When the bot's database user may not alter
   the role, or the role does not exist, the reply says so and points
@@ -49,6 +51,9 @@ READS_LINE = "Чтений сегодня: {n}."
 # L2: the newest `lens_round`, in the user's local date; one outcome
 # phrase per ck_lens_round_outcome value (app/vault/lens.py's ROUND_OUTCOMES).
 LAST_ROUND_LINE = "Последний разбор: {date}, {outcome}."
+# L3: the newest garden run, in the user's local date, and the gaps
+# still open across all runs (app/vault/lens.py's `garden_status`).
+GARDEN_LINE = "Сад: {date}, открыто {n}."
 ROUND_OUTCOME_TEXT = {
     "grounded": "предложения опираются на линзу",
     "empty": "подходящих заметок не нашлось",
@@ -64,11 +69,16 @@ USAGE = (
     "/lens code off — закрыть доступ и оборвать открытые сессии"
 )
 
+# L3: lens.gaps() joins the doors. Its proposals were written from the
+# lens alone, so they are no more than lens.notes() already shows; the
+# reply says so, and that a gap closed by the recheck reads «closed».
 CODE_SET_ON = (
-    "Доступ открыт: Claude Code может читать линзу через lens.notes(), lens.graph() и "
-    "lens.rounds() — последнее отдаёт, какие заметки выбрал еженедельный разбор, но не "
-    "объяснение почему: оно написано по твоей неделе и видно только тебе. Больше ничего "
-    "из заметок. Каждое чтение считается. Закрыть: /lens code off"
+    "Доступ открыт: Claude Code может читать линзу через lens.notes(), lens.graph(), "
+    "lens.rounds() и lens.gaps(). lens.rounds() отдаёт, какие заметки выбрал еженедельный "
+    "разбор, но не объяснение почему: оно написано по твоей неделе и видно только тебе. "
+    "lens.gaps() — предложения сада линзы, написанные только по самой линзе, и их статус "
+    "(открыто, сделано, не нужно или закрыто). Больше ничего из заметок. Каждое чтение "
+    "считается. Закрыть: /lens code off"
 )
 CODE_SET_OFF = "Доступ закрыт."
 CODE_SET_OFF_TERMINATED = "Доступ закрыт, оборвано сессий: {n}."
@@ -111,6 +121,7 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
         reads = await lens.reads_between(session, start, end)
         unrecorded = await lens.unrecorded_reads(session)
         last = await lens.last_round(session)
+        garden = await lens.garden_status(session)
     people, concepts = per_kind.get("person", 0), per_kind.get("concept", 0)
     lines = [
         ON_LINE if settings.LENS_ENABLED else OFF_LINE,
@@ -128,6 +139,13 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
             LAST_ROUND_LINE.format(
                 date=clock_module.local_date_of(last.created_at, timezone).strftime("%d.%m.%Y"),
                 outcome=ROUND_OUTCOME_TEXT.get(last.outcome, last.outcome),
+            )
+        )
+    if garden is not None:
+        lines.append(
+            GARDEN_LINE.format(
+                date=clock_module.local_date_of(garden.last_run_at, timezone).strftime("%d.%m.%Y"),
+                n=garden.open,
             )
         )
     if unrecorded:

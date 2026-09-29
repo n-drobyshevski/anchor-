@@ -63,3 +63,18 @@ def test_the_lens_review_clause_is_in_both_places():
     assert "review sends the model the lens catalog" in doc
     assert "начало текста, связи" in PRIVACY_TEXT and "start of the text, links" in doc
     assert "(и только их)" not in PRIVACY_TEXT and "and only they" not in doc
+
+
+def test_the_lens_garden_clause_is_in_both_places():
+    """L3 (spec section 8): what the weekly garden sends the model while
+    it is on -- titles, summaries or the start of the text (as the L2
+    catalog), links, and counts of links to knowledge notes, never
+    their titles -- and that Claude Code can read its proposals, in both
+    copies."""
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
+    assert "Пока включён сад линзы, раз в неделю модели уходят названия и краткие описания" in PRIVACY_TEXT
+    assert "(или начало текста) заметок линзы" in PRIVACY_TEXT and "видит и Claude Code" in PRIVACY_TEXT
+    assert "без текста заметок" not in PRIVACY_TEXT
+    assert "While the lens garden is on, once a week the model gets the" in doc
+    assert "summaries or the start of the text, the links" in doc and "Claude Code can read its proposals" in doc
+    assert "not the\n  notes' text" not in doc

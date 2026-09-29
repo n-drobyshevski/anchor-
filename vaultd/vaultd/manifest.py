@@ -2,8 +2,9 @@
 
 Two scopes, and nothing else is listed:
 
-- `anchor` -- every `.md` directly inside `Anchor/Memory/` or
-  `Anchor/Journal/` (the writable set, see paths.py);
+- `anchor` -- every `.md` directly inside `Anchor/Memory/`,
+  `Anchor/Journal/` or `Anchor/Reports/` (the writable set, see
+  paths.py);
 - `note` -- every other `.md` of at most NOTE_MAX_BYTES whose effective
   class (classes.py) is `personal`, `knowledge` or `lens`. The entry
   carries that class, and a lens note also its `lens_kind` (`person` or

@@ -21,7 +21,8 @@ from app.core.clock import Clock, to_local
 from app.core.idle.candidates import reflect_candidates, summary_candidates
 from app.core.idle.consolidate import find_clusters
 from app.core.idle.critique import has_new_replies_since, last_done_critique_finished_at
-from app.core.idle.gate import IdleFacts
+from app.core.idle.gate import IdleFacts, config_from_settings
+from app.core.idle.lens_garden import gate_facts as lens_garden_gate_facts
 from app.core.idle.prebrief import note_exists as prebrief_note_exists
 from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finished_at
 from app.core.idle.research import pick_topic as research_pick_topic
@@ -133,6 +134,14 @@ async def load_idle_facts(
     research_topic = await research_pick_topic(session)
     research_quota_used = await study_quota_used(session, settings, clock, timezone)
 
+    # L3: shared with app/core/idle/lens_garden.py's own job, as the 6d
+    # facts above. Only while every switch the garden needs is on: the
+    # gate's first garden check refuses otherwise, and this runs every
+    # heartbeat tick, so a lens nobody gardens costs no queries.
+    garden = None
+    if config_from_settings(settings).garden_enabled:
+        garden = await lens_garden_gate_facts(session)
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -151,6 +160,12 @@ async def load_idle_facts(
         critique_has_new_replies=critique_has_new_replies,
         research_has_active_topic=research_topic is not None,
         research_quota_used=research_quota_used,
+        garden_notes=garden.notes if garden else 0,
+        garden_last_run_at=garden.last_run_at if garden else None,
+        garden_last_iso_week=garden.last_iso_week if garden else None,
+        garden_last_version_id=garden.last_version_id if garden else None,
+        garden_version_id=garden.version_id if garden else None,
+        garden_done=garden.done if garden else 0,
     )
 
 

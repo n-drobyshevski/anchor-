@@ -121,6 +121,42 @@ async def test_status_never_shows_a_title(sessionmaker):
     assert "N0" not in reply and "N1" not in reply
 
 
+async def test_status_shows_the_garden_after_its_first_run(sessionmaker):
+    """L3: «Сад: <дата>, открыто N» -- the newest run's local date and the
+    open gaps across all runs; nothing before the first run. Counts
+    only: no gap's title or detail."""
+    await _seed(sessionmaker)
+    settings = Settings(LENS_ENABLED=True)
+    before = await lens_ui.command(sessionmaker, settings, FrozenClock(NOW), None)
+    assert "Сад:" not in before
+
+    def gap(i: int) -> lens.NewGap:
+        return lens.NewGap(
+            kind="link", note_ids=(1, 2), titles=(f"N{i}", "N9"), title=None,
+            detail=f"Деталь {i}.", signature=f"{i:064x}", recheck={},
+        )
+
+    for week, gaps in (("2026-W39", [gap(0)]), ("2026-W40", [gap(1), gap(2)])):
+        async with sessionmaker() as session:
+            record = await lens.record_garden(
+                session, idle_run_id=None, iso_week=week, version_id=None, findings={},
+                resolved_ids=(), reopened_ids=(), new=gaps, now=NOW,
+            )
+            await session.commit()
+    # The newest run at 23:30 UTC on the 28th: the 29th in Moscow.
+    async with sessionmaker() as session:
+        await session.execute(text("update user_state set timezone = 'Europe/Moscow'"))
+        await session.execute(
+            text("update lens_garden_run set created_at = :t where id = :i"),
+            {"t": datetime.datetime(2026, 9, 28, 23, 30, tzinfo=datetime.timezone.utc), "i": record.run_id},
+        )
+        await session.commit()
+
+    reply = await lens_ui.command(sessionmaker, settings, FrozenClock(NOW), None)
+    assert "Сад: 29.09.2026, открыто 3." in reply.splitlines()
+    assert "Деталь" not in reply
+
+
 async def test_unknown_arguments_show_usage(sessionmaker):
     await _seed(sessionmaker)
     for args in ("code", "code maybe", "on", "code on now"):
@@ -140,6 +176,8 @@ async def test_code_on_and_off_flip_the_role(sessionmaker, nologin_after):
     # included, and says the review's rationale is not one of them.
     assert "lens.rounds()" in reply and "какие заметки выбрал еженедельный разбор" in reply
     assert "но не объяснение почему" in reply and "видно только тебе" in reply
+    # L3: lens.gaps() too, said to be written from the lens alone.
+    assert "lens.gaps()" in reply and "только по самой линзе" in reply
     assert await _can_login(sessionmaker) is True
     status = await lens_ui.command(sessionmaker, Settings(), FrozenClock(NOW), None)
     assert lens_ui.CODE_ON_LINE in status.splitlines()

@@ -24,7 +24,10 @@
    touched here). L1 (anchor-lens-plan.md section 5) adds the lens to
    this step: lens notes are indexed as knowledge, kept whole in the
    lens table behind LENS_ENABLED, and the links out of every
-   knowledge and lens note are refreshed from vaultd's graph.
+   knowledge and lens note are refreshed from vaultd's graph;
+8. L3 (the L3 spec's section 3) **renders the lens garden's report**:
+   the latest garden run with gaps, as one note in `Anchor/Reports/`,
+   after the index so it can never starve it (`_render_reports`).
 
 **Every write is compare-and-swap.** A create is create-only; an update
 names the hash Anchor last saw; a delete names it too. A 412 means the
@@ -145,6 +148,9 @@ class PassResult:
     lens_removed: int = 0
     links_rewritten: bool = False
     lens_changed: bool = False
+    # L3: report writes an older vaultd refused (it predates Reports/).
+    # A report's creates and updates count in `created`/`updated`.
+    reports_refused: int = 0
 
     @property
     def writes(self) -> int:
@@ -237,8 +243,13 @@ async def run_vault_sync(
 
         # Step 2: snapshot `absent` *before* ingest, so a rename that
         # arrives in a single manifest is recognised (plan 7.1 case b).
+        # L3: a report the user deletes is dismissed like a journal day.
         tracked = (
-            (await session.execute(select(VaultFile).where(VaultFile.role.in_(("fact", "journal")))))
+            (
+                await session.execute(
+                    select(VaultFile).where(VaultFile.role.in_(("fact", "journal", "report")))
+                )
+            )
             .scalars()
             .all()
         )
@@ -262,6 +273,7 @@ async def run_vault_sync(
         await _render_facts(session, client, manifest, state, clock, budget, result, sync_mode=sync_mode)
         await _render_journal(session, client, manifest, state, clock, budget, result)
         await _index_notes(session, client, manifest, state, settings, result, clock)
+        await _render_reports(session, client, manifest, settings, clock, budget, result)
         if sync_mode:
             expired = await holds.expire_holds(session, clock)
             result.new_hold_ids = [hid for hid in result.new_hold_ids if hid not in expired]
@@ -282,7 +294,8 @@ async def run_vault_sync(
                 f"changed_facts={result.changed_facts} forgotten_facts={result.forgotten_facts} "
                 f"held={result.held} indexed={result.indexed} removed={result.removed} "
                 f"lens_stored={result.lens_stored} lens_removed={result.lens_removed} "
-                f"links={int(result.links_rewritten)} lens_changed={int(result.lens_changed)}"
+                f"links={int(result.links_rewritten)} lens_changed={int(result.lens_changed)} "
+                f"reports_refused={result.reports_refused}"
             ),
         },
     )
@@ -938,21 +951,33 @@ async def _index_notes(
     modules", extended to this step and to the flags):**
     - consent off: `/vault notes off` already deleted every note row
       and both chunk tables' rows for it, synchronously
-      (app/vault/consent.py); the lens rows and links cascade with them.
-      Nothing to do here.
+      (app/vault/consent.py); the lens rows and links cascade with them,
+      and consent.py deletes the garden in the same transaction (L3: the
+      cascade never reaches the garden's tables). The garden is deleted
+      here again as a floor, so no path through consent can leave it.
     - consent on, `VAULT_KNOWLEDGE_ENABLED` off: a flag turned off must
       not leave a stale index, so every existing knowledge row (and its
       chunks, lens row and links) is removed, every pass, until the flag
-      comes back on. The graph is not even requested.
+      comes back on, and the garden with them. The graph is not even
+      requested.
     - both on, `LENS_ENABLED` off: the knowledge index and the links are
-      kept; every lens row is deleted, every pass.
+      kept; every lens row and the garden are deleted, every pass.
     - all on: removals, then indexing, each capped and each note its
       own transaction, so one bad note (invisible by the time it is
       fetched, or text that cannot survive a round trip) is skipped
       without failing the pass or any other note in it; then the links;
       then a lens version, if the lens changed.
+
+    **L3: aliases** come from the graph, like summaries: a note the graph
+    did not report (no graph this pass, or one truncated at vaultd's
+    cap) keeps last pass's aliases (`aliases=None`), and an alias the
+    notes mask would change is dropped, never stored -- the same floor
+    `_refresh_links` puts under unresolved link text. Tags are not
+    stored.
     """
     if not state.notes_consent:
+        await lens.delete_garden(session)
+        await session.commit()
         return
     tracked = (
         (
@@ -965,6 +990,7 @@ async def _index_notes(
     )
     if not settings.VAULT_KNOWLEDGE_ENABLED:
         result.lens_removed += await lens.delete_all(session)
+        await lens.delete_garden(session)
         await lens.delete_links(session)
         await session.commit()
         for row in tracked:
@@ -975,9 +1001,11 @@ async def _index_notes(
     lens_on = settings.LENS_ENABLED
     if not lens_on:
         removed = await lens.delete_all(session)
-        if removed:
-            await session.commit()
-            result.lens_removed += removed
+        # The garden dies with the lens (L3 spec section 4). A run can
+        # exist with no gaps, so this commits even when both counts are 0.
+        await lens.delete_garden(session)
+        await session.commit()
+        result.lens_removed += removed
 
     tracked_by_path = {row.path: row for row in tracked}
     for row in tracked:
@@ -1002,6 +1030,14 @@ async def _index_notes(
 
     graph = await _read_graph(client)
     summaries = {node.path: node.summary for node in graph.nodes} if graph is not None else None
+    reported_aliases = (
+        {
+            node.path: tuple(alias for alias in node.aliases if not notes_text.would_mask(alias))
+            for node in graph.nodes
+        }
+        if graph is not None
+        else {}
+    )
     in_lens = await lens.stored(session) if lens_on else {}
     now = clock.now_utc()
 
@@ -1011,6 +1047,10 @@ async def _index_notes(
         if summaries is not None and path in summaries:
             return summaries[path]
         return stored.summary if stored is not None else None
+
+    def _aliases(path: str) -> tuple[str, ...] | None:
+        # None keeps the stored aliases (lens.store / lens.update_meta).
+        return reported_aliases.get(path)
 
     budget = _Budget(NOTES_MAX_PER_PASS)
     for path, entry in sorted(manifest.items()):
@@ -1024,7 +1064,13 @@ async def _index_notes(
             if is_lens and file_id in in_lens:
                 summary = _summary(path, in_lens[file_id])
                 if await lens.update_meta(
-                    session, file_id, kind=entry.lens_kind, title=title, summary=summary, now=now
+                    session,
+                    file_id,
+                    kind=entry.lens_kind,
+                    title=title,
+                    summary=summary,
+                    now=now,
+                    aliases=_aliases(path),
                 ):
                     await session.commit()
                     result.lens_stored += 1
@@ -1075,6 +1121,7 @@ async def _index_notes(
                         summary=_summary(path, in_lens.get(file_id)),
                         body=body,
                         now=now,
+                        aliases=_aliases(path),
                     )
                 )
             elif file_id in in_lens:
@@ -1143,3 +1190,128 @@ async def _refresh_links(
     if await lens.replace_links(session, links, keep=unreported):
         await session.commit()
         result.links_rewritten = True
+
+
+# --- L3: the lens garden's report -------------------------------------------
+
+
+async def _render_reports(
+    session: AsyncSession,
+    client: VaultClient,
+    manifest: dict[str, ManifestEntry],
+    settings: Settings,
+    clock: Clock,
+    budget: _Budget,
+    result: PassResult,
+) -> None:
+    """The latest garden run with gaps, as `Anchor/Reports/Lens garden
+    <week>-<epoch>.md` (L3 spec section 3). Modelled on the journal step,
+    and run after `_index_notes`, so it can never starve the index.
+
+    - **Gated** on notes consent, `VAULT_KNOWLEDGE_ENABLED` and
+      `LENS_ENABLED`, like everything the lens feeds. Turning one off
+      stops the writing and leaves existing files where they are, until
+      /delete (whose purge takes `Reports/` too). The garden's own flag
+      is not a gate here: it gates new runs and their spend, and a run
+      that exists may still be shown.
+    - **Only the latest run with gaps** is rendered; an older report
+      keeps the content it last had.
+    - **Create-only, then compare-and-swap** on `render_digest`: a status
+      that changed (a tap in Telegram) rewrites the note once. A hand
+      edit makes the row `diverged` and it is never touched again; a
+      412 on the create makes it `quarantined`/`NAME_TAKEN`; a report
+      the user deletes is dismissed by `deletions` (sync mode) and never
+      recreated. The row is committed before its create, as for a
+      journal day, so a crash between the two leaves a row to reconcile.
+    - **`REFUSED`** is what an older vaultd, deployed before
+      `Reports/` was writable, answers. It is caught and counted
+      (`reports_refused`) rather than let through to the pass's handler,
+      which would roll back the whole pass. A row just created for a
+      refused create is removed again, so nothing (the Telegram header
+      included, which shows the path only once the row exists and is
+      `ok`) takes the note as written.
+
+    The note is never read back: `FACT_PATH_RE` is `Anchor/Memory/` only,
+    and nothing else here ingests an Anchor file.
+
+    Consent and the epoch are read here, not from the pass's `UserState`
+    row: a per-note rollback in `_index_notes` expires that row, and an
+    AsyncSession refuses the lazy load reading it would take.
+    """
+    if not (settings.VAULT_KNOWLEDGE_ENABLED and settings.LENS_ENABLED):
+        return
+    consented, epoch = (
+        await session.execute(select(UserState.notes_consent, UserState.vault_epoch))
+    ).one()
+    if not consented:
+        return
+    data = await lens.report_data(session)
+    if data is None:
+        return
+    path = lens.report_path(data.iso_week, epoch)
+    rendered = render.render_report(data, epoch)
+    row = (
+        await session.execute(select(VaultFile).where(VaultFile.path == path))
+    ).scalar_one_or_none()
+    if row is not None and (row.role != "report" or row.state != "ok"):
+        return
+    entry = manifest.get(path)
+    if row is not None and entry is not None:
+        if row.disk_sha256 is None:
+            # Created by a pass that crashed before recording it.
+            row.disk_sha256 = entry.sha256
+            row.render_digest = None
+            await session.commit()
+        elif entry.sha256 != row.disk_sha256:
+            # Edited by hand: Echo never touches it again (as a journal day).
+            row.state = "diverged"
+            row.updated_at = clock.now_utc()
+            await session.commit()
+            return
+    if row is not None and row.render_digest == rendered.digest:
+        return
+    if budget.left <= 0:
+        return
+    if row is None:
+        row = VaultFile(path=path, role="report")
+        session.add(row)
+        await session.commit()
+    if row.disk_sha256 is None:
+        budget.take()
+        try:
+            new_sha = await client.put_file(row.path, rendered.content, None)
+        except VaultError as exc:
+            if exc.code == errors.REFUSED:
+                await session.delete(row)
+                await session.commit()
+                result.reports_refused += 1
+                return
+            if exc.code != errors.CONFLICT:
+                raise
+            row.state, row.reason = "quarantined", NAME_TAKEN
+            await session.commit()
+            result.quarantined += 1
+            return
+        _written(row, new_sha, rendered.digest, clock)
+        await session.commit()
+        result.created += 1
+        return
+    if entry is None:
+        # Deleted by the user: `deletions` dismisses it in sync mode;
+        # mirror leaves it.
+        result.skipped += 1
+        return
+    budget.take()
+    try:
+        new_sha = await client.put_file(row.path, rendered.content, row.disk_sha256)
+    except VaultError as exc:
+        if exc.code == errors.REFUSED:
+            result.reports_refused += 1
+            return
+        if exc.code != errors.CONFLICT:
+            raise
+        result.skipped += 1
+        return
+    _written(row, new_sha, rendered.digest, clock)
+    await session.commit()
+    result.updated += 1

@@ -167,6 +167,8 @@ async def test_purge_deletes_only_anchors_own_files(client, vault: Path, tmp_pat
     write(vault, "Anchor/Memory/0001-abcdef.md", "fact")
     write(vault, "Anchor/Memory/0002-abcdef.md", "fact")
     write(vault, "Anchor/Journal/2026-09-25-abcdef.md", "day")
+    write(vault, "Anchor/Reports/Lens garden 2026-W40-k3f7qa.md", "report")
+    write(vault, "Anchor/Reports/sub/keep.md", "user's")
     write(vault, "Anchor/Memory/sub/keep.md", "user's")
     write(vault, "Anchor/Memory/.keep.md", "hidden")
     write(vault, "Anchor/Memory/keep.txt", "not md")
@@ -177,7 +179,7 @@ async def test_purge_deletes_only_anchors_own_files(client, vault: Path, tmp_pat
     os.symlink(outside, vault / "Anchor" / "Memory" / "link.md")
 
     first = await client.post("/v1/purge", headers=AUTH)
-    assert (await first.json()) == {"deleted": 3}
+    assert (await first.json()) == {"deleted": 4}
     second = await client.post("/v1/purge", headers=AUTH)
     assert (await second.json()) == {"deleted": 0}
     remaining = sorted(str(p.relative_to(vault)) for p in vault.rglob("*") if p.is_file() or p.is_symlink())
@@ -187,9 +189,36 @@ async def test_purge_deletes_only_anchors_own_files(client, vault: Path, tmp_pat
         "Anchor/Memory/link.md",
         "Anchor/Memory/sub/keep.md",
         "Anchor/README.md",
+        "Anchor/Reports/sub/keep.md",
         "Бег.md",
     ]
     assert outside.read_text() == "outside"
+
+
+REPORT = "Anchor/Reports/Lens garden 2026-W40-k3f7qa.md"
+
+
+async def test_a_report_is_created_only_then_swapped_by_hash(client, vault: Path) -> None:
+    """Lens L3's garden note takes the journal's path: create-only, then
+    compare-and-swap, and a stale hash (the user edited it) is a 412."""
+    created = await client.put(
+        "/v1/file", params={"path": REPORT}, json={"content": "v1", "if_sha256": None}, headers=AUTH
+    )
+    assert created.status == 200
+    again = await client.put(
+        "/v1/file", params={"path": REPORT}, json={"content": "v1", "if_sha256": None}, headers=AUTH
+    )
+    assert again.status == 412
+    swapped = await client.put(
+        "/v1/file", params={"path": REPORT}, json={"content": "v2", "if_sha256": sha("v1")}, headers=AUTH
+    )
+    assert swapped.status == 200
+    write(vault, REPORT, "the user's edit")
+    stale = await client.put(
+        "/v1/file", params={"path": REPORT}, json={"content": "v3", "if_sha256": sha("v2")}, headers=AUTH
+    )
+    assert stale.status == 412
+    assert (vault / REPORT).read_text() == "the user's edit"
 
 
 async def test_purge_of_an_empty_vault(client) -> None:

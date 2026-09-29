@@ -713,6 +713,19 @@ class Settings(BaseSettings):
     # overflow the budget ends the list (app/core/lens_review.py).
     LENS_ROUND_MAX_NOTES: int = 6
     LENS_ROUND_MAX_CHARS: int = 24000
+    # --- L3: the lens garden (plan section 8) ---
+    #
+    # The weekly idle job that looks for gaps in how the lens is
+    # organised (app/core/idle/lens_garden.py), its Obsidian report and
+    # its Telegram message. A fourth switch on top of LENS_ENABLED,
+    # VAULT_KNOWLEDGE_ENABLED and a syncing VAULT_MODE: it gates L3's
+    # weekly model spend and messages on a lens that is already on for
+    # L2. Flip it after vaultd writes `Anchor/Reports/`.
+    LENS_GARDEN_ENABLED: bool = False
+    # The garden's own output cap. It builds its own provider on
+    # LLM_MODEL_SAFETY, whose shared cap (LLM_SAFETY_MAX_TOKENS, 400)
+    # would truncate ten gaps of Russian JSON.
+    GARDEN_MAX_TOKENS: int = 2000
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -1006,6 +1019,9 @@ LENS_CATALOG_MAX_NOTES_CEILING = 2000
 # characters not even one ordinary note fits.
 ROUND_MAX_NOTES_RANGE = (1, 12)
 ROUND_MAX_CHARS_RANGE = (2000, 100000)
+# L3: the garden's output cap. Under 1000 tokens ten gaps do not fit;
+# over 8000 is a runaway, not a report.
+GARDEN_MAX_TOKENS_RANGE = (1000, 8000)
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1189,6 +1205,7 @@ def check_vault_settings(settings: Settings) -> None:
     for name, (low, high) in (
         ("LENS_ROUND_MAX_NOTES", ROUND_MAX_NOTES_RANGE),
         ("LENS_ROUND_MAX_CHARS", ROUND_MAX_CHARS_RANGE),
+        ("GARDEN_MAX_TOKENS", GARDEN_MAX_TOKENS_RANGE),
     ):
         value = getattr(settings, name)
         if not low <= value <= high:

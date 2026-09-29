@@ -216,7 +216,10 @@ async def test_lens_role_has_no_grant_outside_its_schema(sessionmaker):
         ).all()
     assert tables == []
     # L2 (c6d2e8a4f917) adds lens.rounds(); tests/test_lens_round_db.py.
-    assert [tuple(r) for r in routines] == [("lens", "graph"), ("lens", "notes"), ("lens", "rounds")]
+    # L3 (b3e9f5a1c7d2) adds lens.gaps(); tests/test_lens_garden_db.py.
+    assert [tuple(r) for r in routines] == [
+        ("lens", "gaps"), ("lens", "graph"), ("lens", "notes"), ("lens", "rounds")
+    ]
 
 
 async def test_the_functions_are_not_public(sessionmaker):

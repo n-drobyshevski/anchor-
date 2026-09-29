@@ -3,7 +3,7 @@
 Not vaultd: the bot's tests import nothing from it. This fake answers
 the same questions the same way -- create-only fails if the file
 exists, an update or delete with a stale hash is a conflict, only
-Anchor's two folders are writable -- and lets a test reach in between
+Anchor's own folders are writable -- and lets a test reach in between
 calls to play the user editing a file on their phone.
 """
 
@@ -27,7 +27,11 @@ from app.vault.client import (
 )
 from app.vault.errors import VaultError
 
-WRITABLE = re.compile(r"^Anchor/(Memory|Journal)/[^/]+\.md$")
+WRITABLE = re.compile(r"^Anchor/(Memory|Journal|Reports)/[^/]+\.md$")
+# Lens L3: vaultd before `Reports/` was writable. A test sets
+# `fake.writable = PRE_REPORTS_WRITABLE` to play the bot deployed ahead
+# of vaultd, whose report writes come back REFUSED.
+PRE_REPORTS_WRITABLE = re.compile(r"^Anchor/(Memory|Journal)/[^/]+\.md$")
 # L1: `[[target]]`, `[[target|label]]`, `[[target#heading]]` -- enough
 # of vaultd's links.py for the fake graph. Embeds are skipped.
 WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#]*)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
@@ -73,6 +77,11 @@ class FakeVault:
         self.summaries: dict[str, str] = {}
         self.graph: Graph | None = None
         self.graph_error: VaultError | None = None
+        # Lens L3: which paths this vaultd takes writes to (see
+        # PRE_REPORTS_WRITABLE).
+        self.writable: re.Pattern[str] = WRITABLE
+        # L3: frontmatter aliases the graph reports, path -> aliases.
+        self.aliases: dict[str, tuple[str, ...]] = {}
 
     # The factory the sync pass takes.
     def __call__(self, settings) -> "FakeVault":
@@ -112,7 +121,7 @@ class FakeVault:
         entries = [
             ManifestEntry(path, sha(content), len(content.encode()), "anchor")
             for path, content in sorted(self.files.items())
-            if WRITABLE.match(path)
+            if self.writable.match(path)
         ]
         entries += [
             ManifestEntry(
@@ -150,7 +159,7 @@ class FakeVault:
                     title=path.rsplit("/", 1)[-1].removesuffix(".md"),
                     note_class=note_class,
                     lens_kind=self.lens_kinds.get(path, "concept") if note_class == "lens" else None,
-                    aliases=(),
+                    aliases=self.aliases.get(path, ()),
                     tags=(),
                     summary=self.summaries.get(path),
                     chars=len(content),
@@ -182,7 +191,7 @@ class FakeVault:
     async def put_file(self, path: str, content: str, if_sha256: str | None) -> str:
         self.calls.append(("put", path))
         self._check()
-        if not WRITABLE.match(path):
+        if not self.writable.match(path):
             raise VaultError(errors.REFUSED)
         if self.before_put is not None:
             self.before_put(path)
@@ -204,7 +213,7 @@ class FakeVault:
     async def delete_file(self, path: str, if_sha256: str) -> None:
         self.calls.append(("delete", path))
         self._check()
-        if not WRITABLE.match(path):
+        if not self.writable.match(path):
             raise VaultError(errors.REFUSED)
         current = self.files.get(path)
         if current is None:
@@ -216,7 +225,7 @@ class FakeVault:
     async def purge(self) -> int:
         self.calls.append(("purge", ""))
         self._check()
-        doomed = [p for p in self.files if WRITABLE.match(p)]
+        doomed = [p for p in self.files if self.writable.match(p)]
         for path in doomed:
             del self.files[path]
         self.purged += len(doomed)

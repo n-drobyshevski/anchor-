@@ -117,10 +117,30 @@ the conversations and stays with the user (the Telegram card's
 «почему эти заметки?»). Neither `lens.rounds(n)` nor
 `debug.lens_round` carries it.
 
+Since L3 it also returns, through `lens.gaps(n)`, the weekly **lens
+garden**'s proposals: links, missing notes, tensions and bridges in
+the lens. Unlike the rationale, their text is safe to show here: the
+model that wrote it saw lens notes only (titles, catalog summaries,
+lens links, counts of knowledge neighbours and the deterministic
+step's findings; never a whole body -- the start of one stands in for
+a missing summary, as in the L2 catalog -- nor knowledge titles,
+dialogs or memory), which is what `lens.notes()` and `lens.graph()`
+already expose. A test pins that input. Their status is `open`,
+`done`, `dismissed` or `closed`: a gap resolved by the next run's
+recheck reads as `closed`, like one L4 has researched, so that a
+resolved missing note does not tell Claude Code that a note with that
+title now exists (it may be a knowledge note Claude Code may not see).
+The word alone would still say it, so a closed missing note also comes
+back without its proposed title and detail. And like `lens.rounds(n)`,
+`lens.gaps(n)` forgets a note that has left the lens: `titles` are the
+current titles (that note skipped), and a gap any of whose notes has
+left comes back without title and detail, which may name it.
+
 **What the role can do.** Migration `e4c7a2d9b1f3` creates
 `anchor_lens` `NOLOGIN`, the same way `anchor_debug` is created, and a
 `lens` schema of `SECURITY DEFINER` functions (two in L1; L2's
-migration adds `lens.rounds(n)`). The role has `EXECUTE` on those and
+migration adds `lens.rounds(n)`, L3's `b3e9f5a1c7d2` adds
+`lens.gaps(n)`). The role has `EXECUTE` on those and
 nothing else: no `public` table, no `debug`
 view, not even `lens_note` itself.
 
@@ -129,6 +149,7 @@ view, not even `lens_note` itself.
 | `lens.notes()` | `id, kind (person, concept), title, summary, body, chars, updated_at`, one row per lens note |
 | `lens.graph()` | `src_title, dst_title, unresolved`: links between lens notes, and the targets of lens notes' links that name no note. Never a knowledge-only note, never a link to a note the bot may not see |
 | `lens.rounds(n)` | `id, consumer, outcome, created_at, titles`: the last `n` (at most 50) rounds in which Echo chose lens notes (L2: the weekly review), newest first, with the current titles of the notes it chose (a note no longer in the lens is skipped) |
+| `lens.gaps(n)` | `id, week, kind, status, titles, title, detail, reopened, created_at, decided_at`: the last `n` (at most 50) gaps the lens garden proposed (L3), newest first. `kind` is link, missing_note, tension or bridge; `titles` are the current titles of its lens notes (a note no longer in the lens is skipped), `title` a missing note's proposed title; `status` is open, done, dismissed or closed (never `resolved`, and no `resolved_at`). `title` and `detail` are null for a closed missing_note and for a gap one of whose notes has left the lens |
 
 Each call inserts one `lens_read` row (function name, row count, time)
 before it returns. That row lives in the caller's transaction, so a
@@ -147,8 +168,10 @@ The notes exist only while notes consent, `VAULT_KNOWLEDGE_ENABLED`
 and `LENS_ENABLED` are all on. The sync pass deletes them when any one
 is off: `lens.notes()` and `lens.graph()` then return nothing, and
 `lens.rounds(n)` still lists past rounds (id, outcome, time) with empty
-`titles`, since a round is review history, not a note. `/delete` erases
-the rounds too.
+`titles`, since a round is review history, not a note. The garden's
+runs and gaps go with the notes (turning notes consent off deletes them
+at once, and a flag off on the next pass), so `lens.gaps(n)` then
+returns nothing. `/delete` erases the rounds and the garden too.
 
 ### One-time setup
 
@@ -161,7 +184,7 @@ the rounds too.
    CREATE ROLE anchor_lens NOLOGIN;
    GRANT CONNECT ON DATABASE railway TO anchor_lens;
    GRANT USAGE ON SCHEMA lens TO anchor_lens;
-   GRANT EXECUTE ON FUNCTION lens.notes(), lens.graph(), lens.rounds(int) TO anchor_lens;
+   GRANT EXECUTE ON FUNCTION lens.notes(), lens.graph(), lens.rounds(int), lens.gaps(int) TO anchor_lens;
    ```
 2. Give it a password, and nothing more: the role stays `NOLOGIN`
    until you open it in step 5. In the Railway Postgres service, open *Data →
@@ -198,7 +221,13 @@ The password stays set; the switch is `LOGIN`.
   and concepts), a warning above `LENS_CATALOG_MAX_NOTES`, whether
   Claude Code may log in, how many reads there were today, and any read
   whose record was rolled back (above), and «Последний разбор: <date>,
-  <outcome>» for the weekly review's last lens round (L2).
+  <outcome>» for the weekly review's last lens round (L2), and «Сад:
+  <date>, открыто N» for the lens garden (L3).
+
+**Upgrading an existing role (L3).** If `anchor_lens` already existed
+when `b3e9f5a1c7d2` ran, the migration granted it `lens.gaps(int)`
+itself. If the migrating user could not, grant it by hand:
+`GRANT EXECUTE ON FUNCTION lens.gaps(int) TO anchor_lens;`.
 
 If the bot's database user may not alter the role (no `CREATEROLE`), or
 the role does not exist, the command says so and points here. Any other
@@ -222,6 +251,9 @@ psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, title, chars from lens.not
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select title, body from lens.notes() where id = 12"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select * from lens.graph()"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, created_at, titles from lens.rounds(10)"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, week, kind, status, titles, title, detail from lens.gaps(20)"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_gap order by id desc limit 20"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_garden_run order by id desc limit 5"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_round order by created_at desc limit 10"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_read order by at desc limit 20"
 ```
@@ -236,7 +268,13 @@ column but the selector's rationale. L2 also adds `debug.review_proposal`
 and `text_len`, never the proposal's text or reason. The titles are
 read through `lens.rounds(n)`, a logged read like the other two. The
 rationale is read by no role Claude Code has: only the user sees it,
-in Telegram.
+in Telegram. L3 adds `debug.lens_gap` (ids, kind, note ids, status with
+`resolved` and `researched` shown as `closed`, reopened, creation and
+decision times, whether it was sent, and the detail's length; never
+its titles, title, detail, recheck payload or signature, since a hash
+of a few short titles can be guessed) and `debug.lens_garden_run`
+(every column but `findings`); `debug.lens_note` gains `alias_count`.
+The gaps' text is read through `lens.gaps(n)`, logged like the rest.
 
 ### Lens text stays in the session
 

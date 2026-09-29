@@ -1855,8 +1855,10 @@ class IdleRun(Base):
 
     __table_args__ = (
         CheckConstraint(
+            # L3 (anchor-lens-plan.md section 8; migration b3e9f5a1c7d2):
+            # the weekly lens garden. `lens_research` waits for L4.
             "kind in ('backfill', 'consolidate', 'reflect', 'prebrief', 'critique', "
-            "'research', 'canary')",
+            "'lens_garden', 'research', 'canary')",
             name="ck_idle_run_kind",
         ),
         CheckConstraint(
@@ -2144,7 +2146,11 @@ class VaultFile(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("role in ('fact', 'journal', 'note')", name="ck_vault_file_role"),
+        # L3: `report` is the lens garden's note in Anchor/Reports
+        # (migration b3e9f5a1c7d2): no memory, no date, no class.
+        CheckConstraint(
+            "role in ('fact', 'journal', 'note', 'report')", name="ck_vault_file_role"
+        ),
         CheckConstraint(
             "state in ('ok', 'quarantined', 'held', 'restore', 'diverged', 'dismissed')",
             name="ck_vault_file_state",
@@ -2154,7 +2160,9 @@ class VaultFile(Base):
             " or (role = 'journal' and memory_id is null and local_date is not null"
             " and note_class is null)"
             " or (role = 'note' and memory_id is null and local_date is null"
-            " and note_class is not null)",
+            " and note_class is not null)"
+            " or (role = 'report' and memory_id is null and local_date is null"
+            " and note_class is null)",
             name="ck_vault_file_role_columns",
         ),
         CheckConstraint(
@@ -2290,6 +2298,8 @@ class VaultStatus(Base):
 # migration e4c7a2d9b1f3). The debug views carry no title, summary,
 # body or link target. L2 adds a fifth, `lens_round` (at the end of this
 # file), owned by the same module, and `lens.rounds()` (c6d2e8a4f917).
+# L3 adds `lens_garden_run` and `lens_gap` after it, the same module's
+# too, and `lens.gaps()` (b3e9f5a1c7d2).
 
 
 class LensNote(Base):
@@ -2315,6 +2325,12 @@ class LensNote(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     # The frontmatter `summary`, as vaultd's graph reports it (<= 300).
     summary: Mapped[str | None] = mapped_column(String)
+    # L3: the frontmatter `aliases`, as vaultd's graph reports them, for
+    # the garden's mention matching (migration b3e9f5a1c7d2). Not part
+    # of the lens's version hash; tags are not stored.
+    aliases: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
     # The note as app/vault/notes_text.prepare_body leaves it: no
     # frontmatter, no %% comments %%, no code, secrets masked.
     body: Mapped[str] = mapped_column(String, nullable=False)
@@ -2444,4 +2460,139 @@ class LensRound(Base):
             "outcome in ('grounded', 'empty', 'fallback')", name="ck_lens_round_outcome"
         ),
         Index("ix_lens_round_weekly_review_id", "weekly_review_id"),
+    )
+
+
+class LensGardenRun(Base):
+    """One run of the lens garden (anchor-lens-plan.md section 8; L3): a
+    weekly idle job that looks for gaps in how the lens is organised.
+
+    One row per local ISO week (`iso_week` is UNIQUE, `2026-W40`), so
+    "not twice in a week" holds in the database as well as in the gate.
+    Its own table, not a column on `idle_run`: gaps must outlive idle
+    pruning (`idle_run_id` is SET NULL), and `idle_run.summary` may hold
+    no text, while `findings` does -- the deterministic step's ids and
+    scores, the clusters with the names the model gave them, and the
+    unresolved link text out of lens notes. All of it lens-only.
+
+    `sent_at`, `tg_message_id`, `sent_gap_ids` and `sent_reopened` are
+    the run's one Telegram message (owner amendment (b) to the L3 spec):
+    when it was sent, its id, the gaps it lists in order, and each one's
+    `reopened` count at that moment -- so a tap re-renders the same
+    message with the same numbering, counts and «снова» marks, even
+    after a later run reopened one of its gaps. `sent_at` without a
+    message id is a run marked sent with nothing to say.
+    """
+
+    __tablename__ = "lens_garden_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idle_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("idle_run.id", ondelete="SET NULL")
+    )
+    iso_week: Mapped[str] = mapped_column(String, nullable=False)
+    lens_version_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_version.id", ondelete="SET NULL")
+    )
+    findings: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=sa.text("'{}'")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    sent_gap_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+    sent_reopened: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+
+    __table_args__ = (
+        UniqueConstraint("iso_week", name="uq_lens_garden_run_iso_week"),
+        CheckConstraint("iso_week ~ '^[0-9]{4}-W[0-9]{2}$'", name="ck_lens_garden_run_iso_week"),
+        CheckConstraint(
+            "tg_message_id is null or sent_at is not null", name="ck_lens_garden_run_sent"
+        ),
+    )
+
+
+class LensGap(Base):
+    """One gap the garden proposed (plan section 8; L3): a `link` between
+    two lens notes, a `missing_note`, a `tension` between two notes, or a
+    `bridge` between two clusters.
+
+    `garden_run_id` is the run that last raised or reopened it (CASCADE).
+    `note_ids` are `lens_note` ids, and `titles` their titles when the gap
+    was raised; `title` is the proposed note's title (missing_note) and
+    `detail` the model's one sentence. All of it is lens-derived: the
+    model saw lens titles, summaries and links only (L3 spec section 6),
+    which is why `lens.gaps()` may show it to Claude Code.
+
+    `signature` is a sha256 over the kind and the normalised titles
+    (app/core/lens_graph.py); the partial unique index
+    `ux_lens_gap_signature_live` refuses a second live gap with it, so
+    only a `resolved` one may recur. `recheck` is the step-1 payload the
+    next run tests (an edge, a title, a path). `status` moves open ->
+    done | dismissed on a tap, open | done -> resolved on a recheck (or
+    when a note is gone), and done -> open again (`reopened` + 1) when a
+    done gap fails its recheck. `researched` is L4's.
+    `tg_message_id` is the message whose keyboard carries it.
+    """
+
+    __tablename__ = "lens_gap"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    garden_run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("lens_garden_run.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    note_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+    titles: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
+    title: Mapped[str | None] = mapped_column(String)
+    detail: Mapped[str] = mapped_column(String, nullable=False)
+    signature: Mapped[str] = mapped_column(String, nullable=False)
+    recheck: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=sa.text("'{}'")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="open", server_default=sa.text("'open'")
+    )
+    reopened: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sa.text("0")
+    )
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('link', 'missing_note', 'tension', 'bridge')", name="ck_lens_gap_kind"
+        ),
+        CheckConstraint(
+            "status in ('open', 'done', 'dismissed', 'resolved', 'researched')",
+            name="ck_lens_gap_status",
+        ),
+        CheckConstraint("char_length(title) <= 80", name="ck_lens_gap_title_len"),
+        CheckConstraint("char_length(detail) <= 300", name="ck_lens_gap_detail_len"),
+        CheckConstraint("signature ~ '^[0-9a-f]{64}$'", name="ck_lens_gap_signature"),
+        CheckConstraint("reopened >= 0", name="ck_lens_gap_reopened"),
+        CheckConstraint(
+            "(status = 'resolved') = (resolved_at is not null)", name="ck_lens_gap_resolved_at"
+        ),
+        Index("ix_lens_gap_garden_run_id", "garden_run_id"),
+        Index(
+            "ux_lens_gap_signature_live",
+            "signature",
+            unique=True,
+            postgresql_where=sa.text("status <> 'resolved'"),
+        ),
     )

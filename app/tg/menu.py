@@ -64,7 +64,9 @@ value next to a button that no longer means anything.
 Callback data, prefix `mn:` (distinct from every other prefix already in
 this router's callback_query table -- `m:k:`/`m:p:` (memory), `c:`
 (check-in), `d:` (delete), `so:`/`ob:`/`am:`/`p:`/`pa:`/`pl:`/`r:`/`g:`/
-`cl:`/`it:`/`idle:`/`w:`/`nb:x:`/`st:`: aiogram matches with
+`cl:`/`it:`/`idle:`/`w:`/`nb:x:`/`st:`/`lr:`/`lg:` (the lens: L2's
+[почему эти заметки?], L3's garden buttons, `lg:` refused from the web
+chat by app/web/ingress.py's BLOCKED_CALLBACK_PREFIX): aiogram matches with
 `F.data.startswith`, and none of those is a prefix of `mn:` or vice
 versa, so registration order between this module's handlers and theirs
 never matters):

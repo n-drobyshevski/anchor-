@@ -284,7 +284,7 @@ The first two show what Echo read and which notes each round picked (never the s
 
 ## 12. Milestones
 
-Status: L1 (PR #56, open); L2 on the same branch.
+Status: L1 (PR #56, open); L2 and L3 on the same branch.
 
 - **L1: class, pipe, graph, Claude Code.**
   - vaultd: `lens`, the settings keys, `/v1/knowledge/graph`, the write refusal.

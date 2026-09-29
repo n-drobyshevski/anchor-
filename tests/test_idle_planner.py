@@ -73,8 +73,10 @@ async def test_priority_picks_backfill_first(sessionmaker):
 
 
 async def test_priority_order_matches_the_plan():
+    # L3 (the L3 spec section 1): the weekly lens garden after critique.
     assert PRIORITY == (
-        "backfill", "consolidate", "prebrief", "reflect", "critique", "research", "canary",
+        "backfill", "consolidate", "prebrief", "reflect", "critique", "lens_garden",
+        "research", "canary",
     )
 
 

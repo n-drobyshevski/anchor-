@@ -13,6 +13,8 @@ from tests.conftest import AUTH, write
 async def test_scopes(client, vault: Path) -> None:
     write(vault, "Anchor/Memory/0001-abcdef.md", "---\nanchor: fact\n---\n")
     write(vault, "Anchor/Journal/2026-09-25-abcdef.md", "day")
+    write(vault, "Anchor/Reports/Lens garden 2026-W40-k3f7qa.md", "report")
+    write(vault, "Anchor/Reports/sub/x.md", "---\nanchor: read\n---\n")
     write(vault, "Anchor/Memory/Утро.md", "user-made fact file, no frontmatter")
     write(vault, "Anchor/README.md", "not in a writable folder, not opted in")
     write(vault, "Anchor/Memory/sub/x.md", "---\nanchor: read\n---\n")
@@ -24,6 +26,9 @@ async def test_scopes(client, vault: Path) -> None:
         ("Anchor/Memory/0001-abcdef.md", "anchor", None),
         ("Anchor/Memory/sub/x.md", "note", "personal"),
         ("Anchor/Memory/Утро.md", "anchor", None),
+        # Lens L3: a report is Anchor's own file; a subfolder is not.
+        ("Anchor/Reports/Lens garden 2026-W40-k3f7qa.md", "anchor", None),
+        ("Anchor/Reports/sub/x.md", "note", "personal"),
         ("Notes/Бег.md", "note", "personal"),
     ]
     assert all("class" not in f for f in manifest["files"] if f["scope"] == "anchor")

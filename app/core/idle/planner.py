@@ -33,6 +33,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     IDLE_RUN,
+    LENS_GARDEN,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -46,8 +47,13 @@ logger = logging.getLogger(__name__)
 
 # Priority order, plan section 5. Every kind has a real kind rule as of
 # 6d (RESEARCH's own is app/core/idle/gate.py's `_research_rule`); the
-# order itself never changed across 6a-6d.
-PRIORITY: tuple[str, ...] = (BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, RESEARCH, CANARY)
+# order itself never changed across 6a-6d. L3 puts the weekly lens
+# garden after critique and before research (the L3 spec section 1): it
+# is cheap, weekly and bounded, while research may take the day's
+# shared /study quota.
+PRIORITY: tuple[str, ...] = (
+    BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, LENS_GARDEN, RESEARCH, CANARY,
+)
 
 
 def idle_dedup_key(kind: str, local_date, n: int) -> str:

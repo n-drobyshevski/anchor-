@@ -204,7 +204,7 @@ def test_the_judge_on_the_review_model_warns_for_lens_cases():
 
     settings = Settings(LLM_MODEL_SAFETY="some/model")
     lens_cases = [c for c in load_all() if c.input["kind"] == "lens_review"]
-    persona_cases = [c for c in load_all() if c.input["kind"] != "lens_review"]
+    persona_cases = [c for c in load_all() if c.input["kind"] not in ("lens_review", "lens_garden")]
     warning = lens_same_judge_warning("some/model", settings, lens_cases)
     assert warning is not None and "34, 35, 36, 37, 38" in warning
     assert lens_same_judge_warning("other/model", settings, lens_cases) is None

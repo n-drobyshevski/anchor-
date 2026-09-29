@@ -67,6 +67,12 @@ CONTENT_COLUMNS = {
     # what the review told the user.
     "lens_round": {"rationale"},
     "review_proposal": {"text", "reason"},
+    # L3 (plan section 8): a gap's titles, proposed title and detail
+    # name and discuss lens notes; its signature is a hash of a few
+    # short titles (guessable) and its recheck payload holds titles too.
+    # A run's findings carry cluster names and unresolved link text.
+    "lens_gap": {"titles", "title", "detail", "signature", "recheck"},
+    "lens_garden_run": {"findings"},
 }
 
 

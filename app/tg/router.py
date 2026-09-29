@@ -84,6 +84,7 @@ from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import claude as claude_ui
 from app.tg import data as data_ui
+from app.tg import garden as garden_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
@@ -152,6 +153,10 @@ PRIVACY_TEXT = (
     "оно написано по твоей неделе и видно только тебе. Пока линза включена, еженедельный разбор отправляет модели "
     "каталог линзы (названия, краткие описания или начало текста, связи) и выбранные "
     "заметки целиком — как справочный материал. "
+    "Пока включён сад линзы, раз в неделю модели уходят названия и краткие описания "
+    "(или начало текста) заметок линзы, связи между ними и сколько у каждой связей "
+    "с заметками знаний (без их названий); его предложения при "
+    "/lens code on видит и Claude Code. "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -2283,6 +2288,30 @@ def build_router(
             callback.bot,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("lg:"))
+    async def lens_garden_decision(callback: CallbackQuery) -> None:
+        """L3: `lg:d:<gap id>:<epoch>` / `lg:n:<gap id>:<epoch>` -- the lens
+        garden message's «N · сделал» / «N · не нужно» (app/tg/garden.py).
+
+        Refused from the web chat, like `v:`: the garden's message is
+        only ever sent to Telegram, so a press arriving through the web
+        sink is not one the user made on that message
+        (app/web/ingress.py's BLOCKED_CALLBACK_PREFIX is the first
+        layer).
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await garden_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
             data=callback.data,
         )
 

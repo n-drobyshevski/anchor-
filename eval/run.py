@@ -29,6 +29,15 @@ provider built the way app/main.py builds the review's own
 outputs). Its "reply" is the round rendered for the report; the text
 checks run over the proposals' own words and the lens checks over what
 the round did (eval/checks.py's `lens_checks`).
+
+L3 (the L3 spec section 9): a `lens_garden` case runs the lens garden's
+step 1 and its one call (`lens_garden.propose`) on the provider the idle
+kind builds for itself (`lens_garden.build_garden_provider`: the safety
+model at temperature 0 with `GARDEN_MAX_TOKENS`). Its "reply" is the
+validated gaps rendered for the report; the text checks run over the
+gaps' own words -- and over the raw reply, before `validate()` and its
+`screen()` drop anything -- and the garden checks over which gaps
+survived (eval/checks.py's `garden_checks`).
 """
 
 from __future__ import annotations
@@ -43,11 +52,12 @@ import sys
 from app.config import Settings, get_settings
 from app.core.clock import SystemClock
 from app.core.extract import parse_json
+from app.core.idle import lens_garden
 from app.llm.openrouter import OpenRouterProvider, build_client
 from eval import checks as checks_module
 from eval import judge as judge_module
 from eval import scenario
-from eval.cases import LENS_REVIEW, Case, load_all
+from eval.cases import LENS_GARDEN, LENS_REVIEW, Case, load_all
 from eval.db import throwaway_sessionmaker
 
 REPORTS_DIR = pathlib.Path(__file__).parent / "reports"
@@ -111,11 +121,12 @@ def same_judge_warning(judge_model: str, settings: Settings) -> str | None:
 
 
 def lens_same_judge_warning(judge_model: str, settings: Settings, cases) -> str | None:
-    """The same loud line for L2's lens cases, else None. They generate
-    on `LLM_MODEL_SAFETY` (`_review_provider`), not `LLM_MODEL`, so
-    `same_judge_warning` alone would let a judge set to the review's
-    model grade its own lens rounds unnoticed."""
-    lens_ids = [case.id for case in cases if case.input["kind"] == LENS_REVIEW]
+    """The same loud line for L2's lens cases and L3's garden cases, else
+    None. They generate on `LLM_MODEL_SAFETY` (`_review_provider`,
+    `lens_garden.build_garden_provider`), not `LLM_MODEL`, so
+    `same_judge_warning` alone would let a judge set to that model grade
+    its own lens rounds and gardens unnoticed."""
+    lens_ids = [case.id for case in cases if case.input["kind"] in (LENS_REVIEW, LENS_GARDEN)]
     if not lens_ids or judge_model != settings.LLM_MODEL_SAFETY:
         return None
     return (
@@ -178,6 +189,8 @@ def _review_provider(settings: Settings, client):
 
 # app/core/lens_review.py's grounding schema name.
 GROUNDING_SCHEMA_NAME = "anchor_lens_grounding"
+# app/core/idle/lens_garden.py's schema name (L3).
+GARDEN_SCHEMA_NAME = lens_garden.GARDEN_SCHEMA.name
 
 
 def raw_grounding_text(reply: str) -> str:
@@ -192,6 +205,24 @@ def raw_grounding_text(reply: str) -> str:
             lines.extend(
                 value for value in (item.get("text"), item.get("reason")) if isinstance(value, str)
             )
+    return "\n".join(lines)
+
+
+def raw_garden_text(reply: str) -> str:
+    """Every raw gap's `title` and `detail` and every cluster name, one
+    per line, before `validate()`; empty when the reply is not that
+    JSON. A gap `screen()` dropped still fails a forbidden pattern."""
+    payload = parse_json(reply)
+    if not isinstance(payload, dict):
+        return ""
+    lines = []
+    for key, fields in (("gaps", ("title", "detail")), ("clusters", ("name",))):
+        items = payload.get(key)
+        for item in items if isinstance(items, list) else ():
+            if isinstance(item, dict):
+                lines.extend(
+                    value for value in (item.get(field) for field in fields) if isinstance(value, str)
+                )
     return "\n".join(lines)
 
 
@@ -210,6 +241,8 @@ class _Metered:
         # `validate_grounding` and its `screen()` drop anything: a case
         # checks it too, so a proposal the floor caught still fails.
         self.grounding_raw: str | None = None
+        # L3: the garden call's reply as the model gave it, likewise.
+        self.garden_raw: str | None = None
 
     async def complete(self, messages, *, conversation_id, json_schema=None):
         try:
@@ -223,6 +256,8 @@ class _Metered:
         self.usd_cost += float(response.usage.cost_usd or 0.0)
         if json_schema is not None and json_schema.name == GROUNDING_SCHEMA_NAME:
             self.grounding_raw = response.text
+        if json_schema is not None and json_schema.name == GARDEN_SCHEMA_NAME:
+            self.garden_raw = response.text
         return response
 
     async def close(self) -> None:  # pragma: no cover - the run closes the client
@@ -290,6 +325,54 @@ async def run_lens_case(
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
 
+async def run_garden_case(
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    garden,
+    judge,
+    *,
+    amendments: list[str] | None = None,
+) -> Outcome:
+    """One `lens_garden` case for real (L3): seed, step 1, the call,
+    `validate()`, check, judge. A reply that does not parse fails the
+    case, as it fails the idle run."""
+    if garden is None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), 0.0,
+            "нет провайдера сада (LLM_MODEL_SAFETY) для кейса сада",
+        )
+    metered = _Metered(garden)
+    try:
+        async with sessionmaker() as session:
+            await scenario.reset(session)
+            await scenario.seed(session, case, clock, amendments=amendments)
+            run = await scenario.run_lens_garden(session, clock, metered)
+    except Exception as exc:  # noqa: BLE001 - a failed case, not a failed run
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost,
+            metered.error or f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+
+    reply = scenario.render_garden_run(run)
+    check_results = checks_module.run_all(run.gap_text if run else "", case.checks, settings)
+    if case.checks.get("forbidden_regex") and metered.garden_raw is not None:
+        raw = checks_module.forbidden(
+            raw_garden_text(metered.garden_raw), case.checks["forbidden_regex"]
+        )
+        check_results.append(checks_module.Result("forbidden_regex_raw", raw.passed, raw.detail))
+    check_results += checks_module.garden_checks(case.checks, gaps=run.gaps if run else None)
+    verdict = await judge_module.judge(
+        judge,
+        items=case.judge_items,
+        case_title=case.title,
+        prompt_text=scenario.situation(case),
+        reply=reply,
+    )
+    return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
+
+
 async def run_case(
     sessionmaker,
     case: Case,
@@ -301,6 +384,7 @@ async def run_case(
     *,
     amendments: list[str] | None = None,
     review=None,
+    garden=None,
 ) -> Outcome:
     """Run one case against a fresh, seeded scenario.
 
@@ -317,10 +401,18 @@ async def run_case(
     passes none: its subset is the blocking cases, and no lens case is
     blocking -- one that became blocking would fail there loudly rather
     than run on the persona model.
+
+    `garden` (L3) is the lens garden's own provider, for a `lens_garden`
+    case (`run_garden_case`), on the same terms: a dry run builds its
+    messages through `scenario.build`, and eval/trial.py passes none.
     """
     if case.input["kind"] == LENS_REVIEW and not dry_run:
         return await run_lens_case(
             sessionmaker, case, settings, clock, review, judge, amendments=amendments
+        )
+    if case.input["kind"] == LENS_GARDEN and not dry_run:
+        return await run_garden_case(
+            sessionmaker, case, settings, clock, garden, judge, amendments=amendments
         )
 
     async with sessionmaker() as session:
@@ -365,8 +457,8 @@ def render_report(
         f"- Модель: `{settings.LLM_MODEL}`",
         f"- Судья: `{judge_model}`",
         *(
-            [f"- Модель разбора (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
-            if any(o.case.input["kind"] == LENS_REVIEW for o in outcomes)
+            [f"- Модель разбора и сада (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
+            if any(o.case.input["kind"] in (LENS_REVIEW, LENS_GARDEN) for o in outcomes)
             else []
         ),
         f"- Кейсов: {len(outcomes)} · прошло: {len(outcomes) - len(failed)} "
@@ -436,11 +528,12 @@ async def main_async(args) -> int:
     # A dry run builds no provider: it exists precisely so the prompt
     # path can be exercised on a machine with no key and no budget.
     if args.dry_run:
-        main = judge = review = client = None
+        main = judge = review = garden = client = None
         judge_model = judge_model_for(settings)
     else:
         main, judge, judge_model, client = _providers(settings)
         review = _review_provider(settings, client)
+        garden = lens_garden.build_garden_provider(settings, client)
 
     outcomes: list[Outcome] = []
     try:
@@ -448,7 +541,7 @@ async def main_async(args) -> int:
             for case in cases:
                 outcome = await run_case(
                     sessionmaker, case, settings, clock, main, judge, args.dry_run,
-                    review=review,
+                    review=review, garden=garden,
                 )
                 outcomes.append(outcome)
                 if args.dry_run:

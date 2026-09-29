@@ -33,6 +33,11 @@ REFUSED_FOR_WRITING = [
     "Anchor/Memory/.hidden.md",
     "Anchor/Memory/sub/x.md",
     "Anchor/Journal.md",
+    "Anchor/Reports.md",
+    "Anchor/Reports/sub/x.md",
+    "Anchor/Reports/.hidden.md",
+    "Anchor/Reports/x.txt",
+    "anchor/reports/x.md",
     "Anchor/x.md",
     "Anchor/Memory/x.txt",
     "Anchor/Memory/x.MD",
@@ -58,8 +63,17 @@ async def test_writes_outside_anchor_folders_are_refused(client, vault: Path, pa
     assert [p for p in vault.rglob("*")] == []
 
 
-@pytest.mark.parametrize("path", ["Anchor/Memory/0001-abcdef.md", "Anchor/Journal/2026-09-25-abcdef.md", "Anchor/Memory/Утро.md"])
-def test_the_writable_set_is_exactly_the_two_folders(path: str) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Anchor/Memory/0001-abcdef.md",
+        "Anchor/Journal/2026-09-25-abcdef.md",
+        "Anchor/Memory/Утро.md",
+        # Lens L3's weekly garden note (lens plan section 8).
+        "Anchor/Reports/Lens garden 2026-W40-k3f7qa.md",
+    ],
+)
+def test_the_writable_set_is_exactly_anchors_folders(path: str) -> None:
     assert paths.is_writable(paths.parse_rel(path))
 
 

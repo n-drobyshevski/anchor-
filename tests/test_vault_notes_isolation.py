@@ -23,7 +23,7 @@ every module in app/, eval/ and scripts/:
   a third access module, owning `lens_note`, `note_link`,
   `lens_version` and `lens_read`. Its importers are named one by one --
   the sync pass and /lens -- not "the rest of app/vault/". L2 adds
-  `lens_round` to what it owns.
+  `lens_round` to what it owns, L3 `lens_garden_run` and `lens_gap`.
 """
 
 from __future__ import annotations
@@ -79,12 +79,32 @@ ALLOWED_IMPORTERS = {
         "app/core/scheduler.py",
         "app/core/lens_review.py",
         "eval/scenario.py",
+        # L3 (plan sections 8 and 10: the garden reaches the lens graph
+        # and summaries): the weekly idle job reads the lens and records
+        # its run and gaps, and the Telegram side sends the run's one
+        # message and applies its taps. Both go through this module and
+        # name no lens table themselves.
+        "app/core/idle/lens_garden.py",
+        "app/tg/garden.py",
+        # L3 (spec section 4: the garden dies with the lens): `/vault
+        # notes off` deletes the lens notes by cascade, which never
+        # reaches the garden's tables, so consent calls delete_garden in
+        # the same transaction. It writes nothing else there and reads
+        # nothing.
+        "app/vault/consent.py",
     ),
 }
 
 # The one exception to FORBIDDEN_IMPORTERS' "app/web/" below, and only
 # for notes_knowledge -- see the ALLOWED_IMPORTERS comment above.
-FORBIDDEN_EXCEPTIONS = {"app.vault.notes_knowledge": ("app/web/mcp_core.py",)}
+#
+# L3: the one idle module that may reach the lens module is the garden
+# (plan section 5: "It allows `app.vault.lens` only in the two new idle
+# kinds and in reflect (L5)"); the rest of app/core/idle/ stays banned.
+FORBIDDEN_EXCEPTIONS = {
+    "app.vault.notes_knowledge": ("app/web/mcp_core.py",),
+    "app.vault.lens": ("app/core/idle/lens_garden.py",),
+}
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
 FORBIDDEN_IMPORTERS = (
@@ -113,6 +133,9 @@ TABLES = {
     "lens_read": ("app/vault/lens.py", ("lens_read", "LensRead")),
     # L2: the review's rounds (plan section 7), the same module's.
     "lens_round": ("app/vault/lens.py", ("lens_round", "LensRound")),
+    # L3: the garden's runs and gaps (plan section 8), the same module's.
+    "lens_garden_run": ("app/vault/lens.py", ("lens_garden_run", "LensGardenRun")),
+    "lens_gap": ("app/vault/lens.py", ("lens_gap", "LensGap")),
 }
 # L2: words that contain a lens table's name without meaning the table.
 # review_proposal's two new columns hold ids, never a note's text, and
@@ -125,6 +148,11 @@ NOT_TABLE_WORDS = (
     "lens_note_ids",
     "lens_round_max_notes",
     "lens_round_max_chars",
+    # L3: `lens_gap_id` is plan section 5's column for L4's study_job
+    # (an id, never text), and `lens_gaps` a natural name for a list of
+    # the module's own dataclasses; neither is the table.
+    "lens_gap_id",
+    "lens_gaps",
 )
 # Named by the list, each for a reason: the models define the tables,
 # purge truncates them (/delete), export's comments explain why they
@@ -426,6 +454,42 @@ def test_the_review_reaches_the_lens_only_through_lens_review(tmp_path):
     path.write_text("from app.vault import lens\n")
     assert _import_violations(path, "app/core/lens_review.py") == []
     assert _import_violations(path, "app/core/review.py")
+
+
+def test_the_garden_is_the_one_idle_module_that_may_reach_the_lens(tmp_path):
+    """L3: app/core/idle/lens_garden.py and app/tg/garden.py may import
+    the lens module; every other idle module, and every other Telegram
+    module but /lens, still may not."""
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    for rel in ("app/core/idle/lens_garden.py", "app/tg/garden.py"):
+        assert _import_violations(path, rel) == [], rel
+    for rel in ("app/core/idle/research.py", "app/core/idle/reflect.py", "app/tg/vault.py", "app/tg/router.py"):
+        assert _import_violations(path, rel), rel
+    # The exception is for the lens module only: the garden still may
+    # not reach either chunk module.
+    path.write_text("from app.vault import notes_knowledge\n")
+    assert _import_violations(path, "app/core/idle/lens_garden.py")
+
+
+def test_the_garden_words_are_not_table_names_but_the_tables_are(tmp_path):
+    """L3: an id column, the idle kind and the flag are not the garden's
+    tables; the tables and their models, anywhere but app/vault/lens.py,
+    are."""
+    path = tmp_path / "sample.py"
+    path.write_text(
+        "def f(job, settings):\n"
+        "    return job.lens_gap_id, 'lens_garden', settings.LENS_GARDEN_ENABLED, 'garden_run_id'\n"
+    )
+    assert _table_violations(path, "app/core/idle/lens_garden.py") == []
+    for code in (
+        "from app.db.models import LensGap\n",
+        "from app.db.models import LensGardenRun\n",
+        "q = 'select detail from lens_gap'\n",
+        "q = 'select findings from lens_garden_run'\n",
+    ):
+        path.write_text(code)
+        assert _table_violations(path, "app/tg/garden.py"), code
 
 
 def test_an_unrelated_lens_attribute_is_not_an_import(tmp_path):

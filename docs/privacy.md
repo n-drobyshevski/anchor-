@@ -35,7 +35,11 @@ and that both name Obsidian (8e).
   why, which is written from your week and only you see. While the lens is on, the weekly
   review sends the model the lens catalog (titles, summaries or the
   start of the text, links) and the notes it picks, whole, as reference
-  material. In `sync` mode, editing or
+  material. While the lens garden is on, once a week the model gets the
+  lens notes' titles, summaries or the start of the text, the links
+  between them, and how many links each has to knowledge notes (never
+  their titles); with `/lens code on` Claude Code can read its proposals
+  too. In `sync` mode, editing or
   deleting a fact file in Anchor's folder changes Anchor's memory.
 - Server logs hold only codes, counts and cost -- never text.
 - `/export` downloads all of your own data as one file.

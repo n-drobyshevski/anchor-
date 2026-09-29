@@ -11,6 +11,7 @@ study_card -> study_clip -> study_job, study_card -> memory,
 note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
 vault_file -> memory, lens_round -> weekly_review / lens_version,
 review_proposal -> lens_round,
+lens_gap -> lens_garden_run -> idle_run / lens_version,
 vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
@@ -226,6 +227,11 @@ PURGED_TABLES = (
     # point at lens_note, lens_version and weekly_review, all purged in
     # this statement, and review_proposal.lens_round_id points here.
     "lens_round",
+    # L3 (plan section 8): the garden's runs and gaps. A gap's titles and
+    # detail are about this user's lens notes, and a run's findings
+    # carry lens link text; both point only at tables purged here.
+    "lens_garden_run",
+    "lens_gap",
     "vault_file",
     "vault_hold",
     "vault_status",

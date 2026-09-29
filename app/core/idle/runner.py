@@ -39,7 +39,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
+from app.core.idle import (
+    BACKFILL,
+    CANARY,
+    CONSOLIDATE,
+    CRITIQUE,
+    LENS_GARDEN,
+    PREBRIEF,
+    REFLECT,
+    RESEARCH,
+)
 from app.core.idle.candidates import REFLECTED_SCENE_IDS
 from app.core.idle.facts import load_idle_facts
 from app.core.idle.gate import config_from_settings, idle_gate
@@ -353,6 +362,21 @@ async def run_idle(
             # never "preempted and empty".
             preempted_and_empty = result.preempted and result.topic_id is None
             summary = {"topic_id": result.topic_id, "cards": result.cards}
+            reversible = False
+        elif kind == LENS_GARDEN:
+            from app.core.idle.lens_garden import run_lens_garden
+
+            result = await run_lens_garden(
+                session_factory, settings, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            # Single-transaction (app/core/idle/lens_garden.py): a
+            # preempted run wrote nothing. Not reversible: it changes no
+            # memory, only proposes -- the user decides every gap.
+            preempted_and_empty = result.preempted
+            # Ints only, and no key a LogRecord attribute: it is spread
+            # into the "idle run done" log call's `extra` below.
+            summary = result.summary()
             reversible = False
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
