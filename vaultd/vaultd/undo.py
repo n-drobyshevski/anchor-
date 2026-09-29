@@ -23,9 +23,11 @@ new content reaches this module.** A file that has changed since is
 refused and left untouched -- vaultd's ordinary compare-and-swap,
 applied to the undo direction too.
 
-**Caps** (`CHANGESETS_PER_HOUR`, `FILES_PER_CHANGESET`, `UNDOS_PER_HOUR`)
-are vaultd's own copy of the write plan's section 6.4 limits; the bot
-keeps another. `precheck` is called before any byte touches disk, so a
+**Caps** (changesets per hour, files per changeset, undos per hour,
+and rev. 3's folder and move budgets) are vaultd's own copy of the
+write plan's section 6.4 limits; the bot keeps another. Their values
+come from `self.limits` (limits.py, `<root>/limits.json`), which the
+user tunes via the bot; config.py holds the defaults. `precheck` is called before any byte touches disk, so a
 refusal here never needs an undo of its own.
 
 **The clock is injectable** (`clock`, default `datetime.now(UTC)`),
@@ -44,15 +46,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from vaultd.config import (
-    CHANGESETS_PER_HOUR,
-    FILES_PER_CHANGESET,
-    FOLDERS_PER_CHANGESET,
-    FOLDERS_PER_DAY,
-    MOVE_FILES_PER_CHANGESET,
-    MOVES_PER_DAY,
-    UNDO_TTL_DAYS,
-)
+from vaultd.config import UNDO_TTL_DAYS
+from vaultd.limits import LimitsStore
 
 Clock = Callable[[], datetime]
 
@@ -160,6 +155,9 @@ class UndoStore:
         self._clock = clock
         self._ttl = timedelta(days=ttl_days)
         (self.root / "changesets").mkdir(parents=True, exist_ok=True)
+        # Beside `changesets/`, never inside it: `purge` rebuilds that
+        # directory, and a changeset id can never be `limits.json`.
+        self.limits = LimitsStore(self.root / "limits.json")
 
     # -- layout ----------------------------------------------------------
 
@@ -305,16 +303,17 @@ class UndoStore:
         cap refusal here leaves nothing to roll back.
         """
         self.sweep()
+        limits = self.limits.get()
         meta = self._read_meta(changeset_id)
         if meta is None:
-            if kind == "write" and self.count_recent("write") >= CHANGESETS_PER_HOUR:
+            if kind == "write" and self.count_recent("write") >= limits.changesets_per_hour:
                 raise CapExceeded("cap_changesets")
             current_files = 0
         else:
             if meta["kind"] != kind:
                 raise CapExceeded("changeset_kind_mismatch")
             current_files = meta.get("content_files", 0)
-        if current_files + n_files > FILES_PER_CHANGESET:
+        if current_files + n_files > limits.files_per_changeset:
             raise CapExceeded("cap_files")
 
     def precheck_moves(self, changeset_id: str, n_files: int) -> None:
@@ -327,18 +326,19 @@ class UndoStore:
         content write and a rename in the same changeset may call
         either precheck first."""
         self.sweep()
+        limits = self.limits.get()
         meta = self._read_meta(changeset_id)
         if meta is None:
-            if self.count_recent("write") >= CHANGESETS_PER_HOUR:
+            if self.count_recent("write") >= limits.changesets_per_hour:
                 raise CapExceeded("cap_changesets")
             current = 0
         else:
             if meta["kind"] != "write":
                 raise CapExceeded("changeset_kind_mismatch")
             current = meta.get("move_files", 0)
-        if current + n_files > MOVE_FILES_PER_CHANGESET:
+        if current + n_files > limits.move_files_per_changeset:
             raise CapExceeded("cap_moves")
-        if self._recent_sum("move_files") + n_files > MOVES_PER_DAY:
+        if self._recent_sum("move_files") + n_files > limits.moves_per_day:
             raise CapExceeded("cap_moves_day")
 
     def precheck_folders(self, changeset_id: str, n_folders: int) -> None:
@@ -348,11 +348,12 @@ class UndoStore:
         folder is only ever created on the way to a content write or a
         rename), so it mints no changeset of its own."""
         self.sweep()
+        limits = self.limits.get()
         meta = self._read_meta(changeset_id)
         current = len(meta.get("folders", [])) if meta else 0
-        if current + n_folders > FOLDERS_PER_CHANGESET:
+        if current + n_folders > limits.folders_per_changeset:
             raise CapExceeded("cap_folders")
-        if self._recent_sum("folders") + n_folders > FOLDERS_PER_DAY:
+        if self._recent_sum("folders") + n_folders > limits.folders_per_day:
             raise CapExceeded("cap_folders_day")
 
     # -- writing -------------------------------------------------------------
@@ -437,6 +438,7 @@ class UndoStore:
     def purge(self) -> None:
         shutil.rmtree(self._base(), ignore_errors=True)
         self._base().mkdir(parents=True, exist_ok=True)
+        self.limits.reset()
 
 
 def _iso(dt: datetime) -> str:

@@ -105,7 +105,12 @@ new connection.
   - text that reads like an instruction to a model, or holds a secret,
     is refused;
   - caps limit files, folders, moves, batches, bytes and new notes per
-    hour and per day.
+    hour and per day. You set them: `/claude limits` lists them with
+    their defaults and bounds, `/claude limits KEY N` changes one,
+    `/claude limits KEY reset` or `/claude limits reset` restores the
+    defaults. The web app's state screen has the same controls
+    («Лимиты записи Claude»). vaultd keeps its own copy, which the bot
+    updates on every change.
 
   Every refusal says only «Запись отклонена.».
 - **What you see:** each file Claude touched carries

@@ -329,6 +329,13 @@ class VaultClient:
         _require(isinstance(deleted, int) and not isinstance(deleted, bool))
         return deleted
 
+    async def put_limits(self, values: dict[str, int]) -> None:
+        """Replace vaultd's copy of Claude's write caps (`PUT /v1/limits`).
+        `values` is the full set: a key left out goes back to vaultd's
+        default."""
+        data = await self._request("PUT", "/v1/limits", body=values)
+        _require(isinstance(data.get("values"), dict))
+
     # -- knowledge: the class boundary Claude cannot cross (W2b) ------------
 
     async def get_knowledge(self, path: str) -> KnowledgeContent:

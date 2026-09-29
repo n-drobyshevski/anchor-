@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import claude_write_limits
 from app.core.checkin import DUE_LABELS_TEXT
 from app.core.clock import Clock
 from app.db.jobs import enqueue_job
@@ -204,6 +205,10 @@ async def run_vault_sync(
         result.unavailable = True
         return result
     await record_status(session, last_ok_at=now, ob_running_since=service.running_since)
+    # A change to Claude's write caps vaultd has not taken yet
+    # (app/core/claude_write_limits.py): retried here until it lands.
+    if await claude_write_limits.push_pending(session):
+        await claude_write_limits.push(session, client)
 
     result.ran = True
     sync_mode = settings.VAULT_MODE == "sync"

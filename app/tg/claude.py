@@ -33,6 +33,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import claude_write_limits as write_limits
 from app.core import grants
 from app.core.clock import Clock
 from app.core.clock import zone as zone_of
@@ -61,7 +62,8 @@ USAGE = (
     "/claude library on|off — включить или выключить библиотеку\n"
     "/claude library write on|off — включить или выключить запись в библиотеку\n"
     "/claude undo — откатить последнее изменение Claude\n"
-    "/claude undo all — откатить все изменения Claude за последние 24 часа"
+    "/claude undo all — откатить все изменения Claude за последние 24 часа\n"
+    "/claude limits — лимиты записи Claude (изменить: /claude limits КЛЮЧ ЧИСЛО)"
 )
 NO_CONNECTION = (
     "Нет подключения.\n\n"
@@ -90,6 +92,22 @@ LIBRARY_WRITE_SET_ON = (
     "Запись в библиотеку включена: Claude может менять заметки-знания. Откатить: /claude undo"
 )
 LIBRARY_WRITE_SET_OFF = "Запись в библиотеку выключена."
+
+# Claude's write caps, tuned by hand (app/core/claude_write_limits.py).
+LIMITS_HEADER = "Лимиты записи Claude:"
+LIMITS_LINE = "• {label}: {value}{mark} — {key} ({min}–{max})"
+LIMITS_OVERRIDDEN = " (по умолчанию {default})"
+LIMITS_FOOTER = (
+    "Изменить: /claude limits КЛЮЧ ЧИСЛО\n"
+    "Вернуть по умолчанию: /claude limits КЛЮЧ reset · все: /claude limits reset"
+)
+LIMITS_USAGE = "/claude limits [КЛЮЧ ЧИСЛО | КЛЮЧ reset | reset]"
+LIMITS_UNKNOWN_KEY = "Нет такого лимита. Список: /claude limits"
+LIMITS_OUT_OF_RANGE = "{label}: допустимо от {min} до {max}."
+LIMITS_SET = "{label}: теперь {value}."
+LIMITS_RESET_ONE = "{label}: снова {value} (по умолчанию)."
+LIMITS_RESET_ALL = "Все лимиты записи Claude вернулись к значениям по умолчанию."
+LIMITS_PUSH_FAILED = " Сохранено, vault обновится позже."
 
 # W2b (plan section 6): /claude undo, undo all.
 UNDO_NOTHING = "Нечего откатывать."
@@ -326,6 +344,68 @@ async def undo(
     return _undo_reply(restored_total, refused_total)
 
 
+async def limits_text(sessionmaker) -> str:
+    async with sessionmaker() as session:
+        current = (await write_limits.effective(session)).as_dict()
+    lines = [LIMITS_HEADER]
+    for key, spec in write_limits.SPECS.items():
+        value = current[key]
+        mark = (
+            LIMITS_OVERRIDDEN.format(default=write_limits.format_value(key, spec.default))
+            if value != spec.default
+            else ""
+        )
+        lines.append(
+            LIMITS_LINE.format(
+                label=spec.label,
+                value=write_limits.format_value(key, value),
+                mark=mark,
+                key=key,
+                min=write_limits.format_value(key, spec.min),
+                max=write_limits.format_value(key, spec.max),
+            )
+        )
+    lines.append("")
+    lines.append(LIMITS_FOOTER)
+    return "\n".join(lines)
+
+
+async def limits(
+    sessionmaker, settings: Settings, clock: Clock, words: list[str],
+    client_factory=VaultClient.from_settings,
+) -> str:
+    """`/claude limits [...]`: list, set, reset one, reset all. Needs no
+    connection -- the caps are a standing setting, not a window."""
+    if not words:
+        return await limits_text(sessionmaker)
+    if words == ["reset"]:
+        async with sessionmaker() as session:
+            _, pushed = await write_limits.set_and_push(
+                session, settings, clock, "*", None, client_factory
+            )
+        return LIMITS_RESET_ALL + (LIMITS_PUSH_FAILED if pushed is False else "")
+    if len(words) != 2:
+        return LIMITS_USAGE
+    key, raw = words[0].lower(), words[1]
+    spec = write_limits.SPECS.get(key)
+    if spec is None:
+        return LIMITS_UNKNOWN_KEY
+    value = None if raw.lower() == "reset" else write_limits.parse_value(key, raw)
+    if raw.lower() != "reset" and (value is None or not spec.min <= value <= spec.max):
+        return LIMITS_OUT_OF_RANGE.format(
+            label=spec.label,
+            min=write_limits.format_value(key, spec.min),
+            max=write_limits.format_value(key, spec.max),
+        )
+    async with sessionmaker() as session:
+        new, pushed = await write_limits.set_and_push(
+            session, settings, clock, key, value, client_factory
+        )
+    shown = write_limits.format_value(key, getattr(new, key))
+    text = (LIMITS_RESET_ONE if value is None else LIMITS_SET).format(label=spec.label, value=shown)
+    return text + (LIMITS_PUSH_FAILED if pushed is False else "")
+
+
 async def command(
     sessionmaker,
     settings: Settings,
@@ -348,6 +428,8 @@ async def command(
         return await undo(sessionmaker, settings, clock, "last"), None
     if words == ["undo", "all"]:
         return await undo(sessionmaker, settings, clock, "all"), None
+    if words[0] == "limits":
+        return await limits(sessionmaker, settings, clock, words[1:]), None
     return USAGE, None
 
 

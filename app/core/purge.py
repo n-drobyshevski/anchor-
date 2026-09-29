@@ -149,6 +149,11 @@ PURGED_TABLES = (
     # pre-images themselves) is wiped by the vault_purge job's
     # POST /v1/purge, not by this TRUNCATE.
     "claude_changeset",
+    # User-set overrides of Claude's write caps (a name and a number).
+    # A setting, not content, but "delete all my data" puts every
+    # setting back to its default; vaultd's own copy is reset by the
+    # same POST /v1/purge that wipes its undo store.
+    "claude_write_limit",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a

@@ -2,9 +2,11 @@
 
 The environment carries only what differs per deploy -- credentials,
 the vault's name, paths. Every limit that protects the vault is a code
-constant instead, so no deploy (and no pasted variable) can widen it:
-the body cap, the frontmatter cap, the note size cap and the restart
-backoff are all here, not in the environment.
+constant or a default instead, so no deploy (and no pasted variable)
+can widen it: the body cap, the frontmatter cap, the note size cap and
+the restart backoff are all here, not in the environment. The only
+limits that change at runtime are Claude's write caps, set by the user
+through the bot (limits.py).
 
 Reading the environment never validates it; `boot.check_env` does that,
 and names a variable without ever echoing its value.
@@ -48,9 +50,13 @@ OB_COMMAND_TIMEOUT_S = 120.0
 # fake script instead.
 OB_BIN = "/app/node_modules/.bin/ob"
 
-# Plan (Claude writes knowledge notes) section 6.4, 6.2: caps and the
-# undo TTL are constants, by the same rule as the rest of this module --
-# a deploy must not be able to widen the boundary by pasting a variable.
+# Plan (Claude writes knowledge notes) section 6.4, 6.2. The byte cap
+# and the undo TTL are constants, by the same rule as the rest of this
+# module. The rate/volume caps below (files and changesets, undos,
+# folders, moves) are *defaults*: the user tunes them from Telegram or
+# the web app, the bot pushes them to `PUT /v1/limits`, and limits.py
+# holds each to its bounds. Never from the environment -- a deploy
+# still cannot widen them by pasting a variable.
 # FILES_PER_CHANGESET covers content writes only (rev. 3 splits renames
 # off into their own MOVE_FILES_PER_CHANGESET/MOVES_PER_DAY budget).
 KNOWLEDGE_WRITE_MAX_BYTES = 64 * 1024
@@ -62,7 +68,7 @@ UNDO_TTL_DAYS = 14
 # Rev. 3 (anchor-claude-write-plan.md section 14): vaultd may create
 # missing folders on the way to a new note or a move target, only
 # inside a folder already covered by a `knowledge_folders` rule, and
-# only this far/this much:
+# only this far (constant)/this much (defaults, see limits.py):
 FOLDER_MAX_DEPTH = 4
 FOLDERS_PER_CHANGESET = 3
 FOLDERS_PER_DAY = 10
