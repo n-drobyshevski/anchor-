@@ -1,6 +1,16 @@
-# Anchor
+# Echo
 
-A private, single-user Telegram companion.
+A private, single-user Telegram companion. Formerly **Anchor**: that name
+stays as an alias everywhere below the surface — the package, env vars
+(`ANCHOR_*`), database roles, the vault's `Anchor/` folder and `anchor:`
+note labels, the plan files, and the Railway services. Only what the user
+sees says Echo.
+
+The mark (three circles, each smaller and fainter) is
+`app/web/static/icon.svg`; the Telegram avatar is
+`docs/brand/echo-avatar.png` (set it with BotFather's `/setuserpic`).
+The visual reference (the "cybersyn" mood board) and the web UI's
+palette are in [docs/brand/README.md](docs/brand/README.md).
 
 ## Status
 
@@ -1252,6 +1262,19 @@ uv run python scripts/web_passphrase.py   # prints WEB_PASSPHRASE_HASH=...
 Set `WEB_UI_ENABLED=true` and the printed `WEB_PASSPHRASE_HASH` in the
 deployment environment, then open `PUBLIC_URL` in a browser.
 
+**Pages** (the switcher at the top left):
+
+| Page | What is there | Telegram equivalent |
+|---|---|---|
+| Сегодня | a pending proposal, the day's action, debts, today's check-in, focus / quiet / pause, spend | `/due`, `/paid`, `/checkin`, `/focus`, `/quiet`, `/out`/`/in`, `/state` |
+| Чат | the conversation | the chat |
+| Память | Факты (memories), Блокнот (notebook), Договорённости (standing orders) | `/memories`, `/mind`, `/order`, `/orders` |
+| Дневник | the weekly review and its proposals, the 30-day check-in chart, the journal, decided proposals, style amendments | `/review`, `/amendments` |
+| Настройки | intensity, time zone, Obsidian notes, the planner's sync, Claude's connection (read-only), background work with undo, Claude's write limits | `/intensity`, `/tz`, `/vault notes`, `/planner`, `/digest` |
+
+Changes made on these pages are silent in Telegram; they go through the
+same `app/core/` functions the commands use (audit source `web`).
+
 **Security model.** Every web message becomes a synthetic Telegram
 `Update` (negative `update_id`, `source='web'` in `telegram_update`)
 that the same single-concurrency worker feeds through the exact same
@@ -1276,7 +1299,9 @@ failing closed when either is missing or wrong.
 independent layers (an ingress-side command match, and an
 `is_web_sink` guard inside the handlers themselves) — a stolen web
 session must not be able to wipe the data or produce a bulk export;
-both stay Telegram-only. Proposal confirmations (due-action/focus/rule
+both stay Telegram-only, and so do linking the planner (`/planner_link`),
+opening access for grok.com (`/grok`), and Claude's connection and
+library switches (`/claude`). Proposal confirmations (due-action/focus/rule
 prompts) and the outbound nag's buttons are Telegram-only too — they
 are issued by the background job path, which always uses the real bot,
 not the per-row bot the update path picks; the web view shows their
@@ -1510,7 +1535,11 @@ new folders per batch and 10 a day. Top-level folders stay yours to
 create. Moving notes to reorganise (`rename_note`, with backlinks
 following) has its own budget: 20 files per batch and 60 a day.
 Content writes are capped at 20 files per batch and 40 new notes a
-day.
+day. These budgets are defaults: `/claude limits` in Telegram, or the
+«Лимиты записи Claude» card on the web app's state screen, shows and
+changes them (docs/decisions.md, "Claude write caps become settings"),
+and «Обнулить счётчики» there (or `/claude limits counters`) starts the
+hourly and daily counts over.
 
 Writes are listed once a day in the digest, never one by one. See
 `anchor-claude-write-plan.md`.

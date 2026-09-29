@@ -77,8 +77,8 @@ BLOCKED_TOOLS = {
 
 # claude.ai names a connector's tools mcp__<Name>__<tool>, spaces as
 # underscores; the local CLI adds claude_ai_. "Anchor", "anchor 2" and
-# "Anchor (old)" all match.
-ANCHOR_SERVER = re.compile(r"(?i)^mcp__(?:claude_ai_)?anchor\w*?__")
+# "Anchor (old)" all match, and so does the new name, Echo.
+ANCHOR_SERVER = re.compile(r"(?i)^mcp__(?:claude_ai_)?(?:anchor|echo)\w*?__")
 # Anchor's read tools (app/web/mcp_core.py), C3's search_library, and
 # W2b/rev. 3's seven write tools (app/web/claude_write.py) -- Claude
 # Code builds these, it never calls them.

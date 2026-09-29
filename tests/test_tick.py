@@ -199,7 +199,7 @@ async def test_the_schema_and_prompt_are_sent_with_the_call(sessionmaker):
 
 def test_the_decision_prompt_is_the_plans_text_verbatim():
     assert tick.DECISION_PROMPT == (
-        "Ты решаешь, стоит ли Anchor написать первым прямо сейчас. "
+        "Ты решаешь, стоит ли Echo написать первым прямо сейчас. "
         "По умолчанию — нет. Да — только при естественном поводе: "
         "незакрытая тема из последнего разговора, главное действие с близким "
         "сроком, пользователь сам сказал, что сделает что-то сегодня. "
@@ -339,7 +339,7 @@ async def test_the_input_carries_the_transcript_the_journal_and_the_due_action(
     (messages,) = provider.received_messages
     body = messages[1].content
     assert "доделаю сегодня" in body
-    assert "Anchor: Жду." in body
+    assert "Echo: Жду." in body
     assert "обещал доделать отчёт" in body
     assert "«сдать отчёт»" in body
     assert "Пользователь писал: 5 ч назад" in body

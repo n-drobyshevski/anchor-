@@ -4,8 +4,7 @@
 // bottom tab bar / left sidebar (ui/Nav.js), and works the same at
 // every width.
 //
-// Array-driven: a future screen means one row in NAV_ITEMS plus its
-// entry in ui/Shell.js's OTHER_SCREENS and router.js's KNOWN_ROUTES.
+// Array-driven: the items are routes.js's ROUTES, in order.
 //
 // Keyboard: the button opens the menu and focuses the current item;
 // Up/Down move between items (wrapping), Home/End jump to the ends,
@@ -18,14 +17,9 @@ import { html } from '../html.js';
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { proposalsBadge, route } from '../store.js';
 import { Icon } from './Icon.js';
+import { ROUTES } from '../routes.js';
 
-export const NAV_ITEMS = [
-  { route: '#/chat', label: 'Чат', icon: 'message-circle' },
-  { route: '#/state', label: 'Состояние', icon: 'gauge' },
-  { route: '#/memory', label: 'Память', icon: 'bookmark' },
-  { route: '#/checkin', label: 'Чек-ин', icon: 'circle-check' },
-  { route: '#/proposals', label: 'Предложения', icon: 'inbox' },
-];
+export const NAV_ITEMS = ROUTES;
 
 const MENU_ID = 'surface-menu';
 
@@ -41,9 +35,9 @@ export function SurfaceSwitcher() {
 
   const current = currentNavItem();
   const badge = proposalsBadge.value;
-  // The pip only nags while you are somewhere else: on #/proposals
-  // itself the pending card is already in front of you.
-  const showPip = badge > 0 && route.value !== '#/proposals';
+  // The pip only nags while you are somewhere else: on #/today the
+  // pending card is already in front of you.
+  const showPip = badge > 0 && route.value !== '#/today';
   const buttonLabel = showPip
     ? `Раздел: ${current.label}. Предложений: ${badge}`
     : `Раздел: ${current.label}`;
@@ -153,10 +147,10 @@ export function SurfaceSwitcher() {
       >
         ${NAV_ITEMS.map((item) => {
           const isCurrent = route.value === item.route;
-          // Only #/proposals carries a count today (store.js's
-          // proposalsBadge). A later screen that wants one reads its
-          // own signal here the same way.
-          const count = item.route === '#/proposals' ? badge : 0;
+          // Only Сегодня carries a count (store.js's proposalsBadge:
+          // a proposal waiting there). A later screen that wants one
+          // reads its own signal here the same way.
+          const count = item.route === '#/today' ? badge : 0;
           return html`
             <a
               key=${item.route}

@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 NON_TEXT_REPLY = "Пока только текст."
 
 START_TEXT = (
-    "Я — Anchor. Здесь по-русски, коротко и по делу.\n"
+    "Я — Echo. Здесь по-русски, коротко и по делу.\n"
     "Выйти из роли можно командой /out или словом «пурпурный»."
 )
 
@@ -142,7 +142,7 @@ PRIVACY_TEXT = (
     "еженедельных копий, остальные удаляются.\n"
     "Текст страниц, найденных при поиске, хранится 30 дней, потом "
     "стирается — карточки и ссылки остаются.\n"
-    "Заметки из Obsidian Anchor читает только с твоей меткой: личные — только для "
+    "Заметки из Obsidian Echo читает только с твоей меткой: личные — только для "
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
     "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
     "при /claude library write on — и менять (откат: /claude undo). "
@@ -186,7 +186,7 @@ BOT_COMMANDS = [
     BotCommand(command="adopt", description="Принять карточку"),
     BotCommand(command="reject", description="Отклонить карточку"),
     # 5b (phase-5 plan section 6).
-    BotCommand(command="mind", description="Заметки Anchor"),
+    BotCommand(command="mind", description="Заметки Echo"),
     # 5c (phase-5 plan section 7).
     BotCommand(command="order", description="Новая договорённость"),
     BotCommand(command="orders", description="Список договорённостей"),
@@ -1901,6 +1901,9 @@ def build_router(
     async def _menu_lib_write_off(message: Message, event_update: Update) -> None:
         await _menu_library(message, event_update, "library write off")
 
+    async def _menu_claude_limits(message: Message, event_update: Update) -> None:
+        await _menu_library(message, event_update, "limits")
+
     def _menu_intensity(value: int):
         async def run(message: Message, event_update: Update) -> None:
             await intensity_command(
@@ -1984,6 +1987,7 @@ def build_router(
         "lib_read_off": _menu_lib_read_off,
         "lib_write_on": _menu_lib_write_on,
         "lib_write_off": _menu_lib_write_off,
+        "claude_limits": _menu_claude_limits,
         "planner": _menu_planner_status,
         "planner_on": _menu_planner_on,
         "planner_off": _menu_planner_off,
@@ -2456,6 +2460,26 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             message_text=callback.message.text,
+        )
+
+    @router.callback_query(F.data.startswith("cw:"))
+    async def claude_limits_callback(callback: CallbackQuery) -> None:
+        """`cw:s:<key>:<value>` / `cw:r` / `cw:c` / `cw:i:<key>` -- `/claude
+        limits`' own +/- keyboard. Telegram only, like `cl:`/`cu:`: the
+        web app has its own card for the same caps
+        (POST /api/state/claude-limits)."""
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await claude_ui.handle_limits_callback(
+            sessionmaker,
+            settings,
+            callback.bot,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
         )
 
     @router.callback_query(F.data.startswith("cu:"))

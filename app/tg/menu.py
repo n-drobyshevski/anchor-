@@ -206,7 +206,7 @@ ACTIONS: dict[str, str] = {
     "quiet_off": "🔔 Снять тишину",
     # mem
     "memories": "Что я помню",
-    "mind": "Заметки Anchor",
+    "mind": "Заметки Echo",
     "amendments": "Поправки к стилю",
     "notes": "Карточки исследований",
     "interests": "Темы для поиска",
@@ -224,6 +224,7 @@ ACTIONS: dict[str, str] = {
     "lib_read_off": "Claude: закрыть библиотеку",
     "lib_write_on": "Claude: разрешить запись",
     "lib_write_off": "Claude: запретить запись",
+    "claude_limits": "Claude: лимиты записи",
     # planner
     "planner": "Статус планера",
     "planner_on": "Синхронизация: включить",
@@ -277,7 +278,9 @@ REFRESH_SECTION: dict[str, str] = {
 
 _PLANNER_ACTIONS = frozenset({"plan", "planner", "planner_on", "planner_off"})
 _VAULT_ACTIONS = frozenset({"vault", "notes_on", "notes_off"})
-_CLAUDE_ACTIONS = frozenset({"claude", "lib_read_on", "lib_read_off", "lib_write_on", "lib_write_off"})
+_CLAUDE_ACTIONS = frozenset(
+    {"claude", "lib_read_on", "lib_read_off", "lib_write_on", "lib_write_off", "claude_limits"}
+)
 
 
 def _vault_section_visible(settings: Settings) -> bool:
@@ -651,6 +654,10 @@ def _render_vault(settings: Settings, *, web: bool, view: MenuView) -> Section:
             rows.append([_action_btn("lib_read_off" if view.library_read else "lib_read_on")])
         if view.library_read:
             rows.append([_action_btn("lib_write_off" if view.library_write else "lib_write_on")])
+        # The caps are a standing setting, not tied to a connection:
+        # shown whenever the Claude switches are, answered by
+        # `/claude limits` and its own +/- keyboard.
+        rows.append([_action_btn("claude_limits")])
 
     rows.append([_action_btn("vault")])
     rows.append(_nav_row())

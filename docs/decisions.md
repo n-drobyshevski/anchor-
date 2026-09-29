@@ -2575,6 +2575,104 @@ topic in one go. Your decision:
   512 KB per connection per day, the folder and move budgets.
 - They stay code constants, never environment variables.
 
+## Claude write caps become settings (Telegram and the web app)
+
+Raising the caps by hand meant a code change and a deploy every time
+(the section above). Your decision: the rate/volume caps become
+settings you tune yourself, from Telegram and from the web app. This
+supersedes "they stay code constants" above, and "8c" / "constants,
+not settings", **for these nine caps only**:
+
+| key | default | bounds |
+|---|---|---|
+| `files_per_changeset` | 20 | 1–200 |
+| `changesets_per_hour` | 4 | 0–60 |
+| `creates_per_day` (bot only) | 40 | 0–500 |
+| `bytes_per_day` (bot only) | 512 KB | 0–8 MB |
+| `undos_per_hour` | 4 | 0–60 |
+| `folders_per_changeset` | 3 | 0–20 |
+| `folders_per_day` | 10 | 0–100 |
+| `move_files_per_changeset` | 20 | 1–200 |
+| `moves_per_day` | 60 | 0–600 |
+
+- **Defaults are the old constants**, so nothing changes until you edit
+  a value. 0 means none allowed.
+- **Telegram:** `/claude limits` lists them; `/claude limits KEY N` sets
+  one; `/claude limits KEY reset` and `/claude limits reset` restore
+  defaults. `bytes_per_day` also takes `512k` / `2m`.
+- **Web app:** a «Лимиты записи Claude» card on the state screen
+  (`POST /api/state/claude-limits`). The web may **raise as well as
+  lower** a cap. That is a deliberate exception to "Claude settings are
+  Telegram-only": a stolen web session can now widen how much Claude
+  may write per hour/day, but not turn writing on, open a window, or
+  connect Claude -- those stay Telegram-only.
+- **Storage:** the bot is the source of truth (`claude_write_limit`, one
+  row per override, no content). vaultd keeps its own copy of its seven
+  caps in `<undo_root>/limits.json`, outside the vault, set by
+  `PUT /v1/limits` with the same bearer token. vaultd holds each value
+  to the same bounds, so no push can set a nonsense number. The bot
+  pushes on every change; a failed push sets
+  `vault_status.limits_push_pending` and the vault sync pass retries
+  it. While the copies disagree, the stricter one wins.
+- **Still constants:** 64 KB per note (it touches vaultd's body and read
+  caps), folder depth 4, the 14-day undo TTL and the 10-minute
+  changeset window. Nothing comes from the environment: a deploy still
+  cannot widen a cap by pasting a variable.
+- `/delete` wipes the overrides, and vaultd's `POST /v1/purge` resets
+  its copy. `/export` includes the overrides.
+
+### Follow-up: keyboard, self-healing sync, review fixes
+
+- **Telegram keyboard.** `/claude limits` carries a ➖/➕ row per cap
+  (`cw:s:<key>:<value>`, the value the press sets, never a step, so a
+  doubled press is harmless) and «↺ Все по умолчанию» (`cw:r`). The
+  menu's vault section has «Claude: лимиты записи». Telegram only:
+  `cw:` joins `BLOCKED_CALLBACK_PREFIX`.
+- **Sync heals itself.** The pending flag alone could lie: a slow push
+  of old values landing after a newer one, a failed push in `status`
+  mode (no sync pass runs there), vaultd losing `limits.json`, or a
+  `/v1/purge` resetting it after a cap was set. Now every vault sync
+  pass calls `reconcile`: `GET /v1/limits`, push only when it differs.
+  The pending flag is cleared only when what vaultd holds matches what
+  the bot wants *after* the request. `/state`'s and `/vault`'s probe
+  retries while a change is pending, which covers `status` mode.
+- **`bytes_per_day` is whole KB.** It is shown and edited in KB
+  everywhere, so a byte count between two KB is refused; a plain
+  number in `/claude limits bytes_per_day N` means KB.
+- **Undo store.** Raising the move caps to their maxima (600 moved
+  files a day) lets `<undo_root>` hold up to about 1.7 GB of
+  pre-images over the 14-day TTL, against about 170 MB at the defaults.
+  Accepted: it only happens if you raise them.
+
+## Claude write counters can be reset
+
+Hitting a daily cap (say, 40 new notes) meant waiting until midnight
+or raising the cap. Your decision: a «сбросить счётчики» that starts
+every hourly and daily count over, without touching the caps.
+
+- **Telegram:** `/claude limits counters`, or «🔄 Обнулить счётчики»
+  (`cw:c`) under `/claude limits`. **Web app:** «Обнулить счётчики» in
+  the «Лимиты записи Claude» card (`POST
+  /api/state/claude-counters/reset`), which also shows when they were
+  last reset. Like the caps, the web may do this: a stolen web session
+  could keep handing Claude fresh budgets (each reset is one panel
+  write, rate-limited like the rest), but could already raise the caps
+  themselves, and still cannot turn writing on.
+- **How:** a moment, not a deletion. `vault_status.claude_counters_reset_at`
+  is stamped (whole seconds); every hourly/daily count -- changesets,
+  undos, creates, bytes, folders, moves -- only counts changesets
+  started at or after it. The next write opens a fresh changeset, so
+  the per-changeset caps start over too. The ledger is untouched, so
+  undo and the digest still see everything.
+- **vaultd** gets the same moment as `counters_reset_at` (unix
+  seconds) in `PUT /v1/limits`, through the same push and self-healing
+  reconcile as the caps, and applies it to its own hourly and rolling
+  24h counters. The bot sends the key only once a reset has happened,
+  so a vaultd that predates it keeps working until then (a reset
+  pushed to it is refused and stays pending; the bot's own counters
+  are reset either way).
+- `/delete` leaves the moment in place: it is a timestamp, no content.
+
 ## `/vault` says which knowledge roots it sees, and why not
 
 Production: `Anchor/Settings.md` (capital S) was invisible to vaultd,

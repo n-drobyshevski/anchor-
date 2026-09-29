@@ -252,3 +252,16 @@ async def test_bad_json_returns_400():
             data="not json",
         )
         assert resp.status == 400
+
+
+async def test_an_oversized_json_integer_is_a_400_not_a_500():
+    # Past Python's 4300-digit int conversion limit json.loads raises a
+    # plain ValueError, not JSONDecodeError; it must still read as bad JSON.
+    app = _build_app(_settings())
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/api/send",
+            headers={**SAME_ORIGIN_HEADERS, "Content-Type": "application/json"},
+            data='{"n": ' + "9" * 5000 + "}",
+        )
+        assert resp.status == 400

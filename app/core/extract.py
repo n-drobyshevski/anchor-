@@ -338,13 +338,13 @@ def build_input(
         lines.append("")
         lines.append("## Недавние реплики")
         lines.extend(
-            f"{'Пользователь' if row.role == 'user' else 'Anchor'}: {row.content}"
+            f"{'Пользователь' if row.role == 'user' else 'Echo'}: {row.content}"
             for row in context
         )
     lines.append("")
     lines.append("## Последний обмен")
     lines.append(f"Пользователь: {user_text}")
-    lines.append(f"Anchor: {assistant_text}")
+    lines.append(f"Echo: {assistant_text}")
     return "\n".join(lines)
 
 

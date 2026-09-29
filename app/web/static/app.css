@@ -1,4 +1,4 @@
-/* Anchor web chat: styles.
+/* Echo web chat: styles.
    Tokens on :root, redefined for dark under prefers-color-scheme.
    No `style=` attributes anywhere (grep-enforced) — everything here or
    set via CSSOM (element.style.x) from app.js, which the page's CSP
@@ -109,40 +109,47 @@
 
 :root {
   color-scheme: light dark;
-  /* Planner's clean palette: warm neutrals and one warm-stone accent.
+  /* The "wired" palette from the visual reference (docs/brand/README.md):
+     a white diagram sheet with black ink by day, a soft black screen with
+     phosphor green by night -- the mark's colours, toned down for
+     long reading. Neutral greys, softly
+     rounded corners, flat surfaces (the hairline carries the edge; only
+     popovers keep a shadow).
      --accent is the only accent (primary action, focus, active,
      selection); --danger is for errors, destructive actions and the
-     offline dot only. State is never shown by colour alone. */
-  --bg: #faf8f5;
+     offline dot only. Red and green are close for colour-blind eyes, so
+     state is never shown by colour alone. Contrast (WCAG): every
+     text/accent pair is >= 4.5:1. */
+  --bg: #f4f4f1;
   --surface: #ffffff;
-  --text: #292524;
-  --text-muted: #57514b;
-  --border: #e7e0d7;
-  --input-border: #e7e0d7;
-  --muted-fill: #f2ede7;
-  --muted-fill-text: #44403c;
-  --accent: #57534e;
+  --text: #0a0a0a;
+  --text-muted: #555753;
+  --border: #d6d6d0;
+  --input-border: #b9b9b2;
+  --muted-fill: #e9e9e4;
+  --muted-fill-text: #262626;
+  --accent: #146c34;
   --accent-text: #ffffff;
-  --focus: #57534e;
-  --bubble-user: #ede6dd;
-  --bubble-user-text: #292524;
+  --focus: #146c34;
+  --bubble-user: #e9e9e4;
+  --bubble-user-text: #0a0a0a;
   --bubble-bot: #ffffff;
-  --bubble-bot-text: #292524;
-  --bubble-muted: #f2ede7;
-  --bubble-muted-text: #44403c;
+  --bubble-bot-text: #0a0a0a;
+  --bubble-muted: #e9e9e4;
+  --bubble-muted-text: #262626;
   --danger: #a11414;
-  --dot-ok: #57534e;
-  --dot-warn: #a8a29e;
+  --dot-ok: #146c34;
+  --dot-warn: #9a9a94;
   --dot-bad: #a11414;
-  --chart-bar: #57534e;
-  --chart-bar-active: #292524;
-  --chart-grid: #e7e0d7;
-  --chart-empty: #e7e0d7;
-  --hairline: inset 0 0 0 1px rgb(41 37 36 / .10);
-  --shadow-soft: 0 1px 2px rgb(28 25 23 / .06), 0 4px 12px rgb(28 25 23 / .06);
-  --shadow-soft-lg: 0 2px 6px rgb(28 25 23 / .07), 0 12px 28px rgb(28 25 23 / .08);
-  --radius: 12px;
-  --radius-card: 16.8px;
+  --chart-bar: #146c34;
+  --chart-bar-active: #0a0a0a;
+  --chart-grid: #d6d6d0;
+  --chart-empty: #d6d6d0;
+  --hairline: inset 0 0 0 1px rgb(10 10 10 / .22);
+  --shadow-soft: 0 0 0 transparent;
+  --shadow-soft-lg: 0 6px 16px rgb(10 10 10 / .14);
+  --radius: 6px;
+  --radius-card: 10px;
   --radius-pill: 999px;
   --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
@@ -151,66 +158,66 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #1c1917;
-    --surface: #292524;
-    --text: #faf8f5;
-    --text-muted: #bcb3aa;
-    --border: #3a3531;
-    --input-border: #423c37;
-    --muted-fill: #3a3531;
-    --muted-fill-text: #faf8f5;
-    --accent: #a8a29e;
-    --accent-text: #292524;
-    --focus: #a8a29e;
-    --bubble-user: #3a3531;
-    --bubble-user-text: #faf8f5;
-    --bubble-bot: #292524;
-    --bubble-bot-text: #faf8f5;
-    --bubble-muted: #3a3531;
-    --bubble-muted-text: #faf8f5;
-    --danger: #fca5a5;
-    --dot-ok: #a8a29e;
-    --dot-warn: #78716c;
-    --dot-bad: #fca5a5;
-    --chart-bar: #a8a29e;
-    --chart-bar-active: #faf8f5;
-    --chart-grid: #3a3531;
-    --chart-empty: #3a3531;
-    --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
-    --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
-    --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
+    --bg: #161917;
+    --surface: #1d201e;
+    --text: #c8cbc4;
+    --text-muted: #999c95;
+    --border: #2d312e;
+    --input-border: #3b403c;
+    --muted-fill: #252926;
+    --muted-fill-text: #c8cbc4;
+    --accent: #56c882;
+    --accent-text: #161917;
+    --focus: #56c882;
+    --bubble-user: #252926;
+    --bubble-user-text: #c8cbc4;
+    --bubble-bot: #1d201e;
+    --bubble-bot-text: #c8cbc4;
+    --bubble-muted: #252926;
+    --bubble-muted-text: #c8cbc4;
+    --danger: #f2a3a3;
+    --dot-ok: #56c882;
+    --dot-warn: #6b6f6a;
+    --dot-bad: #f2a3a3;
+    --chart-bar: #56c882;
+    --chart-bar-active: #c8cbc4;
+    --chart-grid: #2d312e;
+    --chart-empty: #2d312e;
+    --hairline: inset 0 0 0 1px rgb(200 203 196 / .12);
+    --shadow-soft: 0 0 0 transparent;
+    --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .5);
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #1c1917;
-  --surface: #292524;
-  --text: #faf8f5;
-  --text-muted: #bcb3aa;
-  --border: #3a3531;
-  --input-border: #423c37;
-  --muted-fill: #3a3531;
-  --muted-fill-text: #faf8f5;
-  --accent: #a8a29e;
-  --accent-text: #292524;
-  --focus: #a8a29e;
-  --bubble-user: #3a3531;
-  --bubble-user-text: #faf8f5;
-  --bubble-bot: #292524;
-  --bubble-bot-text: #faf8f5;
-  --bubble-muted: #3a3531;
-  --bubble-muted-text: #faf8f5;
-  --danger: #fca5a5;
-  --dot-ok: #a8a29e;
-  --dot-warn: #78716c;
-  --dot-bad: #fca5a5;
-  --chart-bar: #a8a29e;
-  --chart-bar-active: #faf8f5;
-  --chart-grid: #3a3531;
-  --chart-empty: #3a3531;
-  --hairline: inset 0 0 0 1px rgb(250 248 245 / .10);
-  --shadow-soft: 0 1px 2px rgb(0 0 0 / .2), 0 4px 12px rgb(0 0 0 / .25);
-  --shadow-soft-lg: 0 2px 6px rgb(0 0 0 / .25), 0 12px 28px rgb(0 0 0 / .35);
+  --bg: #161917;
+  --surface: #1d201e;
+  --text: #c8cbc4;
+  --text-muted: #999c95;
+  --border: #2d312e;
+  --input-border: #3b403c;
+  --muted-fill: #252926;
+  --muted-fill-text: #c8cbc4;
+  --accent: #56c882;
+  --accent-text: #161917;
+  --focus: #56c882;
+  --bubble-user: #252926;
+  --bubble-user-text: #c8cbc4;
+  --bubble-bot: #1d201e;
+  --bubble-bot-text: #c8cbc4;
+  --bubble-muted: #252926;
+  --bubble-muted-text: #c8cbc4;
+  --danger: #f2a3a3;
+  --dot-ok: #56c882;
+  --dot-warn: #6b6f6a;
+  --dot-bad: #f2a3a3;
+  --chart-bar: #56c882;
+  --chart-bar-active: #c8cbc4;
+  --chart-grid: #2d312e;
+  --chart-empty: #2d312e;
+  --hairline: inset 0 0 0 1px rgb(200 203 196 / .12);
+  --shadow-soft: 0 0 0 transparent;
+  --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .5);
 }
 
 * { box-sizing: border-box; }
@@ -341,6 +348,8 @@ button, input, textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The containing block for #toast-region (ui/Shell.js). */
+  position: relative;
 }
 
 .icon {
@@ -475,7 +484,7 @@ button, input, textarea {
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-text);
 }
@@ -543,7 +552,7 @@ button, input, textarea {
   gap: 10px;
   min-height: 44px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   color: var(--text);
   text-decoration: none;
   font-size: 14px;
@@ -641,14 +650,14 @@ button, input, textarea {
 .role-user .bubble {
   background: var(--bubble-user);
   color: var(--bubble-user-text);
-  border-radius: 16px 16px 6px 16px;
+  border-radius: var(--radius-card);
 }
 
 .role-assistant .bubble {
   background: var(--bubble-bot);
   color: var(--bubble-bot-text);
   box-shadow: var(--hairline);
-  border-radius: 16px 16px 16px 6px;
+  border-radius: var(--radius-card);
 }
 
 /* System and check-in rows (canned replies, welfare notes, system
@@ -670,7 +679,7 @@ button, input, textarea {
 .msg-row[data-kind="checkin"] .bubble {
   min-height: 24px;
   padding: 3px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--bubble-muted);
   color: var(--bubble-muted-text);
   box-shadow: none;
@@ -917,6 +926,44 @@ button, input, textarea {
   gap: 14px;
 }
 
+/* Память: the tab strip (a .segmented group of role=tab buttons) and
+   each tab's body, a column of cards like .screen's own. */
+.memory-tabs { flex: none; }
+
+/* Three labels in a phone's width: each tab sized by its label, so
+   «Договорённости» fits whole. */
+.segmented.memory-tabs > button {
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-tabpanel,
+.memory-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* One-line add form under a list (Блокнот, Договорённости): the text
+   field takes the room, the select and button keep their size, and the
+   row wraps on a narrow screen. */
+.inline-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.inline-add input { flex: 1 1 12rem; min-width: 0; }
+.inline-add select { flex: 0 1 auto; }
+.inline-add .inline-error,
+.inline-add .char-counter { flex-basis: 100%; margin: 0; }
+
 /* Check-in only: from 900px up, two columns (the form | the chart and
    the journal) in a wider frame; every other panel stays one 42rem
    column. */
@@ -928,8 +975,9 @@ button, input, textarea {
   max-width: none;
 }
 
-.checkin-main,
-.checkin-side {
+/* Сегодня and Дневник: two columns of cards on a wide screen, one
+   stacked column below 900px. */
+.screen-column {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -937,7 +985,7 @@ button, input, textarea {
 }
 
 @media (min-width: 900px) {
-  .screen-checkin {
+  .screen-columns {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: start;
@@ -1216,6 +1264,21 @@ select:focus-visible {
 .role-assistant .bubble:focus-visible {
   box-shadow: var(--hairline), 0 0 0 3px color-mix(in oklab, var(--focus) 50%, transparent);
 }
+
+/* Claude write caps (State screen): label and range left, number right. */
+.limit-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.limit-input {
+  width: 6em;
+  text-align: right;
+}
+
+.limit-row .link-button { padding: 0; }
 
 /* ---------- Inputs ---------- */
 
@@ -1614,7 +1677,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 }
 
 .confirm-dialog::backdrop {
-  background: rgb(28 25 23 / .4);
+  background: rgb(10 10 10 / .5);
 }
 
 /* ---------- Check-in (screens/Checkin.js) ---------- */
@@ -1626,6 +1689,26 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   font-weight: 500;
   color: var(--text-muted);
 }
+
+/* A short bulleted list inside a card (the weekly review's wins,
+   misses, patterns and intentions). */
+.plain-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plain-list li::marker { color: var(--text-muted); }
+
+/* A decided review proposal's status, under its text: chip-sized, not
+   stretched across the stacked row. */
+.row-stacked > .status-chip { align-self: flex-start; }
+
+/* Фоновая работа's 24 ч / 7 дней switch: compact, beside the heading. */
+.segmented.digest-window { flex: none; }
+.segmented.digest-window > button { flex: none; height: 30px; padding: 0 10px; font-size: 13px; }
 
 .card h2[tabindex="-1"]:focus {
   outline: none;
@@ -1740,7 +1823,8 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
 }
 
 .radio-input:checked + .radio-face,
-.segmented > button[aria-pressed="true"] {
+.segmented > button[aria-pressed="true"],
+.segmented > button[aria-selected="true"] {
   background: var(--muted-fill);
   box-shadow: inset 0 0 0 1.5px var(--accent);
   font-weight: 600;
@@ -1852,7 +1936,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   max-width: 100%;
   overflow: visible;
   touch-action: pan-y;
-  border-radius: 6px;
+  border-radius: var(--radius);
 }
 
 .chart-svg:focus {

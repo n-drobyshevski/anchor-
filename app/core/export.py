@@ -35,6 +35,7 @@ from app.db.models import (
     Checkin,
     CheckinOrderResult,
     ClaudeChangeset,
+    ClaudeWriteLimit,
     IdleChange,
     IdleRun,
     InterestTopic,
@@ -154,6 +155,9 @@ EXPORTED_MODELS = (
     # out), this is a direct answer to "what did Claude change on my
     # behalf" -- ids, counts and times only, no path, no text.
     ClaudeChangeset,
+    # The user's own overrides of Claude's write caps: a name and a
+    # number each.
+    ClaudeWriteLimit,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

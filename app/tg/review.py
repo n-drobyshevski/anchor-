@@ -31,6 +31,7 @@ from app.core import clock as clock_module
 from app.core import orders as orders_module
 from app.core import persona_context as persona_context_module
 from app.core import review as review_module
+from app.core import review_actions
 from app.core.clock import Clock
 from app.core.outbound_gate import WEEKLY_REVIEW
 from app.core.outbound_send import build_outbound_messages
@@ -39,7 +40,6 @@ from app.core.spend import check_cap, priced
 from app.core.state import get_state
 from app.core.turn import CAP_REPLY_TEXT, NICKNAME_RNG, _complete_with_retries
 from app.core.voice import remember_nickname
-from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
 from app.llm.provider import LLMProvider
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard, send_reply
@@ -236,8 +236,10 @@ async def handle_decision_callback(
         return
 
     if action == "a":
+        # Adopts and queues the trial (app/core/review_actions.py, shared
+        # with the web's Дневник).
         async with sessionmaker() as session:
-            result = await amendments_module.adopt(session, settings, proposal_id, clock=clock)
+            result = await review_actions.adopt_amendment(session, settings, proposal_id, clock=clock)
         if result.status == "cap":
             await edit_keyboard(bot, chat_id, message_id, amendments_module.CAP_TEXT, None)
             return
@@ -245,13 +247,6 @@ async def handle_decision_callback(
             await edit_keyboard(bot, chat_id, message_id, STALE, None)
             return
         await edit_keyboard(bot, chat_id, message_id, amendments_module.CHECKING_TEXT, None)
-        async with sessionmaker() as session:
-            await enqueue_job(
-                session,
-                amendments_module.AMENDMENT_TRIAL,
-                {"amendment_id": result.amendment.id},
-                dedup_key=f"am:{result.amendment.id}",
-            )
         return
 
     if action == "r":

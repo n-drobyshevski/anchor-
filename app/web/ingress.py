@@ -71,9 +71,11 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # (app/tg/claude.py), both blocked for the reasons BLOCKED_COMMANDS
 # gives. `v:` is a vault hold's [Да]/[Нет, вернуть] (app/tg/vault.py):
 # accepting a rule or a mass forget is Telegram's alone (phase-8 plan
-# section 8), and hold messages are never sent to the web chat. A
-# tuple, because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:")
+# section 8), and hold messages are never sent to the web chat. `cw:`
+# is `/claude limits`' +/- keyboard, which only ever exists in Telegram
+# (the web app edits the same caps through its own card). A tuple,
+# because str.startswith takes one.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:")
 
 
 class BlockedCommand(Exception):
@@ -202,7 +204,7 @@ def build_callback_update(
                 "message_id": message_id,
                 "date": 0,
                 "chat": {"id": chat_id, "type": "private"},
-                "from": {"id": chat_id, "is_bot": True, "first_name": "Anchor"},
+                "from": {"id": chat_id, "is_bot": True, "first_name": "Echo"},
                 "text": text,
             },
             "chat_instance": "web",

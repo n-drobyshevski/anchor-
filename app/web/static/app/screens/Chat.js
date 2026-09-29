@@ -14,20 +14,12 @@ import { html } from '../html.js';
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiGet, apiPost } from '../api.js';
 import * as sse from '../sse.js';
-import { forceLogout, pushToast, reconnectBanner, registerPauseHandler, typing } from '../store.js';
+import { forceLogout, pushToast, reconnectBanner, typing } from '../store.js';
+import { clockTime, formatDateTime, retryText } from '../lib/format.js';
 import { Icon } from '../ui/Icon.js';
-import { Toasts } from '../ui/Toasts.js';
-
-function minutesText(retryAfterSeconds) {
-  const m = Math.max(1, Math.ceil((retryAfterSeconds || 60) / 60));
-  return `Слишком много попыток — попробуй через ${m} мин.`;
-}
 
 function formatTime(ts) {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return { short: `${hh}:${mm}`, full: d.toLocaleString('ru-RU') };
+  return { short: clockTime(ts), full: formatDateTime(ts) };
 }
 
 // These two read their own signal and nothing else -- module-level,
@@ -51,7 +43,7 @@ function ReconnectBanner() {
 }
 
 function TypingIndicator() {
-  return html`<p id="typing-indicator" hidden=${!typing.value}>Anchor печатает…</p>`;
+  return html`<p id="typing-indicator" hidden=${!typing.value}>Echo печатает…</p>`;
 }
 
 // Module-level (not inside Chat()) so its identity is stable across
@@ -130,6 +122,11 @@ export function Chat({ hidden = false } = {}) {
   const [, bump] = useReducer((n) => n + 1, 0);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [jumpDownVisible, setJumpDownVisible] = useState(false);
+  // The first history page failed to load: shows a retry row. The SSE
+  // gate stays closed (live events stay buffered) until it succeeds.
+  const [historyFailed, setHistoryFailed] = useState(false);
+  // True while this Chat is mounted (the mount effect below sets it).
+  const activeRef = useRef(false);
 
   // id (DB row id, or the sink's negative id) -> nothing; membership
   // alone backs dedupe, exactly like the old `rendered` Map's `.has`.
@@ -263,7 +260,7 @@ export function Chat({ hidden = false } = {}) {
       row.keyboardDisabled = false;
       bump();
     }
-    if (res.status === 429) pushToast(minutesText(res.data && res.data.retry_after));
+    if (res.status === 429) pushToast(retryText(res.data && res.data.retry_after));
     else pushToast('Не отправлено.');
   }
 
@@ -291,9 +288,10 @@ export function Chat({ hidden = false } = {}) {
   // A page of /api/history results, oldest-first. `initial` is the
   // very first page (append, then scroll down); every later page is
   // older messages loaded by scrolling up (prepend, preserving the
-  // reader's scroll position).
+  // reader's scroll position). Resolves false only when the request
+  // failed.
   async function loadHistory() {
-    if (historyLoadingRef.current || !hasMoreRef.current) return;
+    if (historyLoadingRef.current || !hasMoreRef.current) return true;
     historyLoadingRef.current = true;
     // `#log` is `aria-live="polite"`, and a history page can insert up
     // to 50 rows at once. `aria-busy` suppresses live-region
@@ -306,9 +304,13 @@ export function Chat({ hidden = false } = {}) {
       const res = await apiGet(`/api/history?${qs}`);
       if (res.status === 401) {
         forceLogout();
-        return;
+        return false;
       }
-      if (!res.ok || !res.data) return;
+      if (!res.ok || !res.data) {
+        if (initial) setHistoryFailed(true);
+        return false;
+      }
+      setHistoryFailed(false);
       const { messages, has_more } = res.data;
       hasMoreRef.current = !!has_more;
       if (messages.length) {
@@ -318,6 +320,14 @@ export function Chat({ hidden = false } = {}) {
         oldestIdRef.current = -1; // no history at all; stop the sentinel from refetching forever
         bump(); // lets the empty-state paragraph show
       }
+      // The first page, now in the log, opens sse.js's history gate:
+      // live events buffered until now replay *after* it -- whichever
+      // caller loaded it (the mount effect, «Повторить», or the top
+      // sentinel). Never for a mount that is already gone (a logout
+      // during the fetch), which would replay its buffered events into
+      // whatever is current.
+      if (initial && activeRef.current) sse.markHistoryReady();
+      return true;
     } finally {
       historyLoadingRef.current = false;
       setHistoryBusy(false);
@@ -445,19 +455,16 @@ export function Chat({ hidden = false } = {}) {
     composerRef.current.focus();
   }
 
+  async function retryHistory() {
+    const ok = await loadHistory();
+    if (ok && composerRef.current) composerRef.current.focus();
+  }
+
   function handleJumpDown() {
     const log = logRef.current;
     if (log) log.scrollTop = log.scrollHeight;
     setJumpDownVisible(false);
   }
-
-  // The toolbar's #pause-button (ui/Toolbar.js) sends `/out` through
-  // this screen's own sendMessage, exactly as #chat-header's button
-  // did: store.js's requestPause() calls whatever is registered here.
-  // Through a ref, so the handler is always this render's sendMessage.
-  const sendMessageRef = useRef(sendMessage);
-  sendMessageRef.current = sendMessage;
-  useEffect(() => registerPauseHandler(() => sendMessageRef.current('/out')), []);
 
   // enterChat(): resets every per-session piece of state and starts
   // loading history. Runs once per mount, i.e. once per login (Shell
@@ -468,9 +475,8 @@ export function Chat({ hidden = false } = {}) {
     pendingOwnRef.current = [];
     oldestIdRef.current = null;
     hasMoreRef.current = true;
-    // No sse.resetHistoryGate() call here (unlike the gate's own
-    // module comment for why it exists): main.js's `auth` effect calls
-    // sse.close() -- which now resets the gate itself -- synchronously
+    // No gate reset here: main.js's `auth` effect calls
+    // sse.close() -- which resets the gate itself -- synchronously
     // on every login/logout transition, strictly before this mount
     // effect can run. Resetting it again here would throw away exactly
     // the events sse.js buffered in the window between that connect()
@@ -478,20 +484,15 @@ export function Chat({ hidden = false } = {}) {
     bump();
     const unsubMessage = sse.onMessage(renderIncoming);
     const unsubEdit = sse.onEdit(applyEdit);
-    // Guards markHistoryReady() against a Chat that unmounts (a logout
-    // during the initial history fetch) before loadHistory() resolves --
-    // without it, a stale mount's IIFE would flip the gate open and
-    // replay its buffered events into whatever screen/session is
-    // current by the time the awaited fetch finally returns.
-    let cancelled = false;
+    // Guards loadHistory()'s markHistoryReady() against a Chat that
+    // unmounts (a logout during the initial fetch) before it resolves.
+    activeRef.current = true;
     (async () => {
-      await loadHistory();
-      if (cancelled) return;
-      sse.markHistoryReady();
-      if (composerRef.current) composerRef.current.focus();
+      const ok = await loadHistory();
+      if (activeRef.current && ok && composerRef.current) composerRef.current.focus();
     })();
     return () => {
-      cancelled = true;
+      activeRef.current = false;
       unsubMessage();
       unsubEdit();
     };
@@ -558,6 +559,14 @@ export function Chat({ hidden = false } = {}) {
 
       <main id="log" role="log" aria-live="polite" aria-relevant="additions" ref=${logRef} aria-busy=${historyBusy ? 'true' : 'false'}>
         <div id="top-sentinel" ref=${topSentinelRef}></div>
+        ${historyFailed
+          ? html`
+              <p class="empty-hint" role="alert">
+                Не удалось загрузить историю.
+                <button type="button" class="link-button" onClick=${retryHistory}>Повторить</button>
+              </p>
+            `
+          : null}
         ${messagesRef.current.map(
           (row) => html`<${MessageRow} key=${row.key} row=${row} onPress=${handlePress} />`,
         )}
@@ -570,8 +579,6 @@ export function Chat({ hidden = false } = {}) {
         <${Icon} name="arrow-down" size=${14} />
         Новые
       </button>
-
-      <${Toasts} />
 
       <form id="composer" ref=${composerFormRef} onSubmit=${onComposerSubmit}>
         <textarea

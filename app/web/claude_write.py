@@ -129,8 +129,13 @@ async def _local_day_start(session: AsyncSession, clock: Clock) -> datetime.date
     return clock_module.combine_local(today, datetime.time(0, 0), timezone)
 
 
+async def _counting_day_start(session: AsyncSession, clock: Clock) -> datetime.datetime:
+    """Local midnight, or the user's last counter reset if later."""
+    return limits.since(await _local_day_start(session, clock), await limits.counters_reset_at(session))
+
+
 async def _open_changeset(
-    session: AsyncSession, clock: Clock, connection_id: int
+    session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
 ) -> ClaudeChangeset:
     """The connection's current open write changeset: reused if the
     last write was under CHANGESET_IDLE ago, else freshly minted.
@@ -148,7 +153,12 @@ async def _open_changeset(
         .order_by(ClaudeChangeset.id.desc())
         .limit(1)
     )
-    if row is not None and now - row.last_write_at < limits.CHANGESET_IDLE:
+    reset_at = await limits.counters_reset_at(session)
+    if (
+        row is not None
+        and now - row.last_write_at < limits.CHANGESET_IDLE
+        and (reset_at is None or row.created_at >= reset_at)
+    ):
         return row
 
     count = await session.scalar(
@@ -157,10 +167,10 @@ async def _open_changeset(
         .where(
             ClaudeChangeset.connection_id == connection_id,
             ClaudeChangeset.kind == "write",
-            ClaudeChangeset.created_at >= now - datetime.timedelta(hours=1),
+            ClaudeChangeset.created_at >= limits.since(now - datetime.timedelta(hours=1), reset_at),
         )
     )
-    if count >= limits.CHANGESETS_PER_HOUR:
+    if count >= caps.changesets_per_hour:
         raise Refused("cap_changesets")
 
     new_row = ClaudeChangeset(
@@ -183,9 +193,15 @@ async def _open_changeset(
 
 
 async def _check_day_caps(
-    session: AsyncSession, clock: Clock, connection_id: int, *, new_bytes: int, is_create: bool
+    session: AsyncSession,
+    clock: Clock,
+    connection_id: int,
+    caps: limits.Limits,
+    *,
+    new_bytes: int,
+    is_create: bool,
 ) -> None:
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     totals = (
         await session.execute(
             select(func.coalesce(func.sum(ClaudeChangeset.bytes), 0), func.coalesce(func.sum(ClaudeChangeset.created), 0))
@@ -197,18 +213,20 @@ async def _check_day_caps(
         )
     ).one()
     bytes_so_far, creates_so_far = totals
-    if bytes_so_far + new_bytes > limits.BYTES_PER_CONNECTION_PER_DAY:
+    if bytes_so_far + new_bytes > caps.bytes_per_day:
         raise Refused("cap_bytes_day")
-    if is_create and creates_so_far >= limits.CREATES_PER_DAY:
+    if is_create and creates_so_far >= caps.creates_per_day:
         raise Refused("cap_creates")
 
 
-async def _check_day_folder_cap(session: AsyncSession, clock: Clock, connection_id: int) -> None:
+async def _check_day_folder_cap(
+    session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
+) -> None:
     """Rev. 3's FOLDERS_PER_DAY, fast-rejected the same way
     `_check_day_caps` rejects CREATES_PER_DAY -- a local check against
     the ledger's sum so far, before ever calling vaultd. vaultd enforces
     the authoritative copy of this same cap on its own changeset."""
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     folders_so_far = await session.scalar(
         select(func.coalesce(func.sum(ClaudeChangeset.folders), 0)).where(
             ClaudeChangeset.connection_id == connection_id,
@@ -216,13 +234,15 @@ async def _check_day_folder_cap(session: AsyncSession, clock: Clock, connection_
             ClaudeChangeset.created_at >= day_start,
         )
     )
-    if folders_so_far >= limits.FOLDERS_PER_DAY:
+    if folders_so_far >= caps.folders_per_day:
         raise Refused("cap_folders_day")
 
 
-async def _check_day_move_cap(session: AsyncSession, clock: Clock, connection_id: int) -> None:
+async def _check_day_move_cap(
+    session: AsyncSession, clock: Clock, connection_id: int, caps: limits.Limits
+) -> None:
     """Rev. 3's MOVES_PER_DAY, same shape as `_check_day_folder_cap`."""
-    day_start = await _local_day_start(session, clock)
+    day_start = await _counting_day_start(session, clock)
     moves_so_far = await session.scalar(
         select(func.coalesce(func.sum(ClaudeChangeset.moves), 0)).where(
             ClaudeChangeset.connection_id == connection_id,
@@ -230,7 +250,7 @@ async def _check_day_move_cap(session: AsyncSession, clock: Clock, connection_id
             ClaudeChangeset.created_at >= day_start,
         )
     )
-    if moves_so_far >= limits.MOVES_PER_DAY:
+    if moves_so_far >= caps.moves_per_day:
         raise Refused("cap_moves_day")
 
 
@@ -273,13 +293,14 @@ async def update_note(
     base_hash: str,
 ) -> dict:
     body_bytes = new_body.encode("utf-8")
-    row = await _open_changeset(session, clock, connection_id)
+    caps = await limits.effective(session)
+    row = await _open_changeset(session, clock, connection_id, caps)
     try:
         if len(body_bytes) > limits.BYTES_PER_FILE:
             raise Refused("cap_bytes_file")
         _check_content(new_body)
-        await _check_day_caps(session, clock, connection_id, new_bytes=len(body_bytes), is_create=False)
-        if row.files >= limits.FILES_PER_CHANGESET:
+        await _check_day_caps(session, clock, connection_id, caps, new_bytes=len(body_bytes), is_create=False)
+        if row.files >= caps.files_per_changeset:
             raise Refused("cap_files")
         try:
             result = await client.put_knowledge(path, new_body, base_hash, row.vault_ref)
@@ -306,7 +327,8 @@ async def create_note(
     title: str,
     body: str,
 ) -> dict:
-    row = await _open_changeset(session, clock, connection_id)
+    caps = await limits.effective(session)
+    row = await _open_changeset(session, clock, connection_id, caps)
     try:
         filename = sanitize_title(title)
         path = f"{sanitize_folder(folder)}/{filename}"
@@ -314,12 +336,12 @@ async def create_note(
         if len(body_bytes) > limits.BYTES_PER_FILE:
             raise Refused("cap_bytes_file")
         _check_content(body)
-        await _check_day_caps(session, clock, connection_id, new_bytes=len(body_bytes), is_create=True)
-        if row.files >= limits.FILES_PER_CHANGESET:
+        await _check_day_caps(session, clock, connection_id, caps, new_bytes=len(body_bytes), is_create=True)
+        if row.files >= caps.files_per_changeset:
             raise Refused("cap_files")
-        if row.folders >= limits.FOLDERS_PER_CHANGESET:
+        if row.folders >= caps.folders_per_changeset:
             raise Refused("cap_folders")
-        await _check_day_folder_cap(session, clock, connection_id)
+        await _check_day_folder_cap(session, clock, connection_id, caps)
         try:
             result = await client.put_knowledge(path, body, None, row.vault_ref)
         except VaultError as exc:
@@ -347,7 +369,8 @@ async def rename_note(
     new_path: str,
     base_hash: str,
 ) -> dict:
-    row = await _open_changeset(session, clock, connection_id)
+    caps = await limits.effective(session)
+    row = await _open_changeset(session, clock, connection_id, caps)
     try:
         # Rev. 3: a rename spends its own budget (moves), never the
         # content-write one (files) -- the moved note plus its
@@ -358,12 +381,12 @@ async def rename_note(
         # per-changeset budget spent; it is not an exact precheck of
         # this call's own file count, which the bot cannot know before
         # vaultd resolves the backlinks.
-        if row.moves >= limits.MOVE_FILES_PER_CHANGESET:
+        if row.moves >= caps.move_files_per_changeset:
             raise Refused("cap_moves")
-        if row.folders >= limits.FOLDERS_PER_CHANGESET:
+        if row.folders >= caps.folders_per_changeset:
             raise Refused("cap_folders")
-        await _check_day_move_cap(session, clock, connection_id)
-        await _check_day_folder_cap(session, clock, connection_id)
+        await _check_day_move_cap(session, clock, connection_id, caps)
+        await _check_day_folder_cap(session, clock, connection_id, caps)
         try:
             result = await client.rename_knowledge(path, new_path, base_hash, row.vault_ref)
         except VaultError as exc:
@@ -494,10 +517,11 @@ async def undo_changeset(
         .where(
             ClaudeChangeset.connection_id == connection_id,
             ClaudeChangeset.kind == "undo",
-            ClaudeChangeset.created_at >= clock.now_utc() - datetime.timedelta(hours=1),
+            ClaudeChangeset.created_at
+            >= limits.since(clock.now_utc() - datetime.timedelta(hours=1), await limits.counters_reset_at(session)),
         )
     )
-    if count >= limits.UNDOS_PER_HOUR:
+    if count >= (await limits.effective(session)).undos_per_hour:
         raise Refused("cap_undos")
     try:
         result = await client.undo_changeset(row.vault_ref)

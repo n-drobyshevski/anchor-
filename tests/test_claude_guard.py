@@ -113,6 +113,10 @@ def test_hook_protocol_exit_code():
         "mcp__claude_ai_Anchor__get_journal",
         "mcp__anchor_2__get_memory",
         "mcp__Anchor__initialize_anything",
+        # The renamed connector (Echo) is the same connector.
+        "mcp__Echo__get_journal",
+        "mcp__claude_ai_Echo__search_library",
+        "mcp__echo_2__anything",
         "mcp__ANCHOR__get_state",
         # A connector renamed to something else is caught by its tools.
         "mcp__Renamed__get_dialogs",
@@ -188,6 +192,7 @@ def test_settings_deny_the_connector_and_route_every_mcp_tool_through_the_hook()
     settings = json.loads((HOOK.parent.parent / "settings.json").read_text())
     deny = settings["permissions"]["deny"]
     assert "mcp__Anchor" in deny and "mcp__claude_ai_Anchor" in deny
+    assert "mcp__Echo" in deny and "mcp__claude_ai_Echo" in deny
     assert "mcp__anc" in deny and "mcp__claude_ai_anc" in deny
     matchers = [entry["matcher"] for entry in settings["hooks"]["PreToolUse"]]
     assert any("mcp__.*" in matcher.split("|") for matcher in matchers)

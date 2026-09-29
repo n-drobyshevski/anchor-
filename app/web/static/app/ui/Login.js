@@ -8,11 +8,7 @@ import { html } from '../html.js';
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { apiPost } from '../api.js';
 import { auth } from '../store.js';
-
-function minutesText(retryAfterSeconds) {
-  const m = Math.max(1, Math.ceil((retryAfterSeconds || 60) / 60));
-  return `Слишком много попыток — попробуй через ${m} мин.`;
-}
+import { retryText } from '../lib/format.js';
 
 export function Login({ stage }) {
   const passphraseRef = useRef(null);
@@ -55,7 +51,7 @@ export function Login({ stage }) {
     } else if (res.status === 401) {
       setPassphraseError('Неверный пароль или код.');
     } else if (res.status === 429) {
-      setPassphraseError(minutesText(res.data && res.data.retry_after));
+      setPassphraseError(retryText(res.data && res.data.retry_after));
     } else {
       setPassphraseError('Что-то пошло не так. Попробуй ещё раз.');
     }
@@ -74,7 +70,7 @@ export function Login({ stage }) {
     } else if (res.status === 401) {
       setCodeError('Неверный пароль или код.');
     } else if (res.status === 429) {
-      setCodeError(minutesText(res.data && res.data.retry_after));
+      setCodeError(retryText(res.data && res.data.retry_after));
     } else {
       setCodeError('Что-то пошло не так. Попробуй ещё раз.');
     }
@@ -89,7 +85,7 @@ export function Login({ stage }) {
         hidden=${stage === 'code'}
         onSubmit=${onPassphraseSubmit}
       >
-        <h1>Anchor</h1>
+        <h1>Echo</h1>
         <p class="login-hint">Введи пароль.</p>
         <label for="passphrase-input" class="sr-only">Пароль</label>
         <input
@@ -115,7 +111,7 @@ export function Login({ stage }) {
         hidden=${stage !== 'code'}
         onSubmit=${onCodeSubmit}
       >
-        <h1>Anchor</h1>
+        <h1>Echo</h1>
         <p class="login-hint">Код отправлен в Telegram.</p>
         <label for="code-input" class="sr-only">Код</label>
         <input

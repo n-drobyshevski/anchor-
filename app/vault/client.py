@@ -255,6 +255,13 @@ def _parse_time(value: Any) -> datetime.datetime | None:
     return parsed
 
 
+def _limit_values(data: dict) -> dict[str, int]:
+    values = data.get("values")
+    _require(isinstance(values, dict))
+    _require(all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) for k, v in values.items()))
+    return values
+
+
 class VaultClient:
     def __init__(self, base_url: str, token: str, *, opener: SessionOpener = open_session) -> None:
         self._base = base_url.strip().rstrip("/")
@@ -354,6 +361,16 @@ class VaultClient:
         deleted = data.get("deleted")
         _require(isinstance(deleted, int) and not isinstance(deleted, bool))
         return deleted
+
+    async def get_limits(self) -> dict[str, int]:
+        """vaultd's copy of Claude's write caps (`GET /v1/limits`)."""
+        return _limit_values(await self._request("GET", "/v1/limits"))
+
+    async def put_limits(self, values: dict[str, int]) -> dict[str, int]:
+        """Replace vaultd's copy of Claude's write caps (`PUT /v1/limits`).
+        `values` is the full set: a key left out goes back to vaultd's
+        default. Returns what vaultd now holds."""
+        return _limit_values(await self._request("PUT", "/v1/limits", body=values))
 
     # -- knowledge: the class boundary Claude cannot cross (W2b) ------------
 

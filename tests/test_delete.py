@@ -25,6 +25,7 @@ from app.db.models import (
     Obligation,
     AccessGrant,
     ClaudeChangeset,
+    ClaudeWriteLimit,
     OauthConnection,
     OauthRequest,
     OauthToken,
@@ -380,6 +381,8 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     created_at=now,
                     last_write_at=now,
                 ),
+                # A user-set override of one of Claude's write caps.
+                ClaudeWriteLimit(name="creates_per_day", value=5, updated_at=now),
             ]
         )
         # Phase 5: an open debt.
