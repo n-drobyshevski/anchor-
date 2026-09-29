@@ -31,23 +31,12 @@ export async function logout() {
   forceLogout();
 }
 
-// The toolbar's «Пауза» (ui/Toolbar.js) sends `/out` exactly as it did
-// from #chat-header: through Chat's own sendMessage, so it still shows
-// as an optimistic own message and goes through POST /api/send. Chat
-// is always mounted while logged in (ui/Shell.js), and registers its
-// handler on mount; requestPause() before that is a no-op.
-let pauseHandler = null;
-
-export function registerPauseHandler(fn) {
-  pauseHandler = fn;
-  return () => {
-    if (pauseHandler === fn) pauseHandler = null;
-  };
-}
-
-export function requestPause() {
-  if (pauseHandler) pauseHandler();
-}
+// Whether the persona is paused (StateDTO.paused): null until the
+// first GET /api/state lands. Kept app-wide by main.js (after login,
+// on invalidate("state"), on tab focus) and by the State screen's own
+// loads, so the toolbar's pause/resume button (ui/Toolbar.js) shows
+// the right action on every screen, not only on Сегодня.
+export const paused = signal(null);
 
 // An optional second line under the toolbar's screen title (for
 // State: «следующее сообщение ~HH:MM»). The screen that sets it clears
@@ -64,6 +53,10 @@ export const reconnectBanner = signal(false);
 // The current hash route (e.g. '#/chat'), kept for router.js and any
 // screen that wants to know it. See router.js for how it is written.
 export const route = signal(location.hash || '#/chat');
+
+// The optional query after the route (`tab=notebook` in
+// `#/memory?tab=notebook`), written by router.js.
+export const routeQuery = signal('');
 
 // Toast queue, oldest first: [{id, text}]. Toasts.js renders it and
 // nothing else mutates it directly -- always go through pushToast().
@@ -102,14 +95,14 @@ export function pushToast(text) {
 export const invalidate = signal(null);
 
 // 1 when a proposal is awaiting a decision, 0 otherwise -- the
-// switcher's pip and the «Предложения» item's count
+// switcher's pip and the «Сегодня» item's count
 // (ui/SurfaceSwitcher.js). Populated from two places, both
 // GET /api/proposals responses: main.js, right after login and on
 // every SSE invalidate("proposals") *regardless of which screen is
 // open* (the plan's "not only when the screen is open" rule -- a
 // proposal raised while the user sits on #/chat still needs to show
-// up here), and screens/Proposals.js's own reload while that screen is
-// mounted, which would otherwise wait on a second, redundant
+// up here), and screens/today/proposals.js's own loads while Сегодня or
+// Дневник is mounted, which would otherwise wait on a second, redundant
 // round-trip from main.js's listener for the exact same event.
 export const proposalsBadge = signal(0);
 

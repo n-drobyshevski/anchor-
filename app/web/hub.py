@@ -44,7 +44,7 @@ MAX_SUBSCRIBERS = 3
 # shipping quietly. app/web/tail.py's STATE_CHANGE_FIELD_TOPIC is the
 # one producer in this track that publishes through here; no W1 screen
 # consumes it yet (tests cover the wire format only).
-INVALIDATE_TOPICS = frozenset({"state", "memory", "proposals", "checkin", "cards"})
+INVALIDATE_TOPICS = frozenset({"state", "memory", "proposals", "checkin", "cards", "debts", "notebook", "orders", "review", "settings"})
 
 # A sentinel distinct from `None`, which is itself a meaningful value for
 # `keyboard` (an edit that *clears* the buttons). publish_edit() uses this

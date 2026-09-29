@@ -49,6 +49,7 @@ import argparse
 import asyncio
 import contextlib
 import datetime
+import json
 import os
 import random
 import ssl
@@ -252,6 +253,41 @@ async def seed_history(raw_url: str) -> None:
                 "INSERT INTO journal (local_date, text) VALUES ($1, $2)",
                 today - datetime.timedelta(days=back), text,
             )
+        # A weekly review with one standing-order proposal (and its
+        # proposed order) for Дневник's «Обзор недели» card.
+        review_id = await conn.fetchval(
+            "INSERT INTO weekly_review (week_start, analysis) VALUES ($1, $2::jsonb) RETURNING id",
+            today - datetime.timedelta(days=today.weekday()),
+            json.dumps({
+                "wins": ["Гулял пять дней из семи."],
+                "misses": ["Дважды лёг после часа ночи."],
+                "patterns": ["К пятнице устаёт сильнее."],
+                "intentions": ["Ложиться до полуночи."],
+                "proposals": [],
+            }),
+        )
+        proposal_id = await conn.fetchval(
+            "INSERT INTO review_proposal (review_id, kind, text, reason) "
+            "VALUES ($1, 'standing_order', 'Выключать экран в 23:30', 'сон страдает') RETURNING id",
+            review_id,
+        )
+        await conn.execute(
+            "INSERT INTO standing_order (text, cadence, status, source, review_proposal_id) "
+            "VALUES ('Выключать экран в 23:30', 'daily', 'proposed', 'review', $1)",
+            proposal_id,
+        )
+        # One undoable idle run for Настройки's «Фоновая работа» card.
+        await conn.execute(
+            "INSERT INTO idle_run (kind, local_date, status, reversible, summary) "
+            "VALUES ('consolidate', $1, 'done', true, $2::jsonb)",
+            today, json.dumps({"merged": 2, "contradicted": 0}),
+        )
+        # Two open debts for Сегодня's «Долги» card.
+        await conn.execute(
+            "INSERT INTO obligation (text, kind, source, opened_at) VALUES "
+            "('Позвонить в банк', 'promised', 'proposal', now() - interval '2 days'), "
+            "('Дочитать главу', 'promised', 'proposal', now() - interval '1 day')"
+        )
     finally:
         await conn.close()
 
@@ -498,15 +534,30 @@ async def scenario_chat(page, ctx: Ctx) -> None:
 
 
 async def _goto_screen(page, ctx: Ctx, route: str) -> bool:
-    """Navigates to `route` via the nav bar (never a raw location.hash
-    assignment, so this exercises router.js the way a user would).
-    Returns False (and records nothing as a failure) if the route is
-    not in the nav at all.
+    """Navigates to `route` via the section switcher (never a raw
+    location.hash assignment, so this exercises router.js the way a
+    user would): open #surface-button's menu, click the item. Returns
+    False (and records nothing as a failure) if the route is not in the
+    menu at all.
     """
-    link = page.locator(f'#nav a[href="{route}"]')
-    if await link.count() == 0:
+    if await page.locator("#surface-button").count() == 0:
         return False
-    await link.first.click()
+    if await page.locator(f'#surface-menu a[href="{route}"]').count() == 0:
+        return False
+    link = page.locator(f'#surface-menu a[href="{route}"]').first
+    # The menu closes as soon as focus leaves it, and a screen can move
+    # focus on its own a moment after an action (the check-in section
+    # focuses its heading once a submit's reload lands) -- so open it
+    # and click, retrying if it closed in between.
+    for attempt in range(3):
+        if await page.locator("#surface-menu").is_hidden():
+            await page.locator("#surface-button").click()
+        try:
+            await link.click(timeout=2_000)
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 2:
+                raise
     await page.wait_for_function(
         "route => location.hash === route", arg=route, timeout=5_000
     )
@@ -516,11 +567,11 @@ async def _goto_screen(page, ctx: Ctx, route: str) -> bool:
 
 async def scenario_nav_screens(page, ctx: Ctx) -> None:
     for route, selector in (
+        ("#/today", ".screen-today"),
         ("#/chat", "#chat"),
-        ("#/state", ".screen-state"),
         ("#/memory", ".screen-memory"),
-        ("#/proposals", ".screen"),
-        ("#/checkin", ".screen"),
+        ("#/journal", ".screen-journal"),
+        ("#/settings", ".screen-settings"),
     ):
         present = await _goto_screen(page, ctx, route)
         if not present:
@@ -535,10 +586,10 @@ async def scenario_nav_screens(page, ctx: Ctx) -> None:
 
 
 async def scenario_state_due_action(page, ctx: Ctx) -> None:
-    if not await _goto_screen(page, ctx, "#/state"):
-        ctx.fail("#/state missing from nav; cannot run the State panel action")
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail("#/today missing from nav; cannot run the State panel action")
         return
-    await page.wait_for_selector(".screen-state", state="visible", timeout=10_000)
+    await page.wait_for_selector(".screen-today", state="visible", timeout=10_000)
 
     sent_before = ctx.harness.sent_count
     edit_button = page.locator('button[aria-label="Изменить действие на сегодня"]')
@@ -546,12 +597,13 @@ async def scenario_state_due_action(page, ctx: Ctx) -> None:
     await edit_button.click()
 
     due_text = f"e2e due action {datetime.datetime.now(datetime.timezone.utc):%H:%M:%S}"
-    textarea = page.locator(".screen-state textarea.field-edit")
+    due_card = page.locator('.screen-today section[aria-labelledby="due-heading"]')
+    textarea = due_card.locator("textarea.field-edit")
     await textarea.fill(due_text)
-    await page.locator(".screen-state button.btn-primary", has_text="Сохранить").click()
+    await due_card.locator("button.btn-primary", has_text="Сохранить").click()
 
     try:
-        await page.locator(".screen-state .field-value", has_text=due_text).wait_for(
+        await due_card.locator(".field-value", has_text=due_text).wait_for(
             state="visible", timeout=10_000
         )
         ctx.ok("State: set due-today action")
@@ -566,6 +618,178 @@ async def scenario_state_due_action(page, ctx: Ctx) -> None:
     else:
         ctx.ok("State panel write sent nothing to Telegram")
     ctx.did_state_action = True
+
+
+async def scenario_debts_and_intensity(page, ctx: Ctx) -> None:
+    """Сегодня: close a seeded debt with «Сделано». Настройки: set the
+    intensity dial. Both silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail("#/today missing from nav; cannot run the debts action")
+        return
+    sent_before = ctx.harness.sent_count
+    row = page.locator("#debts-card li", has_text="Позвонить в банк")
+    try:
+        await row.wait_for(state="visible", timeout=10_000)
+        await row.locator("button", has_text="Сделано").click()
+        await row.wait_for(state="detached", timeout=10_000)
+        ctx.ok("Debts: closed a debt from Сегодня")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Debts close did not remove the row: {exc}")
+
+    if not await _goto_screen(page, ctx, "#/settings"):
+        ctx.fail("#/settings missing from nav; cannot run the intensity action")
+        return
+    try:
+        button = page.locator('.screen-settings section[aria-labelledby="intensity-heading"] button', has_text="4")
+        await button.click()
+        await page.wait_for_function(
+            """() => {
+                const b = [...document.querySelectorAll('section[aria-labelledby="intensity-heading"] button')]
+                    .find((el) => el.textContent.trim() === '4');
+                return b && b.getAttribute('aria-pressed') === 'true';
+            }""",
+            timeout=10_000,
+        )
+        ctx.ok("Settings: set intensity to 4")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Intensity did not change: {exc}")
+
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("debts/intensity writes caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("debts/intensity writes sent nothing to Telegram")
+
+
+async def scenario_memory_tabs(page, ctx: Ctx) -> None:
+    """Память's Блокнот and Договорённости tabs: add an intention, add
+    an order and retire it again (the seeded order stays, the check-in
+    scenarios answer it). All silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/memory"):
+        ctx.fail("#/memory missing from nav; cannot run the tab actions")
+        return
+    sent_before = ctx.harness.sent_count
+    stamp = f"{datetime.datetime.now(datetime.timezone.utc):%H%M%S}"
+    try:
+        await page.click("#memory-tab-notebook")
+        await page.wait_for_function("() => location.hash === '#/memory?tab=notebook'", timeout=5_000)
+        intention = f"e2e намерение {stamp}"
+        await page.fill("#notebook-add", intention)
+        await page.locator("form.inline-add button", has_text="Добавить").click()
+        await page.locator("#memory-tabpanel li", has_text=intention).wait_for(state="visible", timeout=10_000)
+        ctx.ok("Notebook: added an intention")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Notebook add did not appear: {exc}")
+    await page.screenshot(path=str(ctx.screenshot_path("memory_notebook")))
+
+    try:
+        await page.click("#memory-tab-orders")
+        order = f"e2e договорённость {stamp}"
+        await page.fill("#order-add", order)
+        await page.select_option("#order-cadence", "weekly:3")
+        await page.locator("form.inline-add button", has_text="Добавить").click()
+        row = page.locator("#memory-tabpanel li", has_text=order)
+        await row.wait_for(state="visible", timeout=10_000)
+        await page.screenshot(path=str(ctx.screenshot_path("memory_orders")))
+        await row.locator("button", has_text="Снять").click()
+        await page.locator("dialog.confirm-dialog button.btn-danger", has_text="Снять").click()
+        await row.wait_for(state="detached", timeout=10_000)
+        ctx.ok("Orders: added a weekly order and retired it")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Orders add/retire failed: {exc}")
+
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("notebook/orders writes caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("notebook/orders writes sent nothing to Telegram")
+
+
+async def scenario_review(page, ctx: Ctx) -> None:
+    """Дневник: the seeded weekly review shows, and its order proposal
+    is accepted from the web. Silent in Telegram."""
+    if not await _goto_screen(page, ctx, "#/journal"):
+        ctx.fail("#/journal missing from nav; cannot run the review action")
+        return
+    sent_before = ctx.harness.sent_count
+    card = page.locator("#review-card")
+    try:
+        await card.locator("li", has_text="Гулял пять дней").wait_for(state="visible", timeout=10_000)
+        row = card.locator("li", has_text="Выключать экран в 23:30")
+        await row.locator("button", has_text="Принять").click()
+        await row.locator(".status-chip", has_text="принято").wait_for(state="visible", timeout=10_000)
+        ctx.ok("Review: accepted the order proposal from Дневник")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Review card / accept failed: {exc}")
+    await page.screenshot(path=str(ctx.screenshot_path("journal_review")))
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("review decision caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("review decision sent nothing to Telegram")
+
+
+async def scenario_digest_undo(page, ctx: Ctx) -> None:
+    """Настройки: the seeded idle run is listed under «Фоновая работа»
+    and undone from the web; 7 дней switches the window. Silent in
+    Telegram."""
+    if not await _goto_screen(page, ctx, "#/settings"):
+        ctx.fail("#/settings missing from nav; cannot run the digest action")
+        return
+    sent_before = ctx.harness.sent_count
+    card = page.locator('section[aria-labelledby="digest-heading"]')
+    try:
+        row = card.locator("li", has_text="Память: объединено 2")
+        await row.wait_for(state="visible", timeout=10_000)
+        await card.locator("button", has_text="7 дней").click()
+        await card.locator("p", has_text="Фоновая работа за 7 дн.").wait_for(state="visible", timeout=10_000)
+        await page.screenshot(path=str(ctx.screenshot_path("settings_digest")))
+        await card.locator("li", has_text="Память: объединено 2").locator("button", has_text="Отменить").click()
+        await card.locator("li", has_text="Память: объединено 2").wait_for(state="detached", timeout=10_000)
+        ctx.ok("Digest: undid an idle run from Настройки")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"Digest undo failed: {exc}")
+    if ctx.harness.sent_count != sent_before:
+        ctx.fail("digest undo caused a Telegram Bot API send (must be silent)")
+    else:
+        ctx.ok("digest undo sent nothing to Telegram")
+
+
+async def scenario_integrations_render(page, ctx: Ctx) -> None:
+    """Настройки's «Подключения» card, with every integration on. The
+    harness runs with vault/planner/Claude off (the card is hidden
+    then), so GET /api/settings is answered here with a synthetic body:
+    this checks the card renders each section and that turning notes
+    off asks first -- the endpoints themselves are covered by
+    tests/test_web_panel_settings.py."""
+    body = {
+        "vault": {"mode": "sync", "notes_consent": True, "knowledge_enabled": True,
+                  "last_ok_at": None, "last_unavailable_at": None},
+        "planner": {"linked": True, "status": "active", "enabled": True},
+        "claude": {"connected": True, "expires_at": "2026-12-01T10:00:00+00:00",
+                   "library_read": True, "library_write": False},
+        "idle": {"enabled": True, "undo_days": 7},
+    }
+
+    async def fulfil(route):
+        await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    await page.route("**/api/settings", fulfil)
+    try:
+        if not await _goto_screen(page, ctx, "#/settings"):
+            ctx.fail("#/settings missing from nav; cannot check the integrations card")
+            return
+        card = page.locator('section[aria-labelledby="integrations-heading"]')
+        await card.wait_for(state="visible", timeout=10_000)
+        for text in ("Заметки Obsidian", "Планер", "Claude"):
+            await card.locator(".row-title", has_text=text).wait_for(state="visible", timeout=5_000)
+        await card.locator('button[aria-labelledby="notes-switch-label"]').click()
+        dialog = page.locator("dialog.confirm-dialog", has_text="Перестать читать заметки?")
+        await dialog.wait_for(state="visible", timeout=5_000)
+        await page.screenshot(path=str(ctx.screenshot_path("settings_integrations")))
+        await dialog.locator("button", has_text="Отмена").click()
+        ctx.ok("Settings: integrations card renders; notes off asks first")
+    except Exception as exc:  # noqa: BLE001
+        ctx.fail(f"integrations card did not render as expected: {exc}")
+    finally:
+        await page.unroute("**/api/settings", fulfil)
 
 
 async def scenario_memory_add(page, ctx: Ctx) -> None:
@@ -620,8 +844,8 @@ async def _checkin_once(
     arrive in #/chat over SSE, and verify it in the database. Failures
     go to ctx.fail (real failures -- the screen exists now)."""
     harness = ctx.harness
-    if not await _goto_screen(page, ctx, "#/checkin"):
-        ctx.fail(f"{step}: #/checkin missing from nav")
+    if not await _goto_screen(page, ctx, "#/today"):
+        ctx.fail(f"{step}: #/today missing from nav")
         return
     if redo:
         redo_button = page.locator(".screen button", has_text="Пройти заново")
@@ -657,7 +881,7 @@ async def _checkin_once(
     # Either the in-flight state or (if the worker already finished) the
     # done summary -- never the form with an error.
     try:
-        await page.locator(".screen", has_text="Anchor ответит в чате").or_(
+        await page.locator(".screen", has_text="Echo ответит в чате").or_(
             page.locator(".screen", has_text="Чек-ин на сегодня пройден")
         ).first.wait_for(state="visible", timeout=10_000)
     except Exception as exc:  # noqa: BLE001
@@ -718,7 +942,7 @@ async def _checkin_once(
         ctx.ok(f"{step}: finished in the DB (rating, due, note, streak {row['streak']})")
 
     # Back on the screen: the done summary, with the note if any.
-    await _goto_screen(page, ctx, "#/checkin")
+    await _goto_screen(page, ctx, "#/today")
     try:
         await page.locator(".screen", has_text="Чек-ин на сегодня пройден").wait_for(
             state="visible", timeout=10_000
@@ -727,9 +951,9 @@ async def _checkin_once(
             await page.locator(".checkin-summary", has_text=note).wait_for(
                 state="visible", timeout=10_000
             )
-        ctx.ok(f"{step}: #/checkin shows the done summary")
+        ctx.ok(f"{step}: #/today shows the done summary")
     except Exception as exc:  # noqa: BLE001
-        ctx.fail(f"{step}: #/checkin did not show the done summary: {exc}")
+        ctx.fail(f"{step}: #/today did not show the done summary: {exc}")
 
 
 async def scenario_checkin(page, ctx: Ctx) -> None:
@@ -750,18 +974,18 @@ async def scenario_checkin(page, ctx: Ctx) -> None:
 
 
 async def scenario_checkin_views(page, ctx: Ctx) -> None:
-    """Screenshots of #/checkin with the seeded history: the whole page,
+    """Screenshots of #/journal with the seeded history: the whole page,
     and the chart tooltip driven from the keyboard."""
-    if not await _goto_screen(page, ctx, "#/checkin"):
-        ctx.fail("#/checkin missing from nav")
+    if not await _goto_screen(page, ctx, "#/journal"):
+        ctx.fail("#/journal missing from nav")
         return
     try:
         await page.locator(".chart-svg").wait_for(state="visible", timeout=10_000)
         await page.locator(".journal-item").first.wait_for(state="visible", timeout=10_000)
         bars = await page.locator(".chart-svg .chart-bar, .chart-svg rect").count()
-        ctx.ok(f"#/checkin chart + journal rendered ({bars} rects)")
+        ctx.ok(f"#/journal chart + journal rendered ({bars} rects)")
     except Exception as exc:  # noqa: BLE001
-        ctx.fail(f"#/checkin chart/journal did not render: {exc}")
+        ctx.fail(f"#/journal chart/journal did not render: {exc}")
     # The app scrolls inside its own container, so full_page captures
     # only the viewport: grow the viewport to the content's height for
     # one whole-screen shot, then restore it.
@@ -783,7 +1007,7 @@ async def scenario_checkin_views(page, ctx: Ctx) -> None:
         await page.wait_for_timeout(200)
         tip = page.locator(".chart-tip")
         if not await tip.is_visible():
-            ctx.fail("#/checkin chart tooltip not visible after keyboard focus")
+            ctx.fail("#/journal chart tooltip not visible after keyboard focus")
         box = await page.locator(".chart").bounding_box()
         if box:
             await page.screenshot(
@@ -812,6 +1036,11 @@ async def run_pass(
         if do_actions:
             await scenario_state_due_action(page, ctx)
             await scenario_memory_add(page, ctx)
+            await scenario_debts_and_intensity(page, ctx)
+            await scenario_memory_tabs(page, ctx)
+            await scenario_review(page, ctx)
+            await scenario_digest_undo(page, ctx)
+            await scenario_integrations_render(page, ctx)
         await scenario_nav_screens(page, ctx)
         if do_actions:
             await scenario_checkin(page, ctx)

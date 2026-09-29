@@ -29,7 +29,24 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import proposal as proposal_core
-from app.db.models import Checkin, CheckinOrderResult, Journal, Memory, Message, StateChange
+from app.db.models import (
+    Checkin,
+    CheckinOrderResult,
+    IdleRun,
+    Journal,
+    Memory,
+    Message,
+    NotebookEntry,
+    OauthConnection,
+    Obligation,
+    PersonaAmendment,
+    PlannerCredential,
+    ReviewProposal,
+    StandingOrder,
+    StateChange,
+    UserState,
+    WeeklyReview,
+)
 from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
@@ -504,6 +521,77 @@ async def _tail_checkin_once(
     return current
 
 
+# --- the small fingerprints: debts, notebook, orders -> invalidate -------
+
+# Three tables that write no state_change row, each watched the same
+# way: (max id, count of live rows). A new row moves max id; closing
+# one (a debt paid or dropped, a notebook entry closed, an order
+# retired) drops the live count. Each topic's screen is one card or tab
+# on the web, so a pair is enough -- no need to diff rows.
+#
+#   debts    - app/core/obligations.py: /due, an accepted promise, the
+#              missed-check-in sweep open one; /paid closes one.
+#   notebook - app/core/notebook.py: /mind add, the reflect job, the
+#              weekly review, /mind's ✖, thread expiry.
+#   orders   - app/core/orders.py: /order, an accepted proposal, /orders'
+#              [Снять], the once-order expiry.
+#   settings - Настройки's switches and the idle digest: notes consent
+#              (/vault notes), the planner's sync switch (/planner),
+#              Claude's library switches (/claude library), and idle
+#              runs (a new one, or one undone).
+#   review   - app/core/review.py and amendments.py: a review stored or
+#              regenerated (new proposals, message_id set once sent),
+#              a proposal decided or expired, an amendment adopted,
+#              activated or revoked.
+SimpleFingerprint = tuple[int, ...]
+
+# topic -> the (model, live-row filter) pairs whose (max id, live
+# count) make up its fingerprint.
+_LIVE_ROWS = {
+    "debts": ((Obligation, Obligation.status == "open"),),
+    "notebook": ((NotebookEntry, NotebookEntry.active.is_(True)),),
+    "orders": ((StandingOrder, StandingOrder.status == "active"),),
+    "review": (
+        (WeeklyReview, WeeklyReview.message_id.is_not(None)),
+        (ReviewProposal, ReviewProposal.status == "pending"),
+        (PersonaAmendment, PersonaAmendment.status == "active"),
+    ),
+    "settings": (
+        (UserState, UserState.notes_consent.is_(True)),
+        (PlannerCredential, PlannerCredential.enabled.is_(True)),
+        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_read.is_(True)),
+        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_write.is_(True)),
+        (IdleRun, IdleRun.undone_at.is_(None)),
+    ),
+}
+
+
+async def _simple_fingerprint(session: AsyncSession, topic: str) -> SimpleFingerprint:
+    parts: list[int] = []
+    for model, live in _LIVE_ROWS[topic]:
+        result = await session.execute(select(func.max(model.id), func.count().filter(live)))
+        max_id, live_count = result.one()
+        parts.extend((max_id or 0, live_count or 0))
+    return tuple(parts)
+
+
+async def _simple_fingerprints(session: AsyncSession) -> dict[str, SimpleFingerprint]:
+    return {topic: await _simple_fingerprint(session, topic) for topic in _LIVE_ROWS}
+
+
+async def _tail_simple_once(
+    session: AsyncSession, hub: WebHub, fingerprints: dict[str, SimpleFingerprint]
+) -> dict[str, SimpleFingerprint]:
+    """One poll of every small fingerprint: publish_invalidate(topic)
+    exactly once for each one that moved, then return the new set. The
+    web's own writes to these tables also publish directly."""
+    current = await _simple_fingerprints(session)
+    for topic, fingerprint in current.items():
+        if fingerprint != fingerprints.get(topic):
+            hub.publish_invalidate(topic)
+    return current
+
+
 async def _tail_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     hub: WebHub,
@@ -512,6 +600,7 @@ async def _tail_loop(
     proposals_fingerprint: ProposalFingerprint,
     memory_fingerprint: MemoryFingerprint,
     checkin_fingerprint: CheckinFingerprint,
+    simple_fingerprints: dict[str, SimpleFingerprint],
 ) -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -530,6 +619,7 @@ async def _tail_loop(
                 checkin_fingerprint = await _tail_checkin_once(
                     session, hub, checkin_fingerprint
                 )
+                simple_fingerprints = await _tail_simple_once(session, hub, simple_fingerprints)
         except Exception as exc:  # noqa: BLE001 - a tail crash must never take the process down
             logger.warning("web tail failed", extra={"event": type(exc).__name__})
 
@@ -547,6 +637,7 @@ async def start_tail(
         proposals_fingerprint = await _proposals_fingerprint(session)
         memory_fingerprint = await _memory_fingerprint(session)
         checkin_fingerprint = await _checkin_fingerprint(session)
+        simple_fingerprints = await _simple_fingerprints(session)
     return asyncio.create_task(
         _tail_loop(
             sessionmaker,
@@ -556,6 +647,7 @@ async def start_tail(
             proposals_fingerprint,
             memory_fingerprint,
             checkin_fingerprint,
+            simple_fingerprints,
         ),
         name="anchor-web-tail",
     )

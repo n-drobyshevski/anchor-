@@ -647,3 +647,67 @@ async def test_post_pause_is_a_noop_when_already_in_the_requested_state(sessionm
             ).scalars()
         )
     assert rows == []
+
+
+# --- POST /api/state/intensity -----------------------------------------------
+
+
+async def test_state_carries_intensity_and_its_range(sessionmaker):
+    await _seed(sessionmaker, intensity=2)
+    bot, fake = make_bot()
+    app, _hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    async with TestClient(TestServer(app)) as client:
+        cookies = await _log_in(client, fake)
+        body = await (await _get(client, "/api/state", cookies=cookies)).json()
+    assert body["intensity"] == 2
+    assert (body["limits"]["intensity_min"], body["limits"]["intensity_max"]) == (1, 5)
+
+
+async def test_post_intensity_sets_it_with_source_web(sessionmaker):
+    await _seed(sessionmaker, awaiting="checkin_note", awaiting_ref=1)
+    bot, fake = make_bot()
+    app, hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    async with TestClient(TestServer(app)) as client:
+        cookies = await _log_in(client, fake)
+        sent_before = len(fake.sent)
+        resp = await _post(client, "/api/state/intensity", {"value": 4}, cookies=cookies)
+        assert resp.status == 200
+        body = await resp.json()
+
+    assert body["state"]["intensity"] == 4
+    changes = await _changes(sessionmaker)
+    assert ("intensity", "web") in {(c.field, c.source) for c in changes}
+    async with sessionmaker() as session:
+        state = await get_state(session)
+    assert state.intensity == 4
+    assert state.awaiting is None and state.awaiting_ref is None
+    assert len(fake.sent) == sent_before
+    topics = [record.data["topic"] for record in hub._buffer if record.event == "invalidate"]
+    assert "state" in topics
+
+
+@pytest.mark.parametrize("value", [0, 6, -1])
+async def test_post_intensity_rejects_out_of_range(sessionmaker, value):
+    await _seed(sessionmaker, intensity=3)
+    bot, fake = make_bot()
+    app, _hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    async with TestClient(TestServer(app)) as client:
+        cookies = await _log_in(client, fake)
+        resp = await _post(client, "/api/state/intensity", {"value": value}, cookies=cookies)
+        assert resp.status == 422
+        assert (await resp.json())["detail"] == "out_of_range"
+    async with sessionmaker() as session:
+        assert (await get_state(session)).intensity == 3
+
+
+@pytest.mark.parametrize("value", [True, "3", 3.0, None])
+async def test_post_intensity_rejects_a_non_integer(sessionmaker, value):
+    await _seed(sessionmaker, intensity=3)
+    bot, fake = make_bot()
+    app, _hub, _web_bot = _build_app(_settings(), sessionmaker, FrozenClock(START), bot)
+    async with TestClient(TestServer(app)) as client:
+        cookies = await _log_in(client, fake)
+        resp = await _post(client, "/api/state/intensity", {"value": value}, cookies=cookies)
+        assert resp.status == 400
+    async with sessionmaker() as session:
+        assert (await get_state(session)).intensity == 3

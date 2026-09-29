@@ -116,6 +116,7 @@ async def _build_state_dto(session, settings, clock) -> dict:
         "quiet_until": _iso(user_state.quiet_until),
         "timezone": user_state.timezone,
         "paused": not user_state.persona_active,
+        "intensity": user_state.intensity,
         "ignored_in_row": user_state.ignored_in_row,
         "next_planned_for": _iso(summary.next_planned_for),
         "spend": {
@@ -129,7 +130,11 @@ async def _build_state_dto(session, settings, clock) -> dict:
             "distill_today": distill_ok + distill_fail,
             "search_today": search_ok + search_fail,
         },
-        "limits": {"due_max_len": commands_core.DUE_ACTION_MAX_LEN},
+        "limits": {
+            "due_max_len": commands_core.DUE_ACTION_MAX_LEN,
+            "intensity_min": commands_core.INTENSITY_MIN,
+            "intensity_max": commands_core.INTENSITY_MAX,
+        },
         "claude_write_limits": await _claude_limits_dto(session, settings),
         "claude_counters_reset_at": (
             _iso(await write_limits.counters_reset_at(session)) if settings.CLAUDE_ACCESS_ENABLED else None
@@ -271,6 +276,45 @@ async def post_focus(request: web.Request) -> web.Response:
 
     if expired is not None:
         await _retire_expired_buttons(sessionmaker, bot, settings.ALLOWED_CHAT_ID, expired, hub)
+    hub.publish_invalidate("state")
+    return _json(200, {"state": dto})
+
+
+# --- POST /api/state/intensity --------------------------------------------
+
+
+async def post_intensity(request: web.Request) -> web.Response:
+    """How hard the persona pushes, 1 (gentler) to 5 (stricter): the
+    same dial as Telegram's /intensity and /menu's «Мягче»/«Строже»,
+    through the same `commands_core.set_intensity`. A value outside the
+    range is a 422 `out_of_range` -- set_intensity raises rather than
+    clamps, so it is checked here first. No proposal field to expire:
+    intensity is never proposed."""
+    if not await _session_token_valid(request):
+        return _json(401, {"error": "unauthenticated"})
+    settings, sessionmaker, clock, _bot = _cookie_settings(request)
+    limiter: WebRateLimiter = request.app["web_rate_limiter"]
+    hub: WebHub = request.app["web_hub"]
+
+    body, error = await _read_body(request)
+    if error is not None:
+        return error
+    value = body.get("value")
+    # bool is an int subclass: `true` must not pass as 1.
+    if not isinstance(value, int) or isinstance(value, bool):
+        return _json(400, {"error": "bad_request"})
+    if not commands_core.INTENSITY_MIN <= value <= commands_core.INTENSITY_MAX:
+        return _json(422, {"error": "invalid", "detail": "out_of_range"})
+
+    retry = limiter.check_panel_write()
+    if retry is not None:
+        return _rate_limited(retry)
+
+    async with sessionmaker() as session:
+        await checkin_core.clear_awaiting(session)
+        await commands_core.set_intensity(session, value, "web")
+        dto = await _build_state_dto(session, settings, clock)
+
     hub.publish_invalidate("state")
     return _json(200, {"state": dto})
 
@@ -516,6 +560,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/state", get_state_view)
     app.router.add_post("/api/state/due", post_due)
     app.router.add_post("/api/state/focus", post_focus)
+    app.router.add_post("/api/state/intensity", post_intensity)
     app.router.add_post("/api/state/quiet", post_quiet)
     app.router.add_post("/api/state/timezone", post_timezone)
     app.router.add_post("/api/state/pause", post_pause)

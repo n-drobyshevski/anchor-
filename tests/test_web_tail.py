@@ -859,3 +859,74 @@ async def test_the_tail_loop_publishes_a_checkin_change(sessionmaker, monkeypatc
     finally:
         await stop_tail(task)
     assert "checkin" in _checkin_topics(hub)
+
+
+# --- the small fingerprints: debts, notebook, orders -> invalidate ----------
+
+
+def _topic_events(hub: WebHub, topic: str) -> list[str]:
+    return [r.data["topic"] for r in hub._buffer if r.event == "invalidate" and r.data["topic"] == topic]
+
+
+async def test_simple_fingerprints_start_empty(sessionmaker):
+    from app.web.tail import _simple_fingerprints
+
+    async with sessionmaker() as session:
+        assert await _simple_fingerprints(session) == {"debts": (0, 0), "notebook": (0, 0), "orders": (0, 0), "review": (0, 0, 0, 0, 0, 0), "settings": (0,) * 10}
+
+
+async def test_debts_fingerprint_moves_on_open_and_close(sessionmaker):
+    from app.core import obligations
+    from app.core.clock import FrozenClock
+    from app.web.tail import _simple_fingerprints, _tail_simple_once
+
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fps = await _simple_fingerprints(session)
+
+    async with sessionmaker() as session:
+        row = await obligations.open_(session, text="позвонить", kind="promised", source="proposal")
+    async with sessionmaker() as session:
+        fps = await _tail_simple_once(session, hub, fps)
+    assert _topic_events(hub, "debts") == ["debts"]
+    assert _topic_events(hub, "orders") == []
+
+    # Nothing changed: no second publish.
+    async with sessionmaker() as session:
+        fps = await _tail_simple_once(session, hub, fps)
+    assert _topic_events(hub, "debts") == ["debts"]
+
+    async with sessionmaker() as session:
+        await obligations.close(session, FrozenClock(NOW), row.id)
+    async with sessionmaker() as session:
+        fps = await _tail_simple_once(session, hub, fps)
+    assert _topic_events(hub, "debts") == ["debts", "debts"]
+
+
+async def test_notebook_and_orders_fingerprints_move(sessionmaker):
+    from app.config import Settings
+    from app.core import notebook, orders
+    from app.core.clock import FrozenClock
+    from app.web.tail import _simple_fingerprints, _tail_simple_once
+
+    settings = Settings(ALLOWED_CHAT_ID=1)
+    clock = FrozenClock(NOW)
+    hub = WebHub()
+    async with sessionmaker() as session:
+        fps = await _simple_fingerprints(session)
+
+    async with sessionmaker() as session:
+        assert await notebook.add_user_intention(session, settings, "ложиться до полуночи", clock=clock) == "ok"
+        assert await orders.create_active(session, settings, "Прогулка", "daily", None, clock=clock) == "ok"
+    async with sessionmaker() as session:
+        fps = await _tail_simple_once(session, hub, fps)
+    assert _topic_events(hub, "notebook") == ["notebook"]
+    assert _topic_events(hub, "orders") == ["orders"]
+
+    async with sessionmaker() as session:
+        order_id = (await orders.active_orders(session))[0].id
+        assert await orders.retire(session, order_id, clock=clock) == "ok"
+    async with sessionmaker() as session:
+        fps = await _tail_simple_once(session, hub, fps)
+    assert _topic_events(hub, "orders") == ["orders", "orders"]
+    assert _topic_events(hub, "notebook") == ["notebook"]
