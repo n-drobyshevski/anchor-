@@ -536,6 +536,19 @@ async def current_connection(session: AsyncSession, clock: Clock) -> OauthConnec
     )
 
 
+def library_switch_rows() -> tuple:
+    """(model, live filter) pairs for app/web/tail.py's settings
+    fingerprint: an unrevoked connection with the library read switch
+    on, and one with the write switch on. They live here because this
+    module is the only one that names the OAuth tables
+    (tests/test_claude_privacy.py)."""
+    live = OauthConnection.revoked_at.is_(None)
+    return (
+        (OauthConnection, live & OauthConnection.library_read.is_(True)),
+        (OauthConnection, live & OauthConnection.library_write.is_(True)),
+    )
+
+
 async def set_library(session: AsyncSession, clock: Clock, on: bool) -> OauthConnection | None:
     """`/claude library on|off` (C3): flip the standing switch on the
     live connection. None with no connection -- the caller (/claude
