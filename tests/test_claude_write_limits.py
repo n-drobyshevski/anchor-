@@ -564,8 +564,9 @@ async def test_web_state_carries_the_caps(sessionmaker):
     assert rows["bytes_per_day"]["unit"] == "bytes"
     assert rows["creates_per_day"] == {
         "key": "creates_per_day", "label": limits.SPECS["creates_per_day"].label,
-        "value": 40, "default": 40, "min": 0, "max": 500, "unit": "count",
+        "value": 40, "default": 40, "min": 0, "max": 500, "unit": "count", "used": 0,
     }
+    assert rows["files_per_changeset"]["used"] is None  # per changeset: no running total
 
 
 async def test_web_state_hides_the_caps_with_claude_off(sessionmaker):

@@ -8,6 +8,7 @@ export const ROUTES = [
   { route: '#/chat', label: 'Чат', icon: 'message-circle' },
   { route: '#/memory', label: 'Память', icon: 'bookmark' },
   { route: '#/journal', label: 'Дневник', icon: 'book-open' },
+  { route: '#/usage', label: 'Лимиты', icon: 'gauge' },
   { route: '#/settings', label: 'Настройки', icon: 'settings' },
 ];
 

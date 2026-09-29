@@ -116,6 +116,16 @@ alone. Keep it that way.
 Only dots and avatars stay round (`border-radius: 50%`); every other
 corner goes through the radius tokens.
 
+**Theme and density are the viewer's choice** (Настройки → Оформление,
+kept in the browser's localStorage). `app/web/static/app/boot.js` sets
+`data-theme` and `data-density` on `<html>` before first paint;
+`app/web/static/app/lib/prefs.js` changes them later. A forced theme reuses
+the same dark tokens as the system one, so a palette change still
+happens in one place. Compact density only tightens the spacing tokens
+(`--pad-card`, `--gap-stack`, `--row-min`, `--row-pad-y`,
+`--row-stacked-pad-y`, `--bubble-pad`). A new card, row or bubble that
+uses those tokens gets compact mode for free.
+
 ## Next steps (not done yet)
 
 - **Fonts with Cyrillic.** Geist Mono is Latin-only, so Russian system

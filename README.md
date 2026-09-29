@@ -1270,7 +1270,8 @@ deployment environment, then open `PUBLIC_URL` in a browser.
 | Чат | the conversation | the chat |
 | Память | Факты (memories), Блокнот (notebook), Договорённости (standing orders) | `/memories`, `/mind`, `/order`, `/orders` |
 | Дневник | the weekly review and its proposals, the 30-day check-in chart, the journal, decided proposals, style amendments | `/review`, `/amendments` |
-| Настройки | intensity, time zone, Obsidian notes, the planner's sync, Claude's connection (read-only), background work with undo, Claude's write limits | `/intensity`, `/tz`, `/vault notes`, `/planner`, `/digest` |
+| Лимиты | read-only: today's spend against the daily and idle caps, the OpenRouter key's usage and balance, 14 days of spend (per day, category and model), the daily quotas, Claude's write caps in use | `/state`, `/claude limits` |
+| Настройки | appearance (theme, density; stored in the browser), intensity, time zone, Obsidian notes, the planner's sync, Claude's connection (read-only), background work with undo, Claude's write limits | `/intensity`, `/tz`, `/vault notes`, `/planner`, `/digest` |
 
 Changes made on these pages are silent in Telegram; they go through the
 same `app/core/` functions the commands use (audit source `web`).

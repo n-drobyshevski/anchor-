@@ -1,21 +1,34 @@
-// Настройки (#/settings): the persona's intensity, the account's time
-// zone, the integrations (Obsidian notes, the planner, Claude), the
-// background work with undo, and Claude's write limits.
+// Настройки (#/settings): this browser's appearance, the persona's
+// intensity, the account's time zone, the integrations (Obsidian
+// notes, the planner, Claude), the background work with undo, and
+// Claude's write limits.
 import { html } from '../html.js';
-import { ScreenError, ScreenLoading } from '../ui/ScreenState.js';
+import { LoadError } from '../ui/ScreenState.js';
 import { useAppState } from './useAppState.js';
 import { DigestCard, IntegrationsCard } from './settings/integrations.js';
-import { ClaudeLimitsCard, IntensityCard, TimezoneCard } from './settings/settingsCards.js';
+import { AppearanceCard, ClaudeLimitsCard, IntensityCard, TimezoneCard } from './settings/settingsCards.js';
 
 const limitsToast = (data) => (data.vault_pending ? 'Сохранено, vault обновится позже.' : 'Сохранено.');
 
 export function Settings() {
   const { state, failed, reload, applyMutation } = useAppState();
-  if (!state) return failed ? html`<${ScreenError} onRetry=${reload} />` : html`<${ScreenLoading} />`;
+  // Оформление is local to this browser, so it shows even while
+  // /api/state is loading or has failed.
+  if (!state) {
+    return html`
+      <div class="screen-wrap">
+        <div class="screen screen-settings" aria-busy=${failed ? 'false' : 'true'}>
+          <${AppearanceCard} />
+          ${failed ? html`<${LoadError} onRetry=${reload} />` : null}
+        </div>
+      </div>
+    `;
+  }
 
   return html`
     <div class="screen-wrap">
       <div class="screen screen-settings">
+        <${AppearanceCard} />
         <${IntensityCard}
           value=${state.intensity}
           min=${state.limits.intensity_min}
