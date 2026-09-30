@@ -2878,7 +2878,8 @@ details; you amended two of them (one message per run, and
   recheck's test (a path of length 2 or less in `G_all`, through any
   note), so the model is never pointed at a hole the code would refuse.
 - **Step 2 sees the lens only.** One call on `LLM_MODEL_SAFETY` with its
-  own provider and `GARDEN_MAX_TOKENS` (2000): the shared safety
+  own provider and `GARDEN_MAX_TOKENS` (4000; 2000 until the first
+  real run, on ~90 notes, was cut off): the shared safety
   provider's 400-token cap would truncate ten gaps in Russian. Its
   input is the findings, and for the involved notes their title, kind,
   catalog summary (the frontmatter summary, else the start of the text,

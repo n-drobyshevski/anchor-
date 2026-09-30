@@ -176,7 +176,7 @@ async def _as(sessionmaker, role: str, sql: str):
 def test_the_garden_is_off_by_default_with_its_own_token_cap():
     settings = Settings(_env_file=None)
     assert settings.LENS_GARDEN_ENABLED is False
-    assert settings.GARDEN_MAX_TOKENS == 2000
+    assert settings.GARDEN_MAX_TOKENS == 4000
     check_vault_settings(settings)
 
 

@@ -741,8 +741,9 @@ class Settings(BaseSettings):
     LENS_GARDEN_ENABLED: bool = False
     # The garden's own output cap. It builds its own provider on
     # LLM_MODEL_SAFETY, whose shared cap (LLM_SAFETY_MAX_TOKENS, 400)
-    # would truncate ten gaps of Russian JSON.
-    GARDEN_MAX_TOKENS: int = 2000
+    # would truncate ten gaps of Russian JSON. 2000 was too few for a
+    # lens of ~90 notes: the first real run's reply was cut off.
+    GARDEN_MAX_TOKENS: int = 4000
     # --- L5: the lens in idle reflect (plan sections 7 and 10; the L5
     # spec section 3) ---
     #
