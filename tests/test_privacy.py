@@ -78,3 +78,20 @@ def test_the_lens_garden_clause_is_in_both_places():
     assert "While the lens garden is on, once a week the model gets the" in doc
     assert "summaries or the start of the text, the links" in doc and "Claude Code can read its proposals" in doc
     assert "not the\n  notes' text" not in doc
+
+
+def test_the_lens_research_clause_is_in_both_places():
+    """L4 (spec section 7): after a tap on «исследовать», what goes where
+    -- the gap and its notes' titles and summaries to the model, the
+    query to Exa, pages only from PACKET_LENS -- and that an accepted
+    result becomes a knowledge note in Echo/Inbox, undoable for 14 days,
+    in both copies."""
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
+    assert "Если нажать «исследовать» под пунктом сада" in PRIVACY_TEXT
+    assert "названия и краткие описания его заметок" in PRIVACY_TEXT
+    assert "в Exa" in PRIVACY_TEXT and "PACKET_LENS" in PRIVACY_TEXT
+    assert "заметкой знаний в Echo/Inbox" in PRIVACY_TEXT and "14 дней (/lens undo)" in PRIVACY_TEXT
+    assert "If you tap «исследовать» under a garden gap" in doc
+    assert "titles and summaries of its notes" in doc
+    assert "goes\n  to Exa" in doc and "`PACKET_LENS`" in doc
+    assert "knowledge note in\n  `Echo/Inbox`" in doc and "14 days (`/lens undo`)" in doc

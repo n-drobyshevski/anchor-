@@ -616,6 +616,76 @@ async def test_a_button_on_a_hidden_card_is_forbidden_like_the_command(sessionma
     assert refreshed.status == "hidden"
 
 
+# --- lens L4: a lens card is invisible to /notes and every card path ------------
+
+
+async def _seed_lens_card(sessionmaker) -> StudyCard:
+    """A lens research's pending, visible card (the L4 spec section 4):
+    adoptable only into the vault's inbox, never through these paths."""
+    async with sessionmaker() as session:
+        job = StudyJob(
+            kind="study", packet="lens", query="requisite variety",
+            local_date=datetime.date(2026, 9, 22), status="done",
+        )
+        session.add(job)
+        await session.flush()
+        clip = StudyClip(
+            job_id=job.id, url="https://plato.stanford.edu/x", domain="plato.stanford.edu", text="t"
+        )
+        session.add(clip)
+        await session.flush()
+        card = StudyCard(
+            job_id=job.id, clip_id=clip.id, kind="lens", text="Карточка линзы.",
+            quote="Дословная цитата со страницы о разнообразии.", source_url=clip.url,
+            risk_model="low", risk_rules="low", risk_final="low", status="pending",
+        )
+        session.add(card)
+        await session.commit()
+        await session.refresh(card)
+        return card
+
+
+async def test_notes_never_lists_a_lens_card(sessionmaker):
+    await _seed_lens_card(sessionmaker)
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))
+
+    await _feed(dp, bot, _command_update(1, "/notes"))
+
+    assert fake.sent[0].text == research_ui.NOTES_EMPTY
+
+
+@pytest.mark.parametrize("command", ["card", "adopt", "reject"])
+async def test_a_lens_card_is_missing_to_card_adopt_and_reject(sessionmaker, command):
+    card = await _seed_lens_card(sessionmaker)
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True), clock=_clock())
+
+    await _feed(dp, bot, _command_update(1, f"/{command} {card.id}"))
+
+    assert fake.sent[0].text == research_ui.CARD_MISSING
+    async with sessionmaker() as session:
+        assert (await session.execute(select(Memory))).scalars().all() == []
+        assert (await session.get(StudyCard, card.id)).status == "pending"
+
+
+@pytest.mark.parametrize("data", ["r:a:{id}", "r:r:{id}"])
+async def test_a_button_press_on_a_lens_card_is_forbidden(sessionmaker, data):
+    """The web chat's presses reach this same handler (app/web/ingress.py
+    lets `r:` through), so a forged or replayed `r:a:<id>` from either
+    side must not turn a page found for the lens into a memory."""
+    card = await _seed_lens_card(sessionmaker)
+    await _seed(sessionmaker, 1)
+    dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True), clock=_clock())
+
+    await _feed(dp, bot, _callback_update(1, data.format(id=card.id), message_id=1))
+
+    assert fake.answered[0].text == research_ui.CARD_MISSING
+    async with sessionmaker() as session:
+        assert (await session.execute(select(Memory))).scalars().all() == []
+        assert (await session.get(StudyCard, card.id)).status == "pending"
+
+
 async def test_an_unparseable_decision_callback_is_answered_stale(sessionmaker):
     await _seed(sessionmaker, 1)
     dp, bot, fake = _build_dp(sessionmaker, Settings(RESEARCH_ENABLED=True))

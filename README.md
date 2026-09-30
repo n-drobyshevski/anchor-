@@ -33,6 +33,7 @@ no model call, no outbound).
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
 | The lens (L1, L2): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. The weekly review picks the notes that fit its week and grounds its proposals in them (L2) | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300): above it the review does not use the lens and `/lens` warns; `LENS_ROUND_MAX_NOTES` (6, 1–12) and `LENS_ROUND_MAX_CHARS` (24000, 2000–100000) cap what one review round reads; Claude Code's access is `/lens code on` |
 | The lens garden (L3): once a week an idle job looks for gaps in the lens (missing links, missing notes, tensions, bridges), sends one Telegram message with a button row per gap, and writes a report to `Anchor/Reports` | **off** | `LENS_GARDEN_ENABLED` (on top of `LENS_ENABLED`, and `VAULT_MODE` `mirror` or `sync`); `GARDEN_MAX_TOKENS` (2000, 1000–8000) caps the model's answer. Deploy the vault service first (docs/vault-setup.md) |
+| Lens research (L4): «исследовать» under a garden gap searches `PACKET_LENS` in the background, sends the result as its own message, and «в Inbox» writes it as one knowledge note into the vault's inbox (`Echo/Inbox`); `/lens undo` takes the newest back | **off** | all of `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and `IDLE_ENABLED`; `PACKET_LENS` (7 domains by default, at most 12; empty turns it off); shares `/study`'s `RESEARCH_JOBS_PER_DAY` and `RESEARCH_JOB_USD_CAP`. Deploy the vault service first (docs/vault-setup.md) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -71,7 +72,8 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
-| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; with the garden, «Сад: <дата>, открыто N» | — (the lens itself: `LENS_ENABLED`) |
+| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
+| `/lens undo` | Take back Echo's newest note in the inbox (L4), if under 14 days old and not edited since; Telegram only | the vault service |
 | `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
@@ -1210,7 +1212,7 @@ is the only request 8e adds.
 This is the contract. A later phase that adds a consumer of notes cites
 it, and extends the isolation tests.
 
-| Where | Personal notes | Knowledge notes | Lens notes (L1–L3) |
+| Where | Personal notes | Knowledge notes | Lens notes (L1–L4) |
 |---|---|---|---|
 | The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge |
 | The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never | never |
@@ -1219,7 +1221,9 @@ it, and extends the isolation tests.
 | The lens garden, an idle job (L3) | never | never: a knowledge note is an anonymous id in its graph, and its title is only matched locally, never sent | **yes, weekly, while `LENS_GARDEN_ENABLED` is on**: titles, catalog summaries (or the start of the text, as in L2), lens links and counts of knowledge links go to the model, never a whole body |
 | `Anchor/Reports` in the vault (L3) | never | never named | titles, as `[[links]]` to lens notes |
 | The weekly review | never | never | **yes, via the selector (L2)**: the catalog and the notes it picks, never with the week's own input |
-| Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never in L1 |
+| Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never, except lens research below |
+| Lens research's query call, an idle job (L4), after your tap on «исследовать» | **never, in any phase** | never | **the gap's kind, detail and proposed title, and the titles and catalog summaries of its lens notes**, to the model; the query it writes goes to Exa, pages only from `PACKET_LENS` |
+| Echo's inbox writes (L4, «в Inbox») | never | **new notes in `echo_inbox` only** (vaultd-enforced: create-only, `anchor: knowledge`, `anchor_edited_by: echo`, undo for 14 days) | never: only you promote a note (move it into a lens folder and mark it `anchor: lens`) |
 | `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e | never |
 | Claude connector's `search_library` (C3) | never | yes, under `/claude library on` | yes, as knowledge |
 | Claude's write tools (W2) | never | yes, under `/claude library write on` | read as knowledge (`get_note`, `list_tree`); written **never**: only you change the lens |
@@ -1379,7 +1383,7 @@ missing (`anchor-lens-plan.md` §8). Off by default: set
    between clusters. An empty answer is fine. A failure writes nothing and retries tomorrow.
 4. **Dedup and recheck.** A gap is keyed by its kind and its notes'
    titles, so one you dismissed does not come back, even after a move.
-   Each run rechecks open and done gaps: one that now holds (the link
+   Each run rechecks open, done and (L4) researched gaps: one that now holds (the link
    exists, the note was written) is closed; one you marked done that
    still fails comes back, marked «снова».
 
@@ -1413,6 +1417,58 @@ missing (`anchor-lens-plan.md` §8). Off by default: set
   it and the reports; `/export` leaves it out.
 
 Why it is built this way: docs/decisions.md, "L3 — the lens garden".
+
+## Milestone L4 — lens research into `Echo/Inbox`
+
+A gap the garden raised can be researched on the web, on your tap only,
+and what you accept becomes one knowledge note in the vault's inbox,
+never a lens note (`anchor-lens-plan.md` §9). Off unless
+`RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and
+`IDLE_ENABLED` are all on and `PACKET_LENS` is not empty; **deploy the
+vault service first** (docs/vault-setup.md, section 10).
+
+1. **The tap.** Under a live `missing_note`, `tension` or `bridge` gap
+   the garden message has a row «N · исследовать» (never for `link`,
+   never twice for one gap). A tap spends one of `/study`'s
+   `RESEARCH_JOBS_PER_DAY` and queues the research, or answers
+   «Исследования выключены.», the quota or the budget text and changes
+   nothing. The item then reads «— исследую, итог придёт отдельным
+   сообщением».
+2. **The research** runs as an idle job, `lens_research`: one model call
+   writes an English search query from the gap and its lens notes'
+   titles and summaries only (never a dialog, memory, personal or
+   knowledge note), and Phase 4's pipeline searches only `PACKET_LENS`
+   (`plato.stanford.edu`, `iep.utm.edu`, `philpapers.org`, `arxiv.org`,
+   `en.wikipedia.org`, `pangaro.com`, `asc-cybernetics.org`; no
+   `archive.org`, which would let in `web.archive.org`), fetches,
+   and distills cards that answer the gap, under
+   `RESEARCH_JOB_USD_CAP`. A research not finished in 3 days is dropped.
+3. **The result is its own message**, as soon as the job finishes, with
+   the garden message's holds (quiet hours, `/quiet`, a pause, the
+   welfare cooldown): the gap, up to six «• card (domain)» lines,
+   «скрыто: H», and «в Inbox» / «не нужно». A tap edits that message
+   and removes the buttons. Nothing found sends «ничего не нашлось»,
+   and the gap is open again (its «сделал» / «не нужно» back, no second
+   research); so is a result left untapped until its cards expire
+   (`RESEARCH_CARD_TTL_DAYS`, 14). A gap the garden closes while its
+   research runs (the note now exists) is rechecked like an open one;
+   its result is then dropped unsent, and the quota spent at the tap is
+   not returned.
+4. **«в Inbox»** writes one note, named after the proposed title (a
+   missing note) or «A — B», into `echo_inbox` (`Echo/Inbox` by
+   default): frontmatter `anchor: knowledge`, `source_urls`, `gap`,
+   stamped `anchor_edited_by: echo`; «Исследование Echo; это не
+   линза.»; links to the gap's lens notes; each card with its verbatim
+   quote and URL. The gap becomes done, and the next garden checks it.
+   `/lens undo` takes the newest note back within 14 days, unless you
+   edited it. To make it part of the lens, move it into a lens folder
+   **and** change its mark to `anchor: lens`.
+
+Cards never become memories and never appear in `/notes`. Claude Code
+sees none of it (docs/claude-access.md). `/delete` erases the records
+but leaves the inbox notes, which are yours; `/export` includes the
+write records. Why it is built this way: docs/decisions.md, "L4 — lens
+research into `Echo/Inbox`".
 
 ## Web UI
 

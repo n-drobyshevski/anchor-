@@ -12,6 +12,7 @@ note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
 vault_file -> memory, lens_round -> weekly_review / lens_version,
 review_proposal -> lens_round,
 lens_gap -> lens_garden_run -> idle_run / lens_version,
+study_job -> lens_gap, study_card -> echo_changeset -> lens_gap / study_job,
 vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
 off is deliberate: if a future table ever references a purged one and is
@@ -232,6 +233,13 @@ PURGED_TABLES = (
     # carry lens link text; both point only at tables purged here.
     "lens_garden_run",
     "lens_gap",
+    # L4 (plan sections 9 and 14.5): Echo's inbox writes. Ids and times
+    # only, like claude_changeset, but still a record of what Echo wrote
+    # into this user's vault. The notes themselves stay in the vault:
+    # they are ordinary knowledge notes the user may have kept, edited
+    # or promoted, and vaultd's undo store (which could take them back)
+    # is wiped by the vault_purge job's POST /v1/purge.
+    "echo_changeset",
     "vault_file",
     "vault_hold",
     "vault_status",

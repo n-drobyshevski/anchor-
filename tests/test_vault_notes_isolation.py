@@ -92,6 +92,13 @@ ALLOWED_IMPORTERS = {
         # the same transaction. It writes nothing else there and reads
         # nothing.
         "app/vault/consent.py",
+        # L4 (plan sections 9 and 10; the L4 spec section 7): the idle
+        # kind that runs a gap's research reads the gap's seed -- its
+        # detail and its lens notes' titles and summaries, nothing else
+        # -- and Echo's inbox writer checks the tap and closes the gap
+        # once the note is written. Both through this module only.
+        "app/core/idle/lens_research.py",
+        "app/core/echo_write.py",
     ),
 }
 
@@ -101,9 +108,12 @@ ALLOWED_IMPORTERS = {
 # L3: the one idle module that may reach the lens module is the garden
 # (plan section 5: "It allows `app.vault.lens` only in the two new idle
 # kinds and in reflect (L5)"); the rest of app/core/idle/ stays banned.
+#
+# L4: lens research (the L4 spec section 7) is the second idle kind that
+# may: it reads the gap's seed through this module and nothing else.
 FORBIDDEN_EXCEPTIONS = {
     "app.vault.notes_knowledge": ("app/web/mcp_core.py",),
-    "app.vault.lens": ("app/core/idle/lens_garden.py",),
+    "app.vault.lens": ("app/core/idle/lens_garden.py", "app/core/idle/lens_research.py"),
 }
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
@@ -496,3 +506,20 @@ def test_an_unrelated_lens_attribute_is_not_an_import(tmp_path):
     path = tmp_path / "sample.py"
     path.write_text("def f(camera):\n    return camera.lens\n")
     assert _import_violations(path, "app/core/grants.py") == []
+
+
+def test_lens_research_and_echos_writer_may_reach_the_lens_module(tmp_path):
+    """L4 (the L4 spec section 7): the idle kind that runs a gap's research
+    and Echo's inbox writer may import the lens module; every other idle
+    module and every other app/core/ module still may not, and neither
+    gains a chunk module."""
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    for rel in ("app/core/idle/lens_research.py", "app/core/echo_write.py"):
+        assert _import_violations(path, rel) == [], rel
+    for rel in ("app/core/idle/research.py", "app/core/echo_note.py", "app/core/cards.py", "app/research/lens_query.py"):
+        assert _import_violations(path, rel), rel
+    path.write_text("from app.vault import notes_knowledge\n")
+    for rel in ("app/core/idle/lens_research.py", "app/core/echo_write.py"):
+        assert _import_violations(path, rel), rel
+

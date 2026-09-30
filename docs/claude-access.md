@@ -276,6 +276,46 @@ of a few short titles can be guessed) and `debug.lens_garden_run`
 (every column but `findings`); `debug.lens_note` gains `alias_count`.
 The gaps' text is read through `lens.gaps(n)`, logged like the rest.
 
+### Lens research (L4): no new view, no text
+
+L4 adds research on a garden gap (a tap on «исследовать»), its web
+cards, and Echo's notes in the vault's inbox (`Echo/Inbox` by default,
+«в Inbox»), recorded in `echo_changeset`. **No text of it is readable
+by Claude Code**, and none should be. What is readable is ids, codes,
+times and counts:
+
+- no `debug` view or column is added: no view for `echo_changeset`
+  (like `claude_changeset`, it is a record of what was written into the
+  user's vault), and no `packet`, `query`, `lens_gap_id`, `offered_at`,
+  `echo_changeset_id` or `research_*` column anywhere;
+- the existing `debug.study_job`, `debug.study_card` and
+  `debug.study_clip` views (migration 9e4b2c7a1f05) show lens research
+  like any other /study research: a lens job is a `kind='study'` row
+  with its status, cost and times; its cards are `kind='lens'` rows
+  with their risk columns and status (`pending`, `adopted`, `rejected`,
+  `expired`, `hidden`); its clips show the domain fetched and the text
+  length. Never a card's text, a quote, a query, a URL or a page. No
+  view carries the gap a job was for;
+- `lens.gaps(n)` and `debug.lens_gap` show a researched gap as
+  `closed`, like a resolved one. A research that is spent or declined
+  sends the gap back to `open`, which a resolved gap never does, so a
+  gap going `closed` -> `open` was researched. Job and card times can
+  also be matched against gap changes. That much is visible, and
+  accepted: it says a gap was researched, never what was found;
+- Railway logs name no gap on a research line (a request, a job, a
+  result, a press on it, an inbox write): job ids, the
+  `echo_changeset` row id, counts and outcome codes only, and never a
+  gap id and a job id in one record (app/log.py);
+- no `lens` function returns a query, a card or a page;
+- the inbox notes are knowledge notes in the vault, which stays off
+  limits (CLAUDE.md); promoting one into the lens is the user's own act,
+  after which it is read like any lens note, through `lens.notes()`.
+
+The queries, cards and quotes are web text chosen from the user's gaps;
+they stay with the user. When debugging research, use Railway logs
+(ids, counts and outcome codes only), the `debug.study_*` views and the
+tests' synthetic cards.
+
 ### Lens text stays in the session
 
 The CLAUDE.md rule: lens text never leaves the session. Not in commits,

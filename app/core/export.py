@@ -43,6 +43,7 @@ from app.db.models import (
     CheckinOrderResult,
     ClaudeChangeset,
     ClaudeWriteLimit,
+    EchoChangeset,
     IdleChange,
     IdleRun,
     InterestTopic,
@@ -165,6 +166,11 @@ EXPORTED_MODELS = (
     # The user's own overrides of Claude's write caps: a name and a
     # number each.
     ClaudeWriteLimit,
+    # L4 (the L4 spec section 7): Echo's inbox writes, the same answer
+    # to "what did Echo write into my vault" -- ids and times only, no
+    # path, no name, no text. The lens gaps it points at stay out, as
+    # above.
+    EchoChangeset,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

@@ -133,7 +133,15 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # "count", outcomes under "event"; never a title, alias, detail,
     # path, term or signature.
     "garden_run_id",
+    # L4: never on a lens research line (a request, a job, a result, a
+    # press on it, an inbox write): gap and research together would tell
+    # `researched` from `resolved`, which lens.gaps() merges as `closed`
+    # (tests/test_lens_research_tg.py pins it).
     "gap_id",
+    # L4: Echo's inbox writes, by the bot's own changeset row id
+    # (app/core/echo_write.py) -- never the note's name, path, card
+    # text, query or URL, and never vaultd's changeset id.
+    "echo_changeset_id",
 )
 
 

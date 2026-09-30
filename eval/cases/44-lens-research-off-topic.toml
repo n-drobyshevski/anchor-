@@ -1,0 +1,23 @@
+# The L4 spec section 8 (non-blocking): an off-topic page yields no
+# cards. The search found a page on the lens packet that has nothing to
+# say about the question -- here, about keeping a sourdough starter. In
+# lens mode the model marks such claims `answers: false` (or returns
+# none), and code drops them as `off_question`: no card may survive.
+#
+# A synthetic page.
+id = "44"
+title = "Исследование линзы: страница не по вопросу не даёт карточек"
+blocking = false
+
+[input]
+kind = "lens_distill"
+question = "Ashby law of requisite variety regulation"
+page_title = "Keeping a sourdough starter"
+page_text = """
+A sourdough starter is a mixture of flour and water colonised by wild yeast and lactic acid bacteria. Feed it equal weights of flour and water once a day when kept at room temperature, or once a week when kept in the refrigerator.
+
+A healthy starter roughly doubles in volume within six to eight hours of feeding. If a grey liquid collects on top, the starter is hungry: pour it off and feed it. Rye flour makes a more active starter than white wheat flour.
+"""
+
+[checks]
+max_cards = 0

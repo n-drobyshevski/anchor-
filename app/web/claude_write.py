@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import re
 import secrets
 
 from sqlalchemy import func, select
@@ -42,60 +41,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import claude_write_limits as limits
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.core import redact
+from app.core import note_checks
 from app.db.models import ClaudeChangeset, UserState
-from app.research import injection
-from app.vault import secrets as vault_secrets
 from app.vault.client import ChangeEntry, VaultClient
 from app.vault.errors import VaultError
 
 logger = logging.getLogger(__name__)
 
-# plan section 6.5: the instruction ids that refuse a write. `url`,
-# `handle` and `code_fence` are deliberately excluded -- a knowledge
-# note legitimately holds links and code -- and there is no rule
-# exemption for the rest, unlike app/vault's own memory-write path.
-# Spelled out literally, not derived from injection.RULE_IDS, so a
-# future addition to that list does not silently start refusing
-# knowledge writes.
-REFUSE_INJECTION_IDS = frozenset(
-    {
-        "override_previous",
-        "override_previous_en",
-        "override_previous_fr",
-        "system_prompt",
-        "developer_mode",
-        "role_tag",
-        "exfiltrate",
-        "role_reassign",
-        "speak_as_assistant",
-    }
-)
-
-_BAD_TITLE_CHARS = re.compile(r"[/\\\x00-\x1f]")
-MAX_TITLE_CHARS = 120
-
-
-class Refused(Exception):
-    """Every refusal on the write/undo tool surface. `code` is a reason
-    for the log line only -- never shown to Claude, never a path."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-def sanitize_title(title: str) -> str:
-    """A safe file name: no `/`, no leading `.`, at most
-    MAX_TITLE_CHARS, `.md` appended. Raises `Refused("bad_title")` for
-    a title that sanitises to nothing."""
-    cleaned = _BAD_TITLE_CHARS.sub("_", title.strip())
-    while cleaned.startswith("."):
-        cleaned = cleaned[1:]
-    cleaned = cleaned.strip()[:MAX_TITLE_CHARS].strip()
-    if not cleaned:
-        raise Refused("bad_title")
-    return cleaned + ".md"
+# Title sanitising and the content checks are shared with Echo's inbox
+# writer (lens L4) and live in app/core/note_checks.py; re-exported here
+# under their old names, `Refused` included, so every caller and test
+# that knew them here still does.
+REFUSE_INJECTION_IDS = note_checks.REFUSE_INJECTION_IDS
+MAX_TITLE_CHARS = note_checks.MAX_TITLE_CHARS
+Refused = note_checks.Refused
+sanitize_title = note_checks.sanitize_title
+_check_content = note_checks.check_content
 
 
 def sanitize_folder(folder: str) -> str:
@@ -113,13 +74,6 @@ def sanitize_folder(folder: str) -> str:
     if not cleaned:
         raise Refused("bad_folder")
     return "/".join(cleaned)
-
-
-def _check_content(new_body: str) -> None:
-    if set(injection.hits(new_body)) & REFUSE_INJECTION_IDS:
-        raise Refused("instruction")
-    if redact.secret_spans(new_body) or vault_secrets.spans(new_body):
-        raise Refused("secret")
 
 
 async def _local_day_start(session: AsyncSession, clock: Clock) -> datetime.datetime:

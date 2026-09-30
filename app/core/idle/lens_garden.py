@@ -291,7 +291,7 @@ def _already_proposed(
     titles_now = {lens_graph.norm(note.title) for note in analysis.graph.notes.values()}
     shown = []
     for gap in sorted(live, key=lambda gap: gap.id, reverse=True):
-        if gap.status not in ("open", "done", "dismissed"):
+        if gap.status not in ("open", "done", "dismissed", "researched"):
             continue
         if not all(lens_graph.norm(title) in titles_now for title in gap.titles):
             continue
@@ -361,14 +361,17 @@ def build_input(
 def recheck_known(
     known: Sequence[lens.KnownGap], analysis: lens_graph.Analysis
 ) -> tuple[tuple[int, ...], tuple[int, ...], list[lens.KnownGap]]:
-    """Spec section 7: every open and done gap is rechecked. PASS or GONE
-    resolves it; a done gap that FAILs is reopened. Returns (resolved
-    ids, reopened ids, the gaps still live after this run)."""
+    """Spec section 7: every open and done gap is rechecked -- and, from
+    L4, every researched one (`lens.RECHECKED_STATUSES`). PASS or GONE
+    resolves it; a done gap that FAILs is reopened, while a researched
+    one that FAILs stays researched (its result is still on its way or
+    waiting for a tap). Returns (resolved ids, reopened ids, the gaps
+    still live after this run)."""
     resolved: list[int] = []
     reopened: list[int] = []
     live: list[lens.KnownGap] = []
     for gap in known:
-        if gap.status in ("open", "done"):
+        if gap.status in lens.RECHECKED_STATUSES:
             verdict = lens_graph.recheck(gap.kind, gap.recheck, analysis)
             if verdict in (lens_graph.PASS, lens_graph.GONE):
                 resolved.append(gap.id)

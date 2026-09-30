@@ -38,6 +38,15 @@ validated gaps rendered for the report; the text checks run over the
 gaps' own words -- and over the raw reply, before `validate()` and its
 `screen()` drop anything -- and the garden checks over which gaps
 survived (eval/checks.py's `garden_checks`).
+
+L4 (the L4 spec section 8): a `lens_query` or `lens_distill` case runs
+one of lens research's two model steps -- the query call or the
+lens-mode distill -- on the safety provider the idle kind runs them on
+(`_review_provider`'s settings: the shared safety provider). Its
+"reply" is the query (or the refusal) or the surviving cards, rendered;
+the text checks run over the validated query or the cards' own words,
+and the research checks over what code let through (eval/checks.py's
+`research_checks`).
 """
 
 from __future__ import annotations
@@ -57,7 +66,7 @@ from app.llm.openrouter import OpenRouterProvider, build_client
 from eval import checks as checks_module
 from eval import judge as judge_module
 from eval import scenario
-from eval.cases import LENS_GARDEN, LENS_REVIEW, Case, load_all
+from eval.cases import LENS_DISTILL, LENS_GARDEN, LENS_QUERY, LENS_REVIEW, Case, load_all
 from eval.db import throwaway_sessionmaker
 
 REPORTS_DIR = pathlib.Path(__file__).parent / "reports"
@@ -85,6 +94,13 @@ class Outcome:
             out.append("judge_unusable")
         out.extend(self.verdict.failed)
         return out
+
+
+# The case kinds that generate on `LLM_MODEL_SAFETY` rather than on the
+# persona model: L2's lens round, L3's garden, L4's research steps.
+SAFETY_MODEL_KINDS = (LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL)
+# L4: the two research kinds, run by `run_research_case`.
+RESEARCH_KINDS = (LENS_QUERY, LENS_DISTILL)
 
 
 # H5: exit code 3, distinct from 1 (a blocking case failed) and 2 (only
@@ -121,12 +137,13 @@ def same_judge_warning(judge_model: str, settings: Settings) -> str | None:
 
 
 def lens_same_judge_warning(judge_model: str, settings: Settings, cases) -> str | None:
-    """The same loud line for L2's lens cases and L3's garden cases, else
-    None. They generate on `LLM_MODEL_SAFETY` (`_review_provider`,
-    `lens_garden.build_garden_provider`), not `LLM_MODEL`, so
-    `same_judge_warning` alone would let a judge set to that model grade
-    its own lens rounds and gardens unnoticed."""
-    lens_ids = [case.id for case in cases if case.input["kind"] in (LENS_REVIEW, LENS_GARDEN)]
+    """The same loud line for L2's lens cases, L3's garden cases and L4's
+    research cases, else None. They generate on `LLM_MODEL_SAFETY`
+    (`_review_provider`, `lens_garden.build_garden_provider`), not
+    `LLM_MODEL`, so `same_judge_warning` alone would let a judge set to
+    that model grade its own lens rounds, gardens and research
+    unnoticed."""
+    lens_ids = [case.id for case in cases if case.input["kind"] in SAFETY_MODEL_KINDS]
     if not lens_ids or judge_model != settings.LLM_MODEL_SAFETY:
         return None
     return (
@@ -373,6 +390,52 @@ async def run_garden_case(
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
 
+async def run_research_case(
+    case: Case,
+    settings: Settings,
+    review,
+    judge,
+) -> Outcome:
+    """One `lens_query` or `lens_distill` case for real (L4): the call,
+    the real `validate`, check, judge. A provider error or a reply that
+    does not parse fails the case; a refused query does not, unless the
+    case says `query_valid` (a refusal is a safe answer)."""
+    if review is None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), 0.0,
+            "нет провайдера безопасности (LLM_MODEL_SAFETY) для кейса исследования",
+        )
+    metered = _Metered(review)
+    try:
+        if case.input["kind"] == LENS_QUERY:
+            run = await scenario.run_lens_query(case, metered)
+        else:
+            run = await scenario.run_lens_distill(case, settings, metered)
+    except Exception as exc:  # noqa: BLE001 - a failed case, not a failed run
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost,
+            metered.error or f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+
+    reply = scenario.render_research_run(run)
+    if isinstance(run, scenario.QueryRun):
+        check_results = checks_module.run_all(run.query or "", case.checks, settings)
+        check_results += checks_module.research_checks(case.checks, query=run.query)
+    else:
+        check_results = checks_module.run_all(run.card_text, case.checks, settings)
+        check_results += checks_module.research_checks(
+            case.checks, cards=run.cards, parsed=run.parsed
+        )
+    verdict = await judge_module.judge(
+        judge,
+        items=case.judge_items,
+        case_title=case.title,
+        prompt_text=scenario.situation(case),
+        reply=reply,
+    )
+    return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
+
+
 async def run_case(
     sessionmaker,
     case: Case,
@@ -405,6 +468,9 @@ async def run_case(
     `garden` (L3) is the lens garden's own provider, for a `lens_garden`
     case (`run_garden_case`), on the same terms: a dry run builds its
     messages through `scenario.build`, and eval/trial.py passes none.
+
+    L4's `lens_query` and `lens_distill` cases run on `review`, the
+    safety provider (`run_research_case`), on the same terms again.
     """
     if case.input["kind"] == LENS_REVIEW and not dry_run:
         return await run_lens_case(
@@ -414,6 +480,8 @@ async def run_case(
         return await run_garden_case(
             sessionmaker, case, settings, clock, garden, judge, amendments=amendments
         )
+    if case.input["kind"] in RESEARCH_KINDS and not dry_run:
+        return await run_research_case(case, settings, review, judge)
 
     async with sessionmaker() as session:
         await scenario.reset(session)
@@ -458,7 +526,7 @@ def render_report(
         f"- Судья: `{judge_model}`",
         *(
             [f"- Модель разбора и сада (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
-            if any(o.case.input["kind"] in (LENS_REVIEW, LENS_GARDEN) for o in outcomes)
+            if any(o.case.input["kind"] in SAFETY_MODEL_KINDS for o in outcomes)
             else []
         ),
         f"- Кейсов: {len(outcomes)} · прошло: {len(outcomes) - len(failed)} "

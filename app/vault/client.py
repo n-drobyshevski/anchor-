@@ -19,6 +19,14 @@ never stored. The manifest's `summary` holds
 counts and the settings file's state, never a path: the bot cannot know
 the names of notes it may not see.
 
+**L4: Echo's inbox writer** (`PUT /v1/echo/inbox`, anchor-lens-plan.md
+section 14.5). `put_echo_note` sends a bare basename and the note;
+vaultd builds the path inside its `echo_inbox`, may add a ` 2`..` 9`
+suffix, and answers the name it chose. A replayed changeset (the same
+id after a lost answer) comes back `replayed`. `undo_changeset` names
+the writer, `claude` or `echo`, and vaultd refuses the other's
+changesets; `list_changes` reports each changeset's writer.
+
 **What the client refuses to do.** No redirects (a 3xx is a bad
 response, not a hop). No proxy or `.netrc` from the environment
 (`trust_env=False`), so the bearer token only ever goes to VAULT_URL,
@@ -135,13 +143,15 @@ class ChangeFile:
 class ChangeEntry:
     """One row of vaultd's `GET /v1/changes` index (W2b). No pre-image
     bytes ever reach the bot -- vaultd's own index route never returns
-    them (vaultd/vaultd/undo.py's `list_changes`)."""
+    them (vaultd/vaultd/undo.py's `list_changes`). `writer` (L4) is
+    `claude` or `echo`; a vaultd from before L4 sends none: `claude`."""
 
     id: str
     kind: str
     time: datetime.datetime
     undone: bool
     files: list[ChangeFile]
+    writer: str = "claude"
 
 
 @dataclass(frozen=True)
@@ -171,6 +181,22 @@ class RenameResult:
 class UndoResult:
     restored: int
     refused: int
+
+
+# L4: vaultd's two writers (vaultd/vaultd/undo.py's `WRITERS`).
+WRITERS = ("claude", "echo")
+
+
+@dataclass(frozen=True)
+class EchoPut:
+    """`PUT /v1/echo/inbox`'s body (L4): the basename vaultd gave the
+    note inside the inbox (the one sent, or it with ` 2`..` 9`), the
+    note's hash as written, and whether this was a replay of a
+    changeset vaultd had already written."""
+
+    name: str
+    sha256: str
+    replayed: bool
 
 
 @dataclass(frozen=True)
@@ -553,6 +579,8 @@ class VaultClient:
             )
             _require(isinstance(cid, str) and kind in ("write", "undo") and isinstance(undone, bool))
             _require(isinstance(files, list))
+            writer = item.get("writer", "claude")
+            _require(writer in WRITERS)
             parsed_files = []
             for f in files:
                 _require(isinstance(f, dict))
@@ -561,14 +589,46 @@ class VaultClient:
                 parsed_files.append(ChangeFile(path=path, sha256=sha))
             out.append(
                 ChangeEntry(
-                    id=cid, kind=kind, time=_parse_time(when), undone=undone, files=parsed_files
+                    id=cid,
+                    kind=kind,
+                    time=_parse_time(when),
+                    undone=undone,
+                    files=parsed_files,
+                    writer=writer,
                 )
             )
         return out
 
-    async def undo_changeset(self, vault_ref: str) -> UndoResult:
-        data = await self._request("POST", "/v1/undo", params={"changeset": vault_ref})
+    async def undo_changeset(self, vault_ref: str, *, writer: str = "claude") -> UndoResult:
+        """`POST /v1/undo`. `writer` must be the changeset's own (L4):
+        vaultd refuses Claude's undo of an Echo changeset and the other
+        way round (REFUSED), and answers NOT_FOUND for an unknown or
+        expired one."""
+        if writer not in WRITERS:
+            raise ValueError(f"unknown writer: {writer!r}")
+        data = await self._request(
+            "POST", "/v1/undo", params={"changeset": vault_ref, "writer": writer}
+        )
         restored, refused = data.get("restored"), data.get("refused")
         _require(isinstance(restored, int) and not isinstance(restored, bool) and restored >= 0)
         _require(isinstance(refused, int) and not isinstance(refused, bool) and refused >= 0)
         return UndoResult(restored=restored, refused=refused)
+
+    # -- L4: Echo's inbox writer ----------------------------------------------------
+
+    async def put_echo_note(self, name: str, content: str, changeset: str) -> EchoPut:
+        """Create one knowledge note in vaultd's `echo_inbox` (L4). `name`
+        is a bare `.md` basename; vaultd builds the path. REFUSED for
+        every acceptance failure (no inbox, a bad name, content that is
+        not an Echo note, a cap, another writer's changeset), UNAVAILABLE
+        for a transport failure, after which the same `changeset`
+        replays safely."""
+        data = await self._request(
+            "PUT",
+            "/v1/echo/inbox",
+            body={"name": name, "content": content, "changeset": changeset},
+        )
+        got_name, sha, replayed = data.get("name"), data.get("sha256"), data.get("replayed")
+        _require(isinstance(got_name, str) and got_name.endswith(".md") and "/" not in got_name)
+        _require(isinstance(sha, str) and isinstance(replayed, bool))
+        return EchoPut(name=got_name, sha256=sha, replayed=replayed)

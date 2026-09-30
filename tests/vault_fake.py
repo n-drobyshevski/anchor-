@@ -16,6 +16,9 @@ from typing import Callable
 
 from app.vault import errors
 from app.vault.client import (
+    ChangeEntry,
+    ChangeFile,
+    EchoPut,
     FileContent,
     Graph,
     GraphEdge,
@@ -24,6 +27,7 @@ from app.vault.client import (
     ManifestEntry,
     NotesSummary,
     ServiceStatus,
+    UndoResult,
 )
 from app.vault.errors import VaultError
 
@@ -82,6 +86,23 @@ class FakeVault:
         self.writable: re.Pattern[str] = WRITABLE
         # L3: frontmatter aliases the graph reports, path -> aliases.
         self.aliases: dict[str, tuple[str, ...]] = {}
+        # L4: Echo's inbox writer (`PUT /v1/echo/inbox`). The inbox
+        # folder, or None for "no inbox" (every put REFUSED); each Echo
+        # changeset vaultd recorded, vault_ref -> {"path", "sha256",
+        # "undone"}; an error to raise once instead of performing a put
+        # (`echo_put_error`: REFUSED plays a 403, UNAVAILABLE a transport
+        # failure before the write) or once after performing it
+        # (`echo_crash_after_put`: the note is written, the answer lost).
+        # Notes land in `notes` as knowledge, where vaultd would list them.
+        self.echo_inbox: str | None = "Echo/Inbox"
+        self.echo_changesets: dict[str, dict] = {}
+        self.echo_put_error: Exception | None = None
+        self.echo_crash_after_put: Exception | None = None
+        # L4: the changeset ids a `POST /v1/undo` was asked for, with the
+        # writer named; and an error to raise once after performing an
+        # undo (its answer lost).
+        self.undo_calls: list[tuple[str, str]] = []
+        self.echo_undo_crash_after: Exception | None = None
 
     # The factory the sync pass takes.
     def __call__(self, settings) -> "FakeVault":
@@ -233,3 +254,71 @@ class FakeVault:
 
     def writes(self) -> list[tuple[str, str]]:
         return [c for c in self.calls if c[0] in ("put", "delete", "purge")]
+
+    # -- L4: Echo's inbox writer and undo --------------------------------------------
+
+    async def put_echo_note(self, name: str, content: str, changeset: str) -> EchoPut:
+        """vaultd's `PUT /v1/echo/inbox`, in the ways the bot can see:
+        a replayed changeset answers the note it already made, a missing
+        inbox or a bad basename is REFUSED, a taken name gets ` 2`..` 9`."""
+        self.calls.append(("echo_put", changeset))
+        self._check()
+        recorded = self.echo_changesets.get(changeset)
+        if recorded is not None:
+            return EchoPut(recorded["path"].rsplit("/", 1)[-1], recorded["sha256"], True)
+        if self.echo_put_error is not None:
+            exc, self.echo_put_error = self.echo_put_error, None
+            raise exc
+        if self.echo_inbox is None or "/" in name or not name.endswith(".md") or name.startswith("."):
+            raise VaultError(errors.REFUSED)
+        stem = name[: -len(".md")]
+        for candidate in [name] + [f"{stem} {n}.md" for n in range(2, 10)]:
+            path = f"{self.echo_inbox}/{candidate}"
+            if path not in self.notes and path not in self.files:
+                break
+        else:
+            raise VaultError(errors.REFUSED)
+        self.notes[path] = ("knowledge", content)
+        self.echo_changesets[changeset] = {"path": path, "sha256": sha(content), "undone": False}
+        if self.echo_crash_after_put is not None:
+            exc, self.echo_crash_after_put = self.echo_crash_after_put, None
+            raise exc
+        return EchoPut(candidate, sha(content), False)
+
+    async def undo_changeset(self, vault_ref: str, *, writer: str = "claude") -> UndoResult:
+        """vaultd's `POST /v1/undo` for Echo's changesets: NOT_FOUND for
+        an unknown one, REFUSED for the wrong writer, and a note edited
+        since (or already gone) refused by compare-and-swap."""
+        self.undo_calls.append((vault_ref, writer))
+        self._check()
+        recorded = self.echo_changesets.get(vault_ref)
+        if recorded is None:
+            raise VaultError(errors.NOT_FOUND)
+        if writer != "echo":
+            raise VaultError(errors.REFUSED)
+        current = self.notes.get(recorded["path"])
+        if current is None or sha(current[1]) != recorded["sha256"]:
+            return UndoResult(restored=0, refused=1)
+        del self.notes[recorded["path"]]
+        recorded["undone"] = True
+        if self.echo_undo_crash_after is not None:
+            exc, self.echo_undo_crash_after = self.echo_undo_crash_after, None
+            raise exc
+        return UndoResult(restored=1, refused=0)
+
+    async def list_changes(self) -> list[ChangeEntry]:
+        """vaultd's `GET /v1/changes`, for Echo's changesets: each write
+        with its path, hash and undone flag."""
+        self.calls.append(("list_changes", ""))
+        self._check()
+        return [
+            ChangeEntry(
+                id=ref,
+                kind="write",
+                time=datetime.datetime(2026, 9, 30, tzinfo=datetime.timezone.utc),
+                undone=recorded["undone"],
+                files=[ChangeFile(path=recorded["path"], sha256=recorded["sha256"])],
+                writer="echo",
+            )
+            for ref, recorded in self.echo_changesets.items()
+        ]
