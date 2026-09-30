@@ -75,6 +75,10 @@ FORBIDDEN_IMPORTS = {
     # yet. L3-L5 allow it in the two new idle kinds and in reflect, each
     # by name, when they land -- see ALLOWED_PER_FILE below.
     "app.vault.lens": "the lens reaches only the idle kinds ALLOWED_PER_FILE names",
+    # L5 (the L5 spec sections 1 and 5): the shared selector core --
+    # catalog rendering, the lens block, the selection checks. Idle
+    # reaches it only where it may reach the lens itself.
+    "app.core.lens_select": "the lens selector core reaches only reflect's lens round",
     # 6d: `app.research.jobs` is deliberately no longer banned.
     # app/core/idle/research.py (and, for its own gate fact,
     # app/core/idle/facts.py) calls `run_research_job`/`study_quota_used`
@@ -101,6 +105,14 @@ ALLOWED_PER_FILE = {
     # notes' titles and summaries) through app/vault/lens.py only. It
     # sends nothing either: the result message is the garden hook's.
     "lens_research.py": {"app.vault.lens"},
+    # L5 (plan sections 7 and 10; the L5 spec sections 3 and 5): the
+    # idle reflect's lens round -- the selector and the grounding of the
+    # draft's open threads -- reads the catalog and the selected bodies
+    # and records its `reflect` round, through app/vault/lens.py and the
+    # shared core in app/core/lens_select.py. It is reflect's one door
+    # to the lens: reflect.py and critique.py get no entry here, and the
+    # round sends nothing.
+    "reflect_lens.py": {"app.vault.lens", "app.core.lens_select"},
 }
 
 
@@ -192,29 +204,69 @@ def _violations(path: pathlib.Path) -> list[str]:
     return violations
 
 
-def test_the_lens_allowance_is_the_garden_s_and_lens_research_s_alone(tmp_path):
+def test_the_lens_allowance_is_the_garden_s_lens_research_s_and_reflect_lens_s_alone(tmp_path):
     """L3: `app.vault.lens` is allowed in lens_garden.py and, from L4, in
-    lens_research.py, and nowhere else in app/core/idle/; the allowance
-    lifts nothing else -- neither may import app.tg, a chunk module,
-    card adoption or a state writer."""
+    lens_research.py; L5 adds reflect_lens.py, which alone may also
+    import `app.core.lens_select` (the L5 spec section 5). Nowhere else
+    in app/core/idle/ -- reflect.py and critique.py included -- may
+    reach either. The allowance lifts nothing else: none of the three
+    may import app.tg, a chunk module, card adoption, a state writer or
+    the review."""
     idle = tmp_path / "idle"
     idle.mkdir()
-    for name in ("lens_garden.py", "lens_research.py"):
+    grants = {
+        "lens_garden.py": ("from app.vault import lens\n",),
+        "lens_research.py": ("from app.vault import lens\n",),
+        "reflect_lens.py": (
+            "from app.vault import lens\n",
+            "from app.core.lens_select import SELECTOR_SCHEMA, select_messages\n",
+            "from app.core import lens_select\n",
+        ),
+    }
+    for name, sources in grants.items():
         allowed = idle / name
-        allowed.write_text("from app.vault import lens\n", encoding="utf-8")
-        assert _violations(allowed) == [], name
+        for source in sources:
+            allowed.write_text(source, encoding="utf-8")
+            assert _violations(allowed) == [], (name, source)
         for source in (
             "from app.tg import garden\n",
             "from app.vault import notes_knowledge\n",
             "from app.core import state\n",
             "from app.core import cards\n",
+            "from app.core import review\n",
             "from app.core.echo_write import adopt_research\n",
         ):
             allowed.write_text(source, encoding="utf-8")
             assert _violations(allowed), (name, source)
-    other = idle / "research.py"
-    other.write_text("from app.vault import lens\n", encoding="utf-8")
-    assert _violations(other)
+    # The selector core is reflect_lens.py's alone, not the garden's.
+    for name in ("lens_garden.py", "lens_research.py"):
+        other = idle / name
+        other.write_text("from app.core import lens_select\n", encoding="utf-8")
+        assert _violations(other), name
+    for name in ("research.py", "reflect.py", "critique.py", "runner.py"):
+        other = idle / name
+        for source in (
+            "from app.vault import lens\n",
+            "from app.core import lens_select\n",
+            "from app.core.lens_select import render_lens_block\n",
+        ):
+            other.write_text(source, encoding="utf-8")
+            assert _violations(other), (name, source)
+
+
+def test_reflect_reaches_the_lens_only_through_reflect_lens():
+    """L5: the allowance is not aspirational -- reflect_lens.py does
+    import both modules -- and reflect.py and critique.py, as written,
+    import neither (critique attributes ids from app.db.models alone,
+    the L5 spec section 4)."""
+    idle = pathlib.Path("app/core/idle")
+    imported = set(_imported_names(ast.parse(_code_without_docstrings(idle / "reflect_lens.py"))))
+    assert {"app.vault.lens", "app.core.lens_select"} <= imported
+    for name in ("reflect.py", "critique.py"):
+        names = _imported_names(ast.parse(_code_without_docstrings(idle / name)))
+        assert not any(
+            n in ("app.vault.lens", "app.core.lens_select", "app.core.lens_review") for n in names
+        ), name
 
 
 def test_the_detector_would_actually_catch_a_violation():
@@ -296,7 +348,11 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     LENS_RESEARCH (the L4 spec section 2): it builds the query, searches,
     distills and ends `done` with a lens card, and still sends nothing --
     its result message is the garden hook's (app/worker.py), never
-    idle's."""
+    idle's. L5 runs REFLECT with the lens active (the L5 spec section
+    5): pass 1, the selector and the grounding call, a `reflect` round
+    recorded and an open thread grounded -- and still nothing sent: a
+    grounded entry reaches chat only through the persona prompt, on the
+    user's own next turn."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -355,9 +411,10 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         if kind == RESEARCH:
             session.add(InterestTopic(text="бессонница", packet="forums", active=True))
         garden_ids: list[int] = []
-        if kind == LENS_GARDEN:
+        if kind in (LENS_GARDEN, REFLECT):
             # Three synthetic lens notes; the second mentions the first
             # without a link, which is the gap the canned reply names.
+            # L5: REFLECT runs with the lens active over the same three.
             files = []
             for index, (title, body) in enumerate(
                 (("Кибернетика", "Наука."), ("Винер", "Основал кибернетику."), ("Эшби", "Закон."))
@@ -373,7 +430,8 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
                 session.add(row)
                 await session.flush()
                 garden_ids.append(row.id)
-            session.add(NoteLink(src_file_id=files[2], dst_file_id=files[0]))
+            if kind == LENS_GARDEN:
+                session.add(NoteLink(src_file_id=files[2], dst_file_id=files[0]))
         run = IdleRun(kind=kind, local_date=now.date(), status="queued")
         session.add(run)
         await session.commit()
@@ -448,6 +506,16 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     else:
         safety_text = '{"add": [], "close": [], "update": []}'
     safety_provider = FakeLLMProvider(text=safety_text)
+    if kind == REFLECT:
+        # L5: pass 1's draft (one open thread), the selector's pick and
+        # the grounding call's rewrite, one reply per call, in order.
+        safety_provider = _ScriptedSafety(
+            '{"add": [{"kind": "open_thread", "text": "%s"}], "close": [], "update": []}'
+            % REFLECT_THREAD,
+            '{"selected": [%d], "why": "Эшби о разнообразии."}' % garden_ids[2],
+            '{"add": [{"ref": "a1", "text": "%s", "grounds": ["Эшби"]}], "update": []}'
+            % REFLECT_GROUNDED,
+        )
 
     if kind == LENS_GARDEN:
         # The garden builds its own provider (app/core/idle/lens_garden.py's
@@ -536,6 +604,8 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         monkeypatch.setattr("app.research.search.find_urls", _fake_find_urls)
 
     settings = Settings(RESEARCH_ENABLED=True) if kind == RESEARCH else Settings()
+    if kind == REFLECT:
+        settings = Settings(LENS_ENABLED=True, LENS_REFLECT_ENABLED=True)
     if kind == LENS_RESEARCH:
         settings = _lens_settings()
     if kind == LENS_GARDEN:
@@ -560,6 +630,19 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         elif kind == PREBRIEF:
             tomorrow = now.date() + datetime.timedelta(days=1)
             assert (await session.get(BriefNote, tomorrow)) is not None
+        elif kind == REFLECT:
+            from sqlalchemy import select
+
+            from app.db.models import LensRound, NotebookEntry
+
+            run = await session.get(IdleRun, run_id)
+            [round_] = (await session.execute(select(LensRound))).scalars().all()
+            assert (round_.consumer, round_.outcome) == ("reflect", "grounded")
+            assert run.summary.get("lens_round_id") == round_.id
+            [entry] = (await session.execute(select(NotebookEntry))).scalars().all()
+            assert entry.text == REFLECT_GROUNDED
+            assert (entry.lens_round_id, entry.lens_note_ids) == (round_.id, [garden_ids[2]])
+            assert safety_provider.calls == 3
         elif kind == CRITIQUE:
             run = await session.get(IdleRun, run_id)
             assert run.summary.get("count") == 1
@@ -590,6 +673,25 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     assert fake.sent == []
     assert fake.edits == []
     assert fake.documents == []
+
+
+REFLECT_THREAD = "Вернуться к вечерним чек-инам."
+REFLECT_GROUNDED = "Вернуться к вечерним чек-инам: хватает ли в них разных вопросов."
+
+
+class _ScriptedSafety(FakeLLMProvider):
+    """FakeLLMProvider with one canned reply per call, in order (L5's
+    REFLECT run makes three calls that each want a different shape)."""
+
+    def __init__(self, *texts: str) -> None:
+        super().__init__(text=texts[0], model="fake-safety")
+        self._texts = list(texts)
+
+    async def complete(self, messages, *, conversation_id, json_schema=None):
+        self.text = self._texts[min(self.calls, len(self._texts) - 1)]
+        return await super().complete(
+            messages, conversation_id=conversation_id, json_schema=json_schema
+        )
 
 
 def _lens_settings() -> Settings:

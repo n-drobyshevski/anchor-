@@ -770,3 +770,167 @@ async def test_close_entry_returns_false_for_a_missing_id(sessionmaker, clock):
     async with sessionmaker() as session:
         ok = await notebook.close_entry(session, 999_999, by="user", clock=clock)
     assert ok is False
+
+
+# --- L5: the lens columns (the L5 spec sections 3 and 6) ----------------------
+
+
+def test_validate_never_produces_lens_note_ids():
+    """Only app/core/idle/reflect_lens.py sets the key, after its own
+    checks; a model cannot claim a lens note through validate()."""
+    plan = notebook.validate(
+        _payload(
+            add=[{"kind": "observation", "text": "Пишет по вечерам.", "lens_note_ids": [1]}],
+            update=[{"id": 7, "text": "Новый текст.", "lens_note_ids": [1]}],
+        ),
+        entries={7: "anchor"},
+    )
+    assert plan.add == [{"kind": "observation", "text": "Пишет по вечерам."}]
+    assert plan.update == [{"id": 7, "text": "Новый текст."}]
+
+
+async def _reflect_round(session) -> int:
+    from app.vault import lens
+
+    round_id = await lens.record_round(
+        session, selected_note_ids=[1], rationale=None, outcome="grounded", consumer="reflect"
+    )
+    await session.commit()
+    return round_id
+
+
+async def test_the_per_scene_notebook_ignores_an_active_lens(sessionmaker, clock):
+    """Deviation 1 (owner-approved): the per-scene job gets no lens --
+    with both switches on and a lens stored it makes the same one call,
+    byte for byte, and records no round."""
+    from app.core.scene import render_dialogue, summarizable_messages
+    from app.db.models import LensNote, LensRound, VaultFile
+
+    async with sessionmaker() as session:
+        scene_id = await _closed_scene_with(session, clock, 3)
+        file = VaultFile(path="Lens/Эшби.md", role="note", note_class="knowledge")
+        session.add(file)
+        await session.flush()
+        session.add(
+            LensNote(
+                vault_file_id=file.id, kind="concept", title="Эшби: разнообразие",
+                body="Закон необходимого разнообразия.", body_hash="x" * 64, chars=32,
+            )
+        )
+        await session.commit()
+        expected = notebook.build_input(
+            dialogue=render_dialogue(await summarizable_messages(session, scene_id)),
+            summary="Сводка сессии.",
+            view=await notebook.active_entries(session),
+            due_action=None,
+            orders=[],
+        )
+
+    provider = FakeLLMProvider(text=json.dumps(_payload()))
+    settings = _settings(LENS_ENABLED=True, LENS_REFLECT_ENABLED=True)
+    async with sessionmaker() as session:
+        await notebook.run_notebook_reflect(
+            session, settings, provider, clock=clock, timezone=TIMEZONE, scene_id=scene_id
+        )
+
+    assert provider.calls == 1
+    [messages] = provider.received_messages
+    assert [(m.role, m.content) for m in messages] == [
+        ("system", notebook.REFLECT_PROMPT),
+        ("user", expected),
+    ]
+    assert provider.received_conversation_ids == [f"anchor-nb-{scene_id}"]
+    assert provider.received_schemas == [notebook.REFLECT_SCHEMA]
+    async with sessionmaker() as session:
+        assert (await session.execute(select(LensRound))).scalars().all() == []
+
+
+async def test_a_per_scene_update_clears_the_lens_columns(sessionmaker, clock):
+    async with sessionmaker() as session:
+        scene_id = await _closed_scene_with(session, clock, 3)
+        round_id = await _reflect_round(session)
+        entry = NotebookEntry(
+            kind="open_thread", text="Вернуться к вечерним чек-инам.", source="anchor",
+            lens_round_id=round_id, lens_note_ids=[1],
+        )
+        session.add(entry)
+        await session.commit()
+        entry_id = entry.id
+
+    provider = FakeLLMProvider(
+        text=json.dumps(_payload(update=[{"id": entry_id, "text": "Спросить про поездку в Лилль."}]))
+    )
+    async with sessionmaker() as session:
+        await notebook.run_notebook_reflect(
+            session, _settings(), provider, clock=clock, timezone=TIMEZONE, scene_id=scene_id
+        )
+
+    async with sessionmaker() as session:
+        row = await session.get(NotebookEntry, entry_id)
+    assert row.text == "Спросить про поездку в Лилль."
+    assert (row.lens_round_id, row.lens_note_ids) == (None, [])
+
+
+async def test_a_per_scene_add_writes_empty_lens_columns(sessionmaker, clock):
+    provider = FakeLLMProvider(
+        text=json.dumps(_payload(add=[{"kind": "observation", "text": "Пишет по вечерам."}]))
+    )
+    async with sessionmaker() as session:
+        scene_id = await _closed_scene_with(session, clock, 3)
+    async with sessionmaker() as session:
+        await notebook.run_notebook_reflect(
+            session, _settings(), provider, clock=clock, timezone=TIMEZONE, scene_id=scene_id
+        )
+    async with sessionmaker() as session:
+        [row] = (await session.execute(select(NotebookEntry))).scalars().all()
+    assert (row.lens_round_id, row.lens_note_ids) == (None, [])
+
+
+async def test_apply_plan_writes_the_round_only_beside_ids_and_logs_both_columns(
+    sessionmaker, clock
+):
+    """Grounded items carry the round and their ids; an item without ids
+    gets neither, even when a round is passed; the change snapshots hold
+    both columns, so undo can restore them."""
+    changes: list[tuple] = []
+
+    async def _record(table, row_id, op, before, after):
+        changes.append((op, before, after))
+
+    async with sessionmaker() as session:
+        round_id = await _reflect_round(session)
+        old = NotebookEntry(kind="open_thread", text="Спросить про книгу.", source="anchor")
+        session.add(old)
+        await session.commit()
+        plan = notebook.Plan(
+            add=[
+                {"kind": "open_thread", "text": "Вернуться к вечерним чек-инам.",
+                 "lens_note_ids": [3, 1]},
+                {"kind": "observation", "text": "Пишет по вечерам."},
+            ],
+            update=[{"id": old.id, "text": "Спросить, что дала книга.", "lens_note_ids": [1]}],
+        )
+        result = await notebook.apply_plan(
+            session, _settings(), plan, clock=clock, scene_id=None, on_change=_record,
+            lens_round_id=round_id,
+        )
+        await session.commit()
+        old_id = old.id
+
+    assert (result.added, result.updated) == (2, 1)
+    async with sessionmaker() as session:
+        rows = {
+            row.text: (row.lens_round_id, row.lens_note_ids)
+            for row in (await session.execute(select(NotebookEntry))).scalars().all()
+        }
+    assert rows == {
+        "Вернуться к вечерним чек-инам.": (round_id, [3, 1]),
+        "Пишет по вечерам.": (None, []),
+        "Спросить, что дала книга.": (round_id, [1]),
+    }
+    update = next(c for c in changes if c[0] == "update")
+    assert (update[1]["lens_round_id"], update[1]["lens_note_ids"]) == (None, [])
+    assert (update[2]["lens_round_id"], update[2]["lens_note_ids"]) == (round_id, [1])
+    for op, _before, after in changes:
+        assert {"lens_round_id", "lens_note_ids"} <= set(after)
+    assert old_id in {c[2]["id"] for c in changes}

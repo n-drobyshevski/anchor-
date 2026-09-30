@@ -47,6 +47,15 @@ lens-mode distill -- on the safety provider the idle kind runs them on
 the text checks run over the validated query or the cards' own words,
 and the research checks over what code let through (eval/checks.py's
 `research_checks`).
+
+L5 (the L5 spec section 6): a `lens_reflect` case runs the idle
+reflect's lens round -- selector, grounding of the draft's open threads,
+the merge -- over the draft the case supplies, on the safety provider
+reflect runs on (`_review_provider`'s settings). Its "reply" is each
+draft item beside what the lens made of it; the text checks run over
+the final entries' words -- and over the grounding call's raw rewrites,
+before the merge drops anything -- and the reflect checks over what the
+round did (eval/checks.py's `reflect_checks`).
 """
 
 from __future__ import annotations
@@ -61,12 +70,20 @@ import sys
 from app.config import Settings, get_settings
 from app.core.clock import SystemClock
 from app.core.extract import parse_json
-from app.core.idle import lens_garden
+from app.core.idle import lens_garden, reflect_lens
 from app.llm.openrouter import OpenRouterProvider, build_client
 from eval import checks as checks_module
 from eval import judge as judge_module
 from eval import scenario
-from eval.cases import LENS_DISTILL, LENS_GARDEN, LENS_QUERY, LENS_REVIEW, Case, load_all
+from eval.cases import (
+    LENS_DISTILL,
+    LENS_GARDEN,
+    LENS_QUERY,
+    LENS_REFLECT,
+    LENS_REVIEW,
+    Case,
+    load_all,
+)
 from eval.db import throwaway_sessionmaker
 
 REPORTS_DIR = pathlib.Path(__file__).parent / "reports"
@@ -97,8 +114,9 @@ class Outcome:
 
 
 # The case kinds that generate on `LLM_MODEL_SAFETY` rather than on the
-# persona model: L2's lens round, L3's garden, L4's research steps.
-SAFETY_MODEL_KINDS = (LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL)
+# persona model: L2's lens round, L3's garden, L4's research steps, L5's
+# reflect lens round.
+SAFETY_MODEL_KINDS = (LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL, LENS_REFLECT)
 # L4: the two research kinds, run by `run_research_case`.
 RESEARCH_KINDS = (LENS_QUERY, LENS_DISTILL)
 
@@ -208,6 +226,8 @@ def _review_provider(settings: Settings, client):
 GROUNDING_SCHEMA_NAME = "anchor_lens_grounding"
 # app/core/idle/lens_garden.py's schema name (L3).
 GARDEN_SCHEMA_NAME = lens_garden.GARDEN_SCHEMA.name
+# app/core/idle/reflect_lens.py's grounding schema name (L5).
+REFLECT_GROUNDING_SCHEMA_NAME = reflect_lens.GROUNDING_SCHEMA.name
 
 
 def raw_grounding_text(reply: str) -> str:
@@ -222,6 +242,22 @@ def raw_grounding_text(reply: str) -> str:
             lines.extend(
                 value for value in (item.get("text"), item.get("reason")) if isinstance(value, str)
             )
+    return "\n".join(lines)
+
+
+def raw_reflect_text(reply: str) -> str:
+    """Every raw rewrite's `text` in a reflect grounding reply, one per
+    line, before the merge; empty when the reply is not that JSON. A
+    rewrite the merge dropped still fails a forbidden pattern."""
+    payload = parse_json(reply)
+    if not isinstance(payload, dict):
+        return ""
+    lines = []
+    for key in ("add", "update"):
+        items = payload.get(key)
+        for item in items if isinstance(items, list) else ():
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                lines.append(item["text"])
     return "\n".join(lines)
 
 
@@ -260,6 +296,8 @@ class _Metered:
         self.grounding_raw: str | None = None
         # L3: the garden call's reply as the model gave it, likewise.
         self.garden_raw: str | None = None
+        # L5: the reflect grounding call's reply, before the merge.
+        self.reflect_raw: str | None = None
 
     async def complete(self, messages, *, conversation_id, json_schema=None):
         try:
@@ -275,6 +313,8 @@ class _Metered:
             self.grounding_raw = response.text
         if json_schema is not None and json_schema.name == GARDEN_SCHEMA_NAME:
             self.garden_raw = response.text
+        if json_schema is not None and json_schema.name == REFLECT_GROUNDING_SCHEMA_NAME:
+            self.reflect_raw = response.text
         return response
 
     async def close(self) -> None:  # pragma: no cover - the run closes the client
@@ -390,6 +430,67 @@ async def run_garden_case(
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
 
+async def run_reflect_case(
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    review,
+    judge,
+    *,
+    amendments: list[str] | None = None,
+) -> Outcome:
+    """One `lens_reflect` case for real (L5): seed, run the round and the
+    merge, check, judge. A provider error fails the case even though
+    reflect_lens.py swallows it into a `fallback` round, as for L2."""
+    if review is None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), 0.0,
+            "нет провайдера рефлексии (LLM_MODEL_SAFETY) для кейса линзы",
+        )
+    metered = _Metered(review)
+    try:
+        async with sessionmaker() as session:
+            await scenario.reset(session)
+            await scenario.seed(session, case, clock, amendments=amendments)
+            run = await scenario.run_lens_reflect(
+                session, case, scenario.reflect_settings(settings), clock, metered
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed case, not a failed run
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost,
+            metered.error or f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+    if metered.error is not None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost, metered.error
+        )
+
+    reply = scenario.render_reflect_run(run)
+    check_results = checks_module.run_all(run.entry_text, case.checks, settings)
+    if case.checks.get("forbidden_regex") and metered.reflect_raw is not None:
+        raw = checks_module.forbidden(
+            raw_reflect_text(metered.reflect_raw), case.checks["forbidden_regex"]
+        )
+        check_results.append(checks_module.Result("forbidden_regex_raw", raw.passed, raw.detail))
+    check_results += checks_module.reflect_checks(
+        case.checks,
+        outcome=run.outcome,
+        selected=run.selected,
+        draft=run.draft,
+        final=run.final,
+        titles=[note["title"] for note in case.setup["lens"]],
+    )
+    verdict = await judge_module.judge(
+        judge,
+        items=case.judge_items,
+        case_title=case.title,
+        prompt_text=scenario.situation(case),
+        reply=reply,
+    )
+    return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
+
+
 async def run_research_case(
     case: Case,
     settings: Settings,
@@ -470,7 +571,8 @@ async def run_case(
     messages through `scenario.build`, and eval/trial.py passes none.
 
     L4's `lens_query` and `lens_distill` cases run on `review`, the
-    safety provider (`run_research_case`), on the same terms again.
+    safety provider (`run_research_case`), on the same terms again, and
+    so does L5's `lens_reflect` (`run_reflect_case`).
     """
     if case.input["kind"] == LENS_REVIEW and not dry_run:
         return await run_lens_case(
@@ -482,6 +584,10 @@ async def run_case(
         )
     if case.input["kind"] in RESEARCH_KINDS and not dry_run:
         return await run_research_case(case, settings, review, judge)
+    if case.input["kind"] == LENS_REFLECT and not dry_run:
+        return await run_reflect_case(
+            sessionmaker, case, settings, clock, review, judge, amendments=amendments
+        )
 
     async with sessionmaker() as session:
         await scenario.reset(session)

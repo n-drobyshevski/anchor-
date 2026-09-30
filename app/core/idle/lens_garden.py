@@ -679,6 +679,7 @@ async def run_lens_garden(
     started_at: datetime.datetime,
     timezone: str,
     provider: LLMProvider | None = None,
+    manual: bool = False,
 ) -> GardenResult:
     """The `lens_garden` idle kind body, called by app/core/idle/runner.py
     after its gate re-check and first preemption check.
@@ -737,7 +738,9 @@ async def run_lens_garden(
     plan = proposal.plan
 
     async with session_factory() as session:
-        if await is_preempted(session, clock, started_at):
+        # A manual run (`/lens garden now`) is never preempted: the
+        # user's messages are what preemption guards, and they asked.
+        if not manual and await is_preempted(session, clock, started_at):
             return GardenResult(**step1, proposed=plan.proposed, invalid=plan.invalid, preempted=True)
         record = await lens.record_garden(
             session,

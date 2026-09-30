@@ -5,10 +5,14 @@ No network beyond 127.0.0.1, no vaultd, no Obsidian.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import json
 import socket
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from app.vault import client as client_module
 from app.vault import errors
@@ -96,6 +100,60 @@ async def test_an_oversized_response_is_refused(stub, monkeypatch) -> None:
     monkeypatch.setattr(client_module, "MAX_RESPONSE_BYTES", 16)
     with pytest.raises(VaultError) as exc:
         await _client(stub).status()
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def _chunked_server(body: bytes, pieces: int) -> TestServer:
+    """Serves `body` in `pieces` writes with a pause between, so the
+    client sees it arrive over several reads, as a manifest of a few
+    hundred notes does across Railway's network."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Type": "application/json"})
+        await response.prepare(request)
+        step = -(-len(body) // pieces)
+        for start in range(0, len(body), step):
+            await response.write(body[start : start + step])
+            await asyncio.sleep(0.02)
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/v1/manifest", handler)
+    server = TestServer(app, host="127.0.0.1")
+    await server.start_server()
+    return server
+
+
+def _manifest_body(notes: int) -> bytes:
+    files = [
+        {"path": f"Notes/n{i}.md", "sha256": "a" * 64, "size": 10, "scope": "note", "class": "knowledge"}
+        for i in range(notes)
+    ]
+    summary = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "valid"}
+    return json.dumps({"files": files, "summary": summary}).encode()
+
+
+async def test_a_body_that_arrives_in_several_chunks_is_read_whole() -> None:
+    """The bug behind every sync pass stopping as `bad_response`: the
+    first read returned only what had arrived, and the rest was lost."""
+    server = await _chunked_server(_manifest_body(40), pieces=4)
+    try:
+        manifest = await VaultClient(f"http://127.0.0.1:{server.port}", TOKEN).manifest()
+    finally:
+        await server.close()
+    assert len(manifest.entries) == 40
+
+
+async def test_an_oversized_chunked_response_is_still_refused(monkeypatch) -> None:
+    body = _manifest_body(40)
+    monkeypatch.setattr(client_module, "MAX_RESPONSE_BYTES", len(body) // 2)
+    server = await _chunked_server(body, pieces=4)
+    try:
+        with pytest.raises(VaultError) as exc:
+            await VaultClient(f"http://127.0.0.1:{server.port}", TOKEN).manifest()
+    finally:
+        await server.close()
     assert exc.value.code == errors.BAD_RESPONSE
 
 

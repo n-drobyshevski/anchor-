@@ -1,0 +1,61 @@
+# The L5 spec section 6, case 46 (non-blocking). The idle reflect's lens
+# round, first property: an open thread in pass 1's draft comes out
+# rephrased on the note that actually fits it. The thread is an
+# unfinished report that has been hanging since Monday and keeps the
+# user from starting anything else -- the Zeigarnik effect almost word
+# for word; Goodhart and Pareto are plausible neighbours that fit worse.
+# The round must end `grounded` and the thread must name the Zeigarnik
+# note in its grounds, with no note title in the entry's own text.
+#
+# `input.plan` stands in for pass 1 (app/core/idle/reflect.py's first
+# call), as L2's `input.analysis` does for the review's: the lens calls
+# see only the draft, never the week. eval/scenario.py's
+# `reflect_draft` refuses the case if notebook.validate() would trim any
+# of it. The observation beside the thread is never grounded (owner
+# decision on the spec's risk 2); `draft_shape_kept` checks it stayed.
+#
+# The notes are synthetic, written from public knowledge -- never from
+# the user's lens (anchor-lens-plan.md section 11).
+id = "46"
+title = "Рефлексия с линзой: тема опирается на подходящую заметку (Зейгарник)"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+lens = [
+    { title = "Эффект Зейгарник", kind = "concept", body = """
+Блюма Зейгарник (1927): незавершённые задачи вспоминаются лучше
+завершённых. Незакрытое дело продолжает занимать внимание и мешает
+переключиться; записанный конкретный следующий шаг это напряжение
+заметно снижает, даже если само дело ещё не сделано.
+""" },
+    { title = "Закон Гудхарта", kind = "concept", body = """
+Чарльз Гудхарт (1975), в формулировке Мэрилин Стратерн: когда показатель
+становится целью, он перестаёт быть хорошим показателем. Люди начинают
+оптимизировать саму метрику, а не то, что она должна была измерять.
+""" },
+    { title = "Принцип Парето", kind = "concept", body = """
+Вильфредо Парето: в очень многих системах около 20% причин дают около
+80% результата. Практический вывод -- искать немногие дела, которые дают
+большую часть эффекта.
+""" },
+]
+
+[input]
+kind = "lens_reflect"
+
+[input.plan]
+add = [
+    { kind = "open_thread", text = "Спросить про отчёт: он не дописан с понедельника, и пока он висит, остальное не начинается." },
+    { kind = "observation", text = "По вечерам отвечает короче, чем утром." },
+]
+
+[checks]
+russian = true
+lens_outcome = "grounded"
+grounds_include = ["Эффект Зейгарник"]
+min_grounded = 1
+text_excludes_titles = true
+draft_shape_kept = true
+judge = ["notebook_lens_fit", "notebook_no_new_facts"]

@@ -40,6 +40,23 @@ L4 adds four for lens research's two steps (the L4 spec section 8) --
 
 A refused query is not a failure unless the case says `query_valid`: a
 refusal is one of the two safe answers to an instruction in a summary.
+
+L5 adds three for the idle reflect's lens round (the L5 spec section 6),
+beside L2's `lens_outcome`, `selected_include` and `grounds_include`,
+which it reuses over the notebook entries -- `reflect_checks`:
+
+- `text_excludes_titles` -- does no entry's text carry a lens note's
+  title its draft item lacked (names belong in `grounds` only)?
+- `draft_shape_kept`     -- is the plan still the draft's: the same adds
+  and kinds, the same updates, exactly its closes, and every
+  observation word for word and ungrounded (owner decision: only open
+  threads are ever grounded)?
+- `min_grounded`         -- did at least this many entries come out
+  resting on a lens note?
+
+The code enforces the first two already (app/core/idle/reflect_lens.py's
+`merge`); a case asks for them anyway, so a regression in the merge
+fails the eval as well as the tests.
 """
 
 from __future__ import annotations
@@ -431,4 +448,90 @@ def research_checks(
             results.append(min_cards(cards, spec["min_cards"]))
         if "max_cards" in spec:
             results.append(max_cards(cards, spec["max_cards"]))
+    return results
+
+
+# --- L5: the idle reflect's lens round -------------------------------------------
+
+
+def _entries(plan: dict) -> list[dict]:
+    return [*plan["add"], *plan["update"]]
+
+
+def text_excludes_titles(draft: dict, final: dict, titles: list[str]) -> Result:
+    """No final entry text holds one of `titles` (every seeded lens note,
+    casefolded) that its draft item lacked: the grounding prompt keeps
+    note names in `grounds`, and the merge's leak guard drops a rewrite
+    that names a selected note. This checks every seeded title, selected
+    or not. `draft` and `final` are eval/scenario.py's `ReflectRun`
+    shapes, position for position."""
+    leaks = []
+    for before, after in zip(_entries(draft), _entries(final)):
+        text, original = after["text"].casefold(), before["text"].casefold()
+        leaks.extend(
+            title
+            for title in titles
+            if title.strip().casefold() in text and title.strip().casefold() not in original
+        )
+    return Result(
+        "text_excludes_titles",
+        not leaks,
+        "названий заметок в тексте нет" if not leaks else f"в тексте: {', '.join(leaks)}",
+    )
+
+
+def draft_shape_kept(draft: dict, final: dict) -> Result:
+    """The lens only rephrased open threads: the same adds with the same
+    kinds, the same updates, exactly the draft's closes, and every
+    other item (an observation) word for word, with no grounds."""
+    problems = []
+    if [item["kind"] for item in final["add"]] != [item["kind"] for item in draft["add"]]:
+        problems.append("добавления не те, что в черновике")
+    if [item["id"] for item in final["update"]] != [item["id"] for item in draft["update"]]:
+        problems.append("обновления не те, что в черновике")
+    if sorted(final["close"]) != sorted(draft["close"]):
+        problems.append("закрытия не те, что в черновике")
+    for before, after in zip(_entries(draft), _entries(final)):
+        if before["kind"] != "open_thread" and (after["text"] != before["text"] or after["grounds"]):
+            problems.append(f"переписано не-тема ({before['kind']})")
+    return Result(
+        "draft_shape_kept",
+        not problems,
+        "черновик сохранён" if not problems else "; ".join(problems),
+    )
+
+
+def min_grounded(final: dict, minimum: int) -> Result:
+    """At least `minimum` entries rest on a lens note (non-empty grounds)."""
+    count = sum(1 for item in _entries(final) if item["grounds"])
+    return Result(
+        "min_grounded", count >= minimum, f"с основанием: {count} (нужно не меньше {minimum})"
+    )
+
+
+def reflect_checks(
+    spec: dict,
+    *,
+    outcome: str | None,
+    selected: list[str],
+    draft: dict,
+    final: dict,
+    titles: list[str],
+) -> list[Result]:
+    """The reflect lens checks a case asked for, in a fixed order. Text
+    checks (`russian`, `forbidden_regex`, ...) still come from `run_all`,
+    over the entries' own text."""
+    results: list[Result] = []
+    if "lens_outcome" in spec:
+        results.append(lens_outcome(outcome, spec["lens_outcome"]))
+    if spec.get("selected_include"):
+        results.append(selected_include(selected, spec["selected_include"]))
+    if spec.get("grounds_include"):
+        results.append(grounds_include(_entries(final), spec["grounds_include"]))
+    if spec.get("text_excludes_titles"):
+        results.append(text_excludes_titles(draft, final, titles))
+    if spec.get("draft_shape_kept"):
+        results.append(draft_shape_kept(draft, final))
+    if "min_grounded" in spec:
+        results.append(min_grounded(final, spec["min_grounded"]))
     return results

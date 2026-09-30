@@ -743,6 +743,18 @@ class Settings(BaseSettings):
     # LLM_MODEL_SAFETY, whose shared cap (LLM_SAFETY_MAX_TOKENS, 400)
     # would truncate ten gaps of Russian JSON.
     GARDEN_MAX_TOKENS: int = 2000
+    # --- L5: the lens in idle reflect (plan sections 7 and 10; the L5
+    # spec section 3) ---
+    #
+    # A second switch on top of LENS_ENABLED, like L3's garden switch:
+    # while both are on, the idle reflect picks lens notes for its draft
+    # and may rephrase its open threads on them (app/core/idle/
+    # reflect_lens.py). This is the first path by which lens ideas reach
+    # chat -- through notebook entries in the persona prompt -- so it
+    # ships off and is flipped on its own. Off, reflect makes its one
+    # call exactly as before and records no round. Turning it off leaves
+    # entries already grounded in place; threads expire on their TTL.
+    LENS_REFLECT_ENABLED: bool = False
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", "PACKET_LENS", mode="before")
     @classmethod
@@ -1008,6 +1020,22 @@ class Settings(BaseSettings):
         does a prefix comparison.
         """
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_boolean_flags(cls, value, info):
+        """Trim whitespace around every boolean flag's value.
+
+        A dashboard field kept the space after `true` in
+        LENS_GARDEN_ENABLED, pydantic refused "true " as a boolean, and
+        the bot could not start -- not even far enough to run its
+        migrations. A flag's meaning never lives in its whitespace.
+        Keyed on the annotation rather than a list, so a flag added
+        later is covered too.
+        """
+        if isinstance(value, str) and cls.model_fields[info.field_name].annotation is bool:
+            return value.strip()
+        return value
 
 
 def get_settings() -> Settings:

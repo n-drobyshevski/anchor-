@@ -369,6 +369,24 @@ def _status_error(status: int) -> str:
     return errors.UNAVAILABLE if status >= 500 else errors.BAD_RESPONSE
 
 
+async def _read_body(stream: aiohttp.StreamReader) -> bytes:
+    """The whole body, or MAX_RESPONSE_BYTES + 1 bytes of it.
+
+    `StreamReader.read(n)` returns whatever is buffered, not n bytes: a
+    manifest longer than one network chunk came back cut short and
+    failed to parse as `bad_response` on every sync pass.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    while size <= MAX_RESPONSE_BYTES:
+        chunk = await stream.read(MAX_RESPONSE_BYTES + 1 - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
 def _require(condition: bool) -> None:
     if not condition:
         raise VaultError(errors.BAD_RESPONSE)
@@ -422,7 +440,7 @@ class VaultClient:
                     headers=headers,
                     allow_redirects=False,
                 ) as resp:
-                    raw = await resp.content.read(MAX_RESPONSE_BYTES + 1)
+                    raw = await _read_body(resp.content)
                     status = resp.status
         except asyncio.TimeoutError:
             raise VaultError(errors.UNAVAILABLE) from None

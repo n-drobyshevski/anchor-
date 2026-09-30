@@ -3151,6 +3151,182 @@ a lens note. The L4 spec settled the details; you amended two of them.
   forgotten, and a vault that does not answer is asked again on the
   next pass.
 
+## L5 — reflection and critique read the lens
+
+`anchor-lens-plan.md` rev. 3, milestone L5 (§7, §10, §12): the idle
+reflect picks lens notes for itself and may rephrase its draft's open
+threads on them, and critique records which lens notes stood behind the
+replies it rated. The L5 spec settled the details; you approved its
+three deviations from the plan and decided its open risks 2, 5 and 6
+(below). The switch is `LENS_REFLECT_ENABLED`, off by default, on top
+of `LENS_ENABLED`, as L3's garden switch is. This is the first path by
+which lens ideas reach chat: a grounded thread is a notebook entry,
+and the persona prompt shows the active entries.
+
+- **Three deviations from the plan, owner-approved.**
+  1. **The per-scene notebook stays lens-free**, although §10 and §12
+     name it. It runs on raw dialogue several times a day; L2's shape
+     would add two calls per scene with lens text next to that dialogue,
+     and reusing another round's selection would record a claim nothing
+     checked. Idle reflect writes the same `notebook_entry` rows, so it
+     feeds the notebook instead. `run_notebook_reflect` and its prompt
+     are byte-identical; its updates clear an entry's lens columns.
+  2. **The reflect selector sees pass 1's validated draft, not "the
+     window's scene summaries" (§7).** L2's rule that the selector never
+     sees the week (above) wins: the lens calls get the draft only, which
+     pass 1 built from input without welfare scenes, so the welfare
+     exclusion needs no second copy.
+  3. **Reflect rounds store no rationale.** It would be written from
+     the week and no screen shows it. `record_round` refuses a
+     `reflect` round with one; the selector's `why` is still asked for
+     (the schema is shared with L2) and discarded.
+- **Only open threads are grounded (your decision on the spec's risk
+  2).** An observation is a fact about the user; rewritten through a
+  lens it would attribute a lens idea to the user, and that sentence
+  would then sit in the persona prompt as something Echo "knows". So
+  the grounding call is shown only the draft's thread items (adds of
+  kind `open_thread`, updates of an active thread), its prompt speaks
+  only of threads, and the merge drops any rewrite that names
+  anything else; the observation stands as pass 1 wrote it, with no
+  lens ids. A draft with no thread add or update leaves the lens
+  inactive for the run: no call, no round, the pre-L5 run byte for
+  byte. The selector still sees the whole draft minus closes: which
+  notes fit is a question about the notes as a whole. Eval case 47
+  pins it.
+- **Two single-shot calls after pass 1, the L2 shape.** Pass 1 is
+  unchanged (its prompt's bytes are pinned; its prohibitions are
+  factored out as `REFLECT_PROHIBITIONS` and open the grounding
+  prompt). The selector reads the draft as JSON (`add[{ref, kind,
+  text}]`, `update[{id, text}]`) and the catalog; the grounding call
+  reads the thread items and §6's block, verbatim, under a strict
+  schema with no `close` and no `kind`: it can only rephrase. The shared
+  pieces (catalog and block renderers, selection checks, the budget)
+  moved from `lens_review.py` to `app/core/lens_select.py`, which
+  imports no vault, database, notebook, idle or review code; L2's
+  suite passes unmodified. L2's savepoint, cap and commit sequence
+  stays its own: a shared `call()` would have rewritten it for no gain.
+- **The merge is in code, by `ref`.** At most 3 rewrites
+  (`GROUNDED_MAX`, to stay inside the shared safety provider's
+  400-token output cap); an add's `ref` must be one of the offered
+  thread refs, used once, and keeps the draft's kind; an update's id
+  must be one of the offered thread updates; `grounds` must name a
+  selected title (resolved to `lens_note_ids`); the text must pass
+  `notebook.validate` on its own (length, `screen()`, Anchor-only id);
+  and a casefolded leak guard drops a text holding a selected title its
+  draft item lacked, or an 8-word run of a selected body. A dropped
+  rewrite leaves its draft item as it was. Closes are exactly the
+  draft's. The lens may rephrase a pass-1 thread, never drop, swap or
+  add one. A reply of the right shape is `grounded` even if every
+  rewrite in it was dropped, as in L2.
+- **The lens never fails reflect.** A provider error, a malformed
+  reply or `JobCapHit` on either call keeps the draft and records
+  `fallback` (with the selection's ids if the selector had answered);
+  anything else keeps the draft and records no round. Every call goes
+  through the run's `RunContext.charge` (`idle:reflect`), so
+  `IDLE_JOB_USD_CAP` covers pass 1 and both lens calls; the gate
+  already reserved it against both daily caps. `charge` writes its
+  ledger row before raising, so that row is committed -- and so, now,
+  is pass 1's own on `JobCapHit`, which used to roll back. Preemption
+  is checked before any lens spend and again, as before, before the
+  apply; the round and the entries that name it commit together after
+  it, so a preempted run records no round.
+- **Storage** (migration `3d3efa0cbc9a`). `lens_round.consumer` allows
+  `reflect`; `lens_round.idle_run_id` points at the run **ON DELETE SET
+  NULL**, not CASCADE, following `lens_garden_run.idle_run_id`: a round
+  must outlive its run, since rotation is computed from rounds and the
+  rounds are §13's audit trail. `ck_lens_round_link` ties a review
+  round to no run and a reflect round to no review.
+  `notebook_entry.lens_round_id` (SET NULL) and `lens_note_ids`
+  (`int[]`, default `'{}'`) say which round a grounded entry came out
+  of and which notes it rests on -- ids, not a foreign key, as on
+  `review_proposal`. `/export` carries them; `lens_round` stays out.
+- **Rotation is per consumer.** `rounds_since_used` counts only the
+  consumer's own rounds, both ways: reflect may run daily and the
+  review weekly, so counting them together would let a week of reflect
+  rounds age every note the review picked, and «не выбирали 4 раунда»
+  would stop meaning four weeks. `/lens` shows the review's last round
+  as before and, once one exists, «Последняя рефлексия с линзой».
+- **Undo compares only what the snapshot logged.** `idle_change`
+  snapshots taken before the migration lack the two new columns;
+  without the fix, undoing any reflect run from before the deploy would
+  report every change as a conflict for the 7 days of
+  `IDLE_UNDO_DAYS`. A restore still writes back only the keys in
+  `before`, and new snapshots include the lens columns, so undo
+  restores them.
+- **Critique attributes, it does not select.** No call, no catalog, no
+  lens text, no `app.vault.lens` and no `lens_select` (§10). For each
+  sampled reply, at the reply's time, it collects the lens ids behind
+  the grounded changes that were in the persona prompt then: adopted
+  amendments (live from activation to revocation), standing orders
+  from a review proposal (from decision to retirement; a
+  counter-proposal is the user's own text and has no link) and
+  notebook entries (from their last update to closing -- an entry
+  updated after the reply is missed rather than misattributed). The
+  union, first-seen, and the number of replies with a source go into
+  `idle_run.summary` as `lens_note_ids` and `lens_grounded`, only with
+  `LENS_ENABLED` on and something grounded; otherwise the summary and
+  the digest are byte-identical. Neither key is in `SAFE_EXTRA_KEYS`,
+  so the runner's log never shows note ids; the ids reach the user in
+  `/export` only. Reflect's summary gains `lens_round_id` (logged) and
+  `lens_outcome` (not logged).
+- **Turning the lens off leaves grounded threads in place (your
+  decision on risk 5).** They expire on their own TTL like any thread,
+  or close when resolved, just as adopted grounded amendments stay.
+  `/privacy` says so.
+- **`lens.rounds(n)` keeps its signature (your decision on risk 6).**
+  It already returns each round's consumer, so reflect rounds show up
+  there with their picks and outcome and no rationale; daily reflect
+  rounds will push review rounds out of its 50-row window sooner, which
+  is accepted. `debug.lens_round` is unchanged (its column list leaves
+  out `idle_run_id`), and `idle_run` still has no debug view.
+  `docs/claude-access.md` and CLAUDE.md say "each weekly review or
+  reflection round".
+- **Guards.** `tests/test_idle_isolation.py` bans
+  `app.core.lens_select` from idle code and allows it, with
+  `app.vault.lens`, in `reflect_lens.py` alone -- reflect's one door to
+  the lens; reflect.py and critique.py get no entry. The mock-bot run
+  of `reflect` now runs with the lens active and still sends nothing.
+  `tests/test_vault_notes_isolation.py` adds `reflect_lens.py` alone to
+  the lens module's importers, still refuses reflect.py, critique.py and
+  notebook.py, and checks lens_select.py reaches no `app.vault` module.
+  `tests/test_autonomy_isolation.py` lists lens_select.py, which writes
+  nothing.
+- **Eval.** A `lens_reflect` case kind runs `reflect_lens.run()` and
+  `record()` over a draft the case supplies (through the real
+  `notebook.validate()`), with checks on the outcome, the selection,
+  the grounds, no title in an entry's text, and the draft's shape kept
+  (observations word for word), and five judge items worded for
+  notebook entries, since L2's speak of proposals. Cases 46-50: a
+  fitting note; a note inviting a user trait, next to observations
+  that must stay untouched; an acceleration note; an injection asking
+  to add an intention and close every thread; no fit, `empty`. All
+  non-blocking.
+
+## `/lens garden now`
+
+The garden (L3) runs only as idle work, so the first one could take
+days: it waits for the user to be quiet for `IDLE_AFTER_H`, inside
+`IDLE_WINDOW`, and then only if the lens changed. `/lens garden now`
+queues one run on demand through its own gate,
+app/core/idle/gate.py's `manual_garden_gate`, rather than weakening the
+idle one.
+
+- **Dropped**, because they exist to keep idle work out of the user's
+  way and the user asked: `user_active` (the command is itself a
+  message), `window`, the 168-hour interval, `unchanged`, and
+  preemption (a message during the run would otherwise throw the run
+  away).
+- **Kept**: the switches, the pause, the welfare cooldown, `busy`,
+  every money row (jobs per day, the idle cap, the reserve), the lens
+  size, and **once per local ISO week**. `lens_garden_run.iso_week` is
+  UNIQUE, so a second run in a week could not record its gaps; the
+  reply says the next one is next week.
+- The run is an ordinary `lens_garden` idle run whose job payload
+  carries `manual: true`; app/core/idle/runner.py re-checks it against
+  the manual gate. Nothing about the automatic path changed. The
+  garden's Telegram message keeps its own holds (quiet hours, pause,
+  welfare), so a run started at night reports in the morning.
+
 ## `/vault` says which knowledge roots it sees, and why not
 
 Production: `Anchor/Settings.md` (capital S) was invisible to vaultd,

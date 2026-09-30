@@ -50,6 +50,9 @@ MODULES = [
     pathlib.Path("app/core/attention.py"),
     # L2 (anchor-lens-plan.md section 7): the review's lens round.
     pathlib.Path("app/core/lens_review.py"),
+    # L5 (the L5 spec section 1): the selector core lens_review.py and
+    # the idle reflect's lens round share.
+    pathlib.Path("app/core/lens_select.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -379,6 +382,9 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     # row goes through app/vault/lens.py and its ledger rows through
     # review.py's record_spend, under the review's own category.
     "lens_review.py": set(),
+    # L5: lens_select.py is pure -- prompts, the catalog and lens block
+    # renderers, the selection checks. It writes nothing at all.
+    "lens_select.py": set(),
 }
 
 # Names a write call might be imported under -- this repo's own
