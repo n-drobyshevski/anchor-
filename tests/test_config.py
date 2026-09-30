@@ -145,6 +145,31 @@ def test_a_whitespace_padded_secret_token_is_accepted():
     )
 
 
+@pytest.mark.parametrize("padded", ["true ", " true", "true\n", "true\r\n", "\t1\t"])
+def test_surrounding_whitespace_is_stripped_from_boolean_flags(padded, monkeypatch):
+    """The production failure: LENS_GARDEN_ENABLED="true " in the
+    dashboard stopped the bot before its migrations. Read from the
+    environment, as Railway delivers it."""
+    monkeypatch.setenv("LENS_GARDEN_ENABLED", padded)
+    monkeypatch.setenv("LENS_ENABLED", padded)
+    assert _settings().LENS_GARDEN_ENABLED is True
+    assert _settings().LENS_ENABLED is True
+
+
+def test_every_boolean_flag_is_covered():
+    """The validator keys on the annotation, so no flag can be missed."""
+    flags = [name for name, field in Settings.model_fields.items() if field.annotation is bool]
+    assert "LENS_GARDEN_ENABLED" in flags
+    for name in flags:
+        assert getattr(_settings(**{name: " false "}), name) is False
+
+
+def test_a_padded_non_boolean_is_still_rejected():
+    """Only whitespace is forgiven, never a wrong word."""
+    with pytest.raises(ValidationError):
+        _settings(LENS_GARDEN_ENABLED="yes please")
+
+
 def test_database_url_scheme_rewrite_still_runs_after_stripping():
     """The strip validator is mode="before", so it must not displace the
     asyncpg rewrite, which compares a prefix."""
