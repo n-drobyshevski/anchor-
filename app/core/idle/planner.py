@@ -40,7 +40,7 @@ from app.core.idle import (
     RESEARCH,
 )
 from app.core.idle.facts import load_idle_facts
-from app.core.idle.gate import BUSY, GateResult, config_from_settings, idle_gate
+from app.core.idle.gate import BUSY, GateResult, config_from_settings, idle_gate, manual_garden_gate
 from app.db.jobs import enqueue_job
 from app.db.models import IdleRun, UserState
 
@@ -127,9 +127,13 @@ async def _record_skip_if_changed(
 
 
 async def _insert_run(
-    session: AsyncSession, clock: Clock, local_date, kind: str
+    session: AsyncSession, clock: Clock, local_date, kind: str, *, manual: bool = False
 ) -> int | None:
-    """Insert one idle_run(status='queued') + its job, in one transaction."""
+    """Insert one idle_run(status='queued') + its job, in one transaction.
+
+    `manual` (only `/lens garden now`, `plan_manual_garden` below) rides
+    in the job payload, so app/core/idle/runner.py re-checks the run
+    against the manual gate rather than the idle one."""
     # Every row of this kind today counts, skipped ones included: a
     # preempted run keeps its job row, so reusing its `n` would collide
     # on the dedup key.
@@ -151,7 +155,7 @@ async def _insert_run(
     inserted = await enqueue_job(
         session,
         IDLE_RUN,
-        {"run_id": run_id},
+        {"run_id": run_id, "manual": True} if manual else {"run_id": run_id},
         dedup_key=idle_dedup_key(kind, local_date, n),
     )
     if not inserted:
@@ -208,4 +212,24 @@ async def plan_idle(session: AsyncSession, settings: Settings, clock: Clock) -> 
     return None
 
 
-__all__ = ["PRIORITY", "idle_dedup_key", "plan_idle"]
+async def plan_manual_garden(
+    session: AsyncSession, settings: Settings, clock: Clock
+) -> tuple[int | None, str]:
+    """`/lens garden now`: queue one lens garden run outside the idle
+    schedule, or say why not. Returns (run_id, OK) or (None, reason);
+    the reasons are app/core/idle/gate.py's `manual_garden_gate` ones,
+    plus "dedup" when the job key was taken."""
+    await _fail_stale_runs(session, clock)
+    state = (await session.execute(select(UserState).where(UserState.id == 1))).scalar_one()
+    facts = await load_idle_facts(session, settings, clock, state.timezone)
+    verdict = manual_garden_gate(facts, clock.now_utc(), config_from_settings(settings))
+    if not verdict.allowed:
+        return None, verdict.reason
+    local_date = clock_module.local_date(clock, state.timezone)
+    run_id = await _insert_run(session, clock, local_date, LENS_GARDEN, manual=True)
+    if run_id is None:
+        return None, "dedup"
+    return run_id, verdict.reason
+
+
+__all__ = ["PRIORITY", "idle_dedup_key", "plan_idle", "plan_manual_garden"]

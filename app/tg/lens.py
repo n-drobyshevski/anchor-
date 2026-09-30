@@ -54,6 +54,8 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core import echo_write
 from app.core.clock import Clock
+from app.core.idle import gate as idle_gate
+from app.core.idle.planner import plan_manual_garden
 from app.core.state import get_state
 from app.research import jobs
 from app.tg.vault import _ru_plural
@@ -101,8 +103,30 @@ USAGE = (
     "/lens — состояние линзы\n"
     "/lens code on — открыть Claude Code доступ к линзе (только к ней)\n"
     "/lens code off — закрыть доступ и оборвать открытые сессии\n"
-    "/lens undo — отменить последнюю запись Echo в Inbox (до 14 дней)"
+    "/lens undo — отменить последнюю запись Echo в Inbox (до 14 дней)\n"
+    "/lens garden now — запустить сад сейчас, не дожидаясь фонового окна"
 )
+
+# `/lens garden now`: one reply per app/core/idle/gate.py's
+# `manual_garden_gate` reason. The garden's own message then follows
+# from app/tg/garden.py, under its usual holds.
+GARDEN_NOW_STARTED = (
+    "Сад запущен. Итог придёт отдельным сообщением, когда он закончит "
+    "(в тихие часы — после них)."
+)
+GARDEN_NOW_REPLIES = {
+    idle_gate.DISABLED: "Фоновые задачи выключены (IDLE_ENABLED).",
+    idle_gate.PAUSED: "Echo на паузе — сад подождёт.",
+    idle_gate.WELFARE_COOLDOWN: "Сейчас не время для сада. Попробуй завтра.",
+    idle_gate.BUSY: "Сейчас идёт другая фоновая задача. Попробуй через пару минут.",
+    idle_gate.MAX_JOBS: "На сегодня лимит фоновых задач исчерпан.",
+    idle_gate.IDLE_CAP: "На сегодня бюджет фоновых задач исчерпан.",
+    idle_gate.RESERVE: "На сегодня бюджет исчерпан.",
+    idle_gate.GARDEN_OFF: "Сад выключен (LENS_ENABLED, LENS_GARDEN_ENABLED, заметки из хранилища).",
+    idle_gate.LENS_SIZE: "Для сада в линзе нужно от 3 заметок (и не больше лимита каталога).",
+    idle_gate.NOT_DUE: "Сад на этой неделе уже был. Следующий — на новой неделе.",
+}
+GARDEN_NOW_FAILED = "Не вышло запустить сад. Попробуй ещё раз."
 
 # L4: `/lens undo`, one reply per echo_write.undo_last outcome.
 UNDO_REPLIES = {
@@ -271,7 +295,22 @@ async def command(
         return await code(sessionmaker, False)
     if words == ["undo"]:
         return await undo(sessionmaker, settings, clock, client_factory)
+    if words == ["garden", "now"]:
+        return await garden_now(sessionmaker, settings, clock)
     return USAGE
+
+
+async def garden_now(sessionmaker, settings: Settings, clock: Clock) -> str:
+    """`/lens garden now`: queue one garden pass outside the idle
+    schedule (app/core/idle/planner.py's `plan_manual_garden`). It keeps
+    the pause, the welfare cooldown, every budget row and once per ISO
+    week; it skips only the waits that keep idle work out of the user's
+    way, since the user asked."""
+    async with sessionmaker() as session:
+        run_id, reason = await plan_manual_garden(session, settings, clock)
+    if run_id is not None:
+        return GARDEN_NOW_STARTED
+    return GARDEN_NOW_REPLIES.get(reason, GARDEN_NOW_FAILED)
 
 
 async def digest_line(session, start: datetime.datetime, end: datetime.datetime) -> str | None:

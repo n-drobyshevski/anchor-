@@ -3301,3 +3301,29 @@ and the persona prompt shows the active entries.
   that must stay untouched; an acceleration note; an injection asking
   to add an intention and close every thread; no fit, `empty`. All
   non-blocking.
+
+## `/lens garden now`
+
+The garden (L3) runs only as idle work, so the first one could take
+days: it waits for the user to be quiet for `IDLE_AFTER_H`, inside
+`IDLE_WINDOW`, and then only if the lens changed. `/lens garden now`
+queues one run on demand through its own gate,
+app/core/idle/gate.py's `manual_garden_gate`, rather than weakening the
+idle one.
+
+- **Dropped**, because they exist to keep idle work out of the user's
+  way and the user asked: `user_active` (the command is itself a
+  message), `window`, the 168-hour interval, `unchanged`, and
+  preemption (a message during the run would otherwise throw the run
+  away).
+- **Kept**: the switches, the pause, the welfare cooldown, `busy`,
+  every money row (jobs per day, the idle cap, the reserve), the lens
+  size, and **once per local ISO week**. `lens_garden_run.iso_week` is
+  UNIQUE, so a second run in a week could not record its gaps; the
+  reply says the next one is next week.
+- The run is an ordinary `lens_garden` idle run whose job payload
+  carries `manual: true`; app/core/idle/runner.py re-checks it against
+  the manual gate. Nothing about the automatic path changed. The
+  garden's Telegram message keeps its own holds (quiet hours, pause,
+  welfare), so a run started at night reports in the morning.
+

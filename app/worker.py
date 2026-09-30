@@ -457,6 +457,7 @@ async def _run_job(
             clock,
             run_id=payload["run_id"],
             job_id=job_id,
+            manual=bool(payload.get("manual", False)),
         )
         return ExtractOutcome()
 

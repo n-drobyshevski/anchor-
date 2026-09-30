@@ -75,6 +75,7 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
 | `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
 | `/lens undo` | Take back Echo's newest note in the inbox (L4), if under 14 days old and not edited since; Telegram only | the vault service |
+| `/lens garden now` | Run this week's lens garden now instead of waiting for an idle slot: skips only the inactivity wait, the idle window and the garden's own 168-hour/unchanged rules; keeps the pause, the welfare cooldown, every budget row and once per ISO week. The garden message follows under its usual holds; Telegram only | `LENS_GARDEN_ENABLED` |
 | `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review or reflection round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
