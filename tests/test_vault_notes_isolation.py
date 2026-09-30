@@ -19,6 +19,11 @@ every module in app/, eval/ and scripts/:
   table, as an ORM model or as a string (SQL). Names, attributes and
   string literals are scanned; docstrings are not, so prose may mention
   a table. The models file, purge and export are exempt by name.
+- **L1, the lens** (anchor-lens-plan.md section 5): `app.vault.lens` is
+  a third access module, owning `lens_note`, `note_link`,
+  `lens_version` and `lens_read`. Its importers are named one by one --
+  the sync pass and /lens -- not "the rest of app/vault/". L2 adds
+  `lens_round` to what it owns, L3 `lens_garden_run` and `lens_gap`.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCANNED = ("app", "eval", "scripts")
 
-NOTE_MODULES = ("app.vault.notes_personal", "app.vault.notes_knowledge")
+NOTE_MODULES = ("app.vault.notes_personal", "app.vault.notes_knowledge", "app.vault.lens")
 
 # module -> the paths that may import it. Nothing else.
 #
@@ -55,11 +60,51 @@ ALLOWED_IMPORTERS = {
         "scripts/measure_note_rank.py",
         "app/web/mcp_core.py",
     ),
+    # L1 (anchor-lens-plan.md sections 5 and 11): the sync pass writes the
+    # lens tables, and /lens reads counts from them and flips Claude
+    # Code's switch (the daily Claude digest asks app/tg/lens.py for its
+    # line, and does not import this module itself). Nothing in Echo
+    # reads a lens note's text in L1. The scheduler asks only whether the
+    # door is open or was read through, so a digest is queued even with
+    # both flags off. L2: the weekly review's selector and grounding call
+    # (plan sections 7 and 10: the review reaches the lens, via the
+    # selector); app/core/review.py itself goes through it, never here.
+    # The eval harness seeds its synthetic lens notes through this
+    # module's own writers and reads the round back through its catalog
+    # (L2's lens cases, plan section 13) -- a throwaway database, never
+    # a runtime consumer, and still no table named outside this module.
+    "app.vault.lens": (
+        "app/vault/sync.py",
+        "app/tg/lens.py",
+        "app/core/scheduler.py",
+        "app/core/lens_review.py",
+        "eval/scenario.py",
+        # L3 (plan sections 8 and 10: the garden reaches the lens graph
+        # and summaries): the weekly idle job reads the lens and records
+        # its run and gaps, and the Telegram side sends the run's one
+        # message and applies its taps. Both go through this module and
+        # name no lens table themselves.
+        "app/core/idle/lens_garden.py",
+        "app/tg/garden.py",
+        # L3 (spec section 4: the garden dies with the lens): `/vault
+        # notes off` deletes the lens notes by cascade, which never
+        # reaches the garden's tables, so consent calls delete_garden in
+        # the same transaction. It writes nothing else there and reads
+        # nothing.
+        "app/vault/consent.py",
+    ),
 }
 
 # The one exception to FORBIDDEN_IMPORTERS' "app/web/" below, and only
 # for notes_knowledge -- see the ALLOWED_IMPORTERS comment above.
-FORBIDDEN_EXCEPTIONS = {"app.vault.notes_knowledge": ("app/web/mcp_core.py",)}
+#
+# L3: the one idle module that may reach the lens module is the garden
+# (plan section 5: "It allows `app.vault.lens` only in the two new idle
+# kinds and in reflect (L5)"); the rest of app/core/idle/ stays banned.
+FORBIDDEN_EXCEPTIONS = {
+    "app.vault.notes_knowledge": ("app/web/mcp_core.py",),
+    "app.vault.lens": ("app/core/idle/lens_garden.py",),
+}
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
 FORBIDDEN_IMPORTERS = (
@@ -81,7 +126,34 @@ FORBIDDEN_IMPORTERS = (
 TABLES = {
     "note_chunk_personal": ("app/vault/notes_personal.py", ("note_chunk_personal", "NoteChunkPersonal")),
     "note_chunk_knowledge": ("app/vault/notes_knowledge.py", ("note_chunk_knowledge", "NoteChunkKnowledge")),
+    # L1: the lens's four tables, all app/vault/lens.py's.
+    "lens_note": ("app/vault/lens.py", ("lens_note", "LensNote")),
+    "note_link": ("app/vault/lens.py", ("note_link", "NoteLink")),
+    "lens_version": ("app/vault/lens.py", ("lens_version", "LensVersion")),
+    "lens_read": ("app/vault/lens.py", ("lens_read", "LensRead")),
+    # L2: the review's rounds (plan section 7), the same module's.
+    "lens_round": ("app/vault/lens.py", ("lens_round", "LensRound")),
+    # L3: the garden's runs and gaps (plan section 8), the same module's.
+    "lens_garden_run": ("app/vault/lens.py", ("lens_garden_run", "LensGardenRun")),
+    "lens_gap": ("app/vault/lens.py", ("lens_gap", "LensGap")),
 }
+# L2: words that contain a lens table's name without meaning the table.
+# review_proposal's two new columns hold ids, never a note's text, and
+# review code and the card read and write them by name; the two
+# settings bound a round (app/config.py, app/core/lens_review.py). Only
+# these exact words are set aside before the substring match below; any
+# other word containing a table's name still counts.
+NOT_TABLE_WORDS = (
+    "lens_round_id",
+    "lens_note_ids",
+    "lens_round_max_notes",
+    "lens_round_max_chars",
+    # L3: `lens_gap_id` is plan section 5's column for L4's study_job
+    # (an id, never text), and `lens_gaps` a natural name for a list of
+    # the module's own dataclasses; neither is the table.
+    "lens_gap_id",
+    "lens_gaps",
+)
 # Named by the list, each for a reason: the models define the tables,
 # purge truncates them (/delete), export's comments explain why they
 # are left out (/export), and the measurement script (milestone 8d,
@@ -128,13 +200,28 @@ def _reaches(imported: set[str], module: str) -> bool:
     return any(name == module or name.startswith(module + ".") for name in imported)
 
 
+def _dotted(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_dotted(node.value)}.{node.attr}"
+    return ""
+
+
 def _attribute_uses(tree: ast.AST) -> set[str]:
-    """`app.vault.notes_personal` reached as an attribute, after `import app.vault`."""
-    return {
-        f"app.vault.{node.attr}"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and f"app.vault.{node.attr}" in NOTE_MODULES
-    }
+    """`app.vault.notes_personal` reached as an attribute, after `import app.vault`.
+
+    `lens` is a common word, so it counts only when reached through
+    something named `vault` (`app.vault.lens`, `vault.lens`); the two
+    `notes_*` names are distinctive enough to count anywhere."""
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or f"app.vault.{node.attr}" not in NOTE_MODULES:
+            continue
+        if node.attr == "lens" and not _dotted(node.value).split(".")[-1] == "vault":
+            continue
+        found.add(f"app.vault.{node.attr}")
+    return found
 
 
 def _import_violations(path: Path, rel: str) -> list[str]:
@@ -176,6 +263,7 @@ def _named_tables(tree: ast.AST) -> set[str]:
             words = [node.value]
         else:
             continue
+        words = [word for word in words if word.lower() not in NOT_TABLE_WORDS]
         for table, (_owner, names) in TABLES.items():
             if any(name.lower() in word.lower() for word in words for name in names):
                 named.add(table)
@@ -200,9 +288,12 @@ def test_only_each_access_module_names_its_chunk_table():
 
 
 def test_each_access_module_names_only_its_own_table():
+    owned: dict[str, set[str]] = {}
     for table, (owner, _names) in TABLES.items():
+        owned.setdefault(owner, set()).add(table)
+    for owner, tables in owned.items():
         named = _named_tables(ast.parse((ROOT / owner).read_text(encoding="utf-8")))
-        assert named == {table}, owner
+        assert named == tables, owner
 
 
 def test_sync_indexes_knowledge_only_and_never_imports_notes_personal():
@@ -226,6 +317,10 @@ def test_the_forbidden_importers_exist():
 # --- guarding the guard ---
 
 IMPORT_SAMPLES = [
+    "from app.vault import lens\n",
+    "from app.vault.lens import stored\n",
+    "import app.vault.lens\n",
+    "import app.vault\napp.vault.lens.stored\n",
     "from app.vault import notes_personal\n",
     "from app.vault import notes_knowledge as k\n",
     "import app.vault.notes_personal\n",
@@ -279,6 +374,13 @@ def test_mcp_core_may_import_notes_knowledge_only(tmp_path):
 
 
 TABLE_SAMPLES = [
+    "from app.db.models import LensNote\n",
+    "q = 'select body from lens_note'\n",
+    "q = 'select unresolved_text from note_link'\n",
+    "q = 'insert into lens_read (fn, rows) values (1, 2)'\n",
+    "from app.db.models import LensRound\n",
+    "q = 'select rationale from lens_round'\n",
+    "proposal.lens_round_ids\n",
     "from app.db.models import NoteChunkPersonal\n",
     "from app.db import models\nmodels.NoteChunkKnowledge\n",
     "q = 'select text from note_chunk_personal'\n",
@@ -294,6 +396,19 @@ def test_the_table_check_catches_models_and_sql(tmp_path, code):
     assert _table_violations(path, "app/core/grants.py")
 
 
+def test_id_columns_and_round_settings_are_not_table_names(tmp_path):
+    """L2: review code stores and the card reads a proposal's round id and
+    note ids by name, and the selector reads its two bounds; those words
+    alone are not the lens tables."""
+    path = tmp_path / "sample.py"
+    path.write_text(
+        "def f(proposal):\n"
+        "    return ReviewProposal(lens_round_id=1, lens_note_ids=[2]), "
+        "proposal.lens_round_id, proposal.lens_note_ids, settings.LENS_ROUND_MAX_NOTES\n"
+    )
+    assert _table_violations(path, "app/tg/review.py") == []
+
+
 def test_the_table_check_ignores_docstrings_but_not_other_strings(tmp_path):
     path = tmp_path / "sample.py"
     path.write_text('"""Mentions note_chunk_personal in prose."""\n\ndef f():\n    """So does this: NoteChunkKnowledge."""\n')
@@ -306,3 +421,78 @@ def test_the_other_access_module_may_not_name_a_table(tmp_path):
     path = tmp_path / "sample.py"
     path.write_text("from app.db.models import NoteChunkKnowledge\n")
     assert _table_violations(path, "app/vault/notes_personal.py")
+
+
+# --- L1: the lens ---
+
+
+def test_only_sync_and_tg_lens_import_the_lens_module(tmp_path):
+    """Not "the rest of app/vault/": the lens module's importers are
+    named one by one (anchor-lens-plan.md section 5)."""
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    for rel in ("app/vault/sync.py", "app/tg/lens.py"):
+        assert _import_violations(path, rel) == [], rel
+    for rel in ("app/vault/status.py", "app/tg/claude.py", "app/core/turn.py", "app/web/mcp_core.py"):
+        assert _import_violations(path, rel), rel
+
+
+def test_sync_imports_the_lens_module_and_tg_lens_does_too():
+    """The allowlist is not aspirational: both named importers exist and
+    use it, so a rename cannot leave the rule guarding nothing."""
+    for rel in ("app/vault/sync.py", "app/tg/lens.py"):
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens"), rel
+
+
+def test_the_review_reaches_the_lens_only_through_lens_review(tmp_path):
+    """L2: the selector module is the review's one door to the lens, and
+    it does use it; the review module itself is still refused."""
+    tree = ast.parse((ROOT / "app/core/lens_review.py").read_text(encoding="utf-8"))
+    assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens")
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    assert _import_violations(path, "app/core/lens_review.py") == []
+    assert _import_violations(path, "app/core/review.py")
+
+
+def test_the_garden_is_the_one_idle_module_that_may_reach_the_lens(tmp_path):
+    """L3: app/core/idle/lens_garden.py and app/tg/garden.py may import
+    the lens module; every other idle module, and every other Telegram
+    module but /lens, still may not."""
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    for rel in ("app/core/idle/lens_garden.py", "app/tg/garden.py"):
+        assert _import_violations(path, rel) == [], rel
+    for rel in ("app/core/idle/research.py", "app/core/idle/reflect.py", "app/tg/vault.py", "app/tg/router.py"):
+        assert _import_violations(path, rel), rel
+    # The exception is for the lens module only: the garden still may
+    # not reach either chunk module.
+    path.write_text("from app.vault import notes_knowledge\n")
+    assert _import_violations(path, "app/core/idle/lens_garden.py")
+
+
+def test_the_garden_words_are_not_table_names_but_the_tables_are(tmp_path):
+    """L3: an id column, the idle kind and the flag are not the garden's
+    tables; the tables and their models, anywhere but app/vault/lens.py,
+    are."""
+    path = tmp_path / "sample.py"
+    path.write_text(
+        "def f(job, settings):\n"
+        "    return job.lens_gap_id, 'lens_garden', settings.LENS_GARDEN_ENABLED, 'garden_run_id'\n"
+    )
+    assert _table_violations(path, "app/core/idle/lens_garden.py") == []
+    for code in (
+        "from app.db.models import LensGap\n",
+        "from app.db.models import LensGardenRun\n",
+        "q = 'select detail from lens_gap'\n",
+        "q = 'select findings from lens_garden_run'\n",
+    ):
+        path.write_text(code)
+        assert _table_violations(path, "app/tg/garden.py"), code
+
+
+def test_an_unrelated_lens_attribute_is_not_an_import(tmp_path):
+    path = tmp_path / "sample.py"
+    path.write_text("def f(camera):\n    return camera.lens\n")
+    assert _import_violations(path, "app/core/grants.py") == []

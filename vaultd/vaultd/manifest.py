@@ -2,11 +2,13 @@
 
 Two scopes, and nothing else is listed:
 
-- `anchor` -- every `.md` directly inside `Anchor/Memory/` or
-  `Anchor/Journal/` (the writable set, see paths.py);
+- `anchor` -- every `.md` directly inside `Anchor/Memory/`,
+  `Anchor/Journal/` or `Anchor/Reports/` (the writable set, see
+  paths.py);
 - `note` -- every other `.md` of at most NOTE_MAX_BYTES whose effective
-  class (classes.py) is `personal` or `knowledge`. The entry carries
-  that class. `Anchor/settings.md` is never listed.
+  class (classes.py) is `personal`, `knowledge` or `lens`. The entry
+  carries that class, and a lens note also its `lens_kind` (`person` or
+  `concept`, lens plan section 3). `Anchor/settings.md` is never listed.
 
 **Invisible notes contribute counts only, never a path** (8e plan
 section 4): the `summary` says how many notes disagreed with their
@@ -56,11 +58,14 @@ class Entry:
     size: int
     scope: str
     note_class: str | None = None
+    lens_kind: str | None = None
 
     def as_json(self) -> dict:
         out = {"path": self.path, "sha256": self.sha256, "size": self.size, "scope": self.scope}
         if self.scope == "note":
             out["class"] = self.note_class
+            if self.note_class == "lens":
+                out["lens_kind"] = self.lens_kind
         return out
 
 
@@ -206,7 +211,7 @@ def _entry(rel: str, cached: _Cached, rules: classes.FolderRules, summary: Summa
     summary.unknown_value += resolved.unknown_value
     if resolved.note_class is None:
         return None
-    return Entry(rel, cached.sha256, size, "note", resolved.note_class)
+    return Entry(rel, cached.sha256, size, "note", resolved.note_class, resolved.lens_kind)
 
 
 def _read_all(fd: int) -> bytes:

@@ -5,9 +5,13 @@ Three questions, in this order, on every route:
 1. **Is it a well-formed vault-relative path?** Non-empty, no leading
    `/`, no backslash, no NUL, no empty, `.` or `..` segment, valid
    UTF-8. Anything else is malformed and refused outright.
-2. **Is it writable?** Exactly `^Anchor/(Memory|Journal)/[^/]+\\.md$`,
+2. **Is it writable?** Exactly `^Anchor/(Memory|Journal|Reports)/[^/]+\\.md$`,
    and the name does not start with a dot. Nothing else is writable,
    ever: not a subfolder, not another extension, not `Anchor/` itself.
+   `Reports` is lens L3's (lens plan section 8): the weekly lens garden
+   note, `Anchor/Reports/Lens garden <week>-<epoch>.md`. Adding it to
+   `ANCHOR_DIRS` as well puts it in the `anchor` manifest scope and in
+   the purge, so `/delete` removes it with the rest.
 3. **Can it be reached without a symlink?** Every component is opened
    relative to its parent's file descriptor with `O_NOFOLLOW`, so a
    symlink anywhere on the way is refused rather than followed, and
@@ -29,8 +33,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-WRITABLE_RE = re.compile(r"^Anchor/(Memory|Journal)/[^/]+\.md$")
-ANCHOR_DIRS = ("Anchor/Memory", "Anchor/Journal")
+WRITABLE_RE = re.compile(r"^Anchor/(Memory|Journal|Reports)/[^/]+\.md$")
+ANCHOR_DIRS = ("Anchor/Memory", "Anchor/Journal", "Anchor/Reports")
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK

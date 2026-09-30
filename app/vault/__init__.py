@@ -6,7 +6,9 @@ it. 8a shipped the plumbing (the HTTP client, the epoch, and the
 health probe behind `/vault` and `/state`), 8b renders facts and the
 journal, and 8e adds notes consent (consent.py) and the only two
 modules that touch note chunks (notes_personal.py, notes_knowledge.py;
-tests/test_vault_notes_isolation.py pins who may import them).
+tests/test_vault_notes_isolation.py pins who may import them). L1
+(anchor-lens-plan.md) adds lens.py, the only module that touches the
+lens tables, pinned the same way.
 
 **What this package may not touch (plan section 13), pinned by
 tests/test_vault_isolation.py:** no LLM provider, no `update_state`, no

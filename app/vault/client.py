@@ -5,9 +5,17 @@ with a code from app/vault/errors.py. 8a calls only `status()`; the
 rest exist because the API they mirror ships in 8a, and 8b-8d use them.
 
 **8e: the bot trusts the class vaultd reports, and nothing looser.** A
-note entry must carry `class` `personal` or `knowledge`; a missing or
-foreign class is a protocol error, exactly like a bad scope, and an
-Anchor-scope entry must carry none. The manifest's `summary` holds
+note entry must carry `class` `personal`, `knowledge` or (L1,
+anchor-lens-plan.md section 3) `lens`; a missing or foreign class is a
+protocol error, exactly like a bad scope, and an Anchor-scope entry
+must carry none. A lens entry must also say its `lens_kind` (`person`
+or `concept`), and no other entry may carry one.
+
+**L1: the graph** (`GET /v1/knowledge/graph`, plan section 4) is parsed
+as strictly. An edge has exactly one target, and an `outside` edge --
+a link to a note that exists but is not the bot's to see -- must carry
+nothing but its source: an answer that names it is refused whole,
+never stored. The manifest's `summary` holds
 counts and the settings file's state, never a path: the bot cannot know
 the names of notes it may not see.
 
@@ -63,7 +71,14 @@ class ServiceStatus:
     running_since: datetime.datetime | None
 
 
-NOTE_CLASSES = ("personal", "knowledge")
+NOTE_CLASSES = ("personal", "knowledge", "lens")
+# The classes the knowledge routes and the graph may report: lens is a
+# kind of knowledge for every existing consumer (lens plan section 3).
+KNOWLEDGE_CLASSES = ("knowledge", "lens")
+LENS_KINDS = ("person", "concept")
+# vaultd truncates a note's frontmatter `summary` to this many
+# characters; the bot cuts again rather than trusting it did.
+GRAPH_SUMMARY_MAX_CHARS = 300
 SETTINGS_STATES = ("ok", "absent", "invalid")
 
 
@@ -73,8 +88,10 @@ class ManifestEntry:
     sha256: str
     size: int
     scope: str
-    # `personal` or `knowledge` for a note; None for Anchor's own files.
+    # `personal`, `knowledge` or `lens` for a note; None for Anchor's own files.
     note_class: str | None = None
+    # L1: `person` or `concept` for a lens note; None for every other entry.
+    lens_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +177,9 @@ class UndoResult:
 class TreeNote:
     path: str
     title: str
+    # L1: `knowledge` or `lens` (lens plan section 3: "list_tree marks
+    # lens notes as lens"). An older vaultd sends none: knowledge.
+    note_class: str = "knowledge"
 
 
 @dataclass(frozen=True)
@@ -170,6 +190,41 @@ class Tree:
 
     folders: list[str]
     notes: list[TreeNote]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class GraphNode:
+    """A knowledge or lens note in vaultd's graph (lens plan section 4).
+    Metadata only: the body never travels this route."""
+
+    path: str
+    title: str
+    note_class: str
+    lens_kind: str | None
+    aliases: tuple[str, ...]
+    tags: tuple[str, ...]
+    summary: str | None
+    chars: int
+
+
+@dataclass(frozen=True)
+class GraphEdge:
+    """A wikilink out of a knowledge or lens note. Exactly one of `dst`
+    (a visible knowledge/lens note's path), `unresolved` (the target
+    text of a link to no note) or `outside` (a link to a note the bot
+    may not see, which is counted and never named)."""
+
+    src: str
+    dst: str | None = None
+    unresolved: str | None = None
+    outside: bool = False
+
+
+@dataclass(frozen=True)
+class Graph:
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
     truncated: bool
 
 
@@ -186,6 +241,56 @@ def _note_class(scope: str, item: dict) -> str | None:
     note_class = item.get("class")
     _require(isinstance(note_class, str) and note_class in NOTE_CLASSES)
     return note_class
+
+
+def _lens_kind(note_class: str | None, item: dict) -> str | None:
+    """A lens note must say whether it is a person or a concept; nothing
+    else may carry a kind at all (a null is tolerated)."""
+    kind = item.get("lens_kind")
+    if note_class != "lens":
+        _require(kind is None)
+        return None
+    _require(isinstance(kind, str) and kind in LENS_KINDS)
+    return kind
+
+
+def _strings(value: Any) -> tuple[str, ...]:
+    _require(isinstance(value, list) and all(isinstance(v, str) for v in value))
+    return tuple(value)
+
+
+def _graph_node(item: Any) -> GraphNode:
+    _require(isinstance(item, dict))
+    path, title, note_class = item.get("path"), item.get("title"), item.get("class")
+    _require(isinstance(path, str) and isinstance(title, str))
+    _require(isinstance(note_class, str) and note_class in KNOWLEDGE_CLASSES)
+    summary = item.get("summary")
+    _require(summary is None or isinstance(summary, str))
+    return GraphNode(
+        path=path,
+        title=title,
+        note_class=note_class,
+        lens_kind=_lens_kind(note_class, item),
+        aliases=_strings(item.get("aliases", [])),
+        tags=_strings(item.get("tags", [])),
+        summary=None if summary is None else summary[:GRAPH_SUMMARY_MAX_CHARS],
+        chars=_count(item.get("chars")),
+    )
+
+
+def _graph_edge(item: Any) -> GraphEdge:
+    _require(isinstance(item, dict))
+    src = item.get("src")
+    _require(isinstance(src, str))
+    if "outside" in item:
+        # Counted, never named: a source and the flag, and nothing else.
+        _require(item.get("outside") is True and set(item) == {"src", "outside"})
+        return GraphEdge(src=src, outside=True)
+    dst, unresolved = item.get("dst"), item.get("unresolved")
+    _require((dst is None) != (unresolved is None))
+    _require(dst is None or isinstance(dst, str))
+    _require(unresolved is None or isinstance(unresolved, str))
+    return GraphEdge(src=src, dst=dst, unresolved=unresolved)
 
 
 def _summary(raw: Any) -> NotesSummary:
@@ -306,8 +411,16 @@ class VaultClient:
             path, sha, size, scope = (item.get(k) for k in ("path", "sha256", "size", "scope"))
             _require(isinstance(path, str) and isinstance(sha, str) and isinstance(size, int))
             _require(scope in ("anchor", "note"))
+            note_class = _note_class(scope, item)
             out.append(
-                ManifestEntry(path=path, sha256=sha, size=size, scope=scope, note_class=_note_class(scope, item))
+                ManifestEntry(
+                    path=path,
+                    sha256=sha,
+                    size=size,
+                    scope=scope,
+                    note_class=note_class,
+                    lens_kind=_lens_kind(note_class, item),
+                )
             )
         return Manifest(entries=out, summary=_summary(data.get("summary")))
 
@@ -410,8 +523,23 @@ class VaultClient:
             _require(isinstance(item, dict))
             path, title = item.get("path"), item.get("title")
             _require(isinstance(path, str) and isinstance(title, str))
-            out_notes.append(TreeNote(path=path, title=title))
+            note_class = item.get("class", "knowledge")
+            _require(isinstance(note_class, str) and note_class in KNOWLEDGE_CLASSES)
+            out_notes.append(TreeNote(path=path, title=title, note_class=note_class))
         return Tree(folders=folders, notes=out_notes, truncated=truncated)
+
+    async def knowledge_graph(self) -> Graph:
+        """`GET /v1/knowledge/graph` (L1, lens plan section 4): the knowledge
+        and lens notes' metadata and the links between them. Read by the
+        sync pass only, behind the same gates as the knowledge index."""
+        data = await self._request("GET", "/v1/knowledge/graph")
+        nodes, edges, truncated = data.get("nodes"), data.get("edges"), data.get("truncated")
+        _require(isinstance(nodes, list) and isinstance(edges, list) and isinstance(truncated, bool))
+        return Graph(
+            nodes=[_graph_node(item) for item in nodes],
+            edges=[_graph_edge(item) for item in edges],
+            truncated=truncated,
+        )
 
     async def list_changes(self) -> list[ChangeEntry]:
         data = await self._request("GET", "/v1/changes")

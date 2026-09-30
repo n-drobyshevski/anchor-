@@ -13,6 +13,8 @@ ROUTES = [
     ("put", "/v1/file?path=Anchor/Memory/x.md"),
     ("delete", "/v1/file?path=Anchor/Memory/x.md&if_sha256=" + "0" * 64),
     ("post", "/v1/purge"),
+    ("get", "/v1/knowledge/tree"),
+    ("get", "/v1/knowledge/graph"),
 ]
 
 BAD_HEADERS = [

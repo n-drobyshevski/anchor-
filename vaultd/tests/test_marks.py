@@ -1,6 +1,7 @@
 """A note's own mark (8e plan sections 3-4; phase-8 plan 4.4, 15).
 
-Exactly `anchor: never|personal|knowledge`, and 8a's `anchor: read` as
+Exactly `anchor: never|personal|knowledge|lens` (lens plan section 3),
+and 8a's `anchor: read` as
 `legacy_read`. Properties that cannot be read are `unknown`, never
 `none`: `none` would let a folder rule reveal the note.
 """
@@ -21,6 +22,7 @@ MARKS = {
     "never": ("---\nanchor: never\n---\nbody\n", "never"),
     "personal": ("---\nanchor: personal\n---\nbody\n", "personal"),
     "knowledge": ("---\nanchor: knowledge\n---\nbody\n", "knowledge"),
+    "lens": ("---\nanchor: lens\n---\nbody\n", "lens"),
     "legacy read": ("---\nanchor: read\n---\nbody\n", "legacy_read"),
     "quoted": ('---\nanchor: "knowledge"\n---\n', "knowledge"),
     "crlf": ("---\r\nanchor: personal\r\n---\r\nbody\r\n", "personal"),
@@ -35,6 +37,8 @@ MARKS = {
     "settings value": ("---\nanchor: settings\n---\nbody\n", "unknown"),
     "capitalised value": ("---\nanchor: Knowledge\n---\nbody\n", "unknown"),
     "capitalised read": ("---\nanchor: Read\n---\nbody\n", "unknown"),
+    "capitalised lens": ("---\nanchor: Lens\n---\nbody\n", "unknown"),
+    "lens list value": ("---\nanchor: [lens]\n---\nbody\n", "unknown"),
     "typo": ("---\nanchor: knowlege\n---\nbody\n", "unknown"),
     "list value": ("---\nanchor: [knowledge]\n---\nbody\n", "unknown"),
     "bool-ish value": ("---\nanchor: yes\n---\nbody\n", "unknown"),
@@ -76,7 +80,7 @@ async def test_manifest_lists_only_classified_notes(client, vault: Path) -> None
     write(vault, "Бег.md", READABLE)
     for i, name in enumerate(sorted(MARKS)):
         text, expected = MARKS[name]
-        if expected not in ("personal", "knowledge", "legacy_read"):
+        if expected not in ("personal", "knowledge", "lens", "legacy_read"):
             write(vault, f"not-{i}.md", text)
     write(vault, "big.md", "---\nanchor: personal\n---\n" + "x" * NOTE_MAX_BYTES)
     write(vault, "picture.png", "---\nanchor: personal\n---\n")
@@ -132,3 +136,47 @@ async def test_notes_are_never_writable(client, vault: Path) -> None:
     )
     assert resp.status == 403
     assert (vault / "Бег.md").read_text() == READABLE
+
+
+# -- aliases, tags and summary (lens plan section 4) ---------------------------
+
+META = {
+    "no frontmatter": ("body\n", (), (), None),
+    "lists": (
+        "---\nanchor: lens\naliases: [Эшби, W. Ross Ashby]\ntags: [cybernetics, '#variety']\n"
+        "summary: Закон необходимого разнообразия.\n---\nbody\n",
+        ("Эшби", "W. Ross Ashby"),
+        ("cybernetics", "variety"),
+        "Закон необходимого разнообразия.",
+    ),
+    "single strings": (
+        "---\naliases: Эшби\ntags: 'cybernetics, variety #systems'\nsummary: '  s  '\n---\n",
+        ("Эшби",),
+        ("cybernetics", "variety", "systems"),
+        "s",
+    ),
+    "block lists, duplicates and non-strings dropped": (
+        "---\naliases:\n  - A\n  - 1\n  - {x: y}\n  - A\n  - ''\ntags:\n  - t\n  - [nested]\n---\n",
+        ("A",),
+        ("t",),
+        None,
+    ),
+    "wrong types": ("---\naliases: 3\ntags: {a: b}\nsummary: [x]\n---\n", (), (), None),
+    "empty summary": ("---\nsummary: '   '\n---\n", (), (), None),
+    "null values": ("---\naliases:\ntags:\nsummary:\n---\n", (), (), None),
+    "unreadable frontmatter": ("---\naliases: [A]\naliases: [B]\n---\n", (), (), None),
+    "alias bomb": ("---\na: &a [x]\naliases: *a\n---\n", (), (), None),
+}
+
+
+@pytest.mark.parametrize("name", sorted(META))
+def test_note_meta(name: str) -> None:
+    text, aliases, tags, summary = META[name]
+    meta = frontmatter.note_meta(text.encode())
+    assert meta == frontmatter.NoteMeta(aliases=aliases, tags=tags, summary=summary)
+
+
+def test_a_long_summary_is_cut_to_the_cap() -> None:
+    long = "я" * (frontmatter.SUMMARY_MAX_CHARS + 50)
+    meta = frontmatter.note_meta(f"---\nsummary: {long}\n---\n".encode())
+    assert meta.summary == "я" * frontmatter.SUMMARY_MAX_CHARS

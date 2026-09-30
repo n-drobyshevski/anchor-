@@ -13,6 +13,8 @@ from tests.conftest import AUTH, write
 async def test_scopes(client, vault: Path) -> None:
     write(vault, "Anchor/Memory/0001-abcdef.md", "---\nanchor: fact\n---\n")
     write(vault, "Anchor/Journal/2026-09-25-abcdef.md", "day")
+    write(vault, "Anchor/Reports/Lens garden 2026-W40-k3f7qa.md", "report")
+    write(vault, "Anchor/Reports/sub/x.md", "---\nanchor: read\n---\n")
     write(vault, "Anchor/Memory/Утро.md", "user-made fact file, no frontmatter")
     write(vault, "Anchor/README.md", "not in a writable folder, not opted in")
     write(vault, "Anchor/Memory/sub/x.md", "---\nanchor: read\n---\n")
@@ -24,6 +26,9 @@ async def test_scopes(client, vault: Path) -> None:
         ("Anchor/Memory/0001-abcdef.md", "anchor", None),
         ("Anchor/Memory/sub/x.md", "note", "personal"),
         ("Anchor/Memory/Утро.md", "anchor", None),
+        # Lens L3: a report is Anchor's own file; a subfolder is not.
+        ("Anchor/Reports/Lens garden 2026-W40-k3f7qa.md", "anchor", None),
+        ("Anchor/Reports/sub/x.md", "note", "personal"),
         ("Notes/Бег.md", "note", "personal"),
     ]
     assert all("class" not in f for f in manifest["files"] if f["scope"] == "anchor")
@@ -73,3 +78,28 @@ def test_losing_the_opt_in_drops_the_note(vault: Path) -> None:
     assert manifest.scan().entries == []
     path.unlink()
     assert manifest.scan().entries == []
+
+
+def test_lens_kind_follows_the_settings_without_rereading_notes(vault: Path) -> None:
+    """Lens plan section 3: the kind, like the class, is recomputed from
+    the cached mark on every scan, so moving a folder rule re-sorts
+    people and concepts with no note read again."""
+    settings = "---\nanchor: settings\nlens_folders: [Lens]\n{extra}---\n"
+    write(vault, "Anchor/settings.md", settings.format(extra=""))
+    write(vault, "Lens/People/Fisher.md", "Текст.\n")
+    write(vault, "Library/Note.md", "---\nanchor: knowledge\n---\n")
+    manifest = Manifest(vault)
+    first = [e.as_json() for e in manifest.scan().entries]
+    assert [(e["path"], e["class"], e.get("lens_kind")) for e in first] == [
+        ("Lens/People/Fisher.md", "lens", "concept"),
+        ("Library/Note.md", "knowledge", None),
+    ]
+    assert "lens_kind" not in first[1]
+
+    write(vault, "Anchor/settings.md", settings.format(extra="lens_person_folders: [Lens/People]\n"))
+    second = manifest.scan()
+    assert manifest.last_reads == 0
+    assert [(e.path, e.lens_kind) for e in second.entries] == [
+        ("Lens/People/Fisher.md", "person"),
+        ("Library/Note.md", None),
+    ]

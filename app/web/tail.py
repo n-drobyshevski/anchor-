@@ -37,7 +37,6 @@ from app.db.models import (
     Memory,
     Message,
     NotebookEntry,
-    OauthConnection,
     Obligation,
     PersonaAmendment,
     PlannerCredential,
@@ -47,6 +46,7 @@ from app.db.models import (
     UserState,
     WeeklyReview,
 )
+from app.web import oauth_store
 from app.web.hub import WebHub
 
 logger = logging.getLogger(__name__)
@@ -559,8 +559,7 @@ _LIVE_ROWS = {
     "settings": (
         (UserState, UserState.notes_consent.is_(True)),
         (PlannerCredential, PlannerCredential.enabled.is_(True)),
-        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_read.is_(True)),
-        (OauthConnection, OauthConnection.revoked_at.is_(None) & OauthConnection.library_write.is_(True)),
+        *oauth_store.library_switch_rows(),
         (IdleRun, IdleRun.undone_at.is_(None)),
     ),
 }

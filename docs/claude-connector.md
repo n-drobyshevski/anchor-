@@ -81,7 +81,8 @@ new connection.
 
 - **What Claude can do:**
   - `list_tree` lists knowledge folders and note titles (no text), so
-    Claude can see the vault's structure before writing;
+    Claude can see the vault's structure before writing; each note
+    carries its class, `knowledge` or `lens` (L1);
   - `update_note` rewrites a note;
   - `create_note` adds a note in a knowledge folder -- `folder` may be
     a nested path, and a subfolder that does not yet exist is created
@@ -98,6 +99,11 @@ new connection.
 - **What stops it:**
   - vaultd accepts only notes that are knowledge at write time, never
     `Anchor/`, and never a change of a note's class;
+  - **lens notes are never written** (L1, `anchor-lens-plan.md` §3):
+    `update_note` and `rename_note` refuse a lens note, and a create or
+    a move whose destination would make the note lens. Only you change
+    the lens Echo reasons with. `search_library` still finds lens notes,
+    as knowledge;
   - a new folder is only ever built from an existing folder already
     covered by your `knowledge_folders` settings, and never at the top
     level;

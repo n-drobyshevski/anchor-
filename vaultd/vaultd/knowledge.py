@@ -7,7 +7,13 @@ single lock, before a byte is written:
    reached without a symlink (paths.py's O_NOFOLLOW walk).
 2. **The existing file's effective class is `knowledge`** -- folder
    rules and the note's own property, stricter wins (classes.py),
-   exactly as the manifest resolves it.
+   exactly as the manifest resolves it. **Never `lens`** (lens plan
+   section 4): the lens is what Echo reasons with, and only the user
+   changes it. A note that *says* `anchor: lens` is refused too, even
+   where a knowledge folder outranks it, and no new content may carry
+   that mark: a Claude write never puts a note one settings edit away
+   from the lens. Lens notes are still readable here, and listed in
+   the tree and the graph.
 3. **A write cannot reclassify**: the new content's `anchor:` property
    must equal the old one, or both must be absent.
 4. **A new file** goes only into an *existing* folder whose own rule is
@@ -138,6 +144,15 @@ def _class_of(rel: str, data: bytes, rules: classes.FolderRules) -> str | None:
     if mark == "unknown":
         return None
     return classes.effective_class(rel, mark, rules).note_class
+
+
+def _writable_knowledge(rel: str, data: bytes, rules: classes.FolderRules) -> bool:
+    """Knowledge a Claude write may touch: effective class knowledge, and
+    not marked `anchor: lens` (module docstring, item 2)."""
+    mark = frontmatter.note_mark(data)
+    if mark in ("unknown", "lens"):
+        return False
+    return classes.effective_class(rel, mark, rules).note_class == "knowledge"
 
 
 def _safe_segment(seg: str) -> bool:
@@ -276,6 +291,8 @@ def check_new_content(rel: str, data: bytes, rules: classes.FolderRules, *, for_
     mark = frontmatter.note_mark(data)
     if mark == "unknown":
         raise Refused("bad_frontmatter")
+    if mark == "lens":
+        raise Refused("content_not_knowledge")  # only the user marks a note lens
     if for_create:
         if classes._folder_class(rel, rules) != "knowledge":  # noqa: SLF001 - same package
             raise Refused("folder_not_knowledge")
@@ -323,7 +340,7 @@ def perform_put(
     else:
         if current is None:
             raise Missing
-        if _class_of(rel, current, rules) != "knowledge":
+        if not _writable_knowledge(rel, current, rules):
             raise Refused("not_knowledge")
         if sha256(current) != if_sha256:
             raise Conflict
@@ -372,9 +389,8 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
     rules = classes.load_rules(root)
     if rules.state == "invalid":
         raise Refused("settings_invalid")
-    old_mark = frontmatter.note_mark(old_data)
-    if old_mark == "unknown" or classes.effective_class(old_rel, old_mark, rules).note_class != "knowledge":
-        raise Refused("not_knowledge")
+    if not _writable_knowledge(old_rel, old_data, rules):
+        raise Refused("not_knowledge")  # lens included: only the user moves the lens
 
     new_current, new_folder_exists = _read_at(root, new_rel)
     new_folders: tuple[str, ...] = ()
@@ -389,11 +405,12 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
     if classes._folder_class(new_rel, rules) != "knowledge":  # noqa: SLF001
         raise Refused("dest_not_knowledge")
     # No separate check of the destination's resolved class: the guard
-    # above already proved `old_mark` is "knowledge" or "none" (nothing
-    # else can pass it), and combined with a folder rule of "knowledge"
-    # -- just proved too -- `effective_class` always resolves the pair
-    # to "knowledge" (stricter-wins can only raise the rank, and there
-    # is nothing above knowledge left to raise it to).
+    # above already proved the old note's mark is "knowledge" or "none" (nothing
+    # else can pass it, `lens` included), and combined with a folder
+    # rule of "knowledge" -- just proved too, so never a lens folder --
+    # `effective_class` always resolves the pair to "knowledge"
+    # (stricter-wins can only raise the rank, and nothing the pair
+    # holds sits above knowledge). A rename can never land in the lens.
 
     old_base = links.basename(old_rel)
     new_base = links.basename(new_rel)
@@ -403,7 +420,9 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
     for rel, data in links.iter_notes(root):
         if rel == old_rel:
             continue
-        if links.basename(rel) == old_base:
+        if links.same_basename(links.basename(rel), old_base):
+            # Up to case: `[[foo]]` could mean either note (graph.py
+            # prefers the exact name), so a rewrite could not know which.
             ambiguous = True
         try:
             new_text, count = links.rewrite(data, old_base, new_base)
@@ -413,9 +432,10 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
             continue
         if _first_segment(rel) == _ANCHOR_TOP:
             raise Refused("linked_from_non_knowledge")  # a fact/journal page (or any other Anchor file) links here
-        note_class = _class_of(rel, data, rules)
-        if note_class != "knowledge":
-            raise Refused("linked_from_non_knowledge")  # a personal/never/unclassified note links here
+        if not _writable_knowledge(rel, data, rules):
+            # a personal/never/unclassified note links here -- or a lens
+            # note, whose link a rename would have to rewrite
+            raise Refused("linked_from_non_knowledge")
         backlinks.append((rel, data, new_text))
     if ambiguous:
         raise Refused("ambiguous_basename")  # the basename is ambiguous: another file already has it
@@ -547,9 +567,13 @@ def build_tree(root: Path, rules: classes.FolderRules) -> dict:
     """`GET /v1/knowledge/tree`'s body (rev. 3, BUILD item 4): every
     folder under a `knowledge_folders` root whose own class is
     knowledge, and every `.md` note whose *effective* class (folder
-    rule plus its own property, stricter wins) is knowledge -- a note
-    marked personal/never inside a knowledge folder never appears, and
-    neither does anything under `Anchor/`. No file content, ever.
+    rule plus its own property, stricter wins) is knowledge or lens --
+    a note marked personal/never inside a knowledge folder never
+    appears, and neither does anything under `Anchor/`. No file
+    content, ever. Each note carries its `class` (lens plan section 4),
+    so Claude knows which ones it may not write. Lens folders are not
+    in `folders`: that list is where a new note may go, and nothing new
+    goes into the lens.
     Capped at TREE_MAX_NOTES notes, with `truncated: true` past it.
     Invalid settings: empty lists, same as everywhere else in this
     module."""
@@ -596,12 +620,14 @@ def build_tree(root: Path, rules: classes.FolderRules) -> dict:
             if mark == "unknown":
                 continue
             resolved = classes.effective_class(rel, mark, rules)
-            if resolved.note_class != "knowledge":
+            if resolved.note_class not in classes.READABLE_KNOWLEDGE:
                 continue
             if len(notes) >= TREE_MAX_NOTES:
                 truncated = True
                 continue
-            notes.append({"path": rel, "title": rel.rsplit("/", 1)[-1][: -len(".md")]})
+            notes.append(
+                {"path": rel, "title": rel.rsplit("/", 1)[-1][: -len(".md")], "class": resolved.note_class}
+            )
 
     walk(root, "")
     return {"folders": folders, "notes": notes, "truncated": truncated}

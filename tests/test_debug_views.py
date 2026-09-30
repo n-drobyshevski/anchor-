@@ -54,6 +54,25 @@ CONTENT_COLUMNS = {
     "note_chunk_knowledge": {"heading", "text", "tsv"},
     # Timestamps only; forgets_window is a JSON array of them.
     "vault_status": set(),
+    # L1 (anchor-lens-plan.md section 5): a lens note's title, summary
+    # and body are the user's notes; a link's target text names a note.
+    # lens_version (hashes, counts) and lens_read (a function name and
+    # a row count) carry nothing else.
+    "lens_note": {"title", "summary", "body"},
+    "note_link": {"unresolved_text"},
+    "lens_version": set(),
+    "lens_read": set(),
+    # L2 (plan section 7): the selector's why is model text about the
+    # user's week and notes; a review proposal's text and reason are
+    # what the review told the user.
+    "lens_round": {"rationale"},
+    "review_proposal": {"text", "reason"},
+    # L3 (plan section 8): a gap's titles, proposed title and detail
+    # name and discuss lens notes; its signature is a hash of a few
+    # short titles (guessable) and its recheck payload holds titles too.
+    # A run's findings carry cluster names and unresolved link text.
+    "lens_gap": {"titles", "title", "detail", "signature", "recheck"},
+    "lens_garden_run": {"findings"},
 }
 
 

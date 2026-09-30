@@ -692,6 +692,40 @@ class Settings(BaseSettings):
     VAULT_PERSONAL_ENABLED: bool = False
     VAULT_KNOWLEDGE_IN_PROMPT: int = 2
     VAULT_PERSONAL_IN_PROMPT: int = 2
+    # --- L1: the lens (anchor-lens-plan.md sections 3, 5 and 11) ---
+    #
+    # A third switch on top of notes consent and VAULT_KNOWLEDGE_ENABLED:
+    # while all three are on, the sync pass keeps every lens note whole
+    # in `lens_note` (app/vault/lens.py), where Claude Code can read it
+    # through the `anchor_lens` role. Off deletes those rows on the next
+    # pass. Lens notes are still indexed as knowledge either way -- lens
+    # is a kind of knowledge for every existing consumer.
+    LENS_ENABLED: bool = False
+    # Plan section 7: over this many lens notes the selector (L2) does
+    # not use the lens at all rather than silently dropping notes. In L1
+    # only /lens reads it, to warn.
+    LENS_CATALOG_MAX_NOTES: int = 300
+    # --- L2: the weekly review's lens round (plan section 7) ---
+    #
+    # The most notes one round may carry into the grounding call, and
+    # the most characters of their bodies together. Notes are kept in
+    # the selector's order until either is reached; a note that would
+    # overflow the budget ends the list (app/core/lens_review.py).
+    LENS_ROUND_MAX_NOTES: int = 6
+    LENS_ROUND_MAX_CHARS: int = 24000
+    # --- L3: the lens garden (plan section 8) ---
+    #
+    # The weekly idle job that looks for gaps in how the lens is
+    # organised (app/core/idle/lens_garden.py), its Obsidian report and
+    # its Telegram message. A fourth switch on top of LENS_ENABLED,
+    # VAULT_KNOWLEDGE_ENABLED and a syncing VAULT_MODE: it gates L3's
+    # weekly model spend and messages on a lens that is already on for
+    # L2. Flip it after vaultd writes `Anchor/Reports/`.
+    LENS_GARDEN_ENABLED: bool = False
+    # The garden's own output cap. It builds its own provider on
+    # LLM_MODEL_SAFETY, whose shared cap (LLM_SAFETY_MAX_TOKENS, 400)
+    # would truncate ten gaps of Russian JSON.
+    GARDEN_MAX_TOKENS: int = 2000
 
     @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
     @classmethod
@@ -976,6 +1010,18 @@ VAULT_TOKEN_MIN_CHARS = 32
 # 8e: the most note chunks of one class a prompt may ever carry. A
 # constant, so a deploy cannot paste a variable that floods the prompt.
 NOTES_IN_PROMPT_MAX = 5
+# L1: the ceiling on LENS_CATALOG_MAX_NOTES. vaultd's graph stops at
+# 2000 nodes (knowledge and lens together), so a larger limit could
+# never be reached honestly.
+LENS_CATALOG_MAX_NOTES_CEILING = 2000
+# L2: the bounds on a round's selection. More than 12 notes or 100k
+# characters is not a frame any more, it is the library; under 2000
+# characters not even one ordinary note fits.
+ROUND_MAX_NOTES_RANGE = (1, 12)
+ROUND_MAX_CHARS_RANGE = (2000, 100000)
+# L3: the garden's output cap. Under 1000 tokens ten gaps do not fit;
+# over 8000 is a runaway, not a report.
+GARDEN_MAX_TOKENS_RANGE = (1000, 8000)
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1151,6 +1197,19 @@ def check_vault_settings(settings: Settings) -> None:
         value = getattr(settings, name)
         if not 0 <= value <= NOTES_IN_PROMPT_MAX:
             raise SystemExit(f"{name} must be between 0 and {NOTES_IN_PROMPT_MAX}, got {value}.")
+    if not 1 <= settings.LENS_CATALOG_MAX_NOTES <= LENS_CATALOG_MAX_NOTES_CEILING:
+        raise SystemExit(
+            f"LENS_CATALOG_MAX_NOTES must be between 1 and {LENS_CATALOG_MAX_NOTES_CEILING}, "
+            f"got {settings.LENS_CATALOG_MAX_NOTES}."
+        )
+    for name, (low, high) in (
+        ("LENS_ROUND_MAX_NOTES", ROUND_MAX_NOTES_RANGE),
+        ("LENS_ROUND_MAX_CHARS", ROUND_MAX_CHARS_RANGE),
+        ("GARDEN_MAX_TOKENS", GARDEN_MAX_TOKENS_RANGE),
+    ):
+        value = getattr(settings, name)
+        if not low <= value <= high:
+            raise SystemExit(f"{name} must be between {low} and {high}, got {value}.")
     mode = settings.VAULT_MODE
     if mode not in VALID_VAULT_MODES:
         raise SystemExit(

@@ -456,14 +456,17 @@ async def get_note(client: VaultClient, path: str) -> dict:
 async def list_tree(client: VaultClient) -> dict:
     """`list_tree()` (rev. 3, plan section 14, BUILD item 6): knowledge
     folders and note titles, no body text -- gated by the write switch,
-    like `list_changes`, and Claude-only (never Grok's route)."""
+    like `list_changes`, and Claude-only (never Grok's route). L1
+    (anchor-lens-plan.md section 3): each note says its `class`,
+    `knowledge` or `lens`, so Claude can see which notes its write tools
+    will refuse."""
     try:
         tree = await client.knowledge_tree()
     except VaultError as exc:
         raise Refused(_map_vault_error(exc)) from exc
     return {
         "folders": tree.folders,
-        "notes": [{"path": n.path, "title": n.title} for n in tree.notes],
+        "notes": [{"path": n.path, "title": n.title, "class": n.note_class} for n in tree.notes],
         "truncated": tree.truncated,
     }
 

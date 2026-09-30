@@ -2673,3 +2673,322 @@ every hourly and daily count over, without touching the caps.
   are reset either way).
 - `/delete` leaves the moment in place: it is a timestamp, no content.
 
+## L1 — the lens
+
+`anchor-lens-plan.md` rev. 3, milestone L1: the `lens` class, the
+graph, the bot's copy of the lens, and Claude Code's read-only door to
+it. Echo itself does not use the lens yet (L2). Your decisions (§14):
+the lens is material Echo studies, never your views; under 50 notes
+today; people and concepts by folder (`lens_person_folders`).
+
+- **Claude Code reads through a role and two functions, not a view.**
+  `anchor_lens` has `EXECUTE` on `lens.notes()` and `lens.graph()` and
+  nothing else. A view cannot write, so a `SELECT` on one leaves no
+  trace; a `SECURITY DEFINER` function inserts its `lens_read` row
+  before it returns. That count feeds `/lens` and the digest line,
+  «Claude Code прочитал линзу: N раз». The row is in the caller's
+  transaction, so a rollback removes it; each call therefore takes the
+  row's id first, from the table's sequence, which no rollback undoes,
+  and `/lens` (and the digest) report the gaps as reads without a
+  record. Not an autonomous write (no `dblink` extension to depend on),
+  but no read goes unseen. The functions pin `search_path` and are
+  revoked from `PUBLIC`. The door is `LOGIN`, which you flip with
+  `/lens code on|off`; the password is set once by hand, as for
+  `anchor_debug`, so the bot never holds it.
+- **Lens is below knowledge in strictness** (`never > personal >
+  knowledge > lens`). Lens is a kind of knowledge, so every existing
+  consumer (the index, `search_library`) keeps working unchanged, and
+  "stricter wins" can only ever make the lens *smaller*:
+  - `anchor: knowledge` on one note in a lens folder excludes that note;
+  - `anchor: lens` inside a personal or never folder is not lens;
+
+  Two shapes make the settings file invalid (fail closed), like any
+  other settings error, because each is a mistake you would never see:
+  - a lens folder nested in a knowledge, personal or never folder.
+    Stricter wins would turn all of it into the outer class: a lens
+    that is silently empty, and under a knowledge folder writable by
+    Claude. (The first draft let it resolve to knowledge; review found
+    that the plan's own example, `Library/Lens` under `Library`, hit
+    exactly this.)
+  - a `lens_person_folders` entry outside every lens folder: a person
+    rule that covers nothing.
+- **W2 cannot write lens notes.** `PUT /v1/knowledge` and
+  `POST /v1/knowledge/rename` refuse a lens note as the source, and a
+  write or move whose destination would be lens, with the existing
+  "not knowledge" refusal. The lens is what Echo will reason with when
+  it changes itself. A claude.ai chat, or text it read that carries
+  instructions, must not be able to reshape it; a move into a lens
+  folder would be a model choosing lens membership, which is yours
+  alone. Only you change the lens. `list_tree` marks lens notes so
+  Claude knows before it tries.
+- **The graph never names an outside note.** A link from a knowledge
+  or lens note to a note that exists but is personal, never,
+  unclassified or under `Anchor/` becomes `{"outside": true}`: no path,
+  no title, not even the link's own target text, because `[[Name]]`
+  *is* the name. It is counted so the graph's shape stays honest.
+  Existence and name of a hidden note are its content, as 8e already
+  holds for `/vault` ("invisible notes are counts, never paths"). A link
+  to no note at all keeps its target text (`unresolved`): that text is
+  written in a note the bot may already read. `frontmatter`'s
+  `aliases`, `tags` and `summary` are read for knowledge and lens notes
+  only.
+- **Storage.** `lens_note` holds each lens note whole, only while notes
+  consent, `VAULT_KNOWLEDGE_ENABLED` and `LENS_ENABLED` are all on; any
+  one off deletes the rows on the next pass, as the knowledge index
+  does. `note_link` (knowledge and lens links, from the graph) follows
+  the knowledge gates. `lens_version` gets a row only when the hash over
+  the sorted body hashes and lens-to-lens edges is new. Only
+  `app/vault/lens.py` touches the four tables, pinned by
+  `tests/test_vault_notes_isolation.py`. Their debug views carry ids,
+  hashes, lengths, booleans and counts; `debug.note_link` has
+  `unresolved` as a boolean, never the text.
+- **The digest runs with `LENS_ENABLED` alone.** Lens reads need no
+  connector, so the daily Claude digest is queued when either
+  `CLAUDE_ACCESS_ENABLED` or `LENS_ENABLED` is on, and still sends
+  nothing on a day with nothing to report.
+- **`/lens` is Telegram-only**, like `/claude`: opening a database door
+  is an access decision a web session must not make.
+- **Lens text stays out of the repo.** CLAUDE.md lets Claude Code read
+  lens notes and forbids copying their text into commits, PRs, code,
+  fixtures, eval cases, logs or artifacts: it paraphrases from public
+  knowledge and cites the note by id. `lens_read` shows how often it
+  reads.
+
+## L2 — the review reads the lens
+
+`anchor-lens-plan.md` rev. 3, milestone L2: the weekly review picks
+lens notes for itself (§7), grounds its proposals in them (§6's
+block), and the card says which notes it leaned on. The lens is
+active for a round only while `LENS_ENABLED` is on and the lens holds
+between 1 and `LENS_CATALOG_MAX_NOTES` notes; otherwise the review
+makes the same single call with the same prompt and input as before,
+byte for byte, and records no round.
+
+- **Two extra single-shot calls, not a tool loop.** A loop would give
+  one context the week, the lens and the means to fetch more of either.
+  Instead pass 1 (the existing analysis, unchanged) runs first, then a
+  selector call picks notes, then a grounding call rewrites the
+  proposals. Each call has one input, one strict JSON schema and
+  temperature 0, on the model the review already uses; each output is
+  validated before the next call sees it. Every step can be audited
+  on its own, and none can act.
+- **The selector never sees the week.** Its input is pass 1's
+  validated analysis (wins, misses, patterns, intentions, proposals as
+  JSON) and the catalog: id, person or concept, title, summary (or the
+  first 300 characters of the body), linked lens titles, and
+  `rounds_since_used`. The grounding call gets the same analysis and
+  the selected bodies. Neither call gets the raw week input, so
+  `load_week`'s welfare exclusion needs no second copy, and a lens note
+  cannot pull a dialog line into a prompt it was never in.
+- **Grounded proposals replace pass 1's, not add to them.** The
+  grounding call returns the whole proposal list under the same kinds,
+  caps and screening as today, each with `grounds` (note titles, kept
+  only if selected). Adding would double the cards for one week and
+  invite the review to argue with itself; replacing keeps one set,
+  each proposal resting on the lens where it helps and standing alone
+  where it does not. The lens is framed as material the user studies,
+  never their views, and the review's own prohibitions (no raising
+  intensity, no punishments) outrank any note: a note arguing for
+  acceleration cannot become a proposal to push harder. The eval pins
+  both.
+- **The lens never fails the review.** A provider error, invalid JSON,
+  a schema miss or the spend cap on either extra call keeps pass 1's
+  proposals, and the round is recorded as `fallback` (with an empty
+  selection if the selector itself failed). An empty selection is a
+  real answer, recorded as `empty`: some weeks no idea fits. Both calls
+  are ledgered and capped exactly like the analysis call.
+- **`rounds_since_used` keeps the lens from collapsing onto two
+  favourites.** Each catalog line says how many review rounds have
+  passed since the note was last selected («никогда» if never), and
+  the prompt asks for at least one note unused for four or more rounds
+  when one is relevant. The count comes from `lens_round`, so it
+  needs no extra state.
+- **`lens_round` records every active round**: the lens version, the
+  selected ids, the selector's `why`, the outcome. `review_proposal`
+  carries `lens_round_id` and `lens_note_ids`, so the card can show
+  «основание: …» with the notes' current titles and answer «почему эти
+  заметки?» with the rationale. `debug.lens_round` has everything but
+  the rationale, and the new `debug.review_proposal` has ids, kind,
+  status, times, `lens_round_id`, `lens_note_ids` and the text's
+  length, never its text or reason; `lens.rounds(n)` gives Claude Code
+  the last rounds with their outcome and the picked notes' titles
+  through the `anchor_lens` role, logged in `lens_read` like the other
+  two functions. **The rationale is derived from the week**: the
+  selector writes it from the first pass's analysis of the user's
+  conversations, so it stays with the user -- Telegram only -- and
+  neither `lens.rounds(n)` nor `debug.lens_round` carry it (CLAUDE.md's
+  first rule: Claude Code never reads conversation data, and model text
+  written from it counts). The selector's prompt still keeps the week's
+  facts out of it, speaking of the notes and of what Echo should change,
+  as hygiene for what the user reads. The *selection* itself (which ids,
+  in what order, and an `empty` outcome) stays readable, in
+  `lens.rounds(n)` and as ids in `debug.lens_round` and
+  `debug.review_proposal`: it says which of the user's own lens notes
+  the model reached for, not anything about the week, and it is exactly
+  what Claude Code needs to see how the lens is used. `/delete` erases
+  `lens_round` and `/export` leaves it out, as for the other lens
+  tables. Only
+  `app/vault/lens.py` touches it; `app/core/lens_review.py` holds the
+  selector and grounding logic.
+- **Lens text now reaches the model provider**, during the weekly
+  review and only while `LENS_ENABLED` is on: the catalog's summaries
+  and the selected bodies go through OpenRouter like the review's own
+  input. `docs/privacy.md` says so.
+
+## L3 — the lens garden
+
+`anchor-lens-plan.md` rev. 3, milestone L3 (§8): once a week Echo
+reads the lens as a graph and proposes gaps (a missing link, a missing
+note, a tension, a bridge between clusters), in Telegram and as a note
+in the vault. Echo never edits a note here. The L3 spec settled the
+details; you amended two of them (one message per run, and
+`lens.gaps` showing `closed`).
+
+- **An idle kind, `lens_garden`, not a new job.** The idle gate,
+  budget, preemption and `/digest` line come with it. `KIND_DAILY_MAX`
+  is 1, and the job's own gate adds what a daily cap cannot: the flag
+  (`LENS_GARDEN_ENABLED`, off by default, on top of `LENS_ENABLED`,
+  the knowledge index and a sync `VAULT_MODE`), 3 to
+  `LENS_CATALOG_MAX_NOTES` notes, 168 hours and a new local ISO week
+  since the last run (`iso_week` is unique, which also covers DST), and
+  a lens that changed since that run or a gap marked done. Without the
+  last rule a static lens would get marginal gaps every week. A failed
+  run (provider error, bad JSON, the spend cap) writes nothing and
+  retries tomorrow; there is no templated fallback, because the model
+  is the filter on step 1's recall. **This amends phase 6 §8**: idle
+  may now write two tables, `lens_garden_run` and `lens_gap`, through
+  `app.vault.lens` only (`tests/test_idle_isolation.py` allows that one
+  module to that one file, and still bans `app.tg`).
+- **Step 1 is in-house, stdlib only; no networkx.** Orphans, dead ends,
+  wanted notes, unlinked mentions, Brandes betweenness, label
+  propagation, TF-IDF holes, people without concepts and staleness
+  come to about 80 lines over a graph of at most a few hundred nodes,
+  deterministic by construction (ascending ids, ties to the smallest
+  label). A dependency the bot would carry for one weekly job, whose
+  community detection is randomised unless seeded, bought nothing.
+  **Known weakness, kept as specced:** label propagation in place, in
+  ascending id order, with ties to the smallest label, lets the lowest
+  label flood a connected component. Two cliques joined by one edge are
+  one cluster (unless their ids interleave), so in practice clusters
+  are mostly the connected components, they depend on how sync numbered
+  the rows, and holes and bridges appear only between components.
+  `tests/test_lens_graph.py` pins the two-clique case, so replacing it
+  (a greedy seeding pass, or a deterministic modularity pass) is a
+  deliberate change. A hole is "not joined" by exactly the bridge
+  recheck's test (a path of length 2 or less in `G_all`, through any
+  note), so the model is never pointed at a hole the code would refuse.
+- **Step 2 sees the lens only.** One call on `LLM_MODEL_SAFETY` with its
+  own provider and `GARDEN_MAX_TOKENS` (2000): the shared safety
+  provider's 400-token cap would truncate ten gaps in Russian. Its
+  input is the findings, and for the involved notes their title, kind,
+  catalog summary (the frontmatter summary, else the start of the text,
+  as in the L2 catalog), lens links and a count of knowledge
+  neighbours; never a whole body, a knowledge note's title, a dialog or
+  memory, nor the count of links to notes the bot may not see (step 1
+  uses it in code only, and `lens.graph()` never shows it). A knowledge note appears in the graph as
+  an anonymous id, and its title is only matched locally (a proposed
+  missing note that already exists is dropped). This narrows §10's
+  "titles, for context", and it is what makes `lens.gaps(n)` safe
+  below.
+- **Dedup by a title signature, not by ids.** A gap's key is
+  `sha256("v1|kind|" + sorted normalised titles)`: the note pair, the
+  proposed title, or the bridge's anchors. `_index_notes` keys rows by
+  path, so a moved note gets new ids, and an id key would re-raise
+  every gap you dismissed. A partial unique index (status other than
+  `resolved`) makes a live signature impossible to raise twice; only a
+  resolved one may recur. The cost: renaming a note resolves its gaps
+  (the recheck no longer finds the title), which may then return under
+  the new name, and two notes with one basename collide. Every run
+  rechecks open and done gaps by title: one that now holds, or whose
+  note is gone, is resolved; one you marked done that still fails is
+  reopened, moved to the new run and shown again with «снова».
+- **Delivery rides the vault pass, not the idle job.** The idle job
+  sends nothing (idle never reaches Telegram). A sibling of the vault
+  pass's own update hook sends the run once the pass has written the
+  report, so the header can name the note, and retries an unsent run
+  every minute. It waits for quiet hours, `/quiet`, a pause and the
+  welfare cooldown, like the weekly review, and it is an
+  out-of-character report: no `Outbound` row, no counters.
+- **One message per run** (your amendment; the spec had one card per
+  gap, up to ~15 at once). The header has the week, the counts of new,
+  reopened and older open gaps, and the report's path; then the gaps,
+  numbered. The keyboard has a row per open gap, «N · сделал» and «N ·
+  не нужно» (`lg:d:<id>:<epoch>` and `lg:n:<id>:<epoch>`; the epoch
+  makes a pre-`/delete` button stale). A tap updates that gap and
+  edits the same message: the item gains «— отмечено: …», its row
+  goes, and the keyboard goes with the last row. Each gap stores the
+  message id, and the run stores the gaps it was sent with, so the
+  numbering holds when the message is re-rendered, with each gap's
+  «снова» count as sent (`sent_reopened`), so a later run reopening one
+  of them never rewrites the old message's counts. A run still unsent
+  when the next is recorded (a /quiet renewed for a week, a pause,
+  failed sends) hands its open gaps to the new run, which carries them
+  in its message, and is marked sent with nothing sent: otherwise those
+  gaps would never get a row while their signatures blocked them from
+  being raised again. The header names the report only once vaultd has
+  confirmed the create (`disk_sha256` set). Telegram's 4096
+  characters may shorten details; the report has them whole.
+  «Исследовать» waits for L4: a dead button is worse than none, and a
+  tap must not become paid research under pre-L4 terms (`lg:r:` is
+  reserved, and stale).
+- **The report is a third writable folder, `Anchor/Reports/`.** vaultd's
+  writable set and purge gain it (deploy the vault service first; the
+  bot catches an old vaultd's `REFUSED`, counts it as
+  `reports_refused`, and never lets it roll back the pass). The path
+  is `Lens garden <week>-<epoch>.md`: with no epoch, a pre-`/delete`
+  copy re-uploaded by an offline device would take the name and leave
+  the row `NAME_TAKEN` for good. It is written like a journal day:
+  create-only, then compare-and-swap on the digest; a hand edit makes
+  it `diverged`, a deletion (sync) `dismissed`, and neither is written
+  again. Only the latest run with gaps is rendered, after the notes
+  index so it cannot starve it. The note says edits there are not read
+  -- the buttons are the interface -- and `FACT_PATH_RE` never ingests
+  it. It links only to lens notes (W2 cannot rename those), leaves
+  proposed and wanted titles as plain text, escapes everything the
+  model wrote (no `[[`, `]]`, `|`, `#`, link, HTML or line break), and
+  stays under 60 KiB by dropping «Структура» first.
+- **`lens.gaps(n)` for Claude Code, with `resolved` shown as `closed`**
+  (your amendment). The function returns the last gaps with their
+  week, kind, titles, proposed title, detail, reopened count and
+  times, logged in `lens_read` like the other three. Its text is safe
+  where `lens_round.rationale` is not: the model that wrote it saw lens
+  notes only (above), which `lens.notes()` and `lens.graph()` already
+  expose, and a test pins that input. The status is `open`, `done`,
+  `dismissed` or `closed`, and there is no `resolved_at`: a resolved
+  missing note would otherwise tell Claude Code that a note with that
+  title now exists, perhaps a knowledge note it may not see. L4's
+  `researched` is `closed` too. `debug.lens_gap` maps the status the
+  same way and carries no text, recheck payload or signature (a hash of
+  a few short titles can be guessed); one inference remains, a closed
+  gap whose notes still exist was resolved by the recheck.
+  The word alone was not enough for a missing note: its sources still
+  in the lens and no lens note by that title, `closed` would still mean
+  "a knowledge note (or a lens alias) by that name exists". So a closed
+  `missing_note` comes back with no title and no detail. **Chosen: the
+  minimal fix.** An open missing note's proposed title is still shown,
+  so Claude Code can join an earlier read to a later "closed" by id;
+  the stronger fix (never returning a missing note's proposed title)
+  stays available if that correlation matters. And like `lens.rounds`,
+  `lens.gaps` forgets a note that left the lens: `titles` are current
+  titles (a departed note skipped), and a gap any of whose notes has
+  left comes back without title and detail, which may name it. A note
+  moved within the lens gets a new id, so its gaps lose their text
+  too: the cautious side.
+- **Aliases are stored now** (`lens_note.aliases`, for mention matching
+  and missing-note checks): taken from the graph, dropped when the
+  notes mask would change them, kept from the last pass when the graph
+  is missing or truncated, and left out of the version hash. Tags are
+  not stored.
+- **The garden dies with the lens.** `lens.delete_garden` runs wherever
+  `lens_note` is emptied: the knowledge index or the lens turned off
+  (next pass), and notes consent off, in the same transaction as the
+  consent change, because that path deletes the notes by cascade and
+  the garden has no key to a file. `/delete` truncates both tables and
+  purges `Reports/`; `/export` leaves them out like the other lens
+  tables. Logs carry ids and counts, never a title, alias, term,
+  detail, path or signature.
+- **Lens text reaches the model weekly while the garden is on**:
+  titles, catalog summaries (or the start of the text), lens links and
+  counts of links to knowledge notes, through OpenRouter.
+  `/privacy` and `docs/privacy.md` say so, and that Claude Code can read
+  the proposals.

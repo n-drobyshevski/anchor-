@@ -1,0 +1,61 @@
+# anchor-lens-plan.md section 13, "the selector cherry-picking" (L2,
+# non-blocking): "the eval set includes a round where the relevant note
+# is not the favourite". The Pareto note was picked in each of the last
+# five rounds (`lens_history`, oldest first), so the catalog shows it at
+# «0» rounds since use; the peak-end note has never been picked
+# («никогда») and is the one that fits this week -- evenings that end
+# on a list of what was not done. The selector must include it. It may
+# pick the favourite too; the rotation rule asks for at least one
+# long-unused note when relevant, not for dropping the rest.
+id = "38"
+title = "Линза: выбирается подходящая заметка, а не любимая"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+lens = [
+    { title = "Принцип Парето", kind = "concept", body = """
+Вильфредо Парето; правило 80/20 в формулировке Джозефа Джурана: небольшая
+доля причин даёт большую часть результата. Сначала найти те немногие дела,
+которые дают основной эффект, и держаться их.
+""" },
+    { title = "Правило пика и конца (Канеман)", kind = "concept", body = """
+Даниэль Канеман и соавторы (1993): эпизод вспоминается по самому сильному
+моменту и по тому, как он закончился, а не по сумме всего пережитого. В
+опыте с холодной водой более долгое испытание с мягким концом запомнилось
+как менее неприятное. Как закончился день или разговор — во многом
+определяет, каким его запомнят.
+""" },
+    { title = "Закон Гудхарта", kind = "concept", body = """
+Чарльз Гудхарт (1975), в формулировке Мэрилин Стратерн: когда показатель
+становится целью, он перестаёт быть хорошим показателем. Люди начинают
+оптимизировать саму метрику, а не то, что она должна была измерять.
+""" },
+]
+lens_history = [
+    ["Принцип Парето"],
+    ["Принцип Парето", "Закон Гудхарта"],
+    ["Принцип Парето"],
+    ["Принцип Парето"],
+    ["Принцип Парето"],
+]
+
+[input]
+kind = "lens_review"
+
+[input.analysis]
+wins = ["Четыре дня из семи главное действие сдвигалось"]
+misses = ["Два утра без чек-ина, оба после вечеров, закончившихся списком недоделанного"]
+patterns = [
+    "Вечерний итог дня заканчивался перечнем того, что не сделано",
+    "Дни, закончившиеся отмеченным успехом, пользователь потом сам вспоминал в чате",
+]
+intentions = ["Заканчивать день на том, что получилось"]
+proposals = [
+    { kind = "persona_note", text = "Вечером сначала называть сделанное", reason = "После вечеров со списком недоделанного утро выпадало" },
+]
+
+[checks]
+selected_include = ["Правило пика и конца (Канеман)"]
+judge = ["lens_fit"]

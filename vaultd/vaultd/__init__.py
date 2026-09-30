@@ -7,7 +7,8 @@ those files.
 
 **vaultd is the enforcement point, not the bot.** The same shape as the
 `anchor_debug` role: whatever the bot's code does, *this* process
-refuses a write outside `Anchor/Memory/` and `Anchor/Journal/`, and a
+refuses a write outside `Anchor/Memory/`, `Anchor/Journal/` and
+`Anchor/Reports/` (lens L3), and a
 read of any note the user has not classified `personal` or `knowledge`
 (8e). The path rules live in `paths.py`, a note's own mark in
 `frontmatter.py`, the folder rules and precedence in `classes.py`, and

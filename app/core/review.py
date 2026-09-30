@@ -40,6 +40,21 @@ a weekday it is never asked for, and `daily` is the safest reading of
 "держать [it] as a habit" that a one-line proposal text usually means.
 `orders.propose()` still screens it like any other model output, and
 the user always sees the exact cadence before accepting.
+
+**L2: the lens** (anchor-lens-plan.md sections 6, 7 and 10). When the
+lens is active for a round -- `LENS_ENABLED`, and between 1 and
+`LENS_CATALOG_MAX_NOTES` lens notes -- `analyze_week` hands its
+validated analysis to app/core/lens_review.py, which picks lens notes
+for the week and rewrites the proposals to rest on them (see that
+module). The analysis call itself is untouched: same prompt, same
+input, same schema, and the week input never goes further than it.
+When the lens is not active, nothing here changes by a byte: no extra
+call, no `lens_round` row, the same proposals and the same stored
+analysis. The lens can only ever replace the proposals; a failure
+anywhere in it keeps the first pass's, so the review never fails
+because of it. `store_review` points the round at the review row once
+that row exists, and `create_proposals` stores the round and the
+grounding notes' ids on each proposal it rewrote.
 """
 
 from __future__ import annotations
@@ -54,6 +69,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import lens_review
 from app.core import notebook as notebook_module
 from app.core import orders as orders_module
 from app.core import safety_events
@@ -73,7 +89,7 @@ from app.db.models import (
     StateChange,
     WeeklyReview,
 )
-from app.llm.provider import JSONSchema, LLMMessage, LLMProvider
+from app.llm.provider import JSONSchema, LLMMessage, LLMProvider, LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -156,26 +172,42 @@ REVIEW_SCHEMA = JSONSchema(
     },
 )
 
+# The prompt's closing prohibition, named on its own since L2 so the
+# lens's grounding call (app/core/lens_review.py) repeats it word for
+# word, above any lens note.
+REVIEW_PROHIBITIONS = (
+    "Запрещено: здоровье, кризисы, психологические "
+    "ярлыки, повышение интенсивности, наказания."
+)
+
 # Plan section 8, verbatim.
 REVIEW_ANALYSIS_PROMPT = (
     "Подведи неделю пользователя по данным. Только факты из данных. "
     "`intentions` — на чём Echo стоит сосредоточиться на следующей неделе "
     "(формулировки о поддержке и ясности, не об ужесточении). `persona_note` — "
     "короткая поправка к стилю Echo, которую подсказывает неделя (например, "
-    "«меньше вопросов по утрам»). Запрещено: здоровье, кризисы, психологические "
-    "ярлыки, повышение интенсивности, наказания."
+    "«меньше вопросов по утрам»). " + REVIEW_PROHIBITIONS
 )
 
 
 @dataclasses.dataclass(frozen=True)
 class Analysis:
-    """Validated, ready-to-apply output of one weekly-review analysis call."""
+    """Validated, ready-to-apply output of one weekly-review analysis call.
+
+    L2: `lens_round_id` is the `lens_round` row this analysis went
+    through, and `lens_outcome` how it ended (`grounded`, `empty`,
+    `fallback`); both None when the lens was not active. When grounded,
+    each proposal also carries `grounds` (the note titles it names) and
+    `lens_note_ids` (those notes' ids) -- app/core/lens_review.py.
+    """
 
     wins: list[str] = dataclasses.field(default_factory=list)
     misses: list[str] = dataclasses.field(default_factory=list)
     patterns: list[str] = dataclasses.field(default_factory=list)
     intentions: list[str] = dataclasses.field(default_factory=list)
     proposals: list[dict] = dataclasses.field(default_factory=list)
+    lens_round_id: int | None = None
+    lens_outcome: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -248,6 +280,33 @@ def _clean_list(raw, *, limit_count: int, limit_len: int) -> list[str]:
     return out
 
 
+def validate_proposal(item) -> dict | None:
+    """One proposal item, re-checked: a known kind, a non-empty `text`
+    within PROPOSAL_TEXT_MAX and an optional `reason` within
+    PROPOSAL_REASON_MAX, both through `screen()`. Returns the clean
+    `{"kind", "text", "reason"}` dict, or None to drop the item whole.
+    Shared with the lens's grounding call (app/core/lens_review.py), so
+    a grounded proposal passes exactly the checks a first-pass one does.
+    """
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("kind")
+    if kind not in PROPOSAL_KINDS:
+        return None
+    text = _clean(item.get("text"), PROPOSAL_TEXT_MAX)
+    if text is None:
+        return None
+    result = screen(text)
+    if not result.ok:
+        return None
+    reason = _clean(item.get("reason"), PROPOSAL_REASON_MAX)
+    if reason is not None:
+        reason_result = screen(reason)
+        if not reason_result.ok:
+            return None
+    return {"kind": kind, "text": text, "reason": reason}
+
+
 def validate(payload: dict) -> Analysis:
     """Re-check every field of the model's output, trusting nothing.
 
@@ -272,23 +331,9 @@ def validate(payload: dict) -> Analysis:
         for item in raw_proposals:
             if len(proposals) >= PROPOSALS_MAX:
                 break
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("kind")
-            if kind not in PROPOSAL_KINDS:
-                continue
-            text = _clean(item.get("text"), PROPOSAL_TEXT_MAX)
-            if text is None:
-                continue
-            result = screen(text)
-            if not result.ok:
-                continue
-            reason = _clean(item.get("reason"), PROPOSAL_REASON_MAX)
-            if reason is not None:
-                reason_result = screen(reason)
-                if not reason_result.ok:
-                    continue
-            proposals.append({"kind": kind, "text": text, "reason": reason})
+            proposal = validate_proposal(item)
+            if proposal is not None:
+                proposals.append(proposal)
 
     return Analysis(
         wins=wins, misses=misses, patterns=patterns, intentions=intentions, proposals=proposals
@@ -310,8 +355,9 @@ def render_note(analysis: Analysis) -> str:
     return "\n".join(lines)
 
 
-def _analysis_json(analysis: Analysis) -> dict:
-    """The `weekly_review.analysis` jsonb payload."""
+def analysis_json(analysis: Analysis) -> dict:
+    """The `weekly_review.analysis` jsonb payload -- and, from L2, what
+    the lens's two calls see of the week (app/core/lens_review.py)."""
     return {
         "wins": list(analysis.wins),
         "misses": list(analysis.misses),
@@ -556,6 +602,33 @@ async def load_week(session: AsyncSession, *, clock: Clock, timezone: str) -> st
 # --- the analysis call -------------------------------------------------
 
 
+def record_spend(
+    session: AsyncSession,
+    settings: Settings,
+    response: LLMResponse,
+    *,
+    clock: Clock,
+    timezone: str,
+) -> None:
+    """Add the ledger row for one review-side safety-model call, under
+    REVIEW_CATEGORY. The caller commits. The lens's selector and
+    grounding calls are charged through here too (plan section 7:
+    "charged to the same ledger rows as its consumer")."""
+    cost = priced(response.usage, settings, model=response.model)
+    session.add(
+        SpendLedger(
+            local_date=clock_module.local_date(clock, timezone),
+            category=REVIEW_CATEGORY,
+            model=response.model,
+            tokens_in=response.usage.input_tokens,
+            tokens_cached=response.usage.cached_tokens,
+            tokens_out=response.usage.output_tokens,
+            usd_cost=cost.usd,
+            cost_source=cost.source,
+        )
+    )
+
+
 async def analyze_week(
     session: AsyncSession,
     settings: Settings,
@@ -588,19 +661,7 @@ async def analyze_week(
         json_schema=REVIEW_SCHEMA,
     )
 
-    cost = priced(response.usage, settings, model=response.model)
-    session.add(
-        SpendLedger(
-            local_date=clock_module.local_date(clock, timezone),
-            category=REVIEW_CATEGORY,
-            model=response.model,
-            tokens_in=response.usage.input_tokens,
-            tokens_cached=response.usage.cached_tokens,
-            tokens_out=response.usage.output_tokens,
-            usd_cost=cost.usd,
-            cost_source=cost.source,
-        )
-    )
+    record_spend(session, settings, response, clock=clock, timezone=timezone)
     await session.commit()
 
     payload = parse_json(response.text)
@@ -617,7 +678,18 @@ async def analyze_week(
         logger.warning("weekly review returned unparseable output")
         return None
 
-    return validate(payload)
+    # L2: the lens, when active, after the first pass and never instead
+    # of it (see the module docstring). Inactive, this returns
+    # `analysis` itself, having made no call.
+    return await lens_review.apply(
+        session,
+        settings,
+        provider,
+        validate(payload),
+        clock=clock,
+        timezone=timezone,
+        week_start=week_start,
+    )
 
 
 # --- storing the row and its proposals ----------------------------------
@@ -642,6 +714,9 @@ async def store_review(
     `message_id` is set later, via `set_message_id()`, once the caller
     has actually generated and stored the persona message this row
     describes.
+
+    L2: when the analysis went through a lens round, the round is
+    pointed at this row here, the first moment the row exists.
     """
     if on_demand:
         existing = await session.execute(
@@ -655,19 +730,29 @@ async def store_review(
                 .where(ReviewProposal.status == PENDING)
                 .values(status=EXPIRED, decided_at=clock.now_utc())
             )
-            row.analysis = _analysis_json(analysis)
+            row.analysis = analysis_json(analysis)
             row.message_id = None
             await session.commit()
             await session.refresh(row)
             logger.info("weekly review regenerated", extra={"review_id": row.id})
+            await _attach_round(session, analysis, row.id)
             return row
 
-    row = WeeklyReview(week_start=week_start, analysis=_analysis_json(analysis))
+    row = WeeklyReview(week_start=week_start, analysis=analysis_json(analysis))
     session.add(row)
     await session.commit()
     await session.refresh(row)
     logger.info("weekly review stored", extra={"review_id": row.id})
+    await _attach_round(session, analysis, row.id)
     return row
+
+
+async def _attach_round(session: AsyncSession, analysis: Analysis, review_id: int) -> None:
+    """Set `lens_round.weekly_review_id` (L2); nothing without a round."""
+    if analysis.lens_round_id is None:
+        return
+    await lens_review.attach_to_review(session, analysis.lens_round_id, review_id)
+    await session.commit()
 
 
 async def set_message_id(session: AsyncSession, review_id: int, message_id: int) -> None:
@@ -690,11 +775,25 @@ async def create_proposals(
     """Insert `review_proposal` rows for every validated proposal, and,
     for a `standing_order` item, its own `StandingOrder` row too
     (implementation plan's "Proposals": "A review_proposal row, plus
-    orders.propose(..., source='review'), plus the 5c card")."""
+    orders.propose(..., source='review'), plus the 5c card").
+
+    L2: a proposal the lens rewrote (the round's outcome `grounded`)
+    also carries the round's id and the ids of the notes it names as
+    grounds (null when it names none). A first-pass proposal -- no lens,
+    an empty selection, a fallback -- carries neither.
+    """
+    grounded = (
+        analysis.lens_round_id is not None and analysis.lens_outcome == lens_review.GROUNDED
+    )
     rows: list[CreatedProposal] = []
     for item in analysis.proposals:
         row = ReviewProposal(
-            review_id=review_id, kind=item["kind"], text=item["text"], reason=item.get("reason")
+            review_id=review_id,
+            kind=item["kind"],
+            text=item["text"],
+            reason=item.get("reason"),
+            lens_round_id=analysis.lens_round_id if grounded else None,
+            lens_note_ids=(list(item.get("lens_note_ids") or ()) or None) if grounded else None,
         )
         session.add(row)
         await session.commit()
@@ -825,22 +924,26 @@ __all__ = [
     "REVIEW_CATEGORY",
     "REVIEW_EXPIRY",
     "REVIEW_MSG_CATEGORY",
+    "REVIEW_PROHIBITIONS",
     "REVIEW_SCHEMA",
     "REVIEW_UNAVAILABLE",
     "ReviewOutcome",
     "STANDING_ORDER",
     "WINS_MAX",
+    "analysis_json",
     "analyze_week",
     "apply_intentions",
     "create_proposals",
     "expire_proposals",
     "load_week",
     "mark_proposal",
+    "record_spend",
     "render_note",
     "run_review",
     "run_review_expiry",
     "set_message_id",
     "store_review",
     "validate",
+    "validate_proposal",
     "week_start_for",
 ]

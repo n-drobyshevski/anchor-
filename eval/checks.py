@@ -15,6 +15,20 @@ ask by eye of every reply, every run:
 
 They are cheap, they never flake, and they run before the judge, so an
 obviously broken reply costs nothing to reject.
+
+L2 adds four for a lens case (anchor-lens-plan.md sections 7 and 13),
+over what the round did rather than over text -- `lens_checks`:
+
+- `lens_outcome`     -- did the round end the way the case expects?
+- `selected_include` -- did the selector pick these notes (rotation)?
+- `grounds_include`  -- does some proposal name each of these notes?
+- `min_proposals`    -- did at least this many proposals survive?
+
+L3 adds two for a garden case (the L3 spec section 9), over the gaps
+that survived `validate()` -- `garden_checks`:
+
+- `garden_link` -- is there a link gap between exactly these two notes?
+- `min_gaps`    -- did at least this many gaps survive?
 """
 
 from __future__ import annotations
@@ -250,4 +264,107 @@ def run_all(text: str, spec: dict, settings=None) -> list[Result]:
         results.append(max_nicknames(text, spec["max_nicknames"], nicknames))
     if "max_question_marks" in spec:
         results.append(max_question_marks(text, spec["max_question_marks"]))
+    return results
+
+
+# --- L2: the weekly review's lens round -------------------------------------
+
+
+def lens_outcome(outcome: str | None, expected: str) -> Result:
+    """The round ended as the case expects (`grounded`, `empty`,
+    `fallback`). None means no round ran at all: the lens was not
+    active, which for a lens case is a broken seed, never a pass."""
+    return Result(
+        "lens_outcome",
+        outcome == expected,
+        f"исход: {outcome or 'раунда нет'} (нужно {expected})",
+    )
+
+
+def selected_include(selected: list[str], titles: list[str]) -> Result:
+    """Every one of `titles` is among the notes the selector picked
+    (after the code's own validation and budget). Plan section 13's
+    "a round where the relevant note is not the favourite"."""
+    missing = [title for title in titles if title not in selected]
+    return Result(
+        "selected_include",
+        not missing,
+        f"выбрано: {', '.join(selected) or '(ничего)'}"
+        + (f"; не выбрано: {', '.join(missing)}" if missing else ""),
+    )
+
+
+def grounds_include(proposals: list[dict], titles: list[str]) -> Result:
+    """Every one of `titles` is named in the `grounds` of at least one
+    surviving proposal -- `grounds` as app/core/lens_review.py left it,
+    already cut to the round's own selection."""
+    named = {title for proposal in proposals for title in proposal.get("grounds", [])}
+    missing = [title for title in titles if title not in named]
+    return Result(
+        "grounds_include",
+        not missing,
+        f"основания: {', '.join(sorted(named)) or '(нет)'}"
+        + (f"; не названо: {', '.join(missing)}" if missing else ""),
+    )
+
+
+def min_proposals(proposals: list[dict], minimum: int) -> Result:
+    """At least `minimum` proposals survived validation. An empty list
+    after grounding is not a pass for a case about what the proposals
+    say: the screen may have removed exactly the one that failed."""
+    return Result(
+        "min_proposals",
+        len(proposals) >= minimum,
+        f"предложений: {len(proposals)} (нужно не меньше {minimum})",
+    )
+
+
+def lens_checks(
+    spec: dict, *, outcome: str | None, selected: list[str], proposals: list[dict]
+) -> list[Result]:
+    """The lens checks a case asked for, in a fixed order. Text checks
+    (`russian`, `forbidden_regex`, ...) still come from `run_all`, over
+    the proposals' own text."""
+    results: list[Result] = []
+    if "lens_outcome" in spec:
+        results.append(lens_outcome(outcome, spec["lens_outcome"]))
+    if spec.get("selected_include"):
+        results.append(selected_include(selected, spec["selected_include"]))
+    if spec.get("grounds_include"):
+        results.append(grounds_include(proposals, spec["grounds_include"]))
+    if "min_proposals" in spec:
+        results.append(min_proposals(proposals, spec["min_proposals"]))
+    return results
+
+
+# --- L3: the lens garden ------------------------------------------------------
+
+
+def garden_link(gaps: list[dict], pair: list[str]) -> Result:
+    """Some surviving gap is a `link` between exactly these two notes,
+    in either order: case 39's "two related notes without a link must
+    yield a valid link gap"."""
+    wanted = set(pair)
+    found = any(gap["kind"] == "link" and set(gap["titles"]) == wanted for gap in gaps)
+    shown = "; ".join(f"{gap['kind']}: {' / '.join(gap['titles'])}" for gap in gaps) or "(нет)"
+    return Result("garden_link", found, f"пробелы: {shown}")
+
+
+def min_gaps(gaps: list[dict], minimum: int) -> Result:
+    """At least `minimum` gaps survived validation."""
+    return Result(
+        "min_gaps", len(gaps) >= minimum, f"пробелов: {len(gaps)} (нужно не меньше {minimum})"
+    )
+
+
+def garden_checks(spec: dict, *, gaps: list[dict] | None) -> list[Result]:
+    """The garden checks a case asked for. `gaps` None means the reply
+    did not parse, which fails every one of them."""
+    results: list[Result] = []
+    if gaps is None:
+        return [Result("garden_parsed", False, "ответ модели не разобран")]
+    if spec.get("garden_link"):
+        results.append(garden_link(gaps, spec["garden_link"]))
+    if "min_gaps" in spec:
+        results.append(min_gaps(gaps, spec["min_gaps"]))
     return results

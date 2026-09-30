@@ -12,6 +12,11 @@ tuple both need the full Phase 6 vocabulary now -- app/core/idle/
 gate.py's KIND_RULES returns `kind_rule:not_implemented` for all of
 them until their own milestone (6b-6e) gives them a real rule and a
 handler in app/core/idle/runner.py.
+
+L3 (anchor-lens-plan.md section 8) adds `LENS_GARDEN`, the weekly lens
+garden (app/core/idle/lens_garden.py); migration b3e9f5a1c7d2 adds it to
+`ck_idle_run_kind`, which still equals `KINDS` (L4's `lens_research`
+waits for its own milestone).
 """
 
 from __future__ import annotations
@@ -21,10 +26,11 @@ CONSOLIDATE = "consolidate"
 REFLECT = "reflect"
 PREBRIEF = "prebrief"
 CRITIQUE = "critique"
+LENS_GARDEN = "lens_garden"
 RESEARCH = "research"
 CANARY = "canary"
 
-KINDS = (BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, RESEARCH, CANARY)
+KINDS = (BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, LENS_GARDEN, RESEARCH, CANARY)
 
 # The job kind app/db/jobs.py's `job.kind` carries and app/worker.py's
 # `_run_job` dispatches on -- one job kind for every idle kind, since
@@ -37,6 +43,7 @@ __all__ = [
     "REFLECT",
     "PREBRIEF",
     "CRITIQUE",
+    "LENS_GARDEN",
     "RESEARCH",
     "CANARY",
     "KINDS",

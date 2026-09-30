@@ -28,7 +28,17 @@ import re
 from typing import Callable, Mapping, NamedTuple
 
 from app.core.clock import within_window
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
+from app.core.idle import (
+    BACKFILL,
+    CANARY,
+    CONSOLIDATE,
+    CRITIQUE,
+    LENS_GARDEN,
+    PREBRIEF,
+    REFLECT,
+    RESEARCH,
+)
+from app.vault.kinds import SYNC_MODES
 
 # Reason codes, in table order (plan section 4).
 DISABLED = "disabled"
@@ -62,6 +72,19 @@ NOT_CANARY_DOW = KIND_RULE_PREFIX + "not_canary_dow"
 RESEARCH_DISABLED = KIND_RULE_PREFIX + "research_disabled"
 NO_TOPICS = KIND_RULE_PREFIX + "no_topics"
 QUOTA_USED = KIND_RULE_PREFIX + "quota_used"
+# L3 (anchor-lens-plan.md section 8; the L3 spec section 1), in the
+# order the rule checks them.
+GARDEN_OFF = KIND_RULE_PREFIX + "garden_off"
+LENS_SIZE = KIND_RULE_PREFIX + "lens_size"
+NOT_DUE = KIND_RULE_PREFIX + "not_due"
+UNCHANGED = KIND_RULE_PREFIX + "unchanged"
+
+# L3: the garden needs a lens with some shape to it -- under three notes
+# there is no structure to garden -- and runs at most once in 168 hours
+# *and* once per local ISO week (the week is `lens_garden_run`'s UNIQUE
+# key; the hours cover a DST week, whose local week is 167 or 169 h).
+GARDEN_MIN_NOTES = 3
+GARDEN_INTERVAL = datetime.timedelta(hours=168)
 
 # 6c: prebrief may only write tonight's note after this local hour (plan
 # section 6.4's "after 19:00 local") -- a fixed hour, unlike IDLE_WINDOW
@@ -79,6 +102,7 @@ KIND_DAILY_MAX: dict[str, int] = {
     REFLECT: 1,
     PREBRIEF: 1,
     CRITIQUE: 1,
+    LENS_GARDEN: 1,
     RESEARCH: 1,
     CANARY: 1,
 }
@@ -147,6 +171,14 @@ class IdleConfig:
     # app/research/jobs.enqueue_study checks first, reused here so idle
     # research can never run while `/study` itself is turned off.
     research_enabled: bool = False
+    # L3: every switch the garden needs, folded into one --
+    # `LENS_GARDEN_ENABLED`, `LENS_ENABLED`, `VAULT_KNOWLEDGE_ENABLED` and a
+    # `VAULT_MODE` that runs the sync pass (app/vault/kinds.SYNC_MODES):
+    # the run's message and report ride that pass (the L3 spec section 1).
+    garden_enabled: bool = False
+    # L3: `LENS_CATALOG_MAX_NOTES`. Over it the lens is not gardened, as
+    # the review does not use it (app/vault/lens.py's `lens_active`).
+    lens_max_notes: int = 300
 
 
 def config_from_settings(settings) -> IdleConfig:
@@ -167,6 +199,13 @@ def config_from_settings(settings) -> IdleConfig:
         independent_judge=bool(judge_model) and judge_model != settings.LLM_MODEL,
         canary_dow=settings.CANARY_DOW,
         research_enabled=settings.RESEARCH_ENABLED,
+        garden_enabled=(
+            settings.LENS_GARDEN_ENABLED
+            and settings.LENS_ENABLED
+            and settings.VAULT_KNOWLEDGE_ENABLED
+            and settings.VAULT_MODE in SYNC_MODES
+        ),
+        lens_max_notes=settings.LENS_CATALOG_MAX_NOTES,
     )
 
 
@@ -225,6 +264,17 @@ class IdleFacts:
     # already spent.
     research_has_active_topic: bool = False
     research_quota_used: bool = False
+    # L3: app/core/idle/lens_garden.py's `gate_facts` (app/vault/lens.py's
+    # `GardenFacts`), shared with the job the way `research_has_active_
+    # topic` is. Counts, times, a week and version ids -- no text. Left
+    # at these defaults while the garden is switched off, when facts.py
+    # does not query them at all.
+    garden_notes: int = 0
+    garden_last_run_at: datetime.datetime | None = None
+    garden_last_iso_week: str | None = None
+    garden_last_version_id: int | None = None
+    garden_version_id: int | None = None
+    garden_done: int = 0
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -288,6 +338,39 @@ def _research_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
     return GateResult(True, OK)
 
 
+def iso_week(day: datetime.date) -> str:
+    """`2026-W40`: app/vault/lens.py's `iso_week`, which this pure
+    module may not import (tests/test_idle_isolation.py); a test pins
+    the two equal."""
+    year, week, _weekday = day.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _lens_garden_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    """The L3 spec section 1, in order:
+
+    1. `garden_off`: any of the four switches off (`garden_enabled`);
+    2. `lens_size`: under 3 notes, or over `LENS_CATALOG_MAX_NOTES`;
+    3. `not_due`: the last run was under 168 h ago or in this local ISO
+       week -- a fact of its own, since `KIND_DAILY_MAX` counts today only;
+    4. `unchanged`: the lens version is the last run's and no gap waits
+       for a recheck (`done`). Without it a static lens would be offered
+       ever more marginal gaps every week.
+    """
+    if not config.garden_enabled:
+        return GateResult(False, GARDEN_OFF)
+    if not GARDEN_MIN_NOTES <= facts.garden_notes <= config.lens_max_notes:
+        return GateResult(False, LENS_SIZE)
+    if facts.garden_last_run_at is not None:
+        if facts.local_now - facts.garden_last_run_at < GARDEN_INTERVAL:
+            return GateResult(False, NOT_DUE)
+        if facts.garden_last_iso_week == iso_week(facts.local_now.date()):
+            return GateResult(False, NOT_DUE)
+        if facts.garden_version_id == facts.garden_last_version_id and facts.garden_done == 0:
+            return GateResult(False, UNCHANGED)
+    return GateResult(True, OK)
+
+
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
 # per-kind predicates"), each taking (facts, config) -- most only need
 # facts, but prebrief/critique/canary/research also need settings-derived
@@ -300,6 +383,7 @@ KIND_RULES: dict[str, Callable[[IdleFacts, IdleConfig], GateResult]] = {
     CRITIQUE: _critique_rule,
     RESEARCH: _research_rule,
     CANARY: _canary_rule,
+    LENS_GARDEN: _lens_garden_rule,
 }
 
 
@@ -355,10 +439,14 @@ __all__ = [
     "BUSY",
     "DAILY_LIMIT",
     "DISABLED",
+    "GARDEN_INTERVAL",
+    "GARDEN_MIN_NOTES",
+    "GARDEN_OFF",
     "IDLE_CAP",
     "KIND_RULE_PREFIX",
     "KIND_DAILY_MAX",
     "KIND_RULES",
+    "LENS_SIZE",
     "MAX_JOBS",
     "NOT_ENOUGH_CLUSTERS",
     "NOT_IMPLEMENTED",
@@ -370,10 +458,12 @@ __all__ = [
     "NO_INDEPENDENT_JUDGE",
     "NO_NEW_REPLIES",
     "NOT_CANARY_DOW",
+    "NOT_DUE",
     "PREBRIEF_AFTER_HOUR",
     "OK",
     "PAUSED",
     "RESERVE",
+    "UNCHANGED",
     "USER_ACTIVE",
     "WELFARE_COOLDOWN",
     "WELFARE_COOLDOWN_HOURS",
@@ -383,5 +473,6 @@ __all__ = [
     "IdleFacts",
     "config_from_settings",
     "idle_gate",
+    "iso_week",
     "parse_window",
 ]

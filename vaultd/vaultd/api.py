@@ -36,7 +36,7 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, frontmatter, knowledge, paths
+from vaultd import classes, frontmatter, graph, knowledge, paths
 from vaultd import limits as limits_mod
 from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
@@ -289,14 +289,19 @@ async def get_knowledge(request: web.Request) -> web.Response:
     except UnicodeDecodeError:
         _log_refused(request, "bad_utf8")
         return web.json_response(_NOT_FOUND, status=404)
-    return web.json_response({"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content})
+    return web.json_response(
+        {"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "content": content, "class": reason}
+    )
 
 
 def _read_knowledge(store: Store, rel: str) -> tuple[bytes | None, str]:
-    """(bytes, "ok") if `rel` is a readable knowledge note, else (None, reason).
+    """(bytes, class) if `rel` is a readable knowledge or lens note, else (None, reason).
 
-    `reason` is only ever looked at when the first element is None (the
-    404 path); the same closed set of codes `knowledge.Refused` uses.
+    Lens notes read like knowledge (lens plan section 4); the class goes
+    back with the content, so a caller can tell the read-only ones
+    apart. `reason` is only ever looked at when the first element is
+    None (the 404 path); the same closed set of codes
+    `knowledge.Refused` uses.
     """
     path_reason = knowledge.candidate_path_reason(rel)
     if path_reason is not None:
@@ -312,9 +317,10 @@ def _read_knowledge(store: Store, rel: str) -> tuple[bytes | None, str]:
     rules = classes.load_rules(store.vault_path)
     if rules.state == "invalid":
         return None, "settings_invalid"
-    if knowledge._class_of(rel, data, rules) != "knowledge":  # noqa: SLF001 - same package
+    note_class = knowledge._class_of(rel, data, rules)  # noqa: SLF001 - same package
+    if note_class not in classes.READABLE_KNOWLEDGE:
         return None, "not_knowledge"
-    return data, "ok"
+    return data, note_class
 
 
 def _parse_json_body(body: Any, keys: frozenset[str]) -> dict | None:
@@ -474,6 +480,24 @@ def _build_tree(store: Store) -> dict:
     return knowledge.build_tree(store.vault_path, rules)
 
 
+async def get_knowledge_graph(request: web.Request) -> web.Response:
+    """`GET /v1/knowledge/graph` (lens plan section 4): knowledge and lens
+    notes and the links between them, built by graph.py. The log line
+    carries counts only, never a path, title or link text."""
+    store = request.app[STORE_KEY]
+    body = await asyncio.to_thread(_build_graph, store)
+    logger.info(
+        "knowledge_graph",
+        extra={"event": "knowledge_graph", "count": len(body["nodes"])},
+    )
+    return web.json_response(body)
+
+
+def _build_graph(store: Store) -> dict:
+    rules = classes.load_rules(store.vault_path)
+    return graph.build_graph(store.vault_path, rules)
+
+
 async def get_changes(request: web.Request) -> web.Response:
     changes = await asyncio.to_thread(request.app[UNDO_KEY].list_changes)
     return web.json_response({"changes": changes})
@@ -590,6 +614,7 @@ def make_app(
     app.router.add_put("/v1/knowledge", put_knowledge)
     app.router.add_post("/v1/knowledge/rename", rename_knowledge)
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
+    app.router.add_get("/v1/knowledge/graph", get_knowledge_graph)
     app.router.add_get("/v1/changes", get_changes)
     app.router.add_post("/v1/undo", undo_changeset)
     app.router.add_get("/v1/limits", get_limits)

@@ -102,6 +102,7 @@ from app.db.models import Outbound
 from app.planner import auth as planner_auth
 from app.planner.jobs import PLANNER_SYNC
 from app.research.sweeps import RESEARCH_SWEEP
+from app.vault import lens
 from app.core import retention as retention_module
 from app.ops import backup as backup_module
 
@@ -591,6 +592,21 @@ CLAUDE_LIBRARY_DIGEST = "claude_library_digest"
 CLAUDE_LIBRARY_DIGEST_TIME = datetime.time(21, 0)
 
 
+def lens_digest_window(
+    local_date: datetime.date, timezone: str
+) -> tuple[datetime.datetime, datetime.datetime]:
+    """The 24 hours of lens reads `local_date`'s digest reports: from the
+    previous day's `CLAUDE_LIBRARY_DIGEST_TIME` up to this day's. Not
+    midnight to midnight: the digest goes out at that time, so a read
+    later that evening would fall in a day whose digest already ran and
+    never be reported. `lens_read` rows carry a time, so every read
+    lands in exactly one digest (anchor-lens-plan.md section 11)."""
+    start = clock_module.combine_local(
+        local_date - datetime.timedelta(days=1), CLAUDE_LIBRARY_DIGEST_TIME, timezone
+    )
+    return start, clock_module.combine_local(local_date, CLAUDE_LIBRARY_DIGEST_TIME, timezone)
+
+
 def library_digest_dedup_key(local_date: datetime.date) -> str:
     """One digest job per local date, ever -- mirrors `backup_dedup_key`."""
     return f"{CLAUDE_LIBRARY_DIGEST}:{local_date.isoformat()}"
@@ -601,21 +617,32 @@ async def maybe_enqueue_library_digest(
 ) -> bool:
     """Queue today's library digest, at most once per local day (C3).
 
-    Modelled on `maybe_enqueue_backup`: gated on `CLAUDE_ACCESS_ENABLED`
-    (the connector's own kill switch) and on the local wall clock
+    Modelled on `maybe_enqueue_backup`: gated on the local wall clock
     reaching `CLAUDE_LIBRARY_DIGEST_TIME`, so the report reflects a day
-    that is (almost) over rather than "so far today". The job itself
+    that is (almost) over rather than "so far today", and on
+    `CLAUDE_ACCESS_ENABLED` (the connector's own kill switch) or, from
+    L1, `LENS_ENABLED` (the digest also reports Claude Code's lens
+    reads, which need no connector -- anchor-lens-plan.md section 11).
+    With both flags off it is still queued while Claude Code's door to
+    the lens is open or was read through in this digest's window: that
+    door is `/lens code on|off`, which no flag closes, and the digest
+    is how the user hears of every read. The job itself
     (app/tg/claude.py's `run_library_digest`) is what decides whether
     there was any activity to report and whether `may_report_now`
     allows sending it right now -- deferring, not failing, if not; see
     that function's own docstring.
     """
-    if not settings.CLAUDE_ACCESS_ENABLED:
-        return False
     local_date = clock_module.local_date(clock, timezone)
     target = clock_module.combine_local(local_date, CLAUDE_LIBRARY_DIGEST_TIME, timezone)
     if clock.now_utc() < target:
         return False
+    if not (settings.CLAUDE_ACCESS_ENABLED or settings.LENS_ENABLED):
+        start, _end = lens_digest_window(local_date, timezone)
+        if not (
+            await lens.code_access(session)
+            or await lens.reads_between(session, start, clock.now_utc())
+        ):
+            return False
     enqueued = await enqueue_job(
         session,
         CLAUDE_LIBRARY_DIGEST,

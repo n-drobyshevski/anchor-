@@ -9,9 +9,16 @@ What stays out is transport and queue plumbing -- telegram_update, job,
 pending_memory -- whose only real content is message text that
 `messages` already carries in full, plus persona_version, which is a
 hash of a file in this repo, and the vault's note chunks (8e's
-note_chunk_personal and note_chunk_knowledge) and vault_status. Including them would double the file with
-Telegram's own envelope format and make it harder to read, not more
-complete. tests/test_export.py keeps that list honest: a table
+note_chunk_personal and note_chunk_knowledge), the lens tables (L1's
+lens_note, note_link, lens_version, lens_read: derived from the vault,
+or counters; L2's lens_round: which lens notes a review drew on and the
+selector's why, whose result the exported review_proposal rows already
+carry as lens_round_id and lens_note_ids; L3's lens_garden_run and
+lens_gap: the garden's derived proposals about the lens, rebuilt weekly
+from it, and already in the vault as the Anchor/Reports note) and
+vault_status. Including
+them would double the file with Telegram's own envelope format and make
+it harder to read, not more complete. tests/test_export.py keeps that list honest: a table
 is exported or it is named there, and nothing may be neither.
 
 **Nothing here is ever logged.** The caller records byte counts and row

@@ -176,6 +176,7 @@ check the classification.
 | `never` | Invisible, even inside a folder a rule would include. | nowhere |
 | `personal` | About you: your life, health, relationships, plans, feelings. | only the conversation with you |
 | `knowledge` | Generic, true whoever reads it: a note on CCRU, on GCP IAM. | the conversation, as reference material |
+| `lens` | Knowledge you chose as Echo's frame: people and concepts (L1, section 8). | wherever knowledge goes, except Claude's write tools; with `LENS_ENABLED`, Claude Code through its own role |
 
 Two things set a class:
 
@@ -183,8 +184,8 @@ Two things set a class:
   or `anchor: never`, exactly, at the top level of its properties;
 - **a folder rule** in `Anchor/settings.md`. Copy
   `docs/vault/settings.md` into the vault as `Anchor/settings.md` and
-  edit the three lists. A rule covers its folder and everything below
-  it.
+  edit the lists (section 8 adds the two lens ones). A rule covers its
+  folder and everything below it.
 
 When the two disagree, **the stricter class wins**: `never` beats
 `personal`, which beats `knowledge`. A note marked `knowledge` inside a
@@ -217,6 +218,104 @@ Then, in Telegram:
   cannot see.
 - `/vault notes off`: forget everything read from notes. `/delete` does
   the same and turns notes off.
+
+## 8. The lens: notes Echo reasons with (L1)
+
+`anchor-lens-plan.md`. The **lens** is a set of knowledge notes you
+pick as the frame for Echo's self-improvement: people and concepts
+(Ashby, Beer, requisite variety…). In L1 it is stored and Claude Code
+can read it (docs/claude-access.md → Lens notes); from L2 the weekly
+review picks lens notes and grounds its proposals in them while
+`LENS_ENABLED` is on (README, "Milestone L2").
+
+**Membership is always yours.** Two things make a note lens:
+
+- the property `anchor: lens` on the note;
+- a folder rule in `Anchor/settings.md`: `lens_folders: [Lens]`.
+
+`lens` is the **least strict** class: `never` > `personal` >
+`knowledge` > `lens`. So:
+
+- `anchor: knowledge` on a note inside a lens folder keeps that one
+  note out of the lens;
+- `anchor: lens` inside a personal or never folder is not lens;
+- a lens folder **inside** a knowledge, personal or never folder
+  makes the whole settings file invalid, and `/vault` says so: the
+  stricter rule would otherwise turn every note in it into its own
+  class and leave the lens silently empty. Use `Lens`, not
+  `Library/Lens` when `Library` is a knowledge folder.
+
+**People and concepts, by folder.** `lens_person_folders: [Lens/People]`
+lists folders whose notes are about a person; every other lens note is
+a concept. Each entry must be inside (or equal to) a `lens_folders`
+entry, or the settings file is invalid and, as with any error there,
+every note is hidden until you fix it.
+
+For everything that already reads knowledge, a lens note **is**
+knowledge: it is indexed with the knowledge notes, and Claude's
+`search_library` finds it. The difference is writing: **Claude's write
+tools refuse lens notes**, as source or as destination, so a claude.ai
+chat cannot change what Echo reasons with. Only you change the lens.
+`list_tree` marks lens notes as lens.
+
+**The bot stores the lens whole only when `LENS_ENABLED` is set**, on
+top of `/vault notes on` and `VAULT_KNOWLEDGE_ENABLED`. Then every sync
+pass keeps each lens note (title, person or concept, the frontmatter
+`summary`, its `aliases` (L3), the text) and the links between knowledge and lens notes.
+A link to a note the bot may not see is counted, never named. Turn any
+of the three off and the next pass deletes the stored lens.
+
+In Telegram:
+
+- `/lens`: on or off, how many notes (people, concepts), a warning if
+  there are more than `LENS_CATALOG_MAX_NOTES` (300), whether Claude
+  Code may read it, and how many reads today.
+- `/lens code on`, `/lens code off`: open or close Claude Code's access
+  (docs/claude-access.md → Lens notes has the one-time setup).
+
+## 9. The lens garden: a weekly report (L3)
+
+Once a week the bot can look for gaps in the lens (missing links,
+missing notes, tensions, bridges between groups of notes), send them
+to you in one Telegram message with a button row per gap, and write
+them to the vault as a report:
+
+```
+Anchor/Reports/Lens garden 2026-W40-k3f7qa.md
+```
+
+`Anchor/Reports/` is the third folder the bot may write, after
+`Memory/` and `Journal/`: only `.md` files directly inside it, never a
+subfolder, never `Anchor/Reports.md`.
+
+**Deploy the vault service first.** Redeploy `vault` from this
+repository before turning the garden on: an older vault service
+refuses writes to `Anchor/Reports/`. The bot copes (it counts the
+refusal as `reports_refused=` in its pass log and tries again each
+minute, and the rest of the pass is unaffected), but no report appears
+until the service is new. Then set `LENS_GARDEN_ENABLED=true` on the
+bot, on top of `LENS_ENABLED`, with `VAULT_MODE` `mirror` or `sync`.
+`GARDEN_MAX_TOKENS` (2000) caps the model's answer.
+
+The report lists this week's gaps by kind with their status, what is
+still open from earlier weeks, and the lens's structure: hubs, named
+groups, notes with no links, dead ends, and notes that are linked to
+but do not exist. It links only to lens notes; the model's text in it
+is escaped, so it can hold no link, tag or embed of its own.
+
+**Edits in the report are not read.** Mark gaps with the Telegram
+buttons; the report follows on the next pass. Edit the file and the
+bot never touches it again, like a journal day. Delete it and, in
+`sync`, it is not written again (in `mirror` it simply stays gone
+until the next week's report). Only the latest week's report is kept
+up to date; older ones stay as they were.
+
+Turning notes consent, `VAULT_KNOWLEDGE_ENABLED` or `LENS_ENABLED` off
+deletes the garden's gaps and stops the writing; reports already in
+the vault stay until you delete them, or `/delete` removes them with
+the bot's other files in `Anchor/Memory/` and `Anchor/Journal/`. A report from before a `/delete`, re-uploaded by
+a device that was offline, has the old epoch in its name and is
+deleted, never adopted.
 
 ## Turning it off
 
