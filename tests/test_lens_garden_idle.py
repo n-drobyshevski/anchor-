@@ -624,6 +624,25 @@ async def _garden_rows(sessionmaker) -> int:
         return 0 if await lens.garden_status(session) is None else 1
 
 
+@pytest.mark.parametrize(("output_tokens", "event"), [(4000, "at_cap"), (1200, "under_cap")])
+async def test_a_parse_failure_logs_whether_it_hit_the_cap(
+    sessionmaker, caplog, monkeypatch, output_tokens, event
+):
+    """Counts only: the reply itself is never logged. Alembic's
+    in-process run disables existing loggers, hence the re-enable."""
+    monkeypatch.setattr(logging.getLogger(lens_garden.__name__), "disabled", False)
+    await _seed(sessionmaker)
+    truncated = '{"clusters": [], "gaps": [{"kind": "link", "note_ids": [1,'
+    usage = LLMUsage(input_tokens=100, cached_tokens=0, output_tokens=output_tokens, cost_usd=None)
+    with caplog.at_level(logging.WARNING, logger=lens_garden.__name__):
+        with pytest.raises(lens_garden.GardenOutputError):
+            await _run(sessionmaker, FakeLLMProvider(text=truncated, usage=usage),
+                       settings=_settings(GARDEN_MAX_TOKENS=4000))
+    [record] = [r for r in caplog.records if r.getMessage() == "lens garden reply did not parse"]
+    assert (record.count, record.event) == (output_tokens, event)
+    assert "note_ids" not in caplog.text
+
+
 async def test_a_provider_error_writes_nothing(sessionmaker):
     await _seed(sessionmaker)
     provider = FakeLLMProvider(raises=[RuntimeError("down")])

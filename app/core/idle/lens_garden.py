@@ -734,6 +734,17 @@ async def run_lens_garden(
         await session.commit()
 
     if proposal.plan is None:
+        # Counts only: whether the reply ran into GARDEN_MAX_TOKENS is
+        # the first question a parse failure raises.
+        output_tokens = response.usage.output_tokens
+        logger.warning(
+            "lens garden reply did not parse",
+            extra={
+                "run_id": run_id,
+                "count": output_tokens,
+                "event": "at_cap" if output_tokens >= settings.GARDEN_MAX_TOKENS else "under_cap",
+            },
+        )
         raise GardenOutputError("lens garden reply did not parse")
     plan = proposal.plan
 
