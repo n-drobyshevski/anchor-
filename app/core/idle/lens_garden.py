@@ -13,8 +13,8 @@ the vault pass, which also writes the run's report note.
 **Two steps.** Step 1 is code, app/core/lens_graph.py: orphans, dead
 ends, wanted notes, unlinked mentions, hubs, clusters, structural
 holes, people without concepts, stale notes -- and the recheck of every
-open and done gap. Step 2 is one model call on `LLM_MODEL_SAFETY` at
-temperature 0 with a strict schema: it names the clusters and proposes
+open and done gap. Step 2 is one model call on `GARDEN_MODEL` (default
+`LLM_MODEL_SAFETY`) at temperature 0 with a strict schema: it names the clusters and proposes
 up to ten gaps, which `validate()` re-checks in code, trusting nothing.
 
 **The input is lens-only** (spec section 6, narrowing plan section 10's
@@ -609,7 +609,8 @@ async def propose(
 
 
 def build_garden_provider(settings: Settings, client) -> LLMProvider:
-    """`LLM_MODEL_SAFETY` at temperature 0 with `GARDEN_MAX_TOKENS` --
+    """`GARDEN_MODEL` (default `LLM_MODEL_SAFETY`) at temperature 0 with
+    `GARDEN_MAX_TOKENS` --
     constructed like app/core/idle/critique.py's judge provider, since
     the shared safety provider's 400-token cap would truncate the JSON.
     Also what eval/run.py builds for the garden cases."""
@@ -617,7 +618,7 @@ def build_garden_provider(settings: Settings, client) -> LLMProvider:
 
     return OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
-        model=settings.LLM_MODEL_SAFETY,
+        model=settings.GARDEN_MODEL or settings.LLM_MODEL_SAFETY,
         max_tokens=settings.GARDEN_MAX_TOKENS,
         # The spec's temperature, not LLM_SAFETY_TEMPERATURE: a garden
         # run is compared week to week, and 0 keeps it repeatable.
@@ -758,7 +759,10 @@ async def run_lens_garden(
                 "tokens_out": output_tokens,
                 "event": "at_cap" if output_tokens >= settings.GARDEN_MAX_TOKENS else "under_cap",
                 "error_code": proposal.failure,
-                "fields": f"finish={response.finish_reason or 'none'}",
+                "fields": (
+                    f"finish={response.finish_reason or 'none'} "
+                    f"native={response.native_finish_reason or 'none'}"
+                ),
             },
         )
         raise GardenOutputError("lens garden reply did not parse")

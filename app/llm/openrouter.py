@@ -198,6 +198,7 @@ def _raise_for_body_error(response) -> None:
 
 
 _FINISH_REASON = re.compile(r"[a-z_]{1,24}")
+_NATIVE_FINISH_REASON = re.compile(r"[A-Za-z_]{1,32}")
 
 
 def _extract_finish_reason(response) -> str | None:
@@ -206,6 +207,16 @@ def _extract_finish_reason(response) -> str | None:
     choices = getattr(response, "choices", None) or []
     reason = getattr(choices[0], "finish_reason", None) if choices else None
     if isinstance(reason, str) and _FINISH_REASON.fullmatch(reason):
+        return reason
+    return None
+
+
+def _extract_native_finish_reason(response) -> str | None:
+    """OpenRouter's `native_finish_reason` (not an openai SDK field, so
+    it survives only as an extra attribute), when it is a short word."""
+    choices = getattr(response, "choices", None) or []
+    reason = getattr(choices[0], "native_finish_reason", None) if choices else None
+    if isinstance(reason, str) and _NATIVE_FINISH_REASON.fullmatch(reason):
         return reason
     return None
 
@@ -370,6 +381,7 @@ class OpenRouterProvider:
             model=self._model,
             citations=_extract_citations(response),
             finish_reason=_extract_finish_reason(response),
+            native_finish_reason=_extract_native_finish_reason(response),
         )
 
     async def close(self) -> None:

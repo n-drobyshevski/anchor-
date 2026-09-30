@@ -96,6 +96,10 @@ class LLMResponse:
     # lowercase letters and underscores only, else None. Content-free,
     # so a caller may log it.
     finish_reason: str | None = None
+    # The upstream vendor's own reason, as OpenRouter passes it on
+    # (`native_finish_reason`: Gemini's STOP, MAX_TOKENS, RECITATION...),
+    # letters and underscores only, else None. Content-free as above.
+    native_finish_reason: str | None = None
 
 
 class LLMError(Exception):

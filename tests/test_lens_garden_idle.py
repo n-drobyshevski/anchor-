@@ -640,7 +640,7 @@ async def test_a_parse_failure_logs_whether_it_hit_the_cap(
                        settings=_settings(GARDEN_MAX_TOKENS=4000))
     [record] = [r for r in caplog.records if r.getMessage() == "lens garden reply did not parse"]
     assert (record.count, record.tokens_in, record.tokens_out) == (len(truncated), 100, output_tokens)
-    assert (record.event, record.error_code, record.fields) == (event, "not_json", "finish=none")
+    assert (record.event, record.error_code, record.fields) == (event, "not_json", "finish=none native=none")
     assert "note_ids" not in caplog.text
 
 
@@ -891,3 +891,10 @@ def test_the_garden_provider_is_the_safety_model_at_zero_with_its_own_cap():
 class _Client:
     async def close(self):
         return None
+
+
+@pytest.mark.parametrize(("garden_model", "expected"), [("", "google/gemini-2.5-flash-lite"), ("openai/gpt-4.1-mini", "openai/gpt-4.1-mini")])
+def test_garden_model_overrides_the_safety_model_for_the_garden_alone(garden_model, expected):
+    settings = _settings(GARDEN_MODEL=garden_model, LLM_MODEL_SAFETY="google/gemini-2.5-flash-lite")
+    provider = lens_garden.build_garden_provider(settings, client=object())
+    assert provider._model == expected
