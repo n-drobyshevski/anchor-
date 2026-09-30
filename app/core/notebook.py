@@ -161,7 +161,14 @@ REFLECT_PROMPT = (
 
 @dataclasses.dataclass(frozen=True)
 class Plan:
-    """Validated, ready-to-apply output of one `notebook_reflect` call."""
+    """Validated, ready-to-apply output of one `notebook_reflect` call.
+
+    L5 (the L5 spec section 3): an `add` or `update` item may also carry
+    `"lens_note_ids": list[int]`, the lens notes an idle reflect
+    rewrite rests on (app/core/idle/reflect_lens.py sets it after its
+    own checks). `validate()` never produces the key: nothing the model
+    returns to the per-scene job, or to reflect's first pass, can claim
+    a lens note."""
 
     add: list[dict] = dataclasses.field(default_factory=list)
     close: list[dict] = dataclasses.field(default_factory=list)
@@ -457,6 +464,13 @@ def _close(entry: NotebookEntry, *, by: str, clock: Clock) -> bool:
     return True
 
 
+def _lens_columns(item: dict, lens_round_id: int | None) -> tuple[list[int], int | None]:
+    """An add or update item's `(lens_note_ids, lens_round_id)` (L5):
+    the item's own ids, or `[]`; the round only alongside ids."""
+    note_ids = [int(i) for i in item.get("lens_note_ids") or ()]
+    return note_ids, (lens_round_id if note_ids else None)
+
+
 async def apply_plan(
     session: AsyncSession,
     settings: Settings,
@@ -465,6 +479,7 @@ async def apply_plan(
     clock: Clock,
     scene_id: int | None,
     on_change: ChangeRecorder | None = None,
+    lens_round_id: int | None = None,
 ) -> ApplyResult:
     """Apply a validated `Plan` (plan section 6.3): close, then update,
     then add. Shared by `run_notebook_reflect` (per scene, `on_change=
@@ -477,6 +492,14 @@ async def apply_plan(
     after each mutation, with the row's state before and after (6a's
     `idle_change` shape). No commit here -- callers commit, exactly as
     before.
+
+    L5 (the L5 spec section 3): every add and update writes the entry's
+    lens columns -- `lens_note_ids` as the item's list (or `[]`), and
+    `lens_round_id` as the parameter when that list is non-empty, else
+    NULL. So an update from the per-scene job (which never passes a
+    round, and whose items never carry ids) clears both: the new text
+    no longer rests on the old notes. The `idle_change` snapshots are
+    whole rows, so they carry both columns and undo restores them.
     """
     dropped = 0
     added = closed = updated = 0
@@ -505,6 +528,7 @@ async def apply_plan(
         before = _row_state(entry)
         entry.text = item["text"]
         entry.updated_at = clock.now_utc()
+        entry.lens_note_ids, entry.lens_round_id = _lens_columns(item, lens_round_id)
         updated += 1
         if on_change is not None:
             await on_change("notebook_entry", entry.id, "update", before, _row_state(entry))
@@ -517,7 +541,11 @@ async def apply_plan(
         kind = item["kind"]
         if await _count_active(session, kind) >= caps[kind]:
             await _close_oldest_anchor(session, kind, clock=clock, on_change=on_change)
-        entry = NotebookEntry(kind=kind, text=item["text"], source="anchor", scene_id=scene_id)
+        note_ids, round_id = _lens_columns(item, lens_round_id)
+        entry = NotebookEntry(
+            kind=kind, text=item["text"], source="anchor", scene_id=scene_id,
+            lens_note_ids=note_ids, lens_round_id=round_id,
+        )
         session.add(entry)
         await session.flush()
         added += 1

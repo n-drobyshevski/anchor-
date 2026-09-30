@@ -21,7 +21,7 @@
 - Lens notes may be read, through
   `psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.<fn>()"`
   (`lens.notes()`, `lens.graph()`, `lens.rounds(n)`, `lens.gaps(n)`).
-  `lens.rounds(n)` returns which notes each weekly review round picked
+  `lens.rounds(n)` returns which notes each weekly review or reflection round picked
   and its outcome, never the rationale (written from the week, so it
   stays with the user). `lens.gaps(n)` returns the weekly lens garden's
   proposals (written from lens notes only), with their status as

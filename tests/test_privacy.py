@@ -54,9 +54,10 @@ def test_the_lens_review_clause_is_in_both_places():
     on, in both copies."""
     doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
     assert "какие из них выбрал еженедельный разбор" in PRIVACY_TEXT
+    # L5 amends the sentence (both consumers' picks), keeping these words.
     assert "но не с объяснением почему" in PRIVACY_TEXT and "видно только тебе" in PRIVACY_TEXT
-    assert "which of them the weekly review picked" in doc
-    assert "but not its explanation of" in doc and "only you see" in doc
+    assert "which of them the weekly review" in doc
+    assert "picked, but not why: the" in doc and "only you see it" in doc
     assert "объяснениями еженедельного разбора" not in PRIVACY_TEXT
     assert "explanations of why it picked them" not in doc
     assert "еженедельный разбор отправляет модели каталог линзы" in PRIVACY_TEXT
@@ -95,3 +96,31 @@ def test_the_lens_research_clause_is_in_both_places():
     assert "titles and summaries of its notes" in doc
     assert "goes\n  to Exa" in doc and "`PACKET_LENS`" in doc
     assert "knowledge note in\n  `Echo/Inbox`" in doc and "14 days (`/lens undo`)" in doc
+
+
+def test_the_lens_reflect_clause_is_in_both_places():
+    """L5 (the L5 spec section 5; owner decisions on its risks 2 and 5):
+    Claude Code sees which notes the reflection picked too, never why;
+    what the reflection sends the model while its lens is on (the
+    catalog, Echo's draft notebook changes and the picked notes); that
+    only open threads are rephrased, never observations about the user;
+    that rephrased threads stay in the notes the persona reads, even
+    with the lens off, until they close or expire; that the per-scene
+    reflection and critique send no lens text; and that critique's ids
+    show only in /export -- in both copies."""
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "privacy.md").read_text(encoding="utf-8")
+    assert "выбрал еженедельный разбор или рефлексия заметок, но не с объяснением почему" in PRIVACY_TEXT
+    assert "у разбора оно написано по твоей неделе и видно только тебе, у рефлексии не хранится вовсе" in PRIVACY_TEXT
+    assert "which of them the weekly review or the notebook reflection picked" in doc
+    assert "and the reflection\n  keeps none" in doc
+    assert "Пока включена линза в рефлексии заметок, модели уходят каталог линзы, черновик изменений" in PRIVACY_TEXT
+    assert "рабочих заметок Echo и выбранные заметки целиком" in PRIVACY_TEXT
+    assert "While the lens is on in the notebook reflection, the model" in doc
+    assert "Echo's draft changes to its working notes" in doc
+    assert "переформулируются только незакрытые темы, наблюдения о тебе — никогда" in PRIVACY_TEXT
+    assert "never observations about you" in doc
+    assert "пока не закроются или не истекут, даже если линзу выключить" in PRIVACY_TEXT
+    assert "until they are closed or expire, even if the\n  lens is turned off" in doc
+    assert "Рефлексия по отдельному разговору и оценка ответов текста линзы модели не отправляют" in PRIVACY_TEXT
+    assert "The per-conversation reflection and the rating of\n  replies send the model no lens text" in doc
+    assert "видно только в /export" in PRIVACY_TEXT and "shows only in `/export`" in doc

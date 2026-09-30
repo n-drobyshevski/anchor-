@@ -13,7 +13,8 @@ note_chunk_personal and note_chunk_knowledge), the lens tables (L1's
 lens_note, note_link, lens_version, lens_read: derived from the vault,
 or counters; L2's lens_round: which lens notes a review drew on and the
 selector's why, whose result the exported review_proposal rows already
-carry as lens_round_id and lens_note_ids; L3's lens_garden_run and
+carry as lens_round_id and lens_note_ids -- as, from L5, the exported
+notebook_entry rows do for the idle reflect's rounds; L3's lens_garden_run and
 lens_gap: the garden's derived proposals about the lens, rebuilt weekly
 from it, and already in the vault as the Anchor/Reports note) and
 vault_status. Including
@@ -111,7 +112,9 @@ EXPORTED_MODELS = (
     # 5b: Anchor's own working notes (phase-5 plan section 3). User data
     # by the same reasoning as everything above it -- the user's own
     # `/mind add` intentions live here, and so does whatever Anchor
-    # wrote about them.
+    # wrote about them. From L5 each row also carries `lens_round_id`
+    # and `lens_note_ids` (the reflect round and lens notes a grounded
+    # entry rests on); lens_round itself stays out, as above.
     NotebookEntry,
     # 5c: negotiated standing orders (phase-5 plan section 3) and their
     # check-in results. User data by the same reasoning again -- these

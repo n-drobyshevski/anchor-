@@ -33,6 +33,7 @@ no model call, no outbound).
 | Vault notes: personal vs knowledge classes and consent (8e). Knowledge notes are indexed (chunked, secrets masked); personal notes are not, and nothing puts notes into a prompt | **off** | `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED`; `VAULT_PERSONAL_ENABLED` has no reader |
 | The lens (L1, L2): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. The weekly review picks the notes that fit its week and grounds its proposals in them (L2) | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300): above it the review does not use the lens and `/lens` warns; `LENS_ROUND_MAX_NOTES` (6, 1–12) and `LENS_ROUND_MAX_CHARS` (24000, 2000–100000) cap what one review round reads; Claude Code's access is `/lens code on` |
 | The lens garden (L3): once a week an idle job looks for gaps in the lens (missing links, missing notes, tensions, bridges), sends one Telegram message with a button row per gap, and writes a report to `Anchor/Reports` | **off** | `LENS_GARDEN_ENABLED` (on top of `LENS_ENABLED`, and `VAULT_MODE` `mirror` or `sync`); `GARDEN_MAX_TOKENS` (2000, 1000–8000) caps the model's answer. Deploy the vault service first (docs/vault-setup.md) |
+| The lens in reflection (L5): the idle reflection picks the lens notes that fit its draft notebook changes and may rephrase the draft's open threads on them (never observations about you); critique records which lens notes stood behind the replies it rated | **off** | `LENS_REFLECT_ENABLED` (on top of `LENS_ENABLED`) for the reflection; critique's ids need only `LENS_ENABLED`; the same `LENS_ROUND_MAX_NOTES` and `LENS_ROUND_MAX_CHARS` bound a reflection round, and its two extra calls count against `IDLE_JOB_USD_CAP` |
 | Lens research (L4): «исследовать» under a garden gap searches `PACKET_LENS` in the background, sends the result as its own message, and «в Inbox» writes it as one knowledge note into the vault's inbox (`Echo/Inbox`); `/lens undo` takes the newest back | **off** | all of `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and `IDLE_ENABLED`; `PACKET_LENS` (7 domains by default, at most 12; empty turns it off); shares `/study`'s `RESEARCH_JOBS_PER_DAY` and `RESEARCH_JOB_USD_CAP`. Deploy the vault service first (docs/vault-setup.md) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
@@ -72,9 +73,9 @@ Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
-| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
+| `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
 | `/lens undo` | Take back Echo's newest note in the inbox (L4), if under 14 days old and not edited since; Telegram only | the vault service |
-| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
+| `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review or reflection round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
 | `/weblogout` | End every web session | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -1212,12 +1213,14 @@ is the only request 8e adds.
 This is the contract. A later phase that adds a consumer of notes cites
 it, and extends the isolation tests.
 
-| Where | Personal notes | Knowledge notes | Lens notes (L1–L4) |
+| Where | Personal notes | Knowledge notes | Lens notes (L1–L5) |
 |---|---|---|---|
-| The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge |
+| The persona's reply to you, in Telegram or the web chat | yes, as «Из личных заметок» (8d) | yes, as «Справка» (8d) | as knowledge; from L5, open threads the reflection rephrased on the lens reach it as notebook entries, never a note's own text |
 | The extractor, the welfare classifier, the tick, proactive messages, scene summaries | never | never | never |
-| The notebook, `/mind` | never | never | never in L1 |
-| Idle work: consolidate, reflect, prebrief, critique, canary, backfill | never | never | never |
+| The notebook's per-conversation reflection, `/mind` | never | never | never (L5 keeps it lens-free) |
+| Idle work: consolidate, prebrief, canary, backfill | never | never | never |
+| Idle reflect (L5) | never | never | **yes, via the selector, while `LENS_REFLECT_ENABLED` is on**: the catalog and the notes it picks, beside Echo's draft notebook changes (never the week's own input); only open threads are rephrased, never observations |
+| Idle critique (L5) | never | never | **lens ids only**: which notes stood behind the grounded amendments, orders and entries live at each rated reply, into the run's summary; no lens text, no call |
 | The lens garden, an idle job (L3) | never | never: a knowledge note is an anonymous id in its graph, and its title is only matched locally, never sent | **yes, weekly, while `LENS_GARDEN_ENABLED` is on**: titles, catalog summaries (or the start of the text, as in L2), lens links and counts of knowledge links go to the model, never a whole body |
 | `Anchor/Reports` in the vault (L3) | never | never named | titles, as `[[links]]` to lens notes |
 | The weekly review | never | never | **yes, via the selector (L2)**: the catalog and the notes it picks, never with the week's own input |
@@ -1231,7 +1234,7 @@ it, and extends the isolation tests.
 | Becoming a memory fact | never automatically | never automatically | never automatically |
 | Encrypted backups | included; deleted by `/delete` | same | same |
 | `/export` | left out (derived from the vault) | left out | left out |
-| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` (L3: also the garden's gaps, `lens.gaps(n)`) |
+| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` (L3: also the garden's gaps, `lens.gaps(n)`; L5: reflect rounds in `lens.rounds(n)`) |
 
 If notes ever reach `/grok`, personal and knowledge will be separate
 scopes, both off by default.
@@ -1469,6 +1472,46 @@ sees none of it (docs/claude-access.md). `/delete` erases the records
 but leaves the inbox notes, which are yours; `/export` includes the
 write records. Why it is built this way: docs/decisions.md, "L4 — lens
 research into `Echo/Inbox`".
+
+## Milestone L5 — reflection and critique read the lens
+
+With `LENS_REFLECT_ENABLED` on (on top of `LENS_ENABLED`, and 1 to
+`LENS_CATALOG_MAX_NOTES` notes), the idle reflection picks lens notes
+for itself and may rephrase its draft's open threads on them
+(`anchor-lens-plan.md` §7, §10). Off, or when the draft has no open
+thread, the reflection is exactly what it was.
+
+1. **Pass 1, unchanged**: one call, same prompt and input, a validated
+   draft of notebook changes (adds, closes, updates).
+2. **The selector** sees that draft (minus closes) and the catalog,
+   never the week; rotation counts reflection rounds only, so the
+   review's «не выбирали 4 раунда» still means four weeks. Its reason
+   is discarded: a reflection round stores none.
+3. **Grounding** sees the draft's open threads only and the picked
+   notes, and may only rephrase: at most 3 rewrites, each naming the
+   notes it rests on. Code keeps a rewrite only if it is a thread the
+   draft had, names a picked note, passes the notebook's own checks and
+   quotes no note's title or text; otherwise the draft item stands.
+   Observations are facts about you and are never rephrased. Closes and
+   kinds are always the draft's: a note cannot close a thread or add
+   an intention.
+
+Each run with the lens active is a `reflect` round in `lens_round`
+(`grounded`, `empty` or `fallback`, no reason); a rephrased entry
+carries the round and its notes' ids. The per-conversation notebook
+stays lens-free, and its updates clear those ids. A failed call keeps
+the draft and records `fallback`: the lens never fails a reflection.
+Both extra calls count against `IDLE_JOB_USD_CAP`.
+
+Critique makes no extra call: with `LENS_ENABLED` on, for each reply it rates, it records the
+lens notes behind the grounded amendments, standing orders and
+notebook entries that were live then, as ids in the run's summary
+(`/export` only; never a log line, never Claude Code). Grounded threads
+stay when you turn the lens off, until they close or expire. `/lens`
+adds «Последняя рефлексия с линзой: <date>, <outcome>», and Claude Code
+sees the reflection's picks in `lens.rounds(n)`, never why. Why it is
+built this way: docs/decisions.md, "L5 — reflection and critique read
+the lens".
 
 ## Web UI
 

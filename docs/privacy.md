@@ -31,11 +31,19 @@ and that both name Obsidian (8e).
   `/claude library write on` change them (undo: `/claude undo`). Lens
   notes can be read by Claude Code while `/lens code on`
   (what it reads goes to Anthropic), together with
-  which of them the weekly review picked, but not its explanation of
-  why, which is written from your week and only you see. While the lens is on, the weekly
+  which of them the weekly review or the notebook reflection picked, but not why: the
+  review's explanation is written from your week and only you see it, and the reflection
+  keeps none. While the lens is on, the weekly
   review sends the model the lens catalog (titles, summaries or the
   start of the text, links) and the notes it picks, whole, as reference
-  material. While the lens garden is on, once a week the model gets the
+  material. While the lens is on in the notebook reflection, the model
+  gets the lens catalog, Echo's draft changes to its working notes and
+  the notes it picks, whole; only open threads are rephrased through
+  the lens, never observations about you, and such threads stay in the
+  notes the persona reads until they are closed or expire, even if the
+  lens is turned off. The per-conversation reflection and the rating of
+  replies send the model no lens text; which lens notes the rated
+  replies rested on shows only in `/export`. While the lens garden is on, once a week the model gets the
   lens notes' titles, summaries or the start of the text, the links
   between them, and how many links each has to knowledge notes (never
   their titles); with `/lens code on` Claude Code can read its proposals

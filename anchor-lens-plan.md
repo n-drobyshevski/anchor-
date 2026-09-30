@@ -141,7 +141,7 @@ Turning the lens off leaves every prompt **byte-identical** to today's. A test p
 **Call 1, the selector.** It runs on `LLM_MODEL_SAFETY`, at temperature 0, with a strict JSON schema.
 
 - **Input:**
-  - the round's own material, reduced to what the round is about. For the review, that is the analysis's `patterns` and `misses`, from a first pass that does not see the lens. For reflect, the window's scene summaries.
+  - the round's own material, reduced to what the round is about. For the review, that is the analysis's `patterns` and `misses`, from a first pass that does not see the lens. For reflect, pass 1's validated draft minus closes, never the week (amended in L5, see docs/decisions.md).
   - **the catalog**. One line per lens note: `id`, title, `summary` (the frontmatter field, or else the first 300 characters), its linked lens titles, and `rounds_since_used`.
 - **Output:** `{"selected": [id, ...], "why": "..."}`.
   - Selections are validated against the catalog: an unknown id is dropped.
@@ -232,7 +232,7 @@ You edit it like the other packets. At most 12 domains.
 |---|---|---|---|
 | Persona chat turn | 8d block | 8d block | as knowledge; the lens block only in L6 |
 | Weekly review, via the selector (§7) | never | never | **yes** |
-| Notebook and idle reflect, via the selector (L5) | never | never | **yes** |
+| Idle reflect, via the selector (L5; the per-scene notebook stays lens-free, amended in L5, see docs/decisions.md) | never | never | **yes** |
 | Critique | never | never | lens ids only (L5) |
 | Garden (§8) | never; outside links counted, not named | graph and titles, for context | **yes**: graph, summaries |
 | Research query building (§9) | **never, in any phase** | never | **gap kind, detail and proposed title, and its lens notes' titles and summaries only** |
@@ -285,6 +285,13 @@ The first two show what Echo read and which notes each round picked (never the s
 ## 12. Milestones
 
 Status: L1–L3 merged (PR #56). L4 built on its own branch, with your amendments to §9: `PACKET_LENS` leaves out `archive.org`, a research's result is its own Telegram message as soon as the job finishes (not the next garden report), and promotion is a move into a lens folder **and** `anchor: lens` (docs/decisions.md, "L4 — lens research into `Echo/Inbox`").
+
+L5 built on its own branch, behind `LENS_REFLECT_ENABLED` (off by default), with three deviations you approved and your decisions on its open questions (docs/decisions.md, "L5 — reflection and critique read the lens"):
+- the per-scene notebook stays lens-free (§10's row names it); idle reflect, which writes the same entries, is the notebook's lens consumer;
+- the reflect selector sees pass 1's validated draft, not the window's scene summaries (§7), and a reflect round stores no rationale;
+- only open threads are rephrased through the lens, never observations about you; a draft with no thread leaves the lens inactive;
+- grounded threads stay when the lens is turned off (they expire on their own), and `lens.rounds(n)` keeps its signature, returning reflect rounds beside the review's;
+- critique makes no call: it records the lens ids behind the grounded amendments, orders and entries live at each rated reply.
 
 - **L1: class, pipe, graph, Claude Code.**
   - vaultd: `lens`, the settings keys, `/v1/knowledge/graph`, the write refusal.

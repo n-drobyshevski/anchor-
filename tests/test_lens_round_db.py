@@ -18,6 +18,20 @@ file asserts, against the throwaway database:
   a correct `rounds_since_used`;
 - the round's own writes, and the two settings' bounds.
 
+L5 (migration 3d3efa0cbc9a, the L5 spec section 2) adds, here too:
+
+- `reflect` is a consumer (`critique` is not), and each consumer keeps
+  to its own link (`ck_lens_round_link`, and `record_round`'s own
+  check), with no rationale on a reflect round;
+- `lens_round.idle_run_id` and `notebook_entry.lens_round_id` are SET
+  NULL, and `notebook_entry.lens_note_ids` defaults to `'{}'`;
+- rotation (`rounds_since_used`) is per consumer, in both directions,
+  and `last_round` answers per consumer;
+- `lens.rounds(n)` shows reflect rounds, and `debug.lens_round` still
+  leaves the new column out;
+- /delete takes a reflect round an entry and an idle run point at;
+- the migration upgrades and downgrades cleanly (reflect rounds go).
+
 All notes are synthetic.
 """
 
@@ -31,11 +45,14 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from app.config import Settings, check_vault_settings
 from app.db.models import (
+    IdleRun,
     LensNote,
     LensRound,
     LensVersion,
+    NotebookEntry,
     NoteLink,
     ReviewProposal,
+    UserState,
     VaultFile,
     WeeklyReview,
 )
@@ -44,6 +61,8 @@ from tests.test_vault_notes_migration import _alembic, _run, scratch_database  #
 
 BEFORE = "e4c7a2d9b1f3"
 AFTER = "c6d2e8a4f917"
+L5_BEFORE = "e9a4c2f7b1d8"
+L5_AFTER = "3d3efa0cbc9a"
 
 RATIONALE = "Неделя однообразных ответов: Эшби о необходимом разнообразии."
 PROPOSAL_TEXT = "Отвечать по-разному на разные дни"
@@ -95,6 +114,24 @@ async def _round(sessionmaker, ids: list[int], outcome: str = "grounded", ration
     async with sessionmaker() as session:
         round_id = await lens.record_round(
             session, selected_note_ids=ids, rationale=rationale, outcome=outcome
+        )
+        await session.commit()
+        return round_id
+
+
+async def _idle_run(sessionmaker) -> int:
+    async with sessionmaker() as session:
+        run = IdleRun(kind="reflect", local_date=datetime.date(2026, 9, 30), status="done")
+        session.add(run)
+        await session.commit()
+        return run.id
+
+
+async def _reflect(sessionmaker, ids: list[int], outcome: str = "grounded", idle_run_id: int | None = None) -> int:
+    async with sessionmaker() as session:
+        round_id = await lens.record_round(
+            session, selected_note_ids=ids, rationale=None, outcome=outcome,
+            consumer="reflect", idle_run_id=idle_run_id,
         )
         await session.commit()
         return round_id
@@ -297,19 +334,25 @@ async def test_a_lens_back_at_an_earlier_state_records_that_states_version(sessi
 
 
 async def test_record_round_refuses_unknown_outcomes_and_consumers(sessionmaker):
+    """L5: `reflect` joins `review`; `critique` records ids elsewhere
+    (idle_run.summary) and never a round."""
     async with sessionmaker() as session:
         with pytest.raises(ValueError):
             await lens.record_round(session, selected_note_ids=[], rationale=None, outcome="maybe")
         with pytest.raises(ValueError):
             await lens.record_round(
-                session, selected_note_ids=[], rationale=None, outcome="empty", consumer="reflect"
+                session, selected_note_ids=[], rationale=None, outcome="empty", consumer="critique"
             )
+    assert lens.ROUND_CONSUMERS == ("review", "reflect")
     # And the table's own CHECKs, under the module.
-    for kwargs in ({"consumer": "reflect", "outcome": "empty"}, {"consumer": "review", "outcome": "maybe"}):
+    for kwargs in ({"consumer": "critique", "outcome": "empty"}, {"consumer": "review", "outcome": "maybe"}):
         async with sessionmaker() as session:
             session.add(LensRound(**kwargs))
             with pytest.raises(IntegrityError, match="ck_lens_round_"):
                 await session.commit()
+    async with sessionmaker() as session:
+        session.add(LensRound(consumer="reflect", outcome="empty"))
+        await session.commit()
 
 
 async def test_attach_rationale_and_last_round(sessionmaker):
@@ -534,6 +577,220 @@ async def test_debug_views_carry_no_rationale_and_no_proposal_text(sessionmaker)
         assert secret not in dumped
 
 
+# --- L5: the reflect round -----------------------------------------------------------
+
+
+async def test_the_link_rule_holds_in_the_module_and_in_the_table(sessionmaker):
+    """A review round never names an idle run and a reflect round never a
+    weekly review (`ck_lens_round_link`); a reflect round stores no
+    rationale (the L5 spec's deviation 3)."""
+    run_id = await _idle_run(sessionmaker)
+    async with sessionmaker() as session:
+        review = WeeklyReview(week_start=datetime.date(2026, 9, 21), analysis={})
+        session.add(review)
+        await session.commit()
+        review_id = review.id
+
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError, match="idle run"):
+            await lens.record_round(
+                session, selected_note_ids=[], rationale=None, outcome="empty", idle_run_id=run_id
+            )
+        with pytest.raises(ValueError, match="weekly review"):
+            await lens.record_round(
+                session, selected_note_ids=[], rationale=None, outcome="empty",
+                consumer="reflect", weekly_review_id=review_id,
+            )
+        with pytest.raises(ValueError, match="rationale"):
+            await lens.record_round(
+                session, selected_note_ids=[], rationale=RATIONALE, outcome="empty", consumer="reflect"
+            )
+        assert (await session.execute(text("select count(*) from lens_round"))).scalar_one() == 0
+
+    for kwargs in (
+        {"consumer": "review", "idle_run_id": run_id},
+        {"consumer": "reflect", "weekly_review_id": review_id},
+        {"consumer": "reflect", "weekly_review_id": review_id, "idle_run_id": run_id},
+    ):
+        async with sessionmaker() as session:
+            session.add(LensRound(outcome="empty", **kwargs))
+            with pytest.raises(IntegrityError, match="ck_lens_round_link"):
+                await session.commit()
+
+    # Attaching a reflect round to a review is refused by the table too.
+    reflect_id = await _reflect(sessionmaker, [], outcome="empty", idle_run_id=run_id)
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError, match="ck_lens_round_link"):
+            await lens.attach_round_to_review(session, reflect_id, review_id)
+
+
+async def test_a_reflect_round_records_its_run_and_outlives_it(sessionmaker):
+    """SET NULL, not CASCADE (the L5 spec section 2): rotation is counted
+    from rounds, and the rounds are the selection's audit trail."""
+    notes = await _seed(sessionmaker)
+    ashby = notes["Ashby"].id
+    run_id = await _idle_run(sessionmaker)
+    version = await _record_version(sessionmaker)
+    round_id = await _reflect(sessionmaker, [ashby], idle_run_id=run_id)
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(text("select * from lens_round where id = :i"), {"i": round_id})
+        ).mappings().one()
+        assert (row["consumer"], row["idle_run_id"], row["weekly_review_id"]) == ("reflect", run_id, None)
+        assert (row["selected_note_ids"], row["rationale"], row["lens_version_id"]) == ([ashby], None, version)
+        await session.execute(text("delete from idle_run where id = :i"), {"i": run_id})
+        await session.commit()
+        kept = (
+            await session.execute(text("select id, idle_run_id from lens_round"))
+        ).all()
+    assert [tuple(r) for r in kept] == [(round_id, None)]
+
+
+async def test_notebook_entry_lens_columns_default_empty_and_the_round_is_set_null(sessionmaker):
+    round_id = await _reflect(sessionmaker, [1, 2])
+    async with sessionmaker() as session:
+        plain = NotebookEntry(kind="open_thread", text="вернуться к плану", source="anchor")
+        grounded = NotebookEntry(
+            kind="open_thread", text="разнообразить вечерние ответы", source="anchor",
+            lens_round_id=round_id, lens_note_ids=[2, 1],
+        )
+        session.add_all([plain, grounded])
+        await session.flush()
+        await session.execute(
+            text("insert into notebook_entry (kind, text, source) values ('observation', 'сырой', 'anchor')")
+        )
+        await session.commit()
+        ids = (plain.id, grounded.id)
+
+    async with sessionmaker() as session:
+        rows = {
+            r.text: (r.lens_round_id, r.lens_note_ids)
+            for r in await session.execute(text("select text, lens_round_id, lens_note_ids from notebook_entry"))
+        }
+        assert rows == {
+            "вернуться к плану": (None, []),
+            "разнообразить вечерние ответы": (round_id, [2, 1]),
+            "сырой": (None, []),
+        }
+        with pytest.raises(IntegrityError, match="lens_note_ids"):
+            await session.execute(
+                text("update notebook_entry set lens_note_ids = null where id = :i"), {"i": ids[0]}
+            )
+    async with sessionmaker() as session:
+        await session.execute(text("delete from lens_round where id = :i"), {"i": round_id})
+        await session.commit()
+        row = (
+            await session.execute(
+                text("select lens_round_id, lens_note_ids from notebook_entry where id = :i"), {"i": ids[1]}
+            )
+        ).one()
+    assert tuple(row) == (None, [2, 1])
+
+
+async def test_rotation_is_per_consumer_in_both_directions(sessionmaker):
+    """Daily reflect rounds never age the weekly review's counts, and
+    review rounds never age reflect's (the L5 spec section 2)."""
+    notes = await _seed(sessionmaker)
+    ashby, beer = notes["Ashby"].id, notes["Beer"].id
+
+    await _round(sessionmaker, [ashby])
+    await _reflect(sessionmaker, [beer])
+    await _reflect(sessionmaker, [], outcome="empty")
+    await _reflect(sessionmaker, [ashby], outcome="fallback")
+
+    async def since(consumer: str) -> dict[str, int | None]:
+        async with sessionmaker() as session:
+            return {e.title: e.rounds_since_used for e in await lens.catalog(session, consumer=consumer)}
+
+    # The review's own count: three reflect rounds later, Ashby is still
+    # its latest pick, and Beer (reflect's) is new to it.
+    assert await since("review") == {"Ashby": 0, "Beer": None, "Wiener": None}
+    async with sessionmaker() as session:
+        assert {e.title: e.rounds_since_used for e in await lens.catalog(session)} == {
+            "Ashby": 0, "Beer": None, "Wiener": None
+        }
+    # Reflect's: Beer two of its rounds ago, Ashby its latest.
+    assert await since("reflect") == {"Ashby": 0, "Beer": 2, "Wiener": None}
+
+    await _round(sessionmaker, [], outcome="empty")
+    await _round(sessionmaker, [beer])
+    assert await since("review") == {"Ashby": 2, "Beer": 0, "Wiener": None}
+    assert await since("reflect") == {"Ashby": 0, "Beer": 2, "Wiener": None}
+
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError):
+            await lens.catalog(session, consumer="critique")
+
+
+async def test_last_round_answers_per_consumer(sessionmaker):
+    async with sessionmaker() as session:
+        assert await lens.last_round(session, consumer="review") is None
+        assert await lens.last_round(session, consumer="reflect") is None
+    review_id = await _round(sessionmaker, [], outcome="grounded")
+    async with sessionmaker() as session:
+        assert await lens.last_round(session, consumer="reflect") is None
+    first = await _reflect(sessionmaker, [], outcome="fallback")
+    second = await _reflect(sessionmaker, [], outcome="empty")
+    async with sessionmaker() as session:
+        newest = await lens.last_round(session)
+        review_last = await lens.last_round(session, consumer="review")
+        reflect_last = await lens.last_round(session, consumer="reflect")
+        with pytest.raises(ValueError):
+            await lens.last_round(session, consumer="critique")
+    assert (newest.id, newest.consumer) == (second, "reflect")
+    assert (review_last.id, review_last.consumer, review_last.outcome) == (review_id, "review", "grounded")
+    assert (reflect_last.id, reflect_last.consumer, reflect_last.outcome) == (second, "reflect", "empty")
+    assert first != second
+
+
+async def test_lens_rounds_shows_reflect_rounds_and_debug_leaves_the_run_out(sessionmaker):
+    notes = await _seed(sessionmaker)
+    ashby, wiener = notes["Ashby"].id, notes["Wiener"].id
+    run_id = await _idle_run(sessionmaker)
+    review_id = await _round(sessionmaker, [ashby])
+    reflect_id = await _reflect(sessionmaker, [wiener, ashby], idle_run_id=run_id)
+
+    rows = await _as(sessionmaker, "anchor_lens", "select * from lens.rounds(10)")
+    assert [(r.id, r.consumer, r.outcome, r.titles) for r in rows] == [
+        (reflect_id, "reflect", "grounded", ["Wiener", "Ashby"]),
+        (review_id, "review", "grounded", ["Ashby"]),
+    ]
+    debug = await _as(sessionmaker, "anchor_debug", "select * from debug.lens_round order by id")
+    assert "idle_run_id" not in debug[0]._fields
+    assert [(r.id, r.consumer) for r in debug] == [(review_id, "review"), (reflect_id, "reflect")]
+
+
+async def test_delete_takes_a_reflect_round_an_entry_and_a_run_point_at(sessionmaker):
+    """/delete's one TRUNCATE: notebook_entry -> lens_round -> idle_run
+    are all in PURGED_TABLES, so no foreign key stops it."""
+    from app.core import purge
+    from app.core.clock import FrozenClock
+
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1))
+        await session.commit()
+    run_id = await _idle_run(sessionmaker)
+    round_id = await _reflect(sessionmaker, [1], idle_run_id=run_id)
+    async with sessionmaker() as session:
+        session.add(
+            NotebookEntry(
+                kind="open_thread", text="разнообразить ответы", source="anchor",
+                lens_round_id=round_id, lens_note_ids=[1],
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        await purge.delete_everything(
+            session, Settings(), FrozenClock(datetime.datetime(2026, 9, 30, 12, 0, tzinfo=datetime.timezone.utc))
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        for table in ("lens_round", "notebook_entry", "idle_run"):
+            assert (await session.execute(text(f"select count(*) from {table}"))).scalar_one() == 0, table
+
+
 # --- the migration itself ------------------------------------------------------------
 
 
@@ -609,4 +866,52 @@ def test_migration_upgrades_and_downgrades_cleanly(scratch_database):  # noqa: F
         )
     }
     assert functions == {"notes", "graph"}
+    _alembic(scratch_database, "upgrade", "head")
+
+
+def test_l5_migration_upgrades_and_downgrades_cleanly(scratch_database):  # noqa: F811
+    """3d3efa0cbc9a: the reflect consumer, `lens_round.idle_run_id`, the
+    link check and the two notebook columns; downgrade deletes the
+    reflect rounds and restores L2's constraint."""
+    _alembic(scratch_database, "upgrade", L5_AFTER)
+    _run(
+        scratch_database,
+        "INSERT INTO idle_run (kind, local_date, status) VALUES ('reflect', '2026-09-30', 'done')",
+        "INSERT INTO lens_round (consumer, outcome, idle_run_id)"
+        " SELECT 'reflect', 'grounded', id FROM idle_run",
+        "INSERT INTO lens_round (consumer, outcome) VALUES ('review', 'empty')",
+        "INSERT INTO notebook_entry (kind, text, source, lens_round_id, lens_note_ids)"
+        " SELECT 'open_thread', 'т', 'anchor', id, '{3}' FROM lens_round WHERE consumer = 'reflect'",
+        "INSERT INTO notebook_entry (kind, text, source) VALUES ('observation', 'о', 'anchor')",
+    )
+    entries = _run(scratch_database, "SELECT text, lens_round_id IS NOT NULL AS linked, lens_note_ids FROM notebook_entry ORDER BY id")
+    assert [(r["text"], r["linked"], r["lens_note_ids"]) for r in entries] == [("т", True, [3]), ("о", False, [])]
+    indexes = {
+        r["indexname"]
+        for r in _run(scratch_database, "SELECT indexname FROM pg_indexes WHERE tablename = 'lens_round'")
+    }
+    assert "ix_lens_round_idle_run_id" in indexes
+    with pytest.raises(Exception, match="ck_lens_round_link"):
+        _run(
+            scratch_database,
+            "INSERT INTO lens_round (consumer, outcome, idle_run_id) SELECT 'review', 'empty', id FROM idle_run",
+        )
+
+    _alembic(scratch_database, "downgrade", L5_BEFORE)
+    rounds = _run(scratch_database, "SELECT consumer FROM lens_round")
+    assert [r["consumer"] for r in rounds] == ["review"]
+    columns = {
+        (r["table_name"], r["column_name"])
+        for r in _run(
+            scratch_database,
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name IN ('lens_round', 'notebook_entry')",
+        )
+    }
+    assert not {
+        ("lens_round", "idle_run_id"), ("notebook_entry", "lens_round_id"), ("notebook_entry", "lens_note_ids")
+    } & columns
+    assert [r["text"] for r in _run(scratch_database, "SELECT text FROM notebook_entry ORDER BY id")] == ["т", "о"]
+    with pytest.raises(Exception, match="ck_lens_round_consumer"):
+        _run(scratch_database, "INSERT INTO lens_round (consumer, outcome) VALUES ('reflect', 'empty')")
     _alembic(scratch_database, "upgrade", "head")

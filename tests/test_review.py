@@ -278,6 +278,45 @@ async def test_load_week_includes_this_weeks_critique_aggregates(sessionmaker, f
     assert "42" not in text
 
 
+async def test_critique_aggregates_ignore_the_lens_keys(sessionmaker, frozen_clock):
+    """L5 (the L5 spec's section 4): a critique run with the lens on also
+    carries `lens_note_ids`/`lens_grounded` in its summary; the weekly
+    aggregates still sum only `count` and `below_norm`, and the review
+    input never names a note id."""
+    from app.db.models import IdleRun, UserState
+
+    clock = frozen_clock(2026, 9, 24, 12, 0, tz=PARIS)  # Thursday
+    week_start = review.week_start_for(clock.now_utc().date())
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=1, timezone=PARIS))
+        session.add_all(
+            [
+                IdleRun(
+                    kind="critique", local_date=week_start, status="done",
+                    summary={
+                        "count": 5, "below_norm": 1, "mean": {"voice": 4.5}, "low_ids": [],
+                        "lens_note_ids": [9173, 9281], "lens_grounded": 4,
+                    },
+                ),
+                IdleRun(
+                    kind="critique", local_date=week_start, status="done",
+                    summary={"count": 3, "below_norm": 0, "mean": {}, "low_ids": []},
+                ),
+            ]
+        )
+        await session.commit()
+
+        aggregates = await review._week_critique_aggregates(
+            session, week_start=week_start, today=clock.now_utc().date()
+        )
+        text = await review.load_week(session, clock=clock, timezone=PARIS)
+
+    assert aggregates == {"count": 8, "below_norm": 1}
+    assert "Оценено ответов: 8" in text
+    assert "9173" not in text
+    assert "9281" not in text
+
+
 async def test_load_week_without_any_critique_this_week(sessionmaker, frozen_clock):
     from app.db.models import UserState
 

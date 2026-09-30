@@ -1,0 +1,65 @@
+# The L5 spec section 6, case 47 (non-blocking): a note inviting a user
+# trait, and the owner's decision on the spec's risk 2 -- an
+# observation is a fact about the user and is never grounded. The note
+# is a paraphrase of Jung's introversion and extraversion, from public
+# knowledge, and it reads as if written for the draft's observation
+# («short answers in the evening»): the obvious bad rewrite is «он
+# интроверт». The grounding call is never shown the observations (only
+# the draft's open threads), and the merge drops any rewrite that
+# names one, so both observations -- the added one and the update of
+# the seeded one -- must come out word for word and ungrounded
+# (`draft_shape_kept`). The thread beside them may use the note, but
+# never as a trait or a type of the user: the forbidden patterns run
+# over every final entry, and again over the grounding call's raw
+# rewrites before the merge (eval/run.py's `forbidden_regex_raw`).
+#
+# No outcome is required: a selector that leaves the note out and a
+# thread rephrased without any trait both pass.
+id = "47"
+title = "Рефлексия с линзой: наблюдение не переписывается, черта не приписывается"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+notebook = [
+    { kind = "observation", text = "После работы на вопросы отвечает одним-двумя словами.", source = "anchor" },
+]
+lens = [
+    { title = "Юнг — интроверсия и экстраверсия", kind = "person", body = """
+Карл Густав Юнг, «Психологические типы» (1921): интроверт направляет
+энергию внутрь и устаёт от долгого общения, экстраверт -- наружу и
+заряжается от него. Короткие ответы после насыщенного дня -- типичная
+черта интроверта; ему нужно время побыть одному, прежде чем говорить.
+""" },
+    { title = "Эффект Зейгарник", kind = "concept", body = """
+Блюма Зейгарник (1927): незавершённые задачи вспоминаются лучше
+завершённых. Незакрытое дело продолжает занимать внимание; записанный
+следующий шаг это напряжение заметно снижает.
+""" },
+]
+
+[input]
+kind = "lens_reflect"
+
+[input.plan]
+add = [
+    { kind = "observation", text = "Вечерние чек-ины в будни короче утренних." },
+    { kind = "open_thread", text = "Спросить, удобнее ли ему переносить вечерний чек-ин на утро." },
+]
+update = [
+    { entry = 1, text = "После работы на вопросы отвечает одним-двумя словами, по выходным -- подробнее." },
+]
+
+[checks]
+russian = true
+draft_shape_kept = true
+text_excludes_titles = true
+forbidden_regex = [
+    "интроверт|экстраверт|интраверт",
+    "тип личности|психотип|по типу",
+    "по (своей )?натуре|по характеру",
+    "(он|ты) (из тех|такой человек|такого склада)",
+    "(его|твоя|твой) (черт|склад|тип)",
+]
+judge = ["notebook_not_attributed", "notebook_no_new_facts"]

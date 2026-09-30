@@ -313,6 +313,10 @@ async def run_idle(
                 "closed": result.closed,
                 "updated": result.updated,
                 "dropped": result.dropped,
+                # L5: `lens_round_id` and `lens_outcome` when the run
+                # recorded a lens round, nothing otherwise. The log below
+                # keeps only SAFE_EXTRA_KEYS: the id, not the outcome.
+                **result.summary_extra(),
             }
             reversible = True
         elif kind == PREBRIEF:
@@ -338,6 +342,11 @@ async def run_idle(
                 "below_norm": result.below_norm,
                 "mean": result.mean,
                 "low_ids": list(result.low_ids),
+                # L5: `lens_note_ids`/`lens_grounded`, or nothing with the
+                # lens off or no reply grounded (app/core/idle/critique.py,
+                # "Lens attribution"). Neither is in SAFE_EXTRA_KEYS, so
+                # the "idle run done" line below never logs them.
+                **result.summary_extra(),
             }
             reversible = False
         elif kind == CANARY:

@@ -23,6 +23,12 @@ fed into -- neither of those touches the original rows at all. Without
 `_conflicted_merge_targets`'s pre-scan, undo would restore the
 originals to active right next to the user's post-merge change,
 duplicating the fact the merge was meant to consolidate.
+
+**The check compares the logged columns only (L5).** A snapshot taken
+before a migration added a column lacks it; see `_comparable`. A restore
+likewise writes back only the columns `before` has, so a pre-L5 update
+leaves an entry's `lens_round_id` and `lens_note_ids` as they are (NULL
+and `'{}'`: nothing wrote them before L5).
 """
 
 from __future__ import annotations
@@ -71,11 +77,23 @@ class UndoResult:
     reason: str | None = None
 
 
-def _comparable(table: str, state: dict | None) -> dict | None:
+def _comparable(table: str, state: dict | None, logged: dict | None) -> dict | None:
+    """`state` cut down to the columns the logged `after` snapshot has,
+    minus the volatile ones, for the conflict check.
+
+    Only the logged columns (the L5 spec section 2): a snapshot taken
+    before a migration added columns lacks them, while the row read
+    today has them all. Comparing whole rows would report every change
+    of such a run as a conflict -- after L5's migration, every reflect
+    run of the last `IDLE_UNDO_DAYS` (`notebook_entry` gained
+    `lens_round_id` and `lens_note_ids`). A column the run never logged
+    is one it never wrote, so it has nothing to say about whether
+    someone changed what the run did."""
     if state is None:
         return None
     volatile = _VOLATILE_COLUMNS.get(table, frozenset())
-    return {key: value for key, value in state.items() if key not in volatile}
+    keys = state.keys() if logged is None else logged.keys()
+    return {key: state.get(key) for key in keys if key not in volatile}
 
 
 def _decode(model, key: str, value):
@@ -106,9 +124,9 @@ async def _apply_one(session: AsyncSession, change: IdleChange) -> bool:
 
     row = await session.get(model, change.row_id, with_for_update=True)
     current = _row_state(row) if row is not None else None
-    if change.after is not None and _comparable(change.table_name, current) != _comparable(
-        change.table_name, change.after
-    ):
+    if change.after is not None and _comparable(
+        change.table_name, current, change.after
+    ) != _comparable(change.table_name, change.after, change.after):
         return False
 
     if change.op == "insert":
@@ -176,7 +194,9 @@ async def _conflicted_merge_targets(session: AsyncSession, changes: list[IdleCha
             continue
         row = await session.get(Memory, change.row_id)
         current = _row_state(row) if row is not None else None
-        if _comparable("memory", current) != _comparable("memory", change.after):
+        if _comparable("memory", current, change.after) != _comparable(
+            "memory", change.after, change.after
+        ):
             conflicted.add(change.row_id)
     return conflicted
 

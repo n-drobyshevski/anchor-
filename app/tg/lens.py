@@ -12,6 +12,11 @@ L1 has two commands:
   how it ended -- the outcome, never the selector's `why` or a title.
   L3 adds the lens garden (app/tg/garden.py): «Сад: <дата>, открыто N»,
   the newest run's local date and the open gaps across all runs.
+  L5 splits the round line by consumer: «Последний разбор» is the
+  newest review round only, and «Последняя рефлексия с линзой: <дата>,
+  <исход>» the newest idle reflect round (app/core/idle/reflect_lens.py),
+  shown once one exists -- so a daily reflect never hides the weekly
+  review's line.
 - `/lens code on|off` flips the role's LOGIN. Off also ends the
   sessions already open. When the bot's database user may not alter
   the role, or the role does not exist, the reply says so and points
@@ -69,6 +74,9 @@ READS_LINE = "Чтений сегодня: {n}."
 # L2: the newest `lens_round`, in the user's local date; one outcome
 # phrase per ck_lens_round_outcome value (app/vault/lens.py's ROUND_OUTCOMES).
 LAST_ROUND_LINE = "Последний разбор: {date}, {outcome}."
+# L5: the newest `reflect` round, the same way; its outcomes speak of
+# Echo's notes, not of the review's proposals.
+LAST_REFLECT_LINE = "Последняя рефлексия с линзой: {date}, {outcome}."
 # L3: the newest garden run, in the user's local date, and the gaps
 # still open across all runs (app/vault/lens.py's `garden_status`).
 GARDEN_LINE = "Сад: {date}, открыто {n}."
@@ -76,6 +84,11 @@ ROUND_OUTCOME_TEXT = {
     "grounded": "предложения опираются на линзу",
     "empty": "подходящих заметок не нашлось",
     "fallback": "линза не сработала, предложения без неё",
+}
+REFLECT_OUTCOME_TEXT = {
+    "grounded": "заметки опираются на линзу",
+    "empty": "подходящих заметок не нашлось",
+    "fallback": "линза не сработала, заметки без неё",
 }
 UNRECORDED_LINE = (
     "Чтений без записи: {n} — транзакция чтения была откачена (или база упала и сбила "
@@ -112,8 +125,9 @@ UNDO_REPLIES = {
 # reply says so, and that a gap closed by the recheck reads «closed».
 CODE_SET_ON = (
     "Доступ открыт: Claude Code может читать линзу через lens.notes(), lens.graph(), "
-    "lens.rounds() и lens.gaps(). lens.rounds() отдаёт, какие заметки выбрал еженедельный "
-    "разбор, но не объяснение почему: оно написано по твоей неделе и видно только тебе. "
+    "lens.rounds() и lens.gaps(). lens.rounds() отдаёт, какие заметки выбрали еженедельный "
+    "разбор и рефлексия, но не объяснение почему: у разбора оно написано по твоей неделе и "
+    "видно только тебе, у рефлексии не хранится вовсе. "
     "lens.gaps() — предложения сада линзы, написанные только по самой линзе, и их статус "
     "(открыто, сделано, не нужно или закрыто). Больше ничего из заметок. Каждое чтение "
     "считается. Закрыть: /lens code off"
@@ -158,7 +172,8 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
         start, end = _day_bounds(clock_module.local_date(clock, timezone), timezone)
         reads = await lens.reads_between(session, start, end)
         unrecorded = await lens.unrecorded_reads(session)
-        last = await lens.last_round(session)
+        last = await lens.last_round(session, consumer="review")
+        last_reflect = await lens.last_round(session, consumer="reflect")
         garden = await lens.garden_status(session)
         outcomes = await jobs.lens_job_outcomes(session)
         # «ждут решения» counts only results the user can act on: the
@@ -190,6 +205,13 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
             LAST_ROUND_LINE.format(
                 date=clock_module.local_date_of(last.created_at, timezone).strftime("%d.%m.%Y"),
                 outcome=ROUND_OUTCOME_TEXT.get(last.outcome, last.outcome),
+            )
+        )
+    if last_reflect is not None:
+        lines.append(
+            LAST_REFLECT_LINE.format(
+                date=clock_module.local_date_of(last_reflect.created_at, timezone).strftime("%d.%m.%Y"),
+                outcome=REFLECT_OUTCOME_TEXT.get(last_reflect.outcome, last_reflect.outcome),
             )
         )
     if garden is not None:

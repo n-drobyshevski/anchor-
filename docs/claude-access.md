@@ -117,6 +117,17 @@ the conversations and stays with the user (the Telegram card's
 «почему эти заметки?»). Neither `lens.rounds(n)` nor
 `debug.lens_round` carries it.
 
+Since L5 `lens.rounds(n)` also returns the idle **reflection**'s
+rounds (`consumer` = `reflect`): which notes it picked to rephrase
+Echo's draft open threads on, and the outcome. A reflect round stores
+no rationale at all (it would be written from the week too). Which
+notebook entries came out grounded, and on which notes, is not
+readable here: `notebook_entry` has no debug view, and the entries'
+text is conversation data. Nor are critique's lens ids, which sit in
+`idle_run.summary` (no debug view either) and never in a log line.
+Daily reflect rounds fill the function's 50-row window faster than
+weekly review rounds, so an old review round may drop out of it.
+
 Since L3 it also returns, through `lens.gaps(n)`, the weekly **lens
 garden**'s proposals: links, missing notes, tensions and bridges in
 the lens. Unlike the rationale, their text is safe to show here: the
@@ -148,7 +159,7 @@ view, not even `lens_note` itself.
 |---|---|
 | `lens.notes()` | `id, kind (person, concept), title, summary, body, chars, updated_at`, one row per lens note |
 | `lens.graph()` | `src_title, dst_title, unresolved`: links between lens notes, and the targets of lens notes' links that name no note. Never a knowledge-only note, never a link to a note the bot may not see |
-| `lens.rounds(n)` | `id, consumer, outcome, created_at, titles`: the last `n` (at most 50) rounds in which Echo chose lens notes (L2: the weekly review), newest first, with the current titles of the notes it chose (a note no longer in the lens is skipped) |
+| `lens.rounds(n)` | `id, consumer, outcome, created_at, titles`: the last `n` (at most 50) rounds in which Echo chose lens notes (L2: the weekly review, `review`; L5: the idle reflection, `reflect`), newest first, with the current titles of the notes it chose (a note no longer in the lens is skipped) |
 | `lens.gaps(n)` | `id, week, kind, status, titles, title, detail, reopened, created_at, decided_at`: the last `n` (at most 50) gaps the lens garden proposed (L3), newest first. `kind` is link, missing_note, tension or bridge; `titles` are the current titles of its lens notes (a note no longer in the lens is skipped), `title` a missing note's proposed title; `status` is open, done, dismissed or closed (never `resolved`, and no `resolved_at`). `title` and `detail` are null for a closed missing_note and for a gap one of whose notes has left the lens |
 
 Each call inserts one `lens_read` row (function name, row count, time)
@@ -221,8 +232,9 @@ The password stays set; the switch is `LOGIN`.
   and concepts), a warning above `LENS_CATALOG_MAX_NOTES`, whether
   Claude Code may log in, how many reads there were today, and any read
   whose record was rolled back (above), and «Последний разбор: <date>,
-  <outcome>» for the weekly review's last lens round (L2), and «Сад:
-  <date>, открыто N» for the lens garden (L3).
+  <outcome>» for the weekly review's last lens round (L2), «Последняя
+  рефлексия с линзой: <date>, <outcome>» once a reflect round exists
+  (L5), and «Сад: <date>, открыто N» for the lens garden (L3).
 
 **Upgrading an existing role (L3).** If `anchor_lens` already existed
 when `b3e9f5a1c7d2` ran, the migration granted it `lens.gaps(int)`
@@ -250,7 +262,7 @@ none. It is sent even with `CLAUDE_ACCESS_ENABLED` off, as long as
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, title, chars from lens.notes()"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select title, body from lens.notes() where id = 12"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select * from lens.graph()"
-psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, created_at, titles from lens.rounds(10)"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, consumer, outcome, created_at, titles from lens.rounds(10)"
 psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, week, kind, status, titles, title, detail from lens.gaps(20)"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_gap order by id desc limit 20"
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_garden_run order by id desc limit 5"
@@ -263,7 +275,8 @@ counted. Use plain `-c` (autocommit); a call inside a transaction you
 roll back is still reported, as a read without a record. `debug.lens_note`, `debug.note_link`, `debug.lens_version` and
 `debug.lens_read` carry ids, hashes, lengths, booleans and counts only:
 no title, summary, body or link text. `debug.lens_round` (L2) has every
-column but the selector's rationale. L2 also adds `debug.review_proposal`
+column but the selector's rationale (and, since L5, `idle_run_id`:
+there is no `idle_run` view to join it to). L2 also adds `debug.review_proposal`
 (new in L2): ids, kind, status, times, `lens_round_id`, `lens_note_ids`
 and `text_len`, never the proposal's text or reason. The titles are
 read through `lens.rounds(n)`, a logged read like the other two. The
