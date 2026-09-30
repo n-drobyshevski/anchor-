@@ -479,6 +479,54 @@ def idle_gate(
     return KIND_RULES[kind](facts, config)
 
 
+def manual_garden_gate(
+    facts: IdleFacts,
+    now: datetime.datetime,
+    config: IdleConfig,
+    *,
+    self_run_id: int | None = None,
+) -> GateResult:
+    """`/lens garden now`: the rows a garden the user asked for still obeys.
+
+    The user asked, so the rows that exist to keep idle work out of the
+    user's way are dropped: `user_active` (the command itself is a
+    message), `window`, and the garden's 168-hour interval and
+    `unchanged` rule. What stays: the switches and the pause, the
+    welfare cooldown, `busy`, every money row (jobs per day, the idle
+    cap, the reserve), the lens size, and once per local ISO week --
+    `lens_garden_run.iso_week` is UNIQUE, so a second run in the same
+    week could not record its gaps anyway. The garden's Telegram message
+    keeps its own holds (quiet hours, pause, welfare) in app/tg/garden.py.
+    """
+    if not config.enabled:
+        return GateResult(False, DISABLED)
+    if not facts.persona_active:
+        return GateResult(False, PAUSED)
+    if facts.welfare_at is not None and now - facts.welfare_at < datetime.timedelta(
+        hours=WELFARE_COOLDOWN_HOURS
+    ):
+        return GateResult(False, WELFARE_COOLDOWN)
+    active = set(facts.active_run_ids)
+    active.discard(self_run_id)
+    if active:
+        return GateResult(False, BUSY)
+    if facts.jobs_today >= config.max_jobs_per_day:
+        return GateResult(False, MAX_JOBS)
+    if facts.idle_spend_today + config.job_usd_cap > config.usd_cap:
+        return GateResult(False, IDLE_CAP)
+    if facts.spend_today + config.job_usd_cap > facts.daily_usd_cap - config.reserve_usd:
+        return GateResult(False, RESERVE)
+    if not config.garden_enabled:
+        return GateResult(False, GARDEN_OFF)
+    if not GARDEN_MIN_NOTES <= facts.garden_notes <= config.lens_max_notes:
+        return GateResult(False, LENS_SIZE)
+    if facts.garden_last_iso_week is not None and facts.garden_last_iso_week == iso_week(
+        facts.local_now.date()
+    ):
+        return GateResult(False, NOT_DUE)
+    return GateResult(True, OK)
+
+
 __all__ = [
     "BUSY",
     "DAILY_LIMIT",
@@ -494,6 +542,7 @@ __all__ = [
     "LENS_RESEARCH_OFF",
     "LENS_SIZE",
     "MAX_JOBS",
+    "manual_garden_gate",
     "NOT_ENOUGH_CLUSTERS",
     "NOT_IMPLEMENTED",
     "NOTHING_TO_BACKFILL",

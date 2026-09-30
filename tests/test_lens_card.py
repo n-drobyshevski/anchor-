@@ -427,3 +427,69 @@ async def test_status_names_each_outcome(sessionmaker, outcome):
     reply = await lens_ui.command(sessionmaker, Settings(LENS_ENABLED=True), FrozenClock(NOW), None)
 
     assert f"Последний разбор: 29.09.2026, {lens_ui.ROUND_OUTCOME_TEXT[outcome]}." in reply
+
+
+# --- /lens: the reflect round (L5) --------------------------------------------------
+
+
+async def _reflect_round(session, *, outcome="grounded", created_at=None) -> int:
+    row = LensRound(consumer="reflect", selected_note_ids=[], outcome=outcome)
+    if created_at is not None:
+        row.created_at = created_at
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def test_a_newer_reflect_round_never_hides_the_reviews_line(sessionmaker):
+    """L5: the review's line is the newest *review* round, and reflect
+    gets its own line, in the user's local date."""
+    await _seed_state(sessionmaker, timezone="Europe/Moscow")
+    async with sessionmaker() as session:
+        await _round(
+            session, note_ids=[], outcome="empty",
+            created_at=datetime.datetime(2026, 9, 21, 10, 0, tzinfo=datetime.timezone.utc),
+        )
+        await _reflect_round(
+            session, outcome="fallback",
+            created_at=datetime.datetime(2026, 9, 26, 10, 0, tzinfo=datetime.timezone.utc),
+        )
+        await _reflect_round(
+            session, outcome="grounded",
+            created_at=datetime.datetime(2026, 9, 28, 22, 0, tzinfo=datetime.timezone.utc),
+        )
+        await session.commit()
+
+    reply = await lens_ui.command(sessionmaker, Settings(LENS_ENABLED=True), FrozenClock(NOW), None)
+
+    lines = reply.splitlines()
+    assert "Последний разбор: 21.09.2026, подходящих заметок не нашлось." in lines
+    assert "Последняя рефлексия с линзой: 29.09.2026, заметки опираются на линзу." in lines
+    assert lines.index("Последний разбор: 21.09.2026, подходящих заметок не нашлось.") < lines.index(
+        "Последняя рефлексия с линзой: 29.09.2026, заметки опираются на линзу."
+    )
+
+
+async def test_a_reflect_round_alone_shows_only_its_own_line(sessionmaker):
+    await _seed_state(sessionmaker)
+    async with sessionmaker() as session:
+        await _reflect_round(session, outcome="empty", created_at=NOW)
+        await session.commit()
+
+    reply = await lens_ui.command(sessionmaker, Settings(LENS_ENABLED=True), FrozenClock(NOW), None)
+
+    assert "Последний разбор" not in reply
+    assert "Последняя рефлексия с линзой: 29.09.2026, подходящих заметок не нашлось." in reply.splitlines()
+
+
+async def test_without_a_reflect_round_there_is_no_reflect_line(sessionmaker):
+    await _seed_state(sessionmaker)
+    async with sessionmaker() as session:
+        await _round(session, note_ids=[], outcome="grounded", created_at=NOW)
+        await session.commit()
+    reply = await lens_ui.command(sessionmaker, Settings(LENS_ENABLED=True), FrozenClock(NOW), None)
+    assert "Последняя рефлексия" not in reply
+
+
+def test_every_reflect_outcome_has_russian_text():
+    assert set(lens_ui.REFLECT_OUTCOME_TEXT) == set(lens.ROUND_OUTCOMES)

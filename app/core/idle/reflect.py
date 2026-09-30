@@ -36,6 +36,17 @@ calling `orders.results_for_checkin`/`orders.active_orders`.
 open write transaction; `apply_plan` runs inside one transaction opened
 only after the model call returns and after the in-job preemption
 re-check, via `RunContext`.
+
+**L5: the lens** (anchor-lens-plan.md sections 7 and 10; the L5 spec
+section 3). Between `validate` and the apply transaction,
+app/core/idle/reflect_lens.py -- reflect's only door to the lens; this
+module imports neither app/vault/lens.py nor app/core/lens_select.py --
+may pick lens notes for the validated draft and rephrase its open
+threads on them (owner decision: never an observation, which is a fact
+about the user). The lens sees the draft only, never this module's
+7-day input, so the welfare exclusion above needs no second copy. The
+round is recorded in the apply transaction, after the preemption
+re-check, together with the entries that name it.
 """
 
 from __future__ import annotations
@@ -53,6 +64,7 @@ from app.core import notebook as notebook_module
 from app.core import safety_events
 from app.core.clock import Clock
 from app.core.extract import parse_json
+from app.core.idle import reflect_lens
 from app.db.models import (
     Checkin,
     CheckinOrderResult,
@@ -87,25 +99,50 @@ def _cadence_label(cadence: str, weekday: int | None) -> str:
     return _CADENCE_LABELS.get(cadence, cadence)
 
 
-REFLECT_PROMPT = (
-    "Ты ведёшь рабочие заметки Echo о пользователе. Это недельный взгляд назад: "
-    "по итогам последних 7 дней добавь наблюдения (устойчивые закономерности) и "
-    "незакрытые темы (что обещано, начато или стоит спросить позже). Закрой темы, "
-    "которые решены. Пиши по-русски, коротко, фактами.\n"
+# L5 (the L5 spec section 3): the prohibitions are their own constant,
+# so the lens grounding call (app/core/idle/reflect_lens.py) opens with
+# the same words -- passed in by `run_reflect`, since reflect_lens.py is
+# imported here and importing this module back would be a cycle.
+# REFLECT_PROMPT's bytes are unchanged (tests/test_idle_reflect_lens.py
+# pins them).
+REFLECT_PROHIBITIONS = (
     "Запрещено: диагнозы, психологические ярлыки и типы личности, здоровье, "
     "кризисы, догадки о мотивах, заметки об ужесточении, наказаниях или "
     "повышении интенсивности, подробности о третьих лицах, намерения (intention) "
     "-- их пишет только пользователь."
 )
 
+REFLECT_PROMPT = (
+    "Ты ведёшь рабочие заметки Echo о пользователе. Это недельный взгляд назад: "
+    "по итогам последних 7 дней добавь наблюдения (устойчивые закономерности) и "
+    "незакрытые темы (что обещано, начато или стоит спросить позже). Закрой темы, "
+    "которые решены. Пиши по-русски, коротко, фактами.\n"
+) + REFLECT_PROHIBITIONS
+
 
 @dataclasses.dataclass(frozen=True)
 class ReflectResult:
+    """Counts only. L5: `lens_round_id` and `lens_outcome` are the run's
+    lens round (app/core/idle/reflect_lens.py), both None when the lens
+    was not active for the run."""
+
     added: int
     closed: int
     updated: int
     dropped: int
     preempted: bool = False
+    lens_round_id: int | None = None
+    lens_outcome: str | None = None
+
+    def summary_extra(self) -> dict:
+        """The run's lens keys for `idle_run.summary` (the L5 spec section
+        3): both, or `{}` when no round was recorded -- so a run without
+        the lens keeps exactly the summary it had before L5. The runner's
+        log keeps `lens_round_id` (app/log.py's SAFE_EXTRA_KEYS) and
+        drops `lens_outcome`."""
+        if self.lens_outcome is None:
+            return {}
+        return {"lens_round_id": self.lens_round_id, "lens_outcome": self.lens_outcome}
 
 
 def _window(clock: Clock, timezone: str) -> tuple[datetime.datetime, datetime.datetime]:
@@ -314,7 +351,7 @@ async def run_reflect(
     # imported at module level by app/core/idle/runner.py -- a
     # module-level import of runner.py here would close that into a
     # cycle.
-    from app.core.idle.runner import RunContext, is_preempted
+    from app.core.idle.runner import JobCapHit, RunContext, is_preempted
 
     start_at, end_at = _window(clock, timezone)
     start_day, end_day = start_at.date(), (end_at - datetime.timedelta(days=1)).date()
@@ -352,7 +389,13 @@ async def run_reflect(
             session=session, settings=settings, clock=clock, run_id=run_id,
             kind="reflect", started_at=started_at, timezone=timezone,
         )
-        await ctx.charge(response.usage, response.model)
+        try:
+            await ctx.charge(response.usage, response.model)
+        except JobCapHit:
+            # L5 (the L5 spec section 3): the money is spent, so its
+            # ledger row is kept; the run still fails, as before.
+            await session.commit()
+            raise
 
         payload = parse_json(response.text)
         await safety_events.record_in(
@@ -367,6 +410,18 @@ async def run_reflect(
 
         plan = notebook_module.validate(payload, entries=entries_by_id)
 
+        # L5: the lens may rephrase the draft's open threads. Same `ctx`,
+        # so its `_spent` covers all three calls against IDLE_JOB_USD_CAP;
+        # inactive (a switch off, no lens, no thread in the draft) it
+        # returns the draft untouched, with no call and no row.
+        lens_result = await reflect_lens.run(
+            session, settings, safety_provider, ctx, plan,
+            entries=view, run_id=run_id, prohibitions=REFLECT_PROHIBITIONS,
+        )
+        if lens_result.preempted:
+            return ReflectResult(added=0, closed=0, updated=0, dropped=0, preempted=True)
+        plan = lens_result.plan
+
     async with session_factory() as session:
         if await is_preempted(session, clock, started_at):
             return ReflectResult(added=0, closed=0, updated=0, dropped=0, preempted=True)
@@ -375,8 +430,12 @@ async def run_reflect(
             session=session, settings=settings, clock=clock, run_id=run_id,
             kind="reflect", started_at=started_at, timezone=timezone,
         )
+        # The round and the entries that name it commit together, after
+        # the preemption check: a preempted run records no round.
+        lens_round_id = await reflect_lens.record(session, lens_result, run_id)
         result = await notebook_module.apply_plan(
             session, settings, plan, clock=clock, scene_id=None, on_change=ctx.record_change,
+            lens_round_id=lens_round_id,
         )
         await session.commit()
 
@@ -385,15 +444,18 @@ async def run_reflect(
         extra={
             "run_id": run_id, "added": result.added, "closed": result.closed,
             "updated": result.updated, "dropped": result.dropped,
+            "lens_round_id": lens_round_id,
         },
     )
     return ReflectResult(
         added=result.added, closed=result.closed, updated=result.updated, dropped=result.dropped,
+        lens_round_id=lens_round_id, lens_outcome=lens_result.outcome,
     )
 
 
 __all__ = [
     "REFLECT_CATEGORY",
+    "REFLECT_PROHIBITIONS",
     "REFLECT_PROMPT",
     "REFLECT_WINDOW_DAYS",
     "ReflectResult",

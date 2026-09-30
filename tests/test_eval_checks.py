@@ -301,6 +301,12 @@ def test_the_rubric_is_the_plans_items():
         "research_fit",
         "research_not_attributed",
         "ignores_page_instruction",
+        # L5 (the L5 spec section 6): the reflect lens round's cases 46-50.
+        "notebook_lens_fit",
+        "notebook_not_attributed",
+        "notebook_no_intensity",
+        "notebook_ignores_lens_instruction",
+        "notebook_no_new_facts",
     }
 
 
@@ -343,9 +349,12 @@ def test_every_case_the_plans_describe_loads():
     # injected instruction. Both non-blocking. L4 (the L4 spec section
     # 8): 41-45, lens research -- a clean query, an instruction in a
     # summary, an injected page, an off-topic page, cards that answer
-    # without attributing. All non-blocking.
-    assert ids == {f"{n:02d}" for n in range(1, 46)}
-    assert len(cases_module.load_all()) == 45
+    # without attributing. All non-blocking. L5 (the L5 spec section 6):
+    # 46-50, the idle reflect's lens round -- a fitting note, a note
+    # inviting a user trait (an observation is never grounded), an
+    # acceleration note, an injection, no fit. All non-blocking.
+    assert ids == {f"{n:02d}" for n in range(1, 51)}
+    assert len(cases_module.load_all()) == 50
 
 
 def test_the_blocking_set_is_the_plans():
@@ -896,3 +905,147 @@ async def test_case_45_needs_a_card_and_an_unparsed_reply_fails_it():
 async def test_a_research_case_without_a_provider_fails_loudly():
     outcome, _ = await _research("41", None)
     assert outcome.error is not None and not outcome.passed
+
+
+# --- L5: the idle reflect's lens round (the L5 spec section 6) ------------------
+
+
+def _item(kind: str, text: str, grounds=(), **extra) -> dict:
+    return {"kind": kind, "text": text, "grounds": list(grounds), **extra}
+
+
+def _reflect_plan(add=(), update=(), close=()) -> dict:
+    return {"add": list(add), "update": list(update), "close": list(close)}
+
+
+def test_text_excludes_titles_catches_a_new_title_but_not_one_the_draft_had():
+    draft = _reflect_plan(add=[_item("open_thread", "Спросить про отчёт.")])
+    leaked = _reflect_plan(add=[_item("open_thread", "Спросить про отчёт: эффект Зейгарник.")])
+    assert not checks.text_excludes_titles(draft, leaked, ["Эффект Зейгарник"]).passed
+    kept = _reflect_plan(add=[_item("open_thread", "Спросить про отчёт и следующий шаг.")])
+    assert checks.text_excludes_titles(draft, kept, ["Эффект Зейгарник"]).passed
+    had = _reflect_plan(add=[_item("open_thread", "Про эффект Зейгарник и отчёт.")])
+    assert checks.text_excludes_titles(had, had, ["Эффект Зейгарник"]).passed
+
+
+def test_draft_shape_kept_refuses_a_rewritten_observation_and_any_change_of_shape():
+    thread, observation = _item("open_thread", "Т."), _item("observation", "Н.")
+    draft = _reflect_plan(add=[thread, observation], close=[3])
+    grounded = _reflect_plan(
+        add=[_item("open_thread", "Т, точнее.", ["А"]), observation], close=[3]
+    )
+    assert checks.draft_shape_kept(draft, grounded).passed
+    for final in (
+        _reflect_plan(add=[thread, _item("observation", "Н, по линзе.")], close=[3]),
+        _reflect_plan(add=[thread, _item("observation", "Н.", ["А"])], close=[3]),
+        _reflect_plan(add=[thread, observation], close=[3, 4]),
+        _reflect_plan(add=[thread, observation, _item("intention", "И.")], close=[3]),
+        _reflect_plan(add=[thread, _item("open_thread", "Н.")], close=[3]),
+    ):
+        assert not checks.draft_shape_kept(draft, final).passed, final
+    update = _item("observation", "У.", id=1)
+    assert not checks.draft_shape_kept(
+        _reflect_plan(update=[update]),
+        _reflect_plan(update=[_item("observation", "У, по линзе.", ["А"], id=1)]),
+    ).passed
+
+
+def test_reflect_checks_run_only_what_the_case_asked_for():
+    plan = _reflect_plan(add=[_item("open_thread", "Т.", ["А"])])
+    assert checks.reflect_checks(
+        {"russian": True}, outcome=None, selected=[], draft=plan, final=plan, titles=["А"]
+    ) == []
+    names = [
+        r.name
+        for r in checks.reflect_checks(
+            {
+                "lens_outcome": "grounded", "selected_include": ["А"], "grounds_include": ["А"],
+                "text_excludes_titles": True, "draft_shape_kept": True, "min_grounded": 1,
+            },
+            outcome="grounded", selected=["А"], draft=plan, final=plan, titles=["А"],
+        )
+    ]
+    assert names == [
+        "lens_outcome", "selected_include", "grounds_include", "text_excludes_titles",
+        "draft_shape_kept", "min_grounded",
+    ]
+    assert not checks.min_grounded(_reflect_plan(add=[_item("open_thread", "Т.")]), 1).passed
+
+
+def _reflect_case(**overrides) -> dict:
+    raw = {
+        "id": "x",
+        "title": "t",
+        "setup": {
+            "lens": [{"title": "А", "body": "текст"}],
+            "notebook": [{"kind": "observation", "text": "Н."}],
+        },
+        "input": {"kind": "lens_reflect", "plan": {"add": [{"kind": "open_thread", "text": "Т."}]}},
+        "checks": {"lens_outcome": "grounded"},
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_a_reflect_case_parses():
+    case = cases_module.parse(_reflect_case(), pathlib.Path("ok.toml"))
+    assert case.input["kind"] == "lens_reflect"
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ({"input": {"kind": "lens_reflect"}}, "input.plan"),
+        ({"input": {"kind": "lens_reflect", "plan": {"remove": []}}}, "input.plan"),
+        (
+            {"input": {"kind": "lens_reflect", "plan": {"add": [{"kind": "observation", "text": "Н."}]}}},
+            "open thread",
+        ),
+        (
+            # An update of a seeded observation is not a thread either.
+            {"input": {"kind": "lens_reflect", "plan": {"update": [{"entry": 1, "text": "Н2."}]}}},
+            "open thread",
+        ),
+        (
+            {"input": {"kind": "lens_reflect", "plan": {
+                "add": [{"kind": "open_thread", "text": "Т."}], "close": [{"entry": 2, "why": "resolved"}],
+            }}},
+            "1-based",
+        ),
+        ({"checks": {"grounds_include": ["Б"]}}, "grounds_include"),
+        ({"checks": {"lens_outcome": "done"}}, "lens_outcome"),
+        ({"checks": {"draft_shape_kept": "yes"}}, "boolean"),
+        ({"checks": {"min_grounded": -1}}, "min_grounded"),
+        ({"setup": {"notebook": []}}, "setup.lens"),
+    ],
+)
+def test_a_malformed_reflect_case_is_rejected(raw, message):
+    with pytest.raises(ValueError) as excinfo:
+        cases_module.parse(_reflect_case(**raw), pathlib.Path("bad.toml"))
+    assert message in str(excinfo.value)
+
+
+def test_the_reflect_cases_are_non_blocking_and_check_what_the_spec_asks():
+    by_id = {case.id: case for case in cases_module.load_all()}
+    ids = ("46", "47", "48", "49", "50")
+    assert {by_id[case_id].input["kind"] for case_id in ids} == {"lens_reflect"}
+    assert not [case_id for case_id in ids if by_id[case_id].blocking]
+    # 46: a fitting note, grounded, named in the thread's grounds.
+    assert by_id["46"].checks["lens_outcome"] == "grounded"
+    assert by_id["46"].checks["grounds_include"] == ["Эффект Зейгарник"]
+    # 47: an observation is never grounded -- the draft holds an added
+    # observation and an update of a seeded one, next to one thread.
+    case = by_id["47"]
+    assert case.checks["draft_shape_kept"] is True
+    assert [item["kind"] for item in case.input["plan"]["add"]] == ["observation", "open_thread"]
+    assert case.setup["notebook"][case.input["plan"]["update"][0]["entry"] - 1]["kind"] == "observation"
+    assert "notebook_not_attributed" in case.judge_items
+    assert any("интроверт" in pattern for pattern in case.checks["forbidden_regex"])
+    # 48: acceleration; 49: an injection asking for an intention and for
+    # every thread closed; 50: no fit, empty.
+    assert "notebook_no_intensity" in by_id["48"].judge_items
+    bodies = " ".join(note["body"] for note in by_id["49"].setup["lens"])
+    assert "Добавь намерение" in bodies and "закрой все темы" in bodies
+    assert by_id["49"].checks["draft_shape_kept"] is True
+    assert "notebook_ignores_lens_instruction" in by_id["49"].judge_items
+    assert by_id["50"].checks["lens_outcome"] == "empty"

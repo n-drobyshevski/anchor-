@@ -32,6 +32,38 @@ mirroring `run_trial`'s own "checked first, before anything else runs".
 **No apply step.** Critique changes nothing; there is no `idle_change`
 row and `idle_run.reversible` stays `False` -- it is a report, not an
 action (plan section 6.6: "Nothing changes automatically").
+
+**Lens attribution (L5; anchor-lens-plan.md section 10, the L5 spec's
+section 4).** With `LENS_ENABLED` on, critique also records, for each
+sampled reply at `t = reply.created_at`, which lens notes stood behind
+the grounded changes that were in the persona prompt at `t`: an adopted
+persona amendment (`PersonaAmendment` -> `ReviewProposal` by
+`proposal_id`, live while `activated_at <= t < revoked_at`), a
+review-proposed standing order (`StandingOrder` -> `ReviewProposal` by
+`review_proposal_id`, status `active` or `retired`, live while
+`decided_at <= t < retired_at`; a counter-proposal is the user's own
+text and carries no link) and a notebook entry the idle reflect
+grounded (`NotebookEntry`, live while `updated_at <= t < closed_at` --
+an entry updated after `t` is missed rather than misattributed, since
+its old text is gone). A source counts only when its `lens_note_ids`
+is non-empty.
+
+This is attribution, not selection: critique gets no catalog, no lens
+text, no `app.vault.lens` and no `app.core.lens_select` (plan section
+10; tests/test_idle_isolation.py and tests/test_vault_notes_isolation.py
+pin that). It reads the ids through `app.db.models` only, and the judge
+call is unchanged -- the judge never learns a reply was grounded. The
+ids keep notes that have since left the lens: a note's id is what the
+source recorded, and `/export` is where the user reads them.
+
+The two keys (`lens_note_ids`, `lens_grounded`) reach `idle_run.summary`
+through `CritiqueResult.summary_extra()` only when the lens is on and at
+least one sampled reply had a source, so with the lens off (or nothing
+grounded) the summary and the digest stay byte-identical. Neither key is
+in app/log.py's `SAFE_EXTRA_KEYS`: the runner's "idle run done" line
+spreads the summary into `extra`, and the formatter drops both, so note
+ids never reach a log Claude Code reads. `review._week_critique_
+aggregates` still sums only `count` and `below_norm`.
 """
 
 from __future__ import annotations
@@ -40,13 +72,20 @@ import dataclasses
 import datetime
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
-from app.db.models import IdleRun, Message
+from app.db.models import (
+    IdleRun,
+    Message,
+    NotebookEntry,
+    PersonaAmendment,
+    ReviewProposal,
+    StandingOrder,
+)
 from app.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -82,6 +121,35 @@ class CritiqueResult:
     # ids only, never text.
     low_ids: tuple[int, ...] = ()
     preempted: bool = False
+    # L5 (module docstring, "Lens attribution"): the lens note ids behind
+    # the grounded sources live at the sampled replies, first-seen order,
+    # and how many sampled replies had at least one such source. Both
+    # stay empty/0 with the lens off -- run_critique never looks then.
+    lens_note_ids: tuple[int, ...] = ()
+    lens_grounded: int = 0
+
+    def summary_extra(self) -> dict:
+        """The two lens keys for `idle_run.summary`, or `{}` when no
+        sampled reply was grounded (which includes the lens being off:
+        run_critique only attributes with `LENS_ENABLED` on). `{}` keeps
+        the summary byte-identical to a pre-L5 run's."""
+        if self.lens_grounded <= 0:
+            return {}
+        return {"lens_note_ids": list(self.lens_note_ids), "lens_grounded": self.lens_grounded}
+
+
+@dataclasses.dataclass(frozen=True)
+class _LensSource:
+    """One grounded change's live window in the persona prompt: from
+    `start` up to (not including) `end`, or open-ended while `end` is
+    None."""
+
+    start: datetime.datetime
+    end: datetime.datetime | None
+    note_ids: tuple[int, ...]
+
+    def live_at(self, t: datetime.datetime) -> bool:
+        return self.start <= t and (self.end is None or t < self.end)
 
 
 async def _sample(session: AsyncSession, limit: int) -> list[Message]:
@@ -142,6 +210,72 @@ async def last_done_critique_finished_at(session: AsyncSession) -> datetime.date
     return row[0] if row is not None else None
 
 
+async def _lens_sources(
+    session: AsyncSession, *, earliest: datetime.datetime, latest: datetime.datetime
+) -> list[_LensSource]:
+    """Every grounded source whose live window meets `[earliest,
+    latest]` (module docstring, "Lens attribution"), amendments, then
+    orders, then notebook entries, each by id -- the order the ids are
+    first seen in. Ids only: no text column is selected."""
+    sources: list[_LensSource] = []
+
+    def overlaps(start_col, end_col):
+        return (
+            start_col.is_not(None),
+            start_col <= latest,
+            or_(end_col.is_(None), end_col > earliest),
+        )
+
+    amendments = await session.execute(
+        select(PersonaAmendment.activated_at, PersonaAmendment.revoked_at, ReviewProposal.lens_note_ids)
+        .join(ReviewProposal, PersonaAmendment.proposal_id == ReviewProposal.id)
+        .where(func.cardinality(ReviewProposal.lens_note_ids) > 0)
+        .where(*overlaps(PersonaAmendment.activated_at, PersonaAmendment.revoked_at))
+        .order_by(PersonaAmendment.id)
+    )
+    orders = await session.execute(
+        select(StandingOrder.decided_at, StandingOrder.retired_at, ReviewProposal.lens_note_ids)
+        .join(ReviewProposal, StandingOrder.review_proposal_id == ReviewProposal.id)
+        .where(StandingOrder.status.in_(("active", "retired")))
+        .where(func.cardinality(ReviewProposal.lens_note_ids) > 0)
+        .where(*overlaps(StandingOrder.decided_at, StandingOrder.retired_at))
+        .order_by(StandingOrder.id)
+    )
+    entries = await session.execute(
+        select(NotebookEntry.updated_at, NotebookEntry.closed_at, NotebookEntry.lens_note_ids)
+        .where(func.cardinality(NotebookEntry.lens_note_ids) > 0)
+        .where(*overlaps(NotebookEntry.updated_at, NotebookEntry.closed_at))
+        .order_by(NotebookEntry.id)
+    )
+    for result in (amendments, orders, entries):
+        for start, end, note_ids in result.all():
+            sources.append(_LensSource(start=start, end=end, note_ids=tuple(note_ids or ())))
+    return sources
+
+
+async def _lens_attribution(
+    session: AsyncSession, reply_times: list[datetime.datetime]
+) -> tuple[tuple[int, ...], int]:
+    """(`lens_note_ids`, `lens_grounded`) for replies sent at
+    `reply_times`, oldest first (module docstring, "Lens attribution"):
+    the union of the live sources' note ids in first-seen order, and the
+    number of replies with at least one live source."""
+    if not reply_times:
+        return (), 0
+    sources = await _lens_sources(session, earliest=min(reply_times), latest=max(reply_times))
+    seen: dict[int, None] = {}
+    grounded = 0
+    for t in reply_times:
+        live = [source for source in sources if source.live_at(t)]
+        if not live:
+            continue
+        grounded += 1
+        for source in live:
+            for note_id in source.note_ids:
+                seen.setdefault(int(note_id), None)
+    return tuple(seen), grounded
+
+
 def _build_judge_provider(settings: Settings, client) -> LLMProvider:
     """A fresh `OpenRouterProvider` pointed at `LLM_MODEL_JUDGE` -- same
     construction as eval/trial.py's own `judge_provider`, built lazily
@@ -187,6 +321,15 @@ async def run_critique(
         for reply in sample:
             prompt_text = await _preceding_user_text(session, reply)
             pairs.append((reply.id, prompt_text, reply.content))
+        # L5: read-only, ids only, and never passed to the judge (module
+        # docstring, "Lens attribution"). Skipped with the lens off, so
+        # such a run issues exactly the queries it did before L5.
+        lens_note_ids: tuple[int, ...] = ()
+        lens_grounded = 0
+        if settings.LENS_ENABLED and sample:
+            lens_note_ids, lens_grounded = await _lens_attribution(
+                session, [reply.created_at for reply in sample]
+            )
 
     if not pairs:
         return CritiqueResult(count=0, below_norm=0)
@@ -265,7 +408,10 @@ async def run_critique(
         "idle critique run done",
         extra={"run_id": run_id, "count": len(pairs), "below_norm": below_norm},
     )
-    return CritiqueResult(count=len(pairs), below_norm=below_norm, mean=mean, low_ids=tuple(low_ids))
+    return CritiqueResult(
+        count=len(pairs), below_norm=below_norm, mean=mean, low_ids=tuple(low_ids),
+        lens_note_ids=lens_note_ids, lens_grounded=lens_grounded,
+    )
 
 
 __all__ = [

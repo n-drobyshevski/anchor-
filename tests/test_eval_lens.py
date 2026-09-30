@@ -207,7 +207,8 @@ def test_the_judge_on_the_review_model_warns_for_lens_cases():
     persona_cases = [
         c
         for c in load_all()
-        if c.input["kind"] not in ("lens_review", "lens_garden", "lens_query", "lens_distill")
+        if c.input["kind"]
+        not in ("lens_review", "lens_garden", "lens_query", "lens_distill", "lens_reflect")
     ]
     warning = lens_same_judge_warning("some/model", settings, lens_cases)
     assert warning is not None and "34, 35, 36, 37, 38" in warning

@@ -9,8 +9,8 @@ into it: every foreign key in the schema either stays inside that list
 (message -> telegram_update, message -> scene, memory -> memory,
 study_card -> study_clip -> study_job, study_card -> memory,
 note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
-vault_file -> memory, lens_round -> weekly_review / lens_version,
-review_proposal -> lens_round,
+vault_file -> memory, lens_round -> weekly_review / lens_version / idle_run,
+review_proposal -> lens_round, notebook_entry -> lens_round,
 lens_gap -> lens_garden_run -> idle_run / lens_version,
 study_job -> lens_gap, study_card -> echo_changeset -> lens_gap / study_job,
 vault_file -> vault_hold) or belongs
@@ -227,6 +227,9 @@ PURGED_TABLES = (
     # selector's own words about this user's week and notes; the ids
     # point at lens_note, lens_version and weekly_review, all purged in
     # this statement, and review_proposal.lens_round_id points here.
+    # L5 adds the idle reflect's rounds: lens_round.idle_run_id points at
+    # idle_run and notebook_entry.lens_round_id points here, both SET
+    # NULL and both tables purged in this same statement.
     "lens_round",
     # L3 (plan section 8): the garden's runs and gaps. A gap's titles and
     # detail are about this user's lens notes, and a run's findings

@@ -43,7 +43,15 @@ LENS_GARDEN = "lens_garden"
 # persona prompts either; see eval/scenario.py.
 LENS_QUERY = "lens_query"
 LENS_DISTILL = "lens_distill"
-INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL)
+# L5 (anchor-lens-plan.md sections 7 and 10; the L5 spec section 6): the
+# idle reflect's lens round -- selector and grounding call -- over a
+# first-pass draft of notebook changes the case supplies (`input.plan`).
+# Not a persona prompt either; see eval/scenario.py.
+LENS_REFLECT = "lens_reflect"
+INPUT_KINDS = (
+    CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL,
+    LENS_REFLECT,
+)
 # The gap kinds a lens research may be asked for (app/vault/lens.py's
 # RESEARCHABLE_KINDS; tests/test_eval_checks.py pins the two equal).
 RESEARCH_GAP_KINDS = ("missing_note", "tension", "bridge")
@@ -55,6 +63,11 @@ LENS_KINDS = ("person", "concept")
 LENS_OUTCOMES = ("grounded", "empty", "fallback")
 # The first-pass analysis keys app/core/review.py's `validate()` reads.
 ANALYSIS_KEYS = ("wins", "misses", "patterns", "intentions", "proposals")
+# L5: the draft keys app/core/notebook.py's `validate()` reads, and the
+# one kind the lens may ground (owner decision on the L5 spec's risk 2:
+# an observation is a fact about the user and is never grounded).
+PLAN_KEYS = ("add", "close", "update")
+GROUNDABLE_KIND = "open_thread"
 
 OUTBOUND_KINDS = ("morning", "evening_nag", "silence", "tick", "weekly_review")
 
@@ -96,6 +109,8 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
         _check_lens_query(raw, input_block, path)
     elif kind == LENS_DISTILL:
         _check_lens_distill(raw, input_block, path)
+    elif kind == LENS_REFLECT:
+        _check_lens_reflect(raw, input_block, path)
     elif kind == OUTBOUND:
         _require(
             input_block.get("outbound_kind") in OUTBOUND_KINDS,
@@ -266,6 +281,75 @@ def _check_lens_distill(raw: dict, input_block: dict, path: pathlib.Path) -> Non
             path,
             f"checks.{key} must be a non-negative integer",
         )
+
+
+def _check_lens_reflect(raw: dict, input_block: dict, path: pathlib.Path) -> None:
+    """A reflect lens case's own shape (L5): seeded notes as for a lens
+    case, and `input.plan`, pass 1's draft. An `update` or `close` names
+    a `setup.notebook` entry by its 1-based position (eval/scenario.py
+    resolves it to the seeded row's id). The draft must hold at least one
+    open thread -- an added one, or an update of a seeded thread --
+    since without one the lens is inactive for the run and the case
+    would measure nothing. Every title a check names must be seeded."""
+    known = _check_seeded_notes(raw, path, LENS_REFLECT)
+    plan = input_block.get("plan")
+    _require(
+        isinstance(plan, dict) and plan and set(plan) <= set(PLAN_KEYS),
+        path,
+        f"lens_reflect cases need an input.plan table with keys from {PLAN_KEYS}",
+    )
+    notebook = (raw.get("setup") or {}).get("notebook", [])
+    for key in ("update", "close"):
+        for item in plan.get(key, []):
+            position = item.get("entry") if isinstance(item, dict) else None
+            _require(
+                isinstance(position, int)
+                and not isinstance(position, bool)
+                and 1 <= position <= len(notebook),
+                path,
+                f"input.plan.{key} items name a setup.notebook entry by its 1-based `entry`",
+            )
+    for item in plan.get("add", []):
+        _require(
+            isinstance(item, dict) and isinstance(item.get("kind"), str),
+            path,
+            "input.plan.add items need a kind and a text",
+        )
+    threads = [item for item in plan.get("add", []) if item["kind"] == GROUNDABLE_KIND] + [
+        item
+        for item in plan.get("update", [])
+        if notebook[item["entry"] - 1].get("kind") == GROUNDABLE_KIND
+    ]
+    _require(
+        bool(threads),
+        path,
+        "input.plan needs an open thread (an added one or an update of a seeded one): "
+        "without one the lens is inactive",
+    )
+    checks = raw.get("checks") or {}
+    for key in ("selected_include", "grounds_include"):
+        _require(
+            set(checks.get(key, [])) <= known,
+            path,
+            f"checks.{key} names a title that is not in setup.lens",
+        )
+    outcome = checks.get("lens_outcome")
+    _require(
+        outcome is None or outcome in LENS_OUTCOMES,
+        path,
+        f"checks.lens_outcome must be one of {LENS_OUTCOMES}",
+    )
+    for key in ("text_excludes_titles", "draft_shape_kept"):
+        _require(
+            isinstance(checks.get(key, True), bool), path, f"checks.{key} must be a boolean"
+        )
+    minimum = checks.get("min_grounded")
+    _require(
+        minimum is None
+        or (isinstance(minimum, int) and not isinstance(minimum, bool) and minimum >= 0),
+        path,
+        "checks.min_grounded must be a non-negative integer",
+    )
 
 
 def _check_seeded_notes(raw: dict, path: pathlib.Path, kind: str) -> set[str]:

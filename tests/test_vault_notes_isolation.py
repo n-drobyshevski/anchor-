@@ -24,6 +24,10 @@ every module in app/, eval/ and scripts/:
   `lens_version` and `lens_read`. Its importers are named one by one --
   the sync pass and /lens -- not "the rest of app/vault/". L2 adds
   `lens_round` to what it owns, L3 `lens_garden_run` and `lens_gap`.
+  L5 adds the idle reflect's lens round (app/core/idle/reflect_lens.py)
+  as the one more importer; reflect.py, critique.py and notebook.py
+  stay refused, and the shared selector core (app/core/lens_select.py)
+  reaches no `app.vault` module at all.
 """
 
 from __future__ import annotations
@@ -99,6 +103,12 @@ ALLOWED_IMPORTERS = {
         # once the note is written. Both through this module only.
         "app/core/idle/lens_research.py",
         "app/core/echo_write.py",
+        # L5 (plan sections 7 and 10; the L5 spec sections 3 and 5): the
+        # idle reflect's lens round reads the catalog (rotation over
+        # `reflect` rounds only) and the selected bodies, and records
+        # its round. It is reflect's one door to the lens: reflect.py,
+        # critique.py and notebook.py never import this module.
+        "app/core/idle/reflect_lens.py",
     ),
 }
 
@@ -111,9 +121,16 @@ ALLOWED_IMPORTERS = {
 #
 # L4: lens research (the L4 spec section 7) is the second idle kind that
 # may: it reads the gap's seed through this module and nothing else.
+#
+# L5: the idle reflect's lens round (the L5 spec section 5) is the third,
+# alone: reflect.py itself and the rest of app/core/idle/ stay banned.
 FORBIDDEN_EXCEPTIONS = {
     "app.vault.notes_knowledge": ("app/web/mcp_core.py",),
-    "app.vault.lens": ("app/core/idle/lens_garden.py", "app/core/idle/lens_research.py"),
+    "app.vault.lens": (
+        "app/core/idle/lens_garden.py",
+        "app/core/idle/lens_research.py",
+        "app/core/idle/reflect_lens.py",
+    ),
 }
 
 # 8e plan section 8, verbatim: neither module may be imported by these.
@@ -523,3 +540,63 @@ def test_lens_research_and_echos_writer_may_reach_the_lens_module(tmp_path):
     for rel in ("app/core/idle/lens_research.py", "app/core/echo_write.py"):
         assert _import_violations(path, rel), rel
 
+
+# --- L5: the idle reflect ---
+
+
+def test_reflect_reaches_the_lens_only_through_reflect_lens(tmp_path):
+    """L5 (the L5 spec section 5): app/core/idle/reflect_lens.py may
+    import the lens module, and does; reflect.py, critique.py and
+    notebook.py are still refused (the per-scene notebook stays
+    lens-free, and critique attributes ids from app.db.models alone),
+    and the exception lifts no chunk module."""
+    tree = ast.parse((ROOT / "app/core/idle/reflect_lens.py").read_text(encoding="utf-8"))
+    assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens")
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    assert _import_violations(path, "app/core/idle/reflect_lens.py") == []
+    for rel in (
+        "app/core/idle/reflect.py",
+        "app/core/idle/critique.py",
+        "app/core/notebook.py",
+        "app/core/idle/runner.py",
+    ):
+        assert _import_violations(path, rel), rel
+    for module in ("notes_knowledge", "notes_personal"):
+        path.write_text(f"from app.vault import {module}\n")
+        assert _import_violations(path, "app/core/idle/reflect_lens.py"), module
+
+
+@pytest.mark.parametrize(
+    "rel", ["app/core/idle/reflect.py", "app/core/idle/critique.py", "app/core/notebook.py"]
+)
+def test_reflect_critique_and_the_notebook_do_not_reach_the_lens_as_written(rel):
+    """Not only refused in principle: none of the three imports the lens
+    module, the selector core or L2's lens round today."""
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    imported = _imported_modules(tree) | _attribute_uses(tree)
+    for module in ("app.vault.lens", "app.core.lens_select", "app.core.lens_review"):
+        assert not _reaches(imported, module), (rel, module)
+
+
+def test_the_selector_core_reaches_no_vault_module():
+    """L5 (the L5 spec section 1): app/core/lens_select.py is duck-typed
+    over its entries and imports only app.core.screen and
+    app.llm.provider from app/ -- never app.vault, the database, the
+    notebook, idle code or the review."""
+    tree = ast.parse((ROOT / "app/core/lens_select.py").read_text(encoding="utf-8"))
+    imported = _imported_modules(tree) | _attribute_uses(tree)
+    assert not _reaches(imported, "app.vault")
+    for module in ("app.db", "app.core.notebook", "app.core.idle", "app.core.review"):
+        assert not _reaches(imported, module), module
+    modules = {
+        name
+        for node in ast.walk(tree)
+        for name in (
+            [alias.name for alias in node.names] if isinstance(node, ast.Import)
+            else [node.module] if isinstance(node, ast.ImportFrom) and node.module
+            else []
+        )
+    }
+    own = {name for name in modules if name == "app" or name.startswith("app.")}
+    assert own == {"app.core.screen", "app.llm.provider"}, own

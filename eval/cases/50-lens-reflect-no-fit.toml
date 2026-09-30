@@ -1,0 +1,42 @@
+# The L5 spec section 6, case 50 (non-blocking): no note fits, so the
+# round is `empty`. The draft's one thread is a practical errand (a
+# passport to collect from the consulate); the lens holds a note on
+# sourdough fermentation and one on the Mohs hardness scale, neither of
+# which has anything to say about it. The selector prompt allows an
+# empty selection when no idea fits, and a clean round takes it: the
+# outcome must be `empty` and the draft stands as it was. A selector
+# that forces a note in fails `lens_outcome`, and a thread rewritten to
+# drag one in shows up in the report and the judge's reading.
+id = "50"
+title = "Рефлексия с линзой: ничего не подходит — пустой раунд"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+lens = [
+    { title = "Закваска и ферментация", kind = "concept", body = """
+Ржаная закваска -- смесь муки и воды, в которой живут дикие дрожжи и
+молочнокислые бактерии. Её кормят равными по весу частями муки и воды
+раз в сутки; при 24-26 °C она удваивается за 4-6 часов.
+""" },
+    { title = "Шкала Мооса", kind = "concept", body = """
+Фридрих Моос (1812): шкала твёрдости минералов от 1 (тальк) до 10
+(алмаз) по тому, какой минерал царапает какой. Шкала порядковая: алмаз
+твёрже корунда (9) много больше, чем в 10/9 раза.
+""" },
+]
+
+[input]
+kind = "lens_reflect"
+
+[input.plan]
+add = [
+    { kind = "open_thread", text = "Спросить, забрал ли он паспорт из консульства в четверг." },
+]
+
+[checks]
+russian = true
+lens_outcome = "empty"
+draft_shape_kept = true
+judge = ["notebook_no_new_facts"]

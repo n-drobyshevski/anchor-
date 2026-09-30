@@ -65,6 +65,15 @@ or results the user declined, send the gap back to `open`
 (`reopen_researched`). A `researched` gap is also rechecked by the
 garden like an open one: PASS or GONE resolves it.
 
+**L5: the idle reflect** (plan sections 7 and 10; the L5 spec with the
+owner's decisions). app/core/idle/reflect_lens.py, reflect's one door to
+the lens, reads the same `lens_active`, `catalog` and `bodies`, and
+writes a `reflect` round with `record_round(..., consumer="reflect",
+idle_run_id=...)`. Rotation is per consumer: `catalog(consumer=...)`
+counts `rounds_since_used` over that consumer's rounds only, so daily
+reflect rounds never age the weekly review's counts, nor the reverse.
+/lens shows each consumer's newest round (`last_round(consumer=...)`).
+
 **Who may import this module** is pinned by
 tests/test_vault_notes_isolation.py: the sync pass (app/vault/sync.py)
 writes, /lens (app/tg/lens.py) reads counts and flips the switch, and
@@ -465,10 +474,11 @@ async def record_version(session: AsyncSession) -> bool:
     return (await session.execute(stmt)).first() is not None
 
 
-# --- L2: the weekly review's round (plan section 7) ------------------------------
+# --- L2: the weekly review's round (plan section 7); L5: reflect's -----------------
 
-# ck_lens_round_consumer and ck_lens_round_outcome (migration c6d2e8a4f917).
-ROUND_CONSUMERS = ("review",)
+# ck_lens_round_consumer and ck_lens_round_outcome (migrations c6d2e8a4f917
+# and, for `reflect`, 3d3efa0cbc9a).
+ROUND_CONSUMERS = ("review", "reflect")
 ROUND_OUTCOMES = ("grounded", "empty", "fallback")
 
 # Plan section 7: a note without a frontmatter `summary` is described
@@ -484,9 +494,10 @@ class CatalogEntry:
     `SUMMARY_FALLBACK_CHARS` characters of its body, whitespace
     collapsed either way. `links` are the titles of the other lens notes
     this one links to or is linked from, sorted, never a knowledge-only
-    note's. `rounds_since_used` counts the review rounds recorded since
-    the note was last selected (0: picked in the latest round); None
-    when it never was -- the prompt says «никогда».
+    note's. `rounds_since_used` counts the rounds of the catalog's own
+    consumer (`review` or, from L5, `reflect`) recorded since that
+    consumer last selected the note (0: picked in its latest round);
+    None when it never did -- the prompt says «никогда».
     """
 
     id: int
@@ -509,7 +520,8 @@ class Body:
 
 @dataclass(frozen=True)
 class LastRound:
-    """The newest round, for /lens: when and how it ended. No text."""
+    """The newest round (of one consumer, or of any), for /lens: when and
+    how it ended. No text."""
 
     id: int
     consumer: str
@@ -538,27 +550,44 @@ async def lens_active(session: AsyncSession, settings: Settings) -> bool:
     return 1 <= await note_count(session) <= settings.LENS_CATALOG_MAX_NOTES
 
 
-async def _rounds_since_used(session: AsyncSession) -> dict[int, int]:
-    """note id -> review rounds recorded after the latest one that selected it."""
+def _check_consumer(consumer: str) -> None:
+    if consumer not in ROUND_CONSUMERS:
+        raise ValueError(f"unknown lens round consumer: {consumer!r}")
+
+
+async def _rounds_since_used(session: AsyncSession, consumer: str) -> dict[int, int]:
+    """note id -> `consumer`'s rounds recorded after the latest of its
+    rounds that selected it.
+
+    Per consumer (the L5 spec section 2): reflect runs daily and the
+    review weekly, so counting both together would let a week of
+    reflect rounds age every note the review picked, and its rotation
+    rule («не выбирали 4 раунда») would stop meaning four weeks. Each
+    consumer's rotation counts its own rounds only, both ways."""
     rows = await session.execute(
         text(
             "with picked as ("
             "  select u.note_id, max(r.id) as last_id"
             "  from lens_round as r, unnest(r.selected_note_ids) as u(note_id)"
-            "  where r.consumer = 'review'"
+            "  where r.consumer = :consumer"
             "  group by u.note_id"
             ")"
             " select p.note_id,"
             "        (select count(*) from lens_round as later"
-            "         where later.consumer = 'review' and later.id > p.last_id)"
+            "         where later.consumer = :consumer and later.id > p.last_id)"
             " from picked as p"
-        )
+        ),
+        {"consumer": consumer},
     )
     return {int(note_id): int(since) for note_id, since in rows}
 
 
-async def catalog(session: AsyncSession) -> list[CatalogEntry]:
-    """Every lens note as a catalog entry, ordered by title (then id)."""
+async def catalog(session: AsyncSession, consumer: str = "review") -> list[CatalogEntry]:
+    """Every lens note as a catalog entry, ordered by title (then id),
+    with `rounds_since_used` counted over `consumer`'s rounds only
+    (`review`, L2's default, or `reflect`). An unknown consumer raises
+    ValueError."""
+    _check_consumer(consumer)
     notes = (
         await session.execute(
             select(
@@ -582,7 +611,7 @@ async def catalog(session: AsyncSession) -> list[CatalogEntry]:
             continue
         links[src].add(by_file[dst])
         links[dst].add(by_file[src])
-    since = await _rounds_since_used(session)
+    since = await _rounds_since_used(session, consumer)
     entries = []
     for note_id, file_id, kind, title, summary, head in notes:
         described = _collapse(summary or "") or _collapse(head)[:SUMMARY_FALLBACK_CHARS]
@@ -642,6 +671,7 @@ async def record_round(
     outcome: str,
     consumer: str = "review",
     weekly_review_id: int | None = None,
+    idle_run_id: int | None = None,
 ) -> int:
     """Insert one `lens_round` row against the `lens_version` of the lens
     as it is now -- looked up by its hash, not by recency, since a lens
@@ -649,9 +679,21 @@ async def record_round(
     section 7: the round records the version it ran against; no such
     row yet: null) -- and return its id. `selected_note_ids` are stored as
     given (the caller has validated them against the catalog); an empty
-    selection is a round too. Flushes, never commits."""
-    if consumer not in ROUND_CONSUMERS:
-        raise ValueError(f"unknown lens round consumer: {consumer!r}")
+    selection is a round too. Flushes, never commits.
+
+    The link rule (`ck_lens_round_link`, L5) is checked here first, as a
+    ValueError rather than a failed flush: a `review` round never takes
+    an `idle_run_id`, a `reflect` round never a `weekly_review_id`. A
+    `reflect` round takes no rationale either (the L5 spec's deviation
+    3, owner-approved: the selector's `why` would be written from the
+    week, and no screen shows it)."""
+    _check_consumer(consumer)
+    if consumer == "review" and idle_run_id is not None:
+        raise ValueError("a review lens round has no idle run")
+    if consumer == "reflect" and weekly_review_id is not None:
+        raise ValueError("a reflect lens round has no weekly review")
+    if consumer == "reflect" and rationale is not None:
+        raise ValueError("a reflect lens round stores no rationale")
     if outcome not in ROUND_OUTCOMES:
         raise ValueError(f"unknown lens round outcome: {outcome!r}")
     current, _count = await _current_version(session)
@@ -661,6 +703,7 @@ async def record_round(
     row = LensRound(
         consumer=consumer,
         weekly_review_id=weekly_review_id,
+        idle_run_id=idle_run_id,
         lens_version_id=version_id,
         selected_note_ids=[int(i) for i in selected_note_ids],
         rationale=rationale,
@@ -693,13 +736,18 @@ async def round_rationale(session: AsyncSession, round_id: int) -> str | None:
     ).scalar_one_or_none()
 
 
-async def last_round(session: AsyncSession) -> LastRound | None:
-    """The newest round of any consumer, or None before the first."""
+async def last_round(session: AsyncSession, consumer: str | None = None) -> LastRound | None:
+    """The newest round of `consumer` (`review` or `reflect`), or of any
+    consumer when it is None; None before the first. /lens asks per
+    consumer (L5), so a daily reflect round never hides the review's
+    line."""
+    stmt = select(LensRound.id, LensRound.consumer, LensRound.outcome, LensRound.created_at)
+    if consumer is not None:
+        _check_consumer(consumer)
+        stmt = stmt.where(LensRound.consumer == consumer)
     row = (
         await session.execute(
-            select(LensRound.id, LensRound.consumer, LensRound.outcome, LensRound.created_at)
-            .order_by(LensRound.created_at.desc(), LensRound.id.desc())
-            .limit(1)
+            stmt.order_by(LensRound.created_at.desc(), LensRound.id.desc()).limit(1)
         )
     ).first()
     return None if row is None else LastRound(*row)

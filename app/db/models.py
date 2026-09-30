@@ -1539,6 +1539,16 @@ class NotebookEntry(Base):
     with this `scene_id` before calling the model again) and for
     nothing else -- ON DELETE SET NULL because purging that scene must
     never fail the notebook wipe or leave a dangling reference.
+
+    `lens_round_id` and `lens_note_ids` (L5, anchor-lens-plan.md section
+    7; migration 3d3efa0cbc9a): an entry the idle reflect rephrased on
+    the lens names the `reflect` round it came out of and the lens notes
+    it rests on. Every other write -- the per-scene notebook, the user,
+    the review, an ungrounded reflect -- leaves `'{}'` and NULL, and an
+    update clears both, since the new text no longer rests on the old
+    notes. The ids are `lens_note` ids, not a foreign key (a note that
+    leaves the lens leaves its id behind, as on `review_proposal`); the
+    round is SET NULL, never a reason to lose the entry.
     """
 
     __tablename__ = "notebook_entry"
@@ -1566,6 +1576,12 @@ class NotebookEntry(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    lens_round_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_round.id", ondelete="SET NULL")
+    )
+    lens_note_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=list, server_default=sa.text("'{}'")
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -2477,6 +2493,17 @@ class LensRound(Base):
     `weekly_review_id` is set once the review row exists (the round runs
     inside the analysis, before it is stored) and cascades with it; the
     version is SET NULL, never a reason to lose the round.
+
+    **L5** (migration 3d3efa0cbc9a): `consumer` is `review` or `reflect`
+    (the idle reflect's own round, app/core/idle/reflect_lens.py). A
+    reflect round points at its `idle_run` through `idle_run_id`, SET
+    NULL like `lens_garden_run.idle_run_id`: the round outlives idle
+    pruning, because `rounds_since_used` is counted from rounds and they
+    are the selection's audit trail. `ck_lens_round_link` keeps each
+    consumer to its own link: a review round never names an idle run, a
+    reflect round never a weekly review. A reflect round stores no
+    rationale (the L5 spec's deviation 3: it would be written from the
+    week, and no screen shows it).
     """
 
     __tablename__ = "lens_round"
@@ -2497,13 +2524,22 @@ class LensRound(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    idle_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("idle_run.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (
-        CheckConstraint("consumer in ('review')", name="ck_lens_round_consumer"),
+        CheckConstraint("consumer in ('review', 'reflect')", name="ck_lens_round_consumer"),
         CheckConstraint(
             "outcome in ('grounded', 'empty', 'fallback')", name="ck_lens_round_outcome"
         ),
+        CheckConstraint(
+            "(consumer = 'review' and idle_run_id is null) "
+            "or (consumer = 'reflect' and weekly_review_id is null)",
+            name="ck_lens_round_link",
+        ),
         Index("ix_lens_round_weekly_review_id", "weekly_review_id"),
+        Index("ix_lens_round_idle_run_id", "idle_run_id"),
     )
 
 
