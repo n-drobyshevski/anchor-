@@ -67,6 +67,13 @@ from app.db.models import (
     WeeklyReview,
     NoteChunkKnowledge,
     NoteChunkPersonal,
+    LensNote,
+    LensGap,
+    LensGardenRun,
+    LensRead,
+    LensRound,
+    LensVersion,
+    NoteLink,
     VaultFile,
     VaultHold,
     VaultStatus,
@@ -280,8 +287,18 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         )
         session.add(review)
         await session.flush()
+        # L2: the review's lens round, which the proposal names -- so the
+        # TRUNCATE must take review_proposal -> lens_round -> weekly_review
+        # in one statement.
+        lens_round = LensRound(
+            consumer="review", weekly_review_id=review.id, selected_note_ids=[1],
+            rationale="Эшби подходит к этой неделе.", outcome="grounded",
+        )
+        session.add(lens_round)
+        await session.flush()
         proposal = ReviewProposal(
-            review_id=review.id, kind="persona_note", text="меньше вопросов утром"
+            review_id=review.id, kind="persona_note", text="меньше вопросов утром",
+            lens_round_id=lens_round.id, lens_note_ids=[1],
         )
         session.add(proposal)
         await session.flush()
@@ -410,6 +427,29 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         await session.flush()
         session.add(NoteChunkPersonal(file_id=note.id, ord=0, heading="Бег", text="Бегаю по утрам в парке."))
         session.add(NoteChunkKnowledge(file_id=library.id, ord=0, heading="CCRU", text="Hyperstition."))
+        # L1: the lens -- the knowledge note kept whole, a link out of
+        # it, a version and one Claude Code read.
+        session.add(
+            LensNote(
+                vault_file_id=library.id, kind="concept", title="CCRU", body="Hyperstition.",
+                body_hash="h" * 64, chars=13,
+            )
+        )
+        session.add(NoteLink(src_file_id=library.id, unresolved_text="Land"))
+        version = LensVersion(hash="v" * 64, note_count=1)
+        session.add(version)
+        session.add(LensRead(fn="notes", rows=1))
+        await session.flush()
+        # L3: a garden run on that version, and one gap it raised.
+        garden = LensGardenRun(iso_week="2026-W40", lens_version_id=version.id, findings={"wanted": ["Land"]})
+        session.add(garden)
+        await session.flush()
+        session.add(
+            LensGap(
+                garden_run_id=garden.id, kind="missing_note", note_ids=[1], titles=["CCRU"],
+                title="Land", detail="Стоит ли завести заметку?", signature="0" * 64,
+            )
+        )
         session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 

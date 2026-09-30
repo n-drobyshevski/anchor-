@@ -84,9 +84,11 @@ from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
 from app.tg import claude as claude_ui
 from app.tg import data as data_ui
+from app.tg import garden as garden_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
+from app.tg import lens as lens_ui
 from app.tg import memory as memory_ui
 from app.tg import menu
 from app.tg import notebook as notebook_ui
@@ -146,6 +148,15 @@ PRIVACY_TEXT = (
     "разговора с тобой, никогда для поиска или исследований; знания — как справка, "
     "а при /claude library on их может искать Claude (найденное уходит в Anthropic), "
     "при /claude library write on — и менять (откат: /claude undo). "
+    "Заметки линзы при /lens code on может читать Claude Code (прочитанное уходит в Anthropic) — "
+    "вместе с тем, какие из них выбрал еженедельный разбор, но не с объяснением почему: "
+    "оно написано по твоей неделе и видно только тебе. Пока линза включена, еженедельный разбор отправляет модели "
+    "каталог линзы (названия, краткие описания или начало текста, связи) и выбранные "
+    "заметки целиком — как справочный материал. "
+    "Пока включён сад линзы, раз в неделю модели уходят названия и краткие описания "
+    "(или начало текста) заметок линзы, связи между ними и сколько у каждой связей "
+    "с заметками знаний (без их названий); его предложения при "
+    "/lens code on видит и Claude Code. "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -213,6 +224,8 @@ BOT_COMMANDS = [
     BotCommand(command="done", description="Отметить задачу сделанной"),
     # 8a (phase-8 plan section 8): the Obsidian vault's status.
     BotCommand(command="vault", description="Хранилище Obsidian"),
+    # L1 (anchor-lens-plan.md section 11): the lens and Claude Code's door.
+    BotCommand(command="lens", description="Линза и доступ Claude Code"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1186,6 +1199,28 @@ def build_router(
         await send_keyboard(message.bot, message.chat.id, text, keyboard)
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/claude]", scene_id=scene_id
+        )
+
+    @router.message(Command("lens"))
+    async def lens_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """The lens (anchor-lens-plan.md section 11): status, and
+        `/lens code on|off`, Claude Code's database door.
+
+        Telegram only, like /claude: `code on` opens a login to the
+        database, and a web chat must never be able to type it.
+        """
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        text = await lens_ui.command(sessionmaker, settings, clock, command.args)
+        await send_keyboard(message.bot, message.chat.id, text, None)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/lens]", scene_id=scene_id
         )
 
     @router.message(Command("revoke"))
@@ -2254,6 +2289,42 @@ def build_router(
             sessionmaker,
             callback.bot,
             settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("lr:"))
+    async def lens_round_why(callback: CallbackQuery) -> None:
+        """L2: `lr:w:<lens_round id>` -- a grounded review card's
+        [почему эти заметки?] (app/tg/review.py)."""
+        await review_ui.handle_why_callback(
+            sessionmaker,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith("lg:"))
+    async def lens_garden_decision(callback: CallbackQuery) -> None:
+        """L3: `lg:d:<gap id>:<epoch>` / `lg:n:<gap id>:<epoch>` -- the lens
+        garden message's «N · сделал» / «N · не нужно» (app/tg/garden.py).
+
+        Refused from the web chat, like `v:`: the garden's message is
+        only ever sent to Telegram, so a press arriving through the web
+        sink is not one the user made on that message
+        (app/web/ingress.py's BLOCKED_CALLBACK_PREFIX is the first
+        layer).
+        """
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await garden_ui.handle_callback(
+            sessionmaker,
+            callback.bot,
             clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,

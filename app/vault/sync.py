@@ -21,7 +21,13 @@
 7. **indexes knowledge notes** (phase-8 plan section 7 step 8, amended
    by the 8e plan's section 9 and this PR's own decision -- see
    `_index_notes`'s docstring for why personal notes are never
-   touched here).
+   touched here). L1 (anchor-lens-plan.md section 5) adds the lens to
+   this step: lens notes are indexed as knowledge, kept whole in the
+   lens table behind LENS_ENABLED, and the links out of every
+   knowledge and lens note are refreshed from vaultd's graph;
+8. L3 (the L3 spec's section 3) **renders the lens garden's report**:
+   the latest garden run with gaps, as one note in `Anchor/Reports/`,
+   after the index so it can never starve it (`_render_reports`).
 
 **Every write is compare-and-swap.** A create is create-only; an update
 names the hash Anchor last saw; a delete names it too. A 412 means the
@@ -75,8 +81,18 @@ from app.db.models import (
     UserState,
     VaultFile,
 )
-from app.vault import deletions, errors, frontmatter, holds, ingest, notes_knowledge, notes_text, render
-from app.vault.client import ManifestEntry, VaultClient
+from app.vault import (
+    deletions,
+    errors,
+    frontmatter,
+    holds,
+    ingest,
+    lens,
+    notes_knowledge,
+    notes_text,
+    render,
+)
+from app.vault.client import KNOWLEDGE_CLASSES, Graph, ManifestEntry, VaultClient
 from app.vault.errors import VaultError
 from app.vault.kinds import SYNC_MODES, VAULT_SYNC, sync_dedup_key
 from app.vault.status import ClientFactory, purge_pending, record_status
@@ -126,6 +142,15 @@ class PassResult:
     # scope for this PR). Not sent anywhere yet.
     indexed: int = 0
     removed: int = 0
+    # L1: lens notes stored or changed, removed, links rewritten, and
+    # whether the lens changed (a new version was recorded). Counts only.
+    lens_stored: int = 0
+    lens_removed: int = 0
+    links_rewritten: bool = False
+    lens_changed: bool = False
+    # L3: report writes an older vaultd refused (it predates Reports/).
+    # A report's creates and updates count in `created`/`updated`.
+    reports_refused: int = 0
 
     @property
     def writes(self) -> int:
@@ -218,8 +243,13 @@ async def run_vault_sync(
 
         # Step 2: snapshot `absent` *before* ingest, so a rename that
         # arrives in a single manifest is recognised (plan 7.1 case b).
+        # L3: a report the user deletes is dismissed like a journal day.
         tracked = (
-            (await session.execute(select(VaultFile).where(VaultFile.role.in_(("fact", "journal")))))
+            (
+                await session.execute(
+                    select(VaultFile).where(VaultFile.role.in_(("fact", "journal", "report")))
+                )
+            )
             .scalars()
             .all()
         )
@@ -242,7 +272,8 @@ async def run_vault_sync(
             await _record_edits(session, manifest, clock, result)
         await _render_facts(session, client, manifest, state, clock, budget, result, sync_mode=sync_mode)
         await _render_journal(session, client, manifest, state, clock, budget, result)
-        await _index_notes(session, client, manifest, state, settings, result)
+        await _index_notes(session, client, manifest, state, settings, result, clock)
+        await _render_reports(session, client, manifest, settings, clock, budget, result)
         if sync_mode:
             expired = await holds.expire_holds(session, clock)
             result.new_hold_ids = [hid for hid in result.new_hold_ids if hid not in expired]
@@ -261,7 +292,10 @@ async def run_vault_sync(
                 f"orphans={result.orphans} recorded={result.recorded} skipped={result.skipped} "
                 f"quarantined={result.quarantined} created_facts={result.created_facts} "
                 f"changed_facts={result.changed_facts} forgotten_facts={result.forgotten_facts} "
-                f"held={result.held} indexed={result.indexed} removed={result.removed}"
+                f"held={result.held} indexed={result.indexed} removed={result.removed} "
+                f"lens_stored={result.lens_stored} lens_removed={result.lens_removed} "
+                f"links={int(result.links_rewritten)} lens_changed={int(result.lens_changed)} "
+                f"reports_refused={result.reports_refused}"
             ),
         },
     )
@@ -856,6 +890,24 @@ async def _remove_knowledge_note(session: AsyncSession, row: VaultFile) -> None:
     await session.commit()
 
 
+async def _read_graph(client: VaultClient) -> Graph | None:
+    """vaultd's knowledge graph, or None when this pass must do without.
+
+    An unreachable vault stops the pass like every other request here.
+    Any other refusal (an older vaultd without the route, an answer the
+    client refuses -- say, an `outside` link that names its note) only
+    skips what the graph feeds: the links and lens summaries keep last
+    pass's values, and indexing carries on.
+    """
+    try:
+        return await client.knowledge_graph()
+    except VaultError as exc:
+        if exc.code == errors.UNAVAILABLE:
+            raise
+        logger.warning("vault graph skipped", extra={"error_code": exc.code})
+        return None
+
+
 async def _index_notes(
     session: AsyncSession,
     client: VaultClient,
@@ -863,9 +915,11 @@ async def _index_notes(
     state: UserState,
     settings: Settings,
     result: PassResult,
+    clock: Clock,
 ) -> None:
     """Step 8 (phase-8 plan section 7; indexing amended by the 8e plan's
-    section 9). **Knowledge notes only.**
+    section 9, and the lens by anchor-lens-plan.md section 5). **Knowledge
+    and lens notes only.**
 
     This PR indexes `note_class == "knowledge"` and nothing else.
     Personal notes are read by nothing here -- `app/vault/notes_personal`
@@ -877,26 +931,53 @@ async def _index_notes(
     row this PR does not create (docs/decisions.md: "index knowledge
     notes only").
 
+    **L1: lens is a kind of knowledge.** A `lens` manifest entry is
+    indexed exactly like a knowledge one, under a `knowledge` row (the
+    chunk table's composite key allows nothing else, and needs nothing
+    else: which notes are lens is the manifest's to say each pass). On
+    top of that, while LENS_ENABLED is on too, the note is kept whole in
+    the lens table, with its kind from the manifest and its summary from
+    the graph. A lens note already indexed as knowledge is fetched again
+    once, for its body, even though its hash did not move -- joining the
+    lens changes the note's class, not its file.
+
     Runs in both `mirror` and `sync` -- the caller already returned
     before this point for `off` and `status` -- because nothing here
     writes to the vault. The mirror/sync split that matters for facts
     (record vs. apply an edit) has no equivalent for a read-only index.
 
-    **Consent and the flag, checked here, not only by the caller
+    **Consent and the flags, checked here, not only by the caller
     (docs/decisions.md, "8e -- consent is checked inside the access
-    modules", extended to this step and to the flag):**
+    modules", extended to this step and to the flags):**
     - consent off: `/vault notes off` already deleted every note row
       and both chunk tables' rows for it, synchronously
-      (app/vault/consent.py). Nothing to do here.
+      (app/vault/consent.py); the lens rows and links cascade with them,
+      and consent.py deletes the garden in the same transaction (L3: the
+      cascade never reaches the garden's tables). The garden is deleted
+      here again as a floor, so no path through consent can leave it.
     - consent on, `VAULT_KNOWLEDGE_ENABLED` off: a flag turned off must
       not leave a stale index, so every existing knowledge row (and its
-      chunks) is removed, every pass, until the flag comes back on.
-    - both on: removals, then indexing, each capped and each note its
+      chunks, lens row and links) is removed, every pass, until the flag
+      comes back on, and the garden with them. The graph is not even
+      requested.
+    - both on, `LENS_ENABLED` off: the knowledge index and the links are
+      kept; every lens row and the garden are deleted, every pass.
+    - all on: removals, then indexing, each capped and each note its
       own transaction, so one bad note (invisible by the time it is
       fetched, or text that cannot survive a round trip) is skipped
-      without failing the pass or any other note in it.
+      without failing the pass or any other note in it; then the links;
+      then a lens version, if the lens changed.
+
+    **L3: aliases** come from the graph, like summaries: a note the graph
+    did not report (no graph this pass, or one truncated at vaultd's
+    cap) keeps last pass's aliases (`aliases=None`), and an alias the
+    notes mask would change is dropped, never stored -- the same floor
+    `_refresh_links` puts under unresolved link text. Tags are not
+    stored.
     """
     if not state.notes_consent:
+        await lens.delete_garden(session)
+        await session.commit()
         return
     tracked = (
         (
@@ -908,35 +989,109 @@ async def _index_notes(
         .all()
     )
     if not settings.VAULT_KNOWLEDGE_ENABLED:
+        result.lens_removed += await lens.delete_all(session)
+        await lens.delete_garden(session)
+        await lens.delete_links(session)
+        await session.commit()
         for row in tracked:
             await _remove_knowledge_note(session, row)
             result.removed += 1
         return
 
+    lens_on = settings.LENS_ENABLED
+    if not lens_on:
+        removed = await lens.delete_all(session)
+        # The garden dies with the lens (L3 spec section 4). A run can
+        # exist with no gaps, so this commits even when both counts are 0.
+        await lens.delete_garden(session)
+        await session.commit()
+        result.lens_removed += removed
+
     tracked_by_path = {row.path: row for row in tracked}
     for row in tracked:
         entry = manifest.get(row.path)
-        if entry is None or entry.scope != "note" or entry.note_class != "knowledge":
+        if entry is None or entry.scope != "note" or entry.note_class not in KNOWLEDGE_CLASSES:
             # Gone from the manifest, or reclassified away from
-            # knowledge (including to `personal` -- this PR keeps no
-            # row for that class at all).
+            # knowledge and lens (including to `personal` -- this PR
+            # keeps no row for that class at all). Its lens row and
+            # links cascade with it.
             await _remove_knowledge_note(session, row)
             result.removed += 1
             del tracked_by_path[row.path]
 
+    # Plain values, committed, by path: a per-note rollback below
+    # expires every ORM object in the session, and reading an expired
+    # row's attribute outside an awaited call is a lazy load an
+    # AsyncSession refuses -- one bad note would fail the whole pass.
+    # A row is re-read (`session.get`, awaited) only when it is written.
+    known: dict[str, tuple[int, str | None]] = {
+        path: (row.id, row.disk_sha256) for path, row in tracked_by_path.items()
+    }
+
+    graph = await _read_graph(client)
+    summaries = {node.path: node.summary for node in graph.nodes} if graph is not None else None
+    reported_aliases = (
+        {
+            node.path: tuple(alias for alias in node.aliases if not notes_text.would_mask(alias))
+            for node in graph.nodes
+        }
+        if graph is not None
+        else {}
+    )
+    in_lens = await lens.stored(session) if lens_on else {}
+    now = clock.now_utc()
+
+    def _summary(path: str, stored: lens.Stored | None) -> str | None:
+        # A note the graph did not report -- no graph this pass, or one
+        # truncated at vaultd's cap -- keeps last pass's summary.
+        if summaries is not None and path in summaries:
+            return summaries[path]
+        return stored.summary if stored is not None else None
+
+    def _aliases(path: str) -> tuple[str, ...] | None:
+        # None keeps the stored aliases (lens.store / lens.update_meta).
+        return reported_aliases.get(path)
+
     budget = _Budget(NOTES_MAX_PER_PASS)
     for path, entry in sorted(manifest.items()):
-        if entry.scope != "note" or entry.note_class != "knowledge":
+        if entry.scope != "note" or entry.note_class not in KNOWLEDGE_CLASSES:
             continue
-        row = tracked_by_path.get(path)
-        if row is not None and row.disk_sha256 == entry.sha256:
-            continue
+        tracked_row = known.get(path)
+        is_lens = lens_on and entry.note_class == "lens" and entry.lens_kind is not None
+        title = _note_title(path)
+        if tracked_row is not None and tracked_row[1] == entry.sha256:
+            file_id = tracked_row[0]
+            if is_lens and file_id in in_lens:
+                summary = _summary(path, in_lens[file_id])
+                if await lens.update_meta(
+                    session,
+                    file_id,
+                    kind=entry.lens_kind,
+                    title=title,
+                    summary=summary,
+                    now=now,
+                    aliases=_aliases(path),
+                ):
+                    await session.commit()
+                    result.lens_stored += 1
+                continue
+            if not is_lens:
+                if file_id in in_lens:
+                    # Left the lens (an `anchor: knowledge` override, a
+                    # folder rule edited), file unchanged.
+                    await lens.delete_for_file(session, file_id)
+                    await session.commit()
+                    result.lens_removed += 1
+                continue
+            # A lens note indexed before it joined the lens, or before
+            # LENS_ENABLED: fetched once more, for its whole body.
         if not budget.take():
             # A big vault bootstraps over several passes.
             break
         try:
             current = await client.get_file(path)
-            chunks = notes_text.prepare(current.content, _note_title(path))
+            chunks = notes_text.prepare(current.content, title)
+            body = notes_text.prepare_body(current.content) if is_lens else None
         except (VaultError, UnicodeError):
             # vaultd 404 (the note became invisible between this pass's
             # manifest and this fetch) or text that cannot survive a
@@ -944,16 +1099,219 @@ async def _index_notes(
             result.skipped += 1
             continue
         try:
-            if row is None:
+            if tracked_row is None:
                 row = VaultFile(path=path, role="note", note_class="knowledge")
                 session.add(row)
                 await session.flush()
-                tracked_by_path[path] = row
+            else:
+                row = await session.get(VaultFile, tracked_row[0])
+                if row is None:
+                    raise LookupError("vault_file row gone")
+            file_id = row.id
             row.disk_sha256 = current.sha256
-            await notes_knowledge.replace_chunks(session, row.id, chunks)
+            await notes_knowledge.replace_chunks(session, file_id, chunks)
+            lens_change = 0
+            if body is not None:
+                lens_change = int(
+                    await lens.store(
+                        session,
+                        file_id,
+                        kind=entry.lens_kind,
+                        title=title,
+                        summary=_summary(path, in_lens.get(file_id)),
+                        body=body,
+                        now=now,
+                        aliases=_aliases(path),
+                    )
+                )
+            elif file_id in in_lens:
+                lens_change = -(await lens.delete_for_file(session, file_id))
             await session.commit()
         except Exception:
+            # A row created in this attempt is rolled back with it and
+            # never enters `known`.
             await session.rollback()
             result.skipped += 1
             continue
+        known[path] = (file_id, current.sha256)
         result.indexed += 1
+        if lens_change > 0:
+            result.lens_stored += 1
+        elif lens_change < 0:
+            result.lens_removed += 1
+
+    if graph is not None:
+        await _refresh_links(session, graph, {path: ids[0] for path, ids in known.items()}, result)
+    if lens_on and await lens.record_version(session):
+        await session.commit()
+        result.lens_changed = True
+
+
+async def _refresh_links(
+    session: AsyncSession,
+    graph: Graph,
+    file_ids: dict[str, int],
+    result: PassResult,
+) -> None:
+    """`note_link` from the graph's edges, for sources the bot tracks
+    (`file_ids`: committed vault_file ids by path).
+
+    A source or a target not indexed yet (a bootstrap paced over several
+    passes) is left out this pass and arrives with its note. An
+    `outside` edge is stored as a bare flag: vaultd sent nothing that
+    names its note, and there is nowhere here to put a name either.
+
+    An unresolved target whose text the notes mask would change is
+    dropped, not stored: vaultd already leaves out links inside asides
+    and code, and this is the floor under it -- `note_link` never holds
+    a secret the lens body would have masked.
+
+    A graph truncated at vaultd's cap says nothing about the notes past
+    it (no node, no edge out, no edge in), so their existing rows are
+    kept as they are rather than read as "no links any more".
+    """
+    links: list[lens.Link] = []
+    for edge in graph.edges:
+        src = file_ids.get(edge.src)
+        if src is None:
+            continue
+        if edge.outside:
+            links.append(lens.Link(src_file_id=src, outside=True))
+        elif edge.unresolved is not None:
+            if notes_text.would_mask(edge.unresolved):
+                continue
+            links.append(lens.Link(src_file_id=src, unresolved_text=edge.unresolved))
+        elif edge.dst in file_ids:
+            links.append(lens.Link(src_file_id=src, dst_file_id=file_ids[edge.dst]))
+    unreported: set[int] = set()
+    if graph.truncated:
+        reported = {node.path for node in graph.nodes}
+        unreported = {file_id for path, file_id in file_ids.items() if path not in reported}
+    if await lens.replace_links(session, links, keep=unreported):
+        await session.commit()
+        result.links_rewritten = True
+
+
+# --- L3: the lens garden's report -------------------------------------------
+
+
+async def _render_reports(
+    session: AsyncSession,
+    client: VaultClient,
+    manifest: dict[str, ManifestEntry],
+    settings: Settings,
+    clock: Clock,
+    budget: _Budget,
+    result: PassResult,
+) -> None:
+    """The latest garden run with gaps, as `Anchor/Reports/Lens garden
+    <week>-<epoch>.md` (L3 spec section 3). Modelled on the journal step,
+    and run after `_index_notes`, so it can never starve the index.
+
+    - **Gated** on notes consent, `VAULT_KNOWLEDGE_ENABLED` and
+      `LENS_ENABLED`, like everything the lens feeds. Turning one off
+      stops the writing and leaves existing files where they are, until
+      /delete (whose purge takes `Reports/` too). The garden's own flag
+      is not a gate here: it gates new runs and their spend, and a run
+      that exists may still be shown.
+    - **Only the latest run with gaps** is rendered; an older report
+      keeps the content it last had.
+    - **Create-only, then compare-and-swap** on `render_digest`: a status
+      that changed (a tap in Telegram) rewrites the note once. A hand
+      edit makes the row `diverged` and it is never touched again; a
+      412 on the create makes it `quarantined`/`NAME_TAKEN`; a report
+      the user deletes is dismissed by `deletions` (sync mode) and never
+      recreated. The row is committed before its create, as for a
+      journal day, so a crash between the two leaves a row to reconcile.
+    - **`REFUSED`** is what an older vaultd, deployed before
+      `Reports/` was writable, answers. It is caught and counted
+      (`reports_refused`) rather than let through to the pass's handler,
+      which would roll back the whole pass. A row just created for a
+      refused create is removed again, so nothing (the Telegram header
+      included, which shows the path only once the row exists and is
+      `ok`) takes the note as written.
+
+    The note is never read back: `FACT_PATH_RE` is `Anchor/Memory/` only,
+    and nothing else here ingests an Anchor file.
+
+    Consent and the epoch are read here, not from the pass's `UserState`
+    row: a per-note rollback in `_index_notes` expires that row, and an
+    AsyncSession refuses the lazy load reading it would take.
+    """
+    if not (settings.VAULT_KNOWLEDGE_ENABLED and settings.LENS_ENABLED):
+        return
+    consented, epoch = (
+        await session.execute(select(UserState.notes_consent, UserState.vault_epoch))
+    ).one()
+    if not consented:
+        return
+    data = await lens.report_data(session)
+    if data is None:
+        return
+    path = lens.report_path(data.iso_week, epoch)
+    rendered = render.render_report(data, epoch)
+    row = (
+        await session.execute(select(VaultFile).where(VaultFile.path == path))
+    ).scalar_one_or_none()
+    if row is not None and (row.role != "report" or row.state != "ok"):
+        return
+    entry = manifest.get(path)
+    if row is not None and entry is not None:
+        if row.disk_sha256 is None:
+            # Created by a pass that crashed before recording it.
+            row.disk_sha256 = entry.sha256
+            row.render_digest = None
+            await session.commit()
+        elif entry.sha256 != row.disk_sha256:
+            # Edited by hand: Echo never touches it again (as a journal day).
+            row.state = "diverged"
+            row.updated_at = clock.now_utc()
+            await session.commit()
+            return
+    if row is not None and row.render_digest == rendered.digest:
+        return
+    if budget.left <= 0:
+        return
+    if row is None:
+        row = VaultFile(path=path, role="report")
+        session.add(row)
+        await session.commit()
+    if row.disk_sha256 is None:
+        budget.take()
+        try:
+            new_sha = await client.put_file(row.path, rendered.content, None)
+        except VaultError as exc:
+            if exc.code == errors.REFUSED:
+                await session.delete(row)
+                await session.commit()
+                result.reports_refused += 1
+                return
+            if exc.code != errors.CONFLICT:
+                raise
+            row.state, row.reason = "quarantined", NAME_TAKEN
+            await session.commit()
+            result.quarantined += 1
+            return
+        _written(row, new_sha, rendered.digest, clock)
+        await session.commit()
+        result.created += 1
+        return
+    if entry is None:
+        # Deleted by the user: `deletions` dismisses it in sync mode;
+        # mirror leaves it.
+        result.skipped += 1
+        return
+    budget.take()
+    try:
+        new_sha = await client.put_file(row.path, rendered.content, row.disk_sha256)
+    except VaultError as exc:
+        if exc.code == errors.REFUSED:
+            result.reports_refused += 1
+            return
+        if exc.code != errors.CONFLICT:
+            raise
+        result.skipped += 1
+        return
+    _written(row, new_sha, rendered.digest, clock)
+    await session.commit()
+    result.updated += 1

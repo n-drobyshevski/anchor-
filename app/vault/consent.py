@@ -3,8 +3,11 @@
 While `user_state.notes_consent` is false, nothing of either class is
 indexed or retrieved. Turning it off deletes everything derived from
 notes: every `role='note'` file row, which cascades to both chunk
-tables through their composite keys. It is one transaction, so there
-is never a moment with consent off and chunks still present. /delete
+tables through their composite keys, and to the lens notes and links.
+L3: the garden's runs and gaps hold lens titles but no key to a file,
+so the cascade never reaches them; `lens.delete_garden` removes them
+in the same transaction. It is one transaction, so there is never a
+moment with consent off and chunks, lens notes or gaps still present. /delete
 resets the flag too (purge.reset_values), so a wipe cannot be undone by
 the next pass re-reading the same classified notes.
 
@@ -25,6 +28,7 @@ from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import UserState, VaultFile
+from app.vault import lens
 
 
 async def set_notes_consent(session: AsyncSession, on: bool) -> int:
@@ -34,5 +38,6 @@ async def set_notes_consent(session: AsyncSession, on: bool) -> int:
     if not on:
         result = await session.execute(delete(VaultFile).where(VaultFile.role == "note"))
         deleted = result.rowcount or 0
+        await lens.delete_garden(session)
     await session.commit()
     return deleted

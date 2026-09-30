@@ -24,8 +24,11 @@ read them. There are two layers:
 Still allowed: Railway `get-logs`, deployments, status, metrics,
 traces (logs never carry message text, see `app/log.py`), local tests
 and eval against a throwaway local database, and the `debug.*` views.
+One content door is open on purpose, and only while you open it: lens
+notes, through the `anchor_lens` role ("Lens notes" below).
 
-**Phase 8: the Obsidian vault is off limits too.** It holds the same
+**Phase 8: the Obsidian vault is off limits too**, except lens notes
+through the `anchor_lens` role (L1, below). It holds the same
 data as the database, as files. Claude never reads it and never
 connects Obsidian tools to it: no Obsidian MCP server, no Local REST
 API, no `ob` against the real vault. The vault service's logs, like the
@@ -98,6 +101,188 @@ The vault views (8a, migration `b8d24f6e0a17`) carry no path, no hash,
 no hold payload and no chunk text. They have their own grant, because
 `9e4b2c7a1f05`'s `GRANT ... ON ALL TABLES` covered only the views that
 existed when it ran.
+
+## Lens notes (L1)
+
+`anchor-lens-plan.md` §11. The one exception to "the vault is off
+limits": **lens notes**, the knowledge notes the user marked
+`anchor: lens` or keeps under `lens_folders` (docs/vault-setup.md), may
+be read by Claude Code, so that a session changing Echo's
+self-improvement knows what Echo is told. Nothing else in the vault,
+and no other class. Since L2 the door also returns, through
+`lens.rounds(n)`, which notes each weekly review round picked and how
+the round ended. Never the selector's rationale: it is model text
+written from the analysis of the user's week, so it is derived from
+the conversations and stays with the user (the Telegram card's
+«почему эти заметки?»). Neither `lens.rounds(n)` nor
+`debug.lens_round` carries it.
+
+Since L3 it also returns, through `lens.gaps(n)`, the weekly **lens
+garden**'s proposals: links, missing notes, tensions and bridges in
+the lens. Unlike the rationale, their text is safe to show here: the
+model that wrote it saw lens notes only (titles, catalog summaries,
+lens links, counts of knowledge neighbours and the deterministic
+step's findings; never a whole body -- the start of one stands in for
+a missing summary, as in the L2 catalog -- nor knowledge titles,
+dialogs or memory), which is what `lens.notes()` and `lens.graph()`
+already expose. A test pins that input. Their status is `open`,
+`done`, `dismissed` or `closed`: a gap resolved by the next run's
+recheck reads as `closed`, like one L4 has researched, so that a
+resolved missing note does not tell Claude Code that a note with that
+title now exists (it may be a knowledge note Claude Code may not see).
+The word alone would still say it, so a closed missing note also comes
+back without its proposed title and detail. And like `lens.rounds(n)`,
+`lens.gaps(n)` forgets a note that has left the lens: `titles` are the
+current titles (that note skipped), and a gap any of whose notes has
+left comes back without title and detail, which may name it.
+
+**What the role can do.** Migration `e4c7a2d9b1f3` creates
+`anchor_lens` `NOLOGIN`, the same way `anchor_debug` is created, and a
+`lens` schema of `SECURITY DEFINER` functions (two in L1; L2's
+migration adds `lens.rounds(n)`, L3's `b3e9f5a1c7d2` adds
+`lens.gaps(n)`). The role has `EXECUTE` on those and
+nothing else: no `public` table, no `debug`
+view, not even `lens_note` itself.
+
+| Function | Returns |
+|---|---|
+| `lens.notes()` | `id, kind (person, concept), title, summary, body, chars, updated_at`, one row per lens note |
+| `lens.graph()` | `src_title, dst_title, unresolved`: links between lens notes, and the targets of lens notes' links that name no note. Never a knowledge-only note, never a link to a note the bot may not see |
+| `lens.rounds(n)` | `id, consumer, outcome, created_at, titles`: the last `n` (at most 50) rounds in which Echo chose lens notes (L2: the weekly review), newest first, with the current titles of the notes it chose (a note no longer in the lens is skipped) |
+| `lens.gaps(n)` | `id, week, kind, status, titles, title, detail, reopened, created_at, decided_at`: the last `n` (at most 50) gaps the lens garden proposed (L3), newest first. `kind` is link, missing_note, tension or bridge; `titles` are the current titles of its lens notes (a note no longer in the lens is skipped), `title` a missing note's proposed title; `status` is open, done, dismissed or closed (never `resolved`, and no `resolved_at`). `title` and `detail` are null for a closed missing_note and for a gap one of whose notes has left the lens |
+
+Each call inserts one `lens_read` row (function name, row count, time)
+before it returns. That row lives in the caller's transaction, so a
+client that rolls back (`begin; ... rollback`, a savepoint) takes the
+row back with it. It cannot take back the row's id: each call takes it
+first from `lens_read`'s sequence, and a sequence never rolls back. A
+rolled-back read therefore leaves a gap in `lens_read.id`, and `/lens`
+reports every gap as «Чтений без записи: N» (the daily digest too,
+once a recorded read follows it). The count of recorded reads is exact
+for a client that commits, which plain `psql -c` does; the gaps are how
+a client that does not is still seen. One false gap is possible: a
+Postgres crash can make a sequence skip ahead, and the `/lens` line
+names that as the other cause.
+
+The notes exist only while notes consent, `VAULT_KNOWLEDGE_ENABLED`
+and `LENS_ENABLED` are all on. The sync pass deletes them when any one
+is off: `lens.notes()` and `lens.graph()` then return nothing, and
+`lens.rounds(n)` still lists past rounds (id, outcome, time) with empty
+`titles`, since a round is review history, not a note. The garden's
+runs and gaps go with the notes (turning notes consent off deletes them
+at once, and a flag off on the next pass), so `lens.gaps(n)` then
+returns nothing. `/delete` erases the rounds and the garden too.
+
+### One-time setup
+
+1. Deploy, so the migration runs. It creates `anchor_lens` as
+   `NOLOGIN` and grants it what it needs. If the migrating user may not
+   create roles, the migration skips the role with a NOTICE (and the
+   grants with it). Then create it by hand, as a user that may:
+
+   ```sql
+   CREATE ROLE anchor_lens NOLOGIN;
+   GRANT CONNECT ON DATABASE railway TO anchor_lens;
+   GRANT USAGE ON SCHEMA lens TO anchor_lens;
+   GRANT EXECUTE ON FUNCTION lens.notes(), lens.graph(), lens.rounds(int), lens.gaps(int) TO anchor_lens;
+   ```
+2. Give it a password, and nothing more: the role stays `NOLOGIN`
+   until you open it in step 5. In the Railway Postgres service, open *Data →
+   Query* (or `railway connect Postgres` from your own terminal, not
+   from Claude):
+
+   ```sql
+   ALTER ROLE anchor_lens PASSWORD '<a long random password, not the debug one>';
+   ```
+
+3. Build the URL exactly like the debug one, from the **public** TCP
+   proxy (host and port from `DATABASE_PUBLIC_URL`):
+
+   ```
+   postgresql://anchor_lens:<password>@<proxy-host>:<port>/railway
+   ```
+
+4. Put it in the Claude Code environment as `ANCHOR_LENS_DATABASE_URL`,
+   next to `ANCHOR_DEBUG_DATABASE_URL`. The guard hook allows it the way
+   it allows the debug URL; it still blocks `DATABASE_URL`, the admin
+   URL and literal Railway URLs.
+5. When you want Claude Code to read the lens: `/lens code on` in
+   Telegram (or `ALTER ROLE anchor_lens LOGIN;` by hand, if the bot may
+   not alter roles). Until then the URL does not log in.
+
+### Your switch: `/lens code on|off`
+
+The password stays set; the switch is `LOGIN`.
+
+- `/lens code on`: `ALTER ROLE anchor_lens LOGIN`.
+- `/lens code off`: `ALTER ROLE anchor_lens NOLOGIN`, and
+  `pg_terminate_backend` for every session the role already has open.
+- `/lens` shows whether the lens is on, how many notes it holds (people
+  and concepts), a warning above `LENS_CATALOG_MAX_NOTES`, whether
+  Claude Code may log in, how many reads there were today, and any read
+  whose record was rolled back (above), and «Последний разбор: <date>,
+  <outcome>» for the weekly review's last lens round (L2), and «Сад:
+  <date>, открыто N» for the lens garden (L3).
+
+**Upgrading an existing role (L3).** If `anchor_lens` already existed
+when `b3e9f5a1c7d2` ran, the migration granted it `lens.gaps(int)`
+itself. If the migrating user could not, grant it by hand:
+`GRANT EXECUTE ON FUNCTION lens.gaps(int) TO anchor_lens;`.
+
+If the bot's database user may not alter the role (no `CREATEROLE`), or
+the role does not exist, the command says so and points here. Any other
+database error (a lock timeout, a dropped connection) is reported as
+such: nothing changed, try again. Then do
+it by hand in *Data → Query*: `ALTER ROLE anchor_lens LOGIN;` or
+`ALTER ROLE anchor_lens NOLOGIN;` followed by
+`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'anchor_lens';`.
+
+**The daily digest** (the one that reports `search_library` searches)
+gains a line when there were reads: «Claude Code прочитал линзу: N
+раз», counted over the 24 hours up to the digest's own time (21:00), so
+a read later that evening is in the next day's digest rather than in
+none. It is sent even with `CLAUDE_ACCESS_ENABLED` off, as long as
+`LENS_ENABLED` is on, or the role may log in, or there was a read.
+
+### Queries Claude can run
+
+```sh
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, kind, title, chars from lens.notes()"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select title, body from lens.notes() where id = 12"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select * from lens.graph()"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, outcome, created_at, titles from lens.rounds(10)"
+psql "$ANCHOR_LENS_DATABASE_URL" -c "select id, week, kind, status, titles, title, detail from lens.gaps(20)"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_gap order by id desc limit 20"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_garden_run order by id desc limit 5"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_round order by created_at desc limit 10"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select * from debug.lens_read order by at desc limit 20"
+```
+
+Read only what the task needs: every call is a row the user sees
+counted. Use plain `-c` (autocommit); a call inside a transaction you
+roll back is still reported, as a read without a record. `debug.lens_note`, `debug.note_link`, `debug.lens_version` and
+`debug.lens_read` carry ids, hashes, lengths, booleans and counts only:
+no title, summary, body or link text. `debug.lens_round` (L2) has every
+column but the selector's rationale. L2 also adds `debug.review_proposal`
+(new in L2): ids, kind, status, times, `lens_round_id`, `lens_note_ids`
+and `text_len`, never the proposal's text or reason. The titles are
+read through `lens.rounds(n)`, a logged read like the other two. The
+rationale is read by no role Claude Code has: only the user sees it,
+in Telegram. L3 adds `debug.lens_gap` (ids, kind, note ids, status with
+`resolved` and `researched` shown as `closed`, reopened, creation and
+decision times, whether it was sent, and the detail's length; never
+its titles, title, detail, recheck payload or signature, since a hash
+of a few short titles can be guessed) and `debug.lens_garden_run`
+(every column but `findings`); `debug.lens_note` gains `alias_count`.
+The gaps' text is read through `lens.gaps(n)`, logged like the rest.
+
+### Lens text stays in the session
+
+The CLAUDE.md rule: lens text never leaves the session. Not in commits,
+PR text, code comments, test fixtures, eval cases, logs or artifacts.
+Paraphrase the idea from public knowledge ("Ashby's requisite
+variety") and cite the note by its `lens.notes()` id. Tests and eval
+use synthetic lens notes, as they use synthetic dialogs.
 
 ## Adding a table
 

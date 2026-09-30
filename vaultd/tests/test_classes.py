@@ -146,6 +146,32 @@ INVALID_SETTINGS = {
     "unclosed fence": "---\nanchor: settings\n",
     "not utf-8": b"---\nanchor: settings\nknowledge_folders: [\xff]\n---\n",
     "python tag": "---\nanchor: !!python/name:os.system settings\n---\n",
+    # Lens keys (lens plan section 3): the same entry rules, and every
+    # person folder inside some lens folder.
+    "lens folders is a string": settings(extra="lens_folders: Lens\n"),
+    "lens entry dot segment": settings(extra="lens_folders: [Lens/.hidden]\n"),
+    "lens person folders is null": settings(extra="lens_folders: [Lens]\nlens_person_folders:\n"),
+    "lens person without lens folders": settings(extra="lens_person_folders: [Lens/People]\n"),
+    "lens person outside every lens folder": settings(
+        extra="lens_folders: [Lens]\nlens_person_folders: [People]\n"
+    ),
+    "lens person above its lens folder": settings(
+        extra="lens_folders: [Lens/People]\nlens_person_folders: [Lens]\n"
+    ),
+    "lens person sharing only a prefix": settings(
+        extra="lens_folders: [Lens]\nlens_person_folders: [Lenses/People]\n"
+    ),
+    "lens person in another case": settings(extra="lens_folders: [Lens]\nlens_person_folders: [lens/People]\n"),
+    "lens key typo": settings(extra="lens_folder: [Lens]\n"),
+    # A lens folder under a stricter folder rule would be silently empty.
+    "lens folder inside a knowledge folder": settings(
+        knowledge="[Library]", extra="lens_folders: [Library/Lens]\n"
+    ),
+    "lens folder equal to a knowledge folder": settings(knowledge="[Lens]", extra="lens_folders: [Lens]\n"),
+    "lens folder inside a personal folder": settings(personal="[Life]", extra="lens_folders: [Life/Lens]\n"),
+    "lens folder inside a never folder, other case": settings(
+        never="[life]", extra="lens_folders: [Life/Lens]\n"
+    ),
 }
 
 
@@ -367,3 +393,150 @@ def test_the_shipped_template_is_a_valid_settings_file() -> None:
     rules = classes.parse_settings(template.read_bytes())
     assert rules.state == "ok"
     assert rules.never == (("life", "diary"),)
+
+
+# -- the lens class (lens plan section 3) ---------------------------------------
+
+LENS_RULES = classes.parse_settings(
+    settings(
+        "[Library]",
+        "[Life]",
+        "[Life/Diary]",
+        extra="lens_folders: [Lens]\nlens_person_folders: [Lens/People]\n",
+    ).encode()
+)
+
+# never > personal > knowledge > lens, in every (property x folder) pair.
+# (property, folder of the note, expected class, conflict, lens kind)
+LENS_PAIRS = [
+    (None, "Lens", "lens", False, "concept"),
+    (None, "Lens/Sub", "lens", False, "concept"),
+    (None, "Lens/People", "lens", False, "person"),
+    (None, "Lens/People/Deep", "lens", False, "person"),
+    # (A lens folder inside a stricter folder is invalid settings, INVALID_SETTINGS.)
+    ("lens", "Elsewhere", "lens", False, "concept"),
+    ("lens", "Lens", "lens", False, "concept"),
+    ("lens", "Lens/People", "lens", False, "person"),
+    ("lens", "Library", "knowledge", True, None),
+    ("lens", "Library/Sub", "knowledge", True, None),
+    ("lens", "Life", "personal", True, None),
+    ("lens", "Life/Sub", "personal", True, None),
+    ("lens", "Life/Diary", None, True, None),
+    # A stricter property inside a lens folder: excludes the note, no conflict.
+    ("knowledge", "Lens", "knowledge", False, None),
+    ("knowledge", "Lens/People", "knowledge", False, None),
+    ("personal", "Lens", "personal", False, None),
+    ("read", "Lens", "personal", False, None),
+    ("never", "Lens", None, False, None),
+    ("never", "Lens/People", None, False, None),
+    ("knowledge", "Elsewhere", "knowledge", False, None),
+]
+
+
+@pytest.mark.parametrize(("prop", "folder", "expected", "conflict", "kind"), LENS_PAIRS)
+def test_lens_is_the_least_strict_class(prop, folder, expected, conflict, kind) -> None:
+    assert LENS_RULES.state == "ok"
+    mark = frontmatter.note_mark(note(prop).encode())
+    resolved = classes.effective_class(f"{folder}/Заметка.md", mark, LENS_RULES)
+    assert resolved.note_class == expected
+    assert resolved.conflict == conflict
+    assert resolved.lens_kind == kind
+
+
+def test_lens_needs_no_settings_file_when_the_note_says_so() -> None:
+    resolved = classes.effective_class("Anywhere/Ashby.md", "lens", classes.SETTINGS_ABSENT)
+    assert resolved == classes.Resolution("lens", lens_kind="concept")
+
+
+def test_lens_rules_hide_everything_when_the_settings_are_invalid() -> None:
+    rules = classes.parse_settings(settings(extra="lens_folders: [Lens]\nlens_person_folders: [People]\n").encode())
+    assert rules is classes.SETTINGS_INVALID
+    for mark in ("lens", "knowledge", "none"):
+        assert classes.effective_class("Lens/x.md", mark, rules).note_class is None
+
+
+def test_a_person_folder_may_equal_its_lens_folder() -> None:
+    rules = classes.parse_settings(settings(extra="lens_folders: [People]\nlens_person_folders: [People]\n").encode())
+    assert rules.state == "ok"
+    assert classes.effective_class("People/Fisher.md", "none", rules).lens_kind == "person"
+
+
+def test_lens_folders_match_by_segment_and_nfc() -> None:
+    nfc = unicodedata.normalize("NFC", "Линза/Люди")
+    nfd = unicodedata.normalize("NFD", "Линза/Люди")
+    rules = classes.parse_settings(
+        settings(extra=f"lens_folders: [{nfc.split('/')[0]}]\nlens_person_folders: [{nfd}]\n").encode()
+    )
+    assert rules.state == "ok"
+    assert classes.effective_class(f"{nfd}/Фишер.md", "none", rules).lens_kind == "person"
+    assert classes.effective_class(f"{nfc}/Фишер.md", "none", rules).lens_kind == "person"
+    assert classes.effective_class("Линза/Кибернетика.md", "none", rules).lens_kind == "concept"
+    assert classes.effective_class("Линзаx/Кибернетика.md", "none", rules).note_class is None
+    # The readable classes match exactly; only never-rules ignore case.
+    assert classes.effective_class("линза/x.md", "none", rules).note_class is None
+
+
+def test_lens_kind_helper_reads_only_the_person_rules() -> None:
+    assert classes.lens_kind("Lens/People/Fisher.md", LENS_RULES) == "person"
+    assert classes.lens_kind("Lens/Cybernetics.md", LENS_RULES) == "concept"
+    assert classes.lens_kind("Lens/Peoples/x.md", LENS_RULES) == "concept"
+
+
+def test_manifest_lists_lens_notes_with_their_kind(vault: Path) -> None:
+    write(
+        vault,
+        SETTINGS,
+        settings(
+            "[Library]",
+            "[Life]",
+            "[Life/Diary]",
+            extra="lens_folders: [Lens]\nlens_person_folders: [Lens/People]\n",
+        ),
+    )
+    write(vault, "Lens/Cybernetics.md", note(None))
+    write(vault, "Lens/People/Fisher.md", note(None))
+    write(vault, "Lens/Excluded.md", note("knowledge"))
+    write(vault, "Lens/Private.md", note("personal"))
+    write(vault, "Library/Marked.md", note("lens"))
+    write(vault, "Life/Diary/day.md", note("lens"))
+    write(vault, "Elsewhere/Ashby.md", note("lens"))
+    scan = Manifest(vault).scan()
+    got = [e.as_json() for e in scan.entries]
+    assert [(e["path"], e["class"], e.get("lens_kind", "-")) for e in got] == [
+        ("Elsewhere/Ashby.md", "lens", "concept"),
+        ("Lens/Cybernetics.md", "lens", "concept"),
+        ("Lens/Excluded.md", "knowledge", "-"),
+        ("Lens/People/Fisher.md", "lens", "person"),
+        ("Lens/Private.md", "personal", "-"),
+        ("Library/Marked.md", "knowledge", "-"),
+    ]
+    # Library/Marked.md and the diary note both asked for lens and lost.
+    assert scan.summary.conflict == 2
+
+
+async def test_a_lens_note_is_served_like_a_knowledge_note(client, vault: Path) -> None:
+    write(vault, SETTINGS, settings(extra="lens_folders: [Lens]\nlens_person_folders: [Lens/People]\n"))
+    write(vault, "Lens/People/Fisher.md", note(None))
+    manifest = await (await client.get("/v1/manifest", headers=AUTH)).json()
+    assert manifest["files"] == [
+        {
+            "path": "Lens/People/Fisher.md",
+            "sha256": manifest["files"][0]["sha256"],
+            "size": len(note(None).encode()),
+            "scope": "note",
+            "class": "lens",
+            "lens_kind": "person",
+        }
+    ]
+    got = await client.get("/v1/file", params={"path": "Lens/People/Fisher.md"}, headers=AUTH)
+    assert got.status == 200
+    body = await got.json()
+    assert body["class"] == "lens"
+    assert body["content"] == note(None)
+
+    # Settings that turn invalid hide it the same as any other note.
+    write(vault, SETTINGS, settings(extra="lens_folders: [Lens]\nlens_person_folders: [People]\n"))
+    hidden = await client.get("/v1/file", params={"path": "Lens/People/Fisher.md"}, headers=AUTH)
+    missing = await client.get("/v1/file", params={"path": "nope.md"}, headers=AUTH)
+    assert hidden.status == 404
+    assert await hidden.text() == await missing.text()

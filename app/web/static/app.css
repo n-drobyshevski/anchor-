@@ -151,6 +151,14 @@
   --radius: 6px;
   --radius-card: 10px;
   --radius-pill: 999px;
+  /* Density (Настройки → Оформление, lib/prefs.js): comfortable here,
+     :root[data-density="compact"] below tightens the same tokens. */
+  --pad-card: 16px;
+  --gap-stack: 14px;
+  --row-min: 56px;
+  --row-pad-y: 8px;
+  --row-stacked-pad-y: 12px;
+  --bubble-pad: 10px 12px;
   --font: "Plus Jakarta Sans", "Manrope", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", "Manrope", ui-monospace, monospace;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -189,7 +197,12 @@
   }
 }
 
+/* A theme chosen in Настройки → Оформление (lib/prefs.js) also sets
+   the native controls' scheme (scrollbars, inputs, pickers). */
+:root[data-theme="light"] { color-scheme: light; }
+
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #161917;
   --surface: #1d201e;
   --text: #c8cbc4;
@@ -218,6 +231,15 @@
   --hairline: inset 0 0 0 1px rgb(200 203 196 / .12);
   --shadow-soft: 0 0 0 transparent;
   --shadow-soft-lg: 0 6px 16px rgb(0 0 0 / .5);
+}
+
+:root[data-density="compact"] {
+  --pad-card: 12px;
+  --gap-stack: 10px;
+  --row-min: 44px;
+  --row-pad-y: 4px;
+  --row-stacked-pad-y: 8px;
+  --bubble-pad: 7px 10px;
 }
 
 * { box-sizing: border-box; }
@@ -640,7 +662,7 @@ button, input, textarea {
 }
 
 .bubble {
-  padding: 10px 12px;
+  padding: var(--bubble-pad);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 15px;
@@ -919,11 +941,11 @@ button, input, textarea {
   max-width: 42rem;
   margin: 0 auto;
   width: 100%;
-  padding: 16px;
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding: var(--pad-card);
+  padding-bottom: max(var(--pad-card), env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--gap-stack);
 }
 
 /* Память: the tab strip (a .segmented group of role=tab buttons) and
@@ -945,7 +967,7 @@ button, input, textarea {
 .memory-tab {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--gap-stack);
   min-width: 0;
 }
 
@@ -980,7 +1002,7 @@ button, input, textarea {
 .screen-column {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--gap-stack);
   min-width: 0;
 }
 
@@ -1009,7 +1031,7 @@ button, input, textarea {
   background: var(--surface);
   box-shadow: var(--hairline);
   border-radius: var(--radius-card);
-  padding: 16px;
+  padding: var(--pad-card);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1031,8 +1053,8 @@ button, input, textarea {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 8px -16px -16px;
-  padding: 8px 12px 8px 16px;
+  margin: 8px calc(-1 * var(--pad-card)) calc(-1 * var(--pad-card));
+  padding: 8px 12px 8px var(--pad-card);
   border-top: 1px solid var(--border);
   background: color-mix(in oklab, var(--muted-fill) 50%, transparent);
   border-radius: 0 0 var(--radius-card) var(--radius-card);
@@ -1048,7 +1070,7 @@ button, input, textarea {
 /* Rows inside a card, split by hairlines, flush with the card's edges. */
 .card-list {
   list-style: none;
-  margin: 0 -16px;
+  margin: 0 calc(-1 * var(--pad-card));
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1059,8 +1081,8 @@ button, input, textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 56px;
-  padding: 8px 16px;
+  min-height: var(--row-min);
+  padding: var(--row-pad-y) var(--pad-card);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1071,7 +1093,7 @@ button, input, textarea {
   align-items: stretch;
   justify-content: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: var(--row-stacked-pad-y) var(--pad-card);
 }
 
 .row-main {
@@ -2066,4 +2088,62 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--ra
   width: 36px;
   padding-top: 2px;
   color: var(--text-muted);
+}
+
+/* ---------- Оформление (Настройки) ---------- */
+
+.appearance-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* ---------- Лимиты ----------
+   Used/limit meters: the label and the numbers on one line, a thin
+   native <progress> under them. «лимит» marks a reached cap in words,
+   never by colour alone. */
+
+.usage-meter { gap: 6px; }
+
+.usage-numbers {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.usage-reached {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--muted-fill);
+  color: var(--muted-fill-text);
+  font-family: var(--font);
+  font-size: 12px;
+}
+
+.usage-model {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.usage-days > summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+
+.usage-days[open] > summary { margin-bottom: 4px; }
+
+.usage-day-split {
+  display: block;
+  font-size: 12px;
+}
+
+.chart-cap {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  shape-rendering: crispEdges;
 }

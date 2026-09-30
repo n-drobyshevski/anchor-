@@ -316,3 +316,152 @@ async def test_undo_changeset_parses_counts(stub) -> None:
     result = await _client(stub).undo_changeset("chg1")
     assert result.restored == 2
     assert result.refused == 1
+
+
+# --- L1: the lens class and the graph (anchor-lens-plan.md sections 3-4) ------
+
+
+async def test_a_lens_entry_carries_its_kind(stub) -> None:
+    stub.respond(
+        "GET",
+        "/v1/manifest",
+        200,
+        {
+            "files": [
+                {**NOTE, "path": "Lens/Beer.md", "class": "lens", "lens_kind": "person"},
+                {**NOTE, "path": "Lens/Variety.md", "class": "lens", "lens_kind": "concept"},
+                {**NOTE, "path": "Library/CCRU.md", "class": "knowledge", "lens_kind": None},
+            ],
+            "summary": SUMMARY,
+        },
+    )
+    entries = (await _client(stub).manifest()).entries
+    assert [(e.note_class, e.lens_kind) for e in entries] == [
+        ("lens", "person"),
+        ("lens", "concept"),
+        ("knowledge", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {**NOTE, "class": "lens"},
+        {**NOTE, "class": "lens", "lens_kind": "Person"},
+        {**NOTE, "class": "lens", "lens_kind": None},
+        {**NOTE, "class": "knowledge", "lens_kind": "person"},
+        {**NOTE, "class": "personal", "lens_kind": "concept"},
+    ],
+)
+async def test_a_lens_kind_where_it_does_not_belong_is_refused(stub, item) -> None:
+    stub.respond("GET", "/v1/manifest", 200, {"files": [item], "summary": SUMMARY})
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).manifest()
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def test_a_lens_file_is_accepted(stub) -> None:
+    stub.respond("GET", "/v1/file", 200, {"path": "Lens/Beer.md", "sha256": "a" * 64, "content": "x", "class": "lens"})
+    assert (await _client(stub).get_file("Lens/Beer.md")).note_class == "lens"
+
+
+async def test_the_tree_marks_lens_notes(stub) -> None:
+    stub.respond(
+        "GET",
+        "/v1/knowledge/tree",
+        200,
+        {
+            "folders": ["Lens"],
+            "notes": [
+                {"path": "Lens/Beer.md", "title": "Beer", "class": "lens"},
+                {"path": "Library/CCRU.md", "title": "CCRU", "class": "knowledge"},
+                {"path": "Library/Old.md", "title": "Old"},
+            ],
+            "truncated": False,
+        },
+    )
+    tree = await _client(stub).knowledge_tree()
+    assert [n.note_class for n in tree.notes] == ["lens", "knowledge", "knowledge"]
+
+    stub.respond(
+        "GET",
+        "/v1/knowledge/tree",
+        200,
+        {"folders": [], "notes": [{"path": "Life/X.md", "title": "X", "class": "personal"}], "truncated": False},
+    )
+    with pytest.raises(VaultError):
+        await _client(stub).knowledge_tree()
+
+
+GRAPH_NODE = {
+    "path": "Lens/Beer.md",
+    "title": "Beer",
+    "class": "lens",
+    "lens_kind": "person",
+    "aliases": ["Stafford Beer"],
+    "tags": ["cybernetics"],
+    "summary": "Management cybernetics.",
+    "chars": 120,
+}
+
+
+async def test_the_graph_parses_nodes_and_every_edge_shape(stub) -> None:
+    stub.respond(
+        "GET",
+        "/v1/knowledge/graph",
+        200,
+        {
+            "nodes": [
+                GRAPH_NODE,
+                {
+                    "path": "Library/CCRU.md", "title": "CCRU", "class": "knowledge", "lens_kind": None,
+                    "aliases": [], "tags": [], "summary": "x" * 400, "chars": 5,
+                },
+            ],
+            "edges": [
+                {"src": "Lens/Beer.md", "dst": "Library/CCRU.md"},
+                {"src": "Lens/Beer.md", "unresolved": "Viable system model"},
+                {"src": "Library/CCRU.md", "outside": True},
+            ],
+            "truncated": True,
+        },
+    )
+    graph = await _client(stub).knowledge_graph()
+    beer, ccru = graph.nodes
+    assert (beer.note_class, beer.lens_kind, beer.aliases, beer.tags) == (
+        "lens", "person", ("Stafford Beer",), ("cybernetics",),
+    )
+    assert ccru.lens_kind is None and len(ccru.summary) == client_module.GRAPH_SUMMARY_MAX_CHARS
+    assert [(e.dst, e.unresolved, e.outside) for e in graph.edges] == [
+        ("Library/CCRU.md", None, False),
+        (None, "Viable system model", False),
+        (None, None, True),
+    ]
+    assert graph.truncated is True
+    assert stub.requests[-1].authorization == f"Bearer {TOKEN}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # An outside link that names its note is refused whole.
+        {"nodes": [], "edges": [{"src": "a.md", "outside": True, "dst": "Life/Private.md"}], "truncated": False},
+        {"nodes": [], "edges": [{"src": "a.md", "outside": True, "unresolved": "Private"}], "truncated": False},
+        {"nodes": [], "edges": [{"src": "a.md", "outside": True, "title": "Private"}], "truncated": False},
+        {"nodes": [], "edges": [{"src": "a.md", "outside": False}], "truncated": False},
+        # Exactly one target.
+        {"nodes": [], "edges": [{"src": "a.md"}], "truncated": False},
+        {"nodes": [], "edges": [{"src": "a.md", "dst": "b.md", "unresolved": "b"}], "truncated": False},
+        # Only knowledge and lens nodes, lens with a kind.
+        {"nodes": [{**GRAPH_NODE, "class": "personal", "lens_kind": None}], "edges": [], "truncated": False},
+        {"nodes": [{**GRAPH_NODE, "lens_kind": None}], "edges": [], "truncated": False},
+        {"nodes": [{**GRAPH_NODE, "aliases": "Stafford Beer"}], "edges": [], "truncated": False},
+        {"nodes": [{**GRAPH_NODE, "chars": -1}], "edges": [], "truncated": False},
+        {"nodes": [], "edges": []},
+    ],
+)
+async def test_a_malformed_or_revealing_graph_is_refused(stub, body) -> None:
+    stub.respond("GET", "/v1/knowledge/graph", 200, body)
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).knowledge_graph()
+    assert exc.value.code == errors.BAD_RESPONSE

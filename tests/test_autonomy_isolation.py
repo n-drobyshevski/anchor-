@@ -48,6 +48,8 @@ MODULES = [
     # Phase 5 (spec 2026-09-25): the debt queue and scarce attention.
     pathlib.Path("app/core/obligations.py"),
     pathlib.Path("app/core/attention.py"),
+    # L2 (anchor-lens-plan.md section 7): the review's lens round.
+    pathlib.Path("app/core/lens_review.py"),
 ]
 
 # Reason strings are part of the data so a failure explains itself --
@@ -373,6 +375,10 @@ OWN_TABLE_WRITES: dict[str, set[str]] = {
     # ALLOWED_USER_STATE_COLUMNS["attention.py"] names.
     "obligations.py": {"Obligation"},
     "attention.py": {"UserState"},
+    # L2: lens_review.py writes no table of its own -- its `lens_round`
+    # row goes through app/vault/lens.py and its ledger rows through
+    # review.py's record_spend, under the review's own category.
+    "lens_review.py": set(),
 }
 
 # Names a write call might be imported under -- this repo's own

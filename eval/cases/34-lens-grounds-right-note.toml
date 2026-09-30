@@ -1,0 +1,66 @@
+# anchor-lens-plan.md sections 7 and 12, L2 (non-blocking). The weekly
+# review's lens round, first property: a proposal rests on the note that
+# actually fits the week. The week's pattern is one reply template for
+# every situation, which is Ashby's law of requisite variety almost word
+# for word; Goodhart and Zeigarnik are plausible neighbours that fit
+# worse. The round must end `grounded`, and some surviving proposal must
+# name the Ashby note in its grounds.
+#
+# `input.analysis` stands in for the first pass (app/core/review.py's
+# `analyze_week` output), as case 22's `review_note` does: the lens calls
+# see only that, never the week input. eval/scenario.py's `first_pass`
+# refuses the case if review.validate() would trim any of it.
+#
+# The notes are synthetic, written from public knowledge -- never from
+# the user's lens (plan section 11).
+id = "34"
+title = "Линза: предложение опирается на подходящую заметку (Эшби)"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+lens = [
+    { title = "Закон необходимого разнообразия (Эшби)", kind = "concept", summary = "Регулятор справляется, только если разнообразие его ответов не меньше разнообразия ситуаций.", body = """
+У. Росс Эшби, «Введение в кибернетику» (1956). Регулятор может удерживать
+систему в нужных пределах, только если разнообразие его ответов не меньше
+разнообразия возмущений: «только разнообразие может поглотить
+разнообразие». Если на разные ситуации отвечать одним и тем же способом,
+часть ситуаций остаётся без регулирования. Два пути: расширить набор
+ответов регулятора или сузить разнообразие того, что приходится
+регулировать.
+""" },
+    { title = "Закон Гудхарта", kind = "concept", body = """
+Чарльз Гудхарт (1975), в формулировке Мэрилин Стратерн: когда показатель
+становится целью, он перестаёт быть хорошим показателем. Люди начинают
+оптимизировать саму метрику, а не то, что она должна была измерять.
+""" },
+    { title = "Эффект Зейгарник", kind = "concept", body = """
+Блюма Зейгарник (1927): незавершённые задачи вспоминаются лучше
+завершённых. Незакрытое дело продолжает занимать внимание; записанный
+следующий шаг это напряжение заметно снижает.
+""" },
+]
+lens_links = [["Закон необходимого разнообразия (Эшби)", "Закон Гудхарта"]]
+
+[input]
+kind = "lens_review"
+
+[input.analysis]
+wins = ["Четыре чек-ина из пяти", "Отчёт отправлен в пятницу, как договаривались"]
+misses = ["Во вторник и в четверг пользователь ответил «не то» на напоминание"]
+patterns = [
+    "Echo отвечал одним шаблоном — «какое следующее действие?» — и на усталость, и на успех, и на вопрос",
+    "После шаблонных ответов пользователь отвечал реже и короче",
+]
+intentions = ["Подбирать ответ под ситуацию, а не под шаблон"]
+proposals = [
+    { kind = "persona_note", text = "Реже спрашивать про следующее действие", reason = "Дважды за неделю ответ был «не то»" },
+]
+
+[checks]
+russian = true
+lens_outcome = "grounded"
+grounds_include = ["Закон необходимого разнообразия (Эшби)"]
+min_proposals = 1
+judge = ["lens_fit", "lens_not_attributed"]

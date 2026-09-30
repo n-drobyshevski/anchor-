@@ -143,6 +143,7 @@ from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.tg import research as research_ui
 from app.tg import vault as vault_ui
+from app.tg import garden as garden_ui
 from app.tg import claude as claude_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
@@ -634,6 +635,11 @@ async def process_one_job(
         # section 8), through app/tg/vault.py.
         if outcome.vault_pass_result is not None and bot is not None:
             await _send_vault_pass_updates(sessionmaker, bot, settings, clock, outcome.vault_pass_result)
+            # L3 (spec section 2): the lens garden's one message per run,
+            # after the pass that wrote its report note -- a sibling of
+            # the hook above, not part of it, so neither can stop the
+            # other. It retries an unsent run on every pass.
+            await _send_garden_cards(sessionmaker, bot, settings, clock)
 
     return True
 
@@ -719,6 +725,22 @@ async def _send_vault_pass_updates(
         await vault_ui.send_pass_updates(sessionmaker, bot, settings, clock, result)
     except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
         logger.warning("vault pass send failed", extra={"event": type(exc).__name__})
+
+
+async def _send_garden_cards(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+) -> None:
+    """The lens garden's message, if a run is waiting and nothing holds it
+    (L3, app/tg/garden.py). A failure is logged by type only and never
+    fails the pass: the job is already done, and the run stays unsent
+    for the next minute's pass."""
+    try:
+        await garden_ui.send_pending(sessionmaker, bot, settings, clock)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning("lens garden send failed", extra={"event": type(exc).__name__})
 
 
 async def _send_amendment_result(
@@ -842,8 +864,8 @@ async def _heartbeat_loop(
             # C3: the library's once-a-day digest, same cadence and same
             # "not inside heartbeat()" reasoning as every sweep above --
             # see app/core/scheduler.py's maybe_enqueue_library_digest
-            # for the extra gate (CLAUDE_ACCESS_ENABLED,
-            # CLAUDE_LIBRARY_DIGEST_TIME) this one alone checks.
+            # for the extra gate (CLAUDE_ACCESS_ENABLED, LENS_ENABLED or
+            # the lens door, CLAUDE_LIBRARY_DIGEST_TIME) this one alone checks.
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_library_digest(session, settings, clock, state.timezone)

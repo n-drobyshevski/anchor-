@@ -69,7 +69,7 @@ from app.core.quiet import clamp as clamp_quiet
 from app.core.spend import today_by_category, today_usd
 from app.core.state import get_state
 from app.tg import proposals as proposals_ui
-from app.web import ingress
+from app.web import claude_write, ingress, oauth_store
 from app.web.hub import WebHub
 from app.web.http import _cookie_settings, _json, _rate_limited, _read_body, _session_token_valid
 from app.web.ratelimit import WebRateLimiter, pending_web_count, MAX_PENDING_WEB_ROWS
@@ -135,19 +135,24 @@ async def _build_state_dto(session, settings, clock) -> dict:
             "intensity_min": commands_core.INTENSITY_MIN,
             "intensity_max": commands_core.INTENSITY_MAX,
         },
-        "claude_write_limits": await _claude_limits_dto(session, settings),
+        "claude_write_limits": await _claude_limits_dto(session, settings, clock),
         "claude_counters_reset_at": (
             _iso(await write_limits.counters_reset_at(session)) if settings.CLAUDE_ACCESS_ENABLED else None
         ),
     }
 
 
-async def _claude_limits_dto(session, settings) -> list[dict] | None:
+async def _claude_limits_dto(session, settings, clock) -> list[dict] | None:
     """Claude's write caps (app/core/claude_write_limits.py), or None
-    while Claude access is off -- the screen hides the section then."""
+    while Claude access is off -- the screen hides the section then.
+    `used` is the live connection's count against an hourly or daily
+    cap (app/web/claude_write.py's `usage`, the caps' own queries):
+    null for the per-changeset caps, which keep no running total, and
+    0 with no connection."""
     if not settings.CLAUDE_ACCESS_ENABLED:
         return None
     current = (await write_limits.effective(session)).as_dict()
+    used = await claude_usage(session, clock)
     return [
         {
             "key": key,
@@ -157,9 +162,19 @@ async def _claude_limits_dto(session, settings) -> list[dict] | None:
             "min": spec.min,
             "max": spec.max,
             "unit": "bytes" if key == "bytes_per_day" else "count",
+            "used": used.get(key),
         }
         for key, spec in write_limits.SPECS.items()
     ]
+
+
+async def claude_usage(session, clock) -> dict[str, int]:
+    """Counts against Claude's hourly and daily caps for the live
+    connection; every countable key at 0 when nothing is connected."""
+    connection = await oauth_store.current_connection(session, clock)
+    if connection is None:
+        return dict.fromkeys(claude_write.USAGE_KEYS, 0)
+    return await claude_write.usage(session, clock, connection.id)
 
 
 async def _expire_proposal_in_txn(session, clock, field: str) -> proposal_core.Proposal | None:

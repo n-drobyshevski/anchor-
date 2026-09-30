@@ -58,7 +58,9 @@ from app.web.hub import WebHub
 # (app/tg/grok.py), which must only ever be shown in Telegram. `claude`
 # joins it because `/claude connect <code>` *approves* an OAuth
 # connection (app/tg/claude.py): Telegram is the only approval channel.
-BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude"})
+# `lens` joins it for the same reason: `/lens code on` opens a database
+# login for Claude Code (app/tg/lens.py, anchor-lens-plan.md section 11).
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude", "lens"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather
@@ -73,9 +75,11 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # accepting a rule or a mass forget is Telegram's alone (phase-8 plan
 # section 8), and hold messages are never sent to the web chat. `cw:`
 # is `/claude limits`' +/- keyboard, which only ever exists in Telegram
-# (the web app edits the same caps through its own card). A tuple,
+# (the web app edits the same caps through its own card). `lg:` is the
+# lens garden message's «сделал» / «не нужно» (app/tg/garden.py, L3):
+# that message is only ever sent to Telegram, like a hold's. A tuple,
 # because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:")
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:")
 
 
 class BlockedCommand(Exception):

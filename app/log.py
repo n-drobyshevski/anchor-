@@ -124,6 +124,16 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # cookie or client id.
     "connection_id",
     "request_id",
+    # L2: the weekly review's lens round id only (app/vault/lens.py) --
+    # its outcome goes under "event" and its note count under "count";
+    # never a note title, body or the selector's why.
+    "lens_round_id",
+    # L3: the lens garden's run and gap ids only (app/vault/lens.py,
+    # app/core/idle/lens_garden.py, app/tg/garden.py) -- counts go under
+    # "count", outcomes under "event"; never a title, alias, detail,
+    # path, term or signature.
+    "garden_run_id",
+    "gap_id",
 )
 
 

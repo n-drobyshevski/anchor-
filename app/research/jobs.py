@@ -170,6 +170,12 @@ async def _quota_used(session: AsyncSession, kind: str, local_date) -> int:
     return result.scalar_one()
 
 
+async def used_today(session: AsyncSession, local_date) -> dict[str, int]:
+    """Today's `/study` jobs and `/read` reads: the counts the two quotas
+    (RESEARCH_JOBS_PER_DAY, RESEARCH_READS_PER_DAY) check, for display."""
+    return {STUDY: await _quota_used(session, STUDY, local_date), READ: await _read_quota_used(session, local_date)}
+
+
 async def study_quota_used(
     session: AsyncSession, settings: Settings, clock: Clock, timezone: str
 ) -> bool:

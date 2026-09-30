@@ -17,6 +17,7 @@ UTC's -- is unchanged and still tested here and in tests/test_clock.py.
 
 from __future__ import annotations
 
+import datetime
 import decimal
 from typing import NamedTuple
 
@@ -96,6 +97,47 @@ async def today_idle_usd(
         .where(IdleRun.kind == "research")
     )
     return decimal.Decimal(result.scalar_one()) + decimal.Decimal(research.scalar_one())
+
+
+class SpendHistory(NamedTuple):
+    """The last `days` local dates of spend (oldest first, every date
+    present, 0 on a quiet day), each with its per-category split, and the
+    same window's total per model."""
+
+    days: list[tuple[datetime.date, decimal.Decimal, dict[str, decimal.Decimal]]]
+    by_model: dict[str, decimal.Decimal]
+
+
+async def history(
+    session: AsyncSession, clock: Clock, timezone: str, days: int
+) -> SpendHistory:
+    """Spend per local date over the last `days` days, today included
+    (the web's Лимиты screen). Same ledger, same local dates as
+    `today_usd`, so today's bar always equals the cap check's figure."""
+    today = clock_module.local_date(clock, timezone)
+    first = today - datetime.timedelta(days=days - 1)
+    rows = await session.execute(
+        select(SpendLedger.local_date, SpendLedger.category, func.sum(SpendLedger.usd_cost))
+        .where(SpendLedger.local_date >= first, SpendLedger.local_date <= today)
+        .group_by(SpendLedger.local_date, SpendLedger.category)
+    )
+    per_day: dict[datetime.date, dict[str, decimal.Decimal]] = {}
+    for local_date, category, total in rows.all():
+        per_day.setdefault(local_date, {})[category] = decimal.Decimal(total)
+    series = []
+    for offset in range(days):
+        date = first + datetime.timedelta(days=offset)
+        categories = dict(sorted(per_day.get(date, {}).items(), key=lambda item: item[1], reverse=True))
+        series.append((date, sum(categories.values(), decimal.Decimal(0)), categories))
+
+    models = await session.execute(
+        select(SpendLedger.model, func.sum(SpendLedger.usd_cost))
+        .where(SpendLedger.local_date >= first, SpendLedger.local_date <= today)
+        .group_by(SpendLedger.model)
+        .order_by(func.sum(SpendLedger.usd_cost).desc())
+    )
+    by_model = {(model or "—"): decimal.Decimal(total) for model, total in models.all()}
+    return SpendHistory(series, by_model)
 
 
 async def check_cap(

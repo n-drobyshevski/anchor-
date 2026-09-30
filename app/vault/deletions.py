@@ -1,9 +1,9 @@
 """Deletions from the vault: forgetting facts whose files vanished (plan section 7.2).
 
 Called once per pass, in `sync` mode only, with the pre-ingest `absent`
-snapshot (tracked fact/journal rows whose path is not in the manifest,
-minus whatever ingest claimed as a rename this pass -- app/vault/
-sync.py's job, not this module's).
+snapshot (tracked fact, journal and, from L3, report rows whose path
+is not in the manifest, minus whatever ingest claimed as a rename this
+pass -- app/vault/sync.py's job, not this module's).
 
 **Grace and warmup, nothing else.** A file counts as deleted only once
 it has been missing for `limits.DELETE_GRACE_S` *and* `ob` has been
@@ -81,7 +81,9 @@ async def process_deletions(
         missing_for = (now - row.missing_since).total_seconds()
         if missing_for < limits.DELETE_GRACE_S or not warm:
             continue
-        if row.role == "journal":
+        if row.role in ("journal", "report"):
+            # A journal day or (L3) a garden report the user deleted is
+            # dismissed, never recreated, and forgets nothing.
             row.state = "dismissed"
             continue
         candidates.append(row)

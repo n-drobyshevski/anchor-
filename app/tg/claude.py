@@ -38,8 +38,10 @@ from app.core import grants
 from app.core.clock import Clock
 from app.core.clock import zone as zone_of
 from app.core.report import may_report_now
+from app.core.scheduler import lens_digest_window
 from app.core.scene import Deferred
 from app.core.state import get_state
+from app.tg import lens as lens_ui
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
 from app.tg.vault import _ru_plural
@@ -724,7 +726,12 @@ async def run_library_digest(
     `maybe_enqueue_library_digest` queues it, app/worker.py runs it.
 
     Content-free by construction: reads only `grants.library_read_count`
-    (a date and a count) and `claude_changeset` (ids, counts, times).
+    (a date and a count), `claude_changeset` (ids, counts, times) and,
+    from L1 (anchor-lens-plan.md section 11), how many times Claude Code
+    called the `lens` functions in the 24 hours up to this digest's own
+    time (app/core/scheduler.py's `lens_digest_window`, so an evening
+    read is not lost between two days; app/tg/lens.py's `digest_line`:
+    a count of `lens_read` rows).
     Titles are fetched from vaultd at digest time and sent to Telegram
     only -- never logged, never stored. Nothing that day at all --
     nothing is sent, and nothing is deferred: there is nothing to
@@ -746,7 +753,9 @@ async def run_library_digest(
         local_date + datetime.timedelta(days=1), datetime.time(0, 0), state.timezone
     )
     write_rows = await claude_write.changesets_between(session, day_start, day_end)
-    if read_count == 0 and not write_rows:
+    lens_start, lens_end = lens_digest_window(local_date, state.timezone)
+    lens_line = await lens_ui.digest_line(session, lens_start, lens_end)
+    if read_count == 0 and not write_rows and lens_line is None:
         return
     if not may_report_now(settings, clock, state):
         raise Deferred(clock.now_utc() + DIGEST_RETRY)
@@ -771,6 +780,8 @@ async def run_library_digest(
         if markers:
             lines.append(_write_digest_text(markers, refused_total, folders_total))
             keyboard = undo_all_keyboard(local_date, state.vault_epoch)
+    if lens_line is not None:
+        lines.append(lens_line)
     if not lines:
         return
     await bot.send_message(chat_id=state.chat_id, text=" ".join(lines), reply_markup=keyboard)

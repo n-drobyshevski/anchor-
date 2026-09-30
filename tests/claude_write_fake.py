@@ -220,7 +220,9 @@ async def _make_app(vault: FakeKnowledgeVault) -> web.Application:
         return web.json_response(
             {
                 "folders": tree.folders,
-                "notes": [{"path": n.path, "title": n.title} for n in tree.notes],
+                "notes": [
+                    {"path": n.path, "title": n.title, "class": n.note_class} for n in tree.notes
+                ],
                 "truncated": tree.truncated,
             }
         )

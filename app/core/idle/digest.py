@@ -21,7 +21,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
+from app.core.idle import (
+    BACKFILL,
+    CANARY,
+    CONSOLIDATE,
+    CRITIQUE,
+    LENS_GARDEN,
+    PREBRIEF,
+    REFLECT,
+    RESEARCH,
+)
 from app.db.models import IdleRun, InterestTopic
 
 WINDOW_24H = "24h"
@@ -52,6 +61,10 @@ CANARY_REGRESSION_LINE = "• ⚠️ Регрессия: кейсы {cases}"
 # imported (app/core/idle/ may never import app.tg, the isolation test's
 # own FORBIDDEN_PREFIXES).
 RESEARCH_LINE = "• Поиск: «{topic}» → {cards} {noun} (/notes)"
+# L3 (the L3 spec section 1), verbatim: the weekly lens garden's new gaps
+# and the ones its recheck resolved. Counts only; the gaps themselves are
+# in the run's Telegram message and its Obsidian report.
+LENS_GARDEN_LINE = "• Сад линзы: новых {new}, решено {resolved}"
 SKIPS_LINE = "Пропуски: {items}"
 
 _CARD_FORMS = ("карточка", "карточки", "карточек")
@@ -207,6 +220,22 @@ async def build_digest(
                 RESEARCH_LINE.format(topic=topic_text, cards=cards, noun=_card_noun(cards))
             )
 
+    # L3: one line per done garden run, newest first -- weekly, so a 7d
+    # window rarely holds two, and each is its own week. A run with
+    # nothing new still gets its line: that the garden ran and found the
+    # lens in order is the news. Not reversible (runner.py), so no button.
+    garden_runs = sorted(
+        (r for r in done if r.kind == LENS_GARDEN), key=lambda r: r.id, reverse=True
+    )
+    for run in garden_runs:
+        summary = run.summary or {}
+        lines.append(
+            LENS_GARDEN_LINE.format(
+                new=int(summary.get("new", 0) or 0),
+                resolved=int(summary.get("resolved", 0) or 0),
+            )
+        )
+
     undoable = tuple(
         r.id
         for r in sorted(done, key=lambda r: r.id, reverse=True)
@@ -233,6 +262,7 @@ __all__ = [
     "CANARY_OK_LINE",
     "CANARY_REGRESSION_LINE",
     "RESEARCH_LINE",
+    "LENS_GARDEN_LINE",
     "Digest",
     "build_digest",
 ]

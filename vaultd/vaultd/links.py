@@ -13,9 +13,10 @@ already carries an unambiguous path, is matched on basename alone, and
 the folder prefix is dropped when the link is rewritten).
 
 This module never returns a personal note's content to a caller; it is
-used only inside vaultd's rename planning (knowledge.py), which reads
-every note's bytes solely to search for links and to compute its
-class, and both stay in process.
+used inside vaultd's rename planning (knowledge.py), which reads every
+note's bytes solely to search for links and to compute its class, and
+by the graph (graph.py, lens plan section 4), which parses links only
+out of knowledge and lens notes. Both stay in process.
 """
 
 from __future__ import annotations
@@ -55,24 +56,62 @@ def _target_basename(target: str) -> str:
     return unicodedata.normalize("NFC", t)
 
 
-def _parse_inner(inner: str) -> tuple[str, str | None, str | None]:
-    """(target, heading, label), each exactly as written between the brackets."""
+def _parse_inner(inner: str) -> tuple[str, str | None, str | None, str]:
+    """(target, heading, label, separator), each exactly as written between the brackets.
+
+    Inside a Markdown table Obsidian writes the label separator as `\\|`
+    (`[[Name\\|label]]`), so the pipe does not end the cell. The
+    backslash belongs to the separator, not to the target: `Name\\`
+    would resolve to no note, and the graph would report an existing
+    hidden note as `unresolved`, by name. `rewrite` puts the separator
+    back as it was written.
+    """
     if "|" in inner:
         head, label = inner.split("|", 1)
+        separator = "|"
+        if head.endswith("\\"):
+            head, separator = head[:-1], "\\|"
     else:
-        head, label = inner, None
+        head, label, separator = inner, None, "|"
     if "#" in head:
         target, heading = head.split("#", 1)
     else:
         target, heading = head, None
-    return target, heading, label
+    return target, heading, label, separator
+
+
+def target_basename(target: str) -> str:
+    """The basename a link target resolves by: folder prefix and `.md` dropped, NFC."""
+    return _target_basename(target)
+
+
+def targets(text: str) -> Iterator[str]:
+    """Every wikilink's target in `text`, as written (heading and label dropped).
+
+    The same regex and interior parse `rewrite` uses, so the graph and a
+    rename always agree on what counts as a link. Embeds are included;
+    a same-note `[[#heading]]` has an empty target and is skipped.
+    """
+    for match in _LINK_RE.finditer(text):
+        target, _heading, _label, _separator = _parse_inner(match.group("inner"))
+        if target.strip():
+            yield target
+
+
+def same_basename(a: str, b: str) -> bool:
+    """Whether two basenames name the same note, ignoring case as Obsidian
+    (and graph.py's resolution) does."""
+    return unicodedata.normalize("NFC", a).casefold() == unicodedata.normalize("NFC", b).casefold()
 
 
 def rewrite(data: bytes, old_basename: str, new_basename: str) -> tuple[str, int]:
     """Retarget every wikilink to `old_basename`, preserving `|label` and `#heading`.
 
-    Returns the rewritten text (decoded; callers re-encode) and how many
-    links were changed. Raises UnicodeDecodeError if `data` is not UTF-8 --
+    A link matches ignoring case (`[[foo]]` finds `Foo.md`), the way
+    Obsidian and the graph resolve it; rename planning refuses when two
+    notes share a basename up to case, so this never retargets a link
+    that meant another note. Returns the rewritten text (decoded;
+    callers re-encode) and how many links were changed. Raises UnicodeDecodeError if `data` is not UTF-8 --
     callers treat that as "does not link here", since a non-UTF-8 note
     cannot hold a wikilink vaultd can read.
     """
@@ -81,15 +120,15 @@ def rewrite(data: bytes, old_basename: str, new_basename: str) -> tuple[str, int
 
     def repl(match: re.Match) -> str:
         nonlocal count
-        target, heading, label = _parse_inner(match.group("inner"))
-        if _target_basename(target) != old_basename:
+        target, heading, label, separator = _parse_inner(match.group("inner"))
+        if not same_basename(_target_basename(target), old_basename):
             return match.group(0)
         count += 1
         inner = new_basename
         if heading is not None:
             inner += "#" + heading
         if label is not None:
-            inner += "|" + label
+            inner += separator + label
         bang = match.group("bang") or ""
         return f"{bang}[[{inner}]]"
 
