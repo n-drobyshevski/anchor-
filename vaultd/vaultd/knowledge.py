@@ -189,7 +189,7 @@ def _covering_knowledge_rule(ancestor: classes.Segments, rules: classes.FolderRu
     matching rule) so a nested rule -- `knowledge_folders: [Library,
     Library/Deep]` -- roots a new folder's depth budget at whichever
     rule actually names that ancestor, not an outer one."""
-    matches = [rule for rule in rules.knowledge if classes._covers(rule, ancestor)]  # noqa: SLF001 - same package
+    matches = [rule for rule in classes.knowledge_rules(rules) if classes._covers(rule, ancestor)]  # noqa: SLF001 - same package
     return max(matches, key=len) if matches else None
 
 
@@ -351,7 +351,7 @@ def perform_put(
     if if_sha256 is not None and old_anchor != frontmatter.raw_anchor(data):
         raise Refused("reclassify")  # a write cannot reclassify -- creating a file has no "old" to preserve
 
-    stamped = provenance.apply(data, now())
+    stamped = provenance.apply(data, now(), by="claude")
     new_sha = store.put_unchecked(rel, stamped, if_sha256)
     return new_sha, pre_image
 
@@ -480,7 +480,7 @@ def perform_rename(store: Store, plan: RenamePlan, *, now: Callable[[], str] = _
     when = now()
     written_backlinks: list[tuple[str, bytes, str]] = []
     for rel, old_content, new_text in plan.backlinks:
-        stamped = provenance.apply(new_text.encode("utf-8"), when)
+        stamped = provenance.apply(new_text.encode("utf-8"), when, by="claude")
         try:
             written = store.put_unchecked(rel, stamped, sha256(old_content))
         except (Conflict, Missing, paths.Refused):

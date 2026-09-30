@@ -28,6 +28,7 @@ from app.core.idle import (
     CRITIQUE,
     IDLE_RUN,
     LENS_GARDEN,
+    LENS_RESEARCH,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -62,6 +63,9 @@ FORBIDDEN_IMPORTS = {
     "app.core.amendments": "persona amendments -- not an idle-writable table",
     "app.core.review": "the weekly review -- writes WeeklyReview/ReviewProposal",
     "app.core.cards": "research card adoption",
+    # L4 (the L4 spec sections 5 and 7): Echo writes into the vault only
+    # on the user's «в Inbox» tap, never from idle.
+    "app.core.echo_write": "Echo's inbox writes happen only on the user's tap",
     # 8e (8e plan sections 7-8): vault notes reach only the persona's
     # turn. Personal note text never reaches an idle model, in any phase;
     # knowledge note text does not in 8e either.
@@ -92,6 +96,11 @@ ALLOWED_PER_FILE = {
     # records its run and gaps, through app/vault/lens.py only. It sends
     # nothing: app/tg/garden.py delivers after the vault pass.
     "lens_garden.py": {"app.vault.lens"},
+    # L4 (plan sections 9 and 10; the L4 spec section 7): the research a
+    # garden tap asked for reads the gap's seed (its detail, its lens
+    # notes' titles and summaries) through app/vault/lens.py only. It
+    # sends nothing either: the result message is the garden hook's.
+    "lens_research.py": {"app.vault.lens"},
 }
 
 
@@ -183,25 +192,29 @@ def _violations(path: pathlib.Path) -> list[str]:
     return violations
 
 
-def test_the_lens_allowance_is_the_garden_s_alone(tmp_path):
-    """L3: `app.vault.lens` is allowed in lens_garden.py and nowhere else
-    in app/core/idle/, and the allowance lifts nothing else -- the
-    garden still may not import app.tg or a chunk module."""
+def test_the_lens_allowance_is_the_garden_s_and_lens_research_s_alone(tmp_path):
+    """L3: `app.vault.lens` is allowed in lens_garden.py and, from L4, in
+    lens_research.py, and nowhere else in app/core/idle/; the allowance
+    lifts nothing else -- neither may import app.tg, a chunk module,
+    card adoption or a state writer."""
     idle = tmp_path / "idle"
     idle.mkdir()
-    garden = idle / "lens_garden.py"
-    garden.write_text("from app.vault import lens\n", encoding="utf-8")
-    assert _violations(garden) == []
+    for name in ("lens_garden.py", "lens_research.py"):
+        allowed = idle / name
+        allowed.write_text("from app.vault import lens\n", encoding="utf-8")
+        assert _violations(allowed) == [], name
+        for source in (
+            "from app.tg import garden\n",
+            "from app.vault import notes_knowledge\n",
+            "from app.core import state\n",
+            "from app.core import cards\n",
+            "from app.core.echo_write import adopt_research\n",
+        ):
+            allowed.write_text(source, encoding="utf-8")
+            assert _violations(allowed), (name, source)
     other = idle / "research.py"
     other.write_text("from app.vault import lens\n", encoding="utf-8")
     assert _violations(other)
-    for source in (
-        "from app.tg import garden\n",
-        "from app.vault import notes_knowledge\n",
-        "from app.core import state\n",
-    ):
-        garden.write_text(source, encoding="utf-8")
-        assert _violations(garden), source
 
 
 def test_the_detector_would_actually_catch_a_violation():
@@ -262,7 +275,8 @@ def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kind", [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY, RESEARCH, LENS_GARDEN]
+    "kind",
+    [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY, RESEARCH, LENS_GARDEN, LENS_RESEARCH],
 )
 async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     """Every implemented idle kind, run through the worker's own dispatch
@@ -278,7 +292,11 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     it needs no extra assertion, only the setup to make the run do real
     (mocked-network) work. L3 adds LENS_GARDEN (the L3 spec section 8):
     it must end `done` with a gap recorded and still no Telegram call --
-    its one message is app/tg/garden.py's, after the vault pass."""
+    its one message is app/tg/garden.py's, after the vault pass. L4 adds
+    LENS_RESEARCH (the L4 spec section 2): it builds the query, searches,
+    distills and ends `done` with a lens card, and still sends nothing --
+    its result message is the garden hook's (app/worker.py), never
+    idle's."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -362,6 +380,43 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         await session.refresh(run)
         run_id = run.id
 
+    lens_job_id = None
+    if kind == LENS_RESEARCH:
+        # A researched gap and its queued job, as a tap leaves them
+        # (tests/test_lens_research_idle.py's helpers, synthetic notes).
+        from app.research import jobs as research_jobs
+        from app.vault import lens as lens_module
+        from tests.test_lens_research_idle import EPOCH, GARDEN_MESSAGE, _lens_note, _sig
+
+        async with sessionmaker() as session:
+            state = await session.get(UserState, 1)
+            state.vault_epoch = EPOCH
+            state.notes_consent = True
+            ashby = await _lens_note(session, "Ashby", "Кибернетик.")
+            beer = await _lens_note(session, "Beer", "Модель жизнеспособной системы.")
+            await session.commit()
+            record = await lens_module.record_garden(
+                session, idle_run_id=None, iso_week="2026-W39", version_id=None, findings={},
+                resolved_ids=(), reopened_ids=(),
+                new=[
+                    lens_module.NewGap(
+                        "tension", (ashby.id, beer.id), ("Ashby", "Beer"), None,
+                        "Эшби и Бир о разнообразии.", _sig("t"), {},
+                    )
+                ],
+                now=now,
+            )
+            await lens_module.mark_run_sent(session, record.run_id, GARDEN_MESSAGE, now=now)
+            [gap_id] = record.new_ids
+            assert await lens_module.request_research(
+                session, gap_id, EPOCH, now, message_id=GARDEN_MESSAGE
+            ) == "ok"
+            lens_job_id, code = await research_jobs.enqueue_lens_study(
+                session, _lens_settings(), clock, gap_id=gap_id, timezone="Europe/Paris"
+            )
+            assert code is None
+            await session.commit()
+
     bot, fake = make_bot()
     provider = FakeLLMProvider(text="Коротко: поговорили.")
     if kind == CONSOLIDATE:
@@ -371,6 +426,15 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         )
     elif kind == PREBRIEF:
         safety_text = '{"notes": ["Коротко: сегодня был спокойный день."]}'
+    elif kind == LENS_RESEARCH:
+        # One reply both calls can read: the query call takes `query`,
+        # the lens-mode distill takes `cards` (each parser ignores the
+        # other's key). The quote is a verbatim substring of the clip.
+        safety_text = (
+            '{"query": "Ashby requisite variety", "cards": [{"answers": true, '
+            '"text": "Совет со страницы.", "quote": "Спать лучше в прохладной комнате.", '
+            '"risk": "low"}]}'
+        )
     elif kind == RESEARCH:
         # research's "safety_provider" is the distill model
         # (app/core/idle/research.py's own docstring: the same one
@@ -436,7 +500,7 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
 
         monkeypatch.setattr("eval.trial.run_blocking_subset", _fake_run_blocking_subset)
 
-    if kind == RESEARCH:
+    if kind in (RESEARCH, LENS_RESEARCH):
         # run_research_job's own network seams -- see app/core/idle/
         # research.py's own docstring: the pipeline runs unchanged, so
         # this test patches the same module-level names
@@ -472,6 +536,8 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         monkeypatch.setattr("app.research.search.find_urls", _fake_find_urls)
 
     settings = Settings(RESEARCH_ENABLED=True) if kind == RESEARCH else Settings()
+    if kind == LENS_RESEARCH:
+        settings = _lens_settings()
     if kind == LENS_GARDEN:
         settings = Settings(
             LENS_GARDEN_ENABLED=True, LENS_ENABLED=True, VAULT_KNOWLEDGE_ENABLED=True,
@@ -510,10 +576,27 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             assert run.summary.get("new") == 1
             (gap,) = await lens.known_gaps(session)
             assert gap.kind == "link"
+        elif kind == LENS_RESEARCH:
+            from sqlalchemy import select
+
+            from app.db.models import StudyCard, StudyJob
+
+            run = await session.get(IdleRun, run_id)
+            assert run.summary.get("cards") == 1
+            assert (await session.get(StudyJob, lens_job_id)).status == "done"
+            [card] = (await session.execute(select(StudyCard))).scalars().all()
+            assert card.kind == "lens"
     assert calls == []
     assert fake.sent == []
     assert fake.edits == []
     assert fake.documents == []
+
+
+def _lens_settings() -> Settings:
+    return Settings(
+        RESEARCH_ENABLED=True, LENS_ENABLED=True, LENS_GARDEN_ENABLED=True, IDLE_ENABLED=True,
+        RESEARCH_JOBS_PER_DAY=5, DAILY_USD_CAP=10.0,
+    )
 
 
 # --- 6c: welfare/OOC/canned exclusion, and "summary is never text" ------

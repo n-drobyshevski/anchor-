@@ -55,6 +55,25 @@ sides**, because macOS can write a Cyrillic folder name in NFD. `Life`
 covers `Life/Diary/x.md` and not `Lifestyle/x.md`. A `never` rule also
 matches case-insensitively, so a never-rule typed in the wrong case
 still hides; the two readable classes match exactly.
+
+**`echo_inbox`** (lens L4, anchor-lens-plan.md sections 9 and 14.5;
+the L4 spec section 5) is a scalar key: the one folder Echo's own
+writer (`PUT /v1/echo/inbox`, echo.py) may create notes in. It is a
+knowledge folder like any other -- adopted research is ordinary
+knowledge until the user promotes it -- so it joins the knowledge
+rules everywhere a class is resolved (`knowledge_rules`).
+
+- **An explicit value** joins the knowledge rules *before* the nesting
+  checks, so a lens folder inside it invalidates the file exactly as a
+  lens folder inside `knowledge_folders` does. The file is also invalid
+  when the value sits under a lens, personal or never rule, or under
+  `Anchor/`: Echo's notes would be the lens, personal, invisible or the
+  bot's own, and each is a mistake the user would never see.
+- **The default, `Echo/Inbox`**, applies only in a valid file, and only
+  when it conflicts with no rule (the same tests as an explicit value);
+  otherwise there is no inbox and Echo's writes are refused. A default
+  must never invalidate the user's file.
+- **With no settings file** there is no inbox at all.
 """
 
 from __future__ import annotations
@@ -68,7 +87,7 @@ from typing import Literal
 import yaml
 
 from vaultd import frontmatter, paths
-from vaultd.config import NOTE_MAX_BYTES
+from vaultd.config import ECHO_INBOX_DEFAULT, NOTE_MAX_BYTES
 from vaultd.frontmatter import NoteMark
 
 SETTINGS_PATH = "Anchor/settings.md"
@@ -90,7 +109,10 @@ _LIST_KEYS = (
     "lens_folders",
     "lens_person_folders",
 )
-_ALLOWED_KEYS = frozenset({frontmatter.MARK_KEY, *_LIST_KEYS})
+# Lens L4: the one scalar folder key (module docstring).
+ECHO_INBOX_KEY = "echo_inbox"
+_ALLOWED_KEYS = frozenset({frontmatter.MARK_KEY, ECHO_INBOX_KEY, *_LIST_KEYS})
+_ANCHOR_TOP = "Anchor"
 
 # never > personal > knowledge > lens.
 _RANK = {"lens": 0, "knowledge": 1, "personal": 2, "never": 3}
@@ -119,6 +141,9 @@ class FolderRules:
     lens: tuple[Segments, ...] = ()
     # Each one inside some `lens` entry (parse_settings checks).
     lens_person: tuple[Segments, ...] = ()
+    # Lens L4: Echo's inbox (explicit or the default), or None when
+    # there is none. A knowledge folder too: see `knowledge_rules`.
+    echo_inbox: Segments | None = None
 
 
 SETTINGS_ABSENT = FolderRules("absent")
@@ -189,15 +214,31 @@ def parse_settings(data: bytes) -> FolderRules:
                 return SETTINGS_INVALID
             entries.append(parts)
         lists[key] = tuple(entries)
+    explicit: Segments | None = None
+    if ECHO_INBOX_KEY in loaded:
+        explicit = _folder_entry(loaded[ECHO_INBOX_KEY])
+        if explicit is None or _inbox_conflicts(explicit, lists):
+            return SETTINGS_INVALID
+    # An explicit inbox is a knowledge rule for the nesting checks below.
+    knowledge_rules_ = lists["knowledge_folders"] + ((explicit,) if explicit else ())
     for person in lists["lens_person_folders"]:
         if not any(_covers(lens, person) for lens in lists["lens_folders"]):
             return SETTINGS_INVALID
     for lens in lists["lens_folders"]:
         folded = tuple(p.casefold() for p in lens)
-        if any(_covers(rule, lens) for rule in lists["knowledge_folders"] + lists["personal_folders"]):
+        if any(_covers(rule, lens) for rule in knowledge_rules_ + lists["personal_folders"]):
             return SETTINGS_INVALID
         if any(_covers(tuple(p.casefold() for p in rule), folded) for rule in lists["never_folders"]):
             return SETTINGS_INVALID
+    inbox = explicit
+    if inbox is None:
+        default = _segments(ECHO_INBOX_DEFAULT)
+        # The default never invalidates the file: a conflict only means
+        # there is no inbox (module docstring).
+        conflict = _inbox_conflicts(default, lists) or any(
+            _covers(default, lens) for lens in lists["lens_folders"]
+        )
+        inbox = None if conflict else default
     return FolderRules(
         "ok",
         knowledge=lists["knowledge_folders"],
@@ -205,7 +246,30 @@ def parse_settings(data: bytes) -> FolderRules:
         never=tuple(tuple(p.casefold() for p in parts) for parts in lists["never_folders"]),
         lens=lists["lens_folders"],
         lens_person=lists["lens_person_folders"],
+        echo_inbox=inbox,
     )
+
+
+def _inbox_conflicts(inbox: Segments, lists: dict[str, tuple[Segments, ...]]) -> bool:
+    """An inbox under `Anchor/`, or under a lens, personal or never rule
+    (never matched case-insensitively, as everywhere). A lens folder
+    *inside* an explicit inbox is caught by the nesting checks, since the
+    inbox joins the knowledge rules first; the default checks it itself."""
+    folded = tuple(p.casefold() for p in inbox)
+    if folded[0] == _ANCHOR_TOP.casefold():
+        return True
+    if any(_covers(rule, inbox) for rule in lists["lens_folders"] + lists["personal_folders"]):
+        return True
+    return any(_covers(tuple(p.casefold() for p in rule), folded) for rule in lists["never_folders"])
+
+
+def knowledge_rules(rules: FolderRules) -> tuple[Segments, ...]:
+    """The knowledge folder rules with Echo's inbox among them (lens L4):
+    every place that resolves a folder's class, and rev. 3's folder
+    creation, reads this, never `rules.knowledge` alone."""
+    if rules.echo_inbox is None:
+        return rules.knowledge
+    return rules.knowledge + (rules.echo_inbox,)
 
 
 def load_rules(root: Path) -> FolderRules:
@@ -269,7 +333,7 @@ def _folder_class(rel: str, rules: FolderRules) -> str | None:
         return "never"
     if any(_covers(rule, folders) for rule in rules.personal):
         return "personal"
-    if any(_covers(rule, folders) for rule in rules.knowledge):
+    if any(_covers(rule, folders) for rule in knowledge_rules(rules)):
         return "knowledge"
     if any(_covers(rule, folders) for rule in rules.lens):
         return "lens"

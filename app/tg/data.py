@@ -50,9 +50,16 @@ CONFIRM_TEXT = "Удалить все данные и все резервные 
 # rather than implied. Obsidian Sync Standard keeps version history for
 # a month (Plus: a year); the user is on Standard. Shown only when a
 # vault is configured -- a vault line with no vault would be a lie too.
+# Lens L4 (the L4 spec section 7): the notes Echo wrote into the inbox
+# («в Inbox» on a research's result) are ordinary knowledge notes, the
+# user's own from then on, and /delete leaves them: it wipes vaultd's
+# undo store, so after /delete they can no longer be taken back with
+# /lens undo either. The line says so instead of promising every file.
 CONFIRM_VAULT_LINE = (
-    "Файлы Echo в хранилище тоже удалятся. Obsidian Sync хранит их "
-    "в истории версий ещё до месяца, зашифрованными."
+    "Файлы Echo в хранилище тоже удалятся, кроме заметок исследований в папке входящих Echo "
+    "(echo_inbox, по умолчанию Echo/Inbox): это обычные заметки знаний, их удаляешь ты. "
+    "Obsidian Sync хранит удалённое "
+    "в истории версий ещё до месяца, зашифрованным."
 )
 CONFIRM_YES = "Да, удалить"
 CONFIRM_NO = "Отмена"

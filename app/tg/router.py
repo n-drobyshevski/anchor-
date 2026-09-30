@@ -106,6 +106,7 @@ from app.web import oauth_store
 from app.web.hub import WebHub
 from app.vault import consent as vault_consent
 from app.vault import status as vault_status
+from app.vault.client import VaultClient
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,10 @@ PRIVACY_TEXT = (
     "(или начало текста) заметок линзы, связи между ними и сколько у каждой связей "
     "с заметками знаний (без их названий); его предложения при "
     "/lens code on видит и Claude Code. "
+    "Если нажать «исследовать» под пунктом сада, модели уходят этот пункт, названия и краткие "
+    "описания его заметок, поисковый запрос — в Exa (через OpenRouter), страницы берутся только с сайтов из "
+    "PACKET_LENS; принятое («в Inbox») становится заметкой знаний в Echo/Inbox, её можно "
+    "отменить 14 дней (/lens undo). "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -1206,7 +1211,8 @@ def build_router(
         message: Message, event_update: Update, command: CommandObject
     ) -> None:
         """The lens (anchor-lens-plan.md section 11): status, and
-        `/lens code on|off`, Claude Code's database door.
+        `/lens code on|off`, Claude Code's database door. L4: `/lens
+        undo`, Echo's newest inbox write taken back through vaultd.
 
         Telegram only, like /claude: `code on` opens a login to the
         database, and a web chat must never be able to type it.
@@ -1217,7 +1223,9 @@ def build_router(
             await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
             return
         scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
-        text = await lens_ui.command(sessionmaker, settings, clock, command.args)
+        text = await lens_ui.command(
+            sessionmaker, settings, clock, command.args, client_factory=VaultClient.from_settings
+        )
         await send_keyboard(message.bot, message.chat.id, text, None)
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/lens]", scene_id=scene_id
@@ -2312,12 +2320,17 @@ def build_router(
     async def lens_garden_decision(callback: CallbackQuery) -> None:
         """L3: `lg:d:<gap id>:<epoch>` / `lg:n:<gap id>:<epoch>` -- the lens
         garden message's «N · сделал» / «N · не нужно» (app/tg/garden.py).
+        L4: `lg:r:` «N · исследовать» (paid research, spent at the tap),
+        and on a research's result message `lg:a:` «в Inbox» (a write
+        into the user's vault) and `lg:x:` «не нужно». The settings
+        decide whether research may run; the vault client is looked up
+        per press, so a test can swap it.
 
-        Refused from the web chat, like `v:`: the garden's message is
-        only ever sent to Telegram, so a press arriving through the web
-        sink is not one the user made on that message
-        (app/web/ingress.py's BLOCKED_CALLBACK_PREFIX is the first
-        layer).
+        Refused from the web chat, like `v:`: the garden's and the
+        result's messages are only ever sent to Telegram, so a press
+        arriving through the web sink is not one the user made on that
+        message (app/web/ingress.py's BLOCKED_CALLBACK_PREFIX is the
+        first layer).
         """
         if getattr(callback.bot, "is_web_sink", False):
             await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
@@ -2326,10 +2339,13 @@ def build_router(
             sessionmaker,
             callback.bot,
             clock,
+            settings=settings,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+            message_text=getattr(callback.message, "text", None),
+            client_factory=VaultClient.from_settings,
         )
 
     @router.callback_query(F.data.startswith("p:"))

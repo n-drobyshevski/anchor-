@@ -94,7 +94,9 @@ async def today_idle_usd(
     research = await session.execute(
         select(func.coalesce(func.sum(IdleRun.usd_cost), 0))
         .where(IdleRun.local_date == local_today)
-        .where(IdleRun.kind == "research")
+        # L4: idle `lens_research` ledgers the same way (app/core/idle/
+        # lens_research.py), its query call included.
+        .where(IdleRun.kind.in_(("research", "lens_research")))
     )
     return decimal.Decimal(result.scalar_one()) + decimal.Decimal(research.scalar_one())
 

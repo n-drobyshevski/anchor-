@@ -36,7 +36,17 @@ LENS_REVIEW = "lens_review"
 # garden's step 1 and its one model call over synthetic notes the case
 # seeds. Not a persona prompt either; see eval/scenario.py.
 LENS_GARDEN = "lens_garden"
-INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN)
+# L4 (anchor-lens-plan.md section 9; the L4 spec section 8): lens
+# research's two model steps over synthetic data the case supplies --
+# the query call over a gap and its notes (`lens_query`), and the
+# lens-mode distill over one page and a question (`lens_distill`). Not
+# persona prompts either; see eval/scenario.py.
+LENS_QUERY = "lens_query"
+LENS_DISTILL = "lens_distill"
+INPUT_KINDS = (CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL)
+# The gap kinds a lens research may be asked for (app/vault/lens.py's
+# RESEARCHABLE_KINDS; tests/test_eval_checks.py pins the two equal).
+RESEARCH_GAP_KINDS = ("missing_note", "tension", "bridge")
 
 # What a lens case's `setup.lens` entries may be, and what its
 # `checks.lens_outcome` may name -- the same values the migration's
@@ -82,6 +92,10 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
         _check_lens(raw, input_block, path)
     elif kind == LENS_GARDEN:
         _check_garden(raw, path)
+    elif kind == LENS_QUERY:
+        _check_lens_query(raw, input_block, path)
+    elif kind == LENS_DISTILL:
+        _check_lens_distill(raw, input_block, path)
     elif kind == OUTBOUND:
         _require(
             input_block.get("outbound_kind") in OUTBOUND_KINDS,
@@ -181,6 +195,77 @@ def _check_garden(raw: dict, path: pathlib.Path) -> None:
         path,
         "checks.min_gaps must be a non-negative integer",
     )
+
+
+def _check_lens_query(raw: dict, input_block: dict, path: pathlib.Path) -> None:
+    """A query case's own shape (L4): seeded notes, each with the summary
+    the query call sees, and `input.gap` naming some of them -- the gap's
+    kind, one sentence of detail, a proposed title for a missing note."""
+    known = _check_seeded_notes(raw, path, LENS_QUERY)
+    for note in raw["setup"]["lens"]:
+        _require(
+            isinstance(note.get("summary"), str) and note["summary"].strip(),
+            path,
+            "lens_query cases need a summary on every setup.lens note (what the call sees)",
+        )
+    gap = input_block.get("gap")
+    _require(isinstance(gap, dict), path, "lens_query cases need an input.gap table")
+    _require(
+        gap.get("kind") in RESEARCH_GAP_KINDS,
+        path,
+        f"input.gap.kind must be one of {RESEARCH_GAP_KINDS}",
+    )
+    _require(
+        isinstance(gap.get("detail"), str) and gap["detail"].strip(),
+        path,
+        "input.gap needs a detail",
+    )
+    notes = gap.get("notes")
+    _require(
+        isinstance(notes, list) and notes and set(notes) <= known,
+        path,
+        "input.gap.notes is a non-empty list of seeded titles",
+    )
+    title = gap.get("title")
+    _require(
+        (title is None) == (gap["kind"] != "missing_note")
+        and (title is None or (isinstance(title, str) and title.strip())),
+        path,
+        "input.gap.title is set for a missing_note gap, and only for one",
+    )
+    checks = raw.get("checks") or {}
+    _require(
+        isinstance(checks.get("query_valid", True), bool),
+        path,
+        "checks.query_valid must be a boolean",
+    )
+
+
+def _check_lens_distill(raw: dict, input_block: dict, path: pathlib.Path) -> None:
+    """A distill case's own shape (L4): the question (a research query,
+    English, one line) and one page's text, as the fetcher would hand it
+    to distill."""
+    question = input_block.get("question")
+    _require(
+        isinstance(question, str) and question.strip() and "\n" not in question.strip(),
+        path,
+        "lens_distill cases need a one-line input.question",
+    )
+    _require(
+        isinstance(input_block.get("page_text"), str) and input_block["page_text"].strip(),
+        path,
+        "lens_distill cases need a non-empty input.page_text",
+    )
+    title = input_block.get("page_title")
+    _require(title is None or isinstance(title, str), path, "input.page_title must be a string")
+    checks = raw.get("checks") or {}
+    for key in ("min_cards", "max_cards"):
+        value = checks.get(key)
+        _require(
+            value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0),
+            path,
+            f"checks.{key} must be a non-negative integer",
+        )
 
 
 def _check_seeded_notes(raw: dict, path: pathlib.Path, kind: str) -> set[str]:

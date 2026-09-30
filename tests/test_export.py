@@ -265,6 +265,14 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         session.add(models.ClaudeWriteLimit(name="creates_per_day", value=5, updated_at=now))
         await session.commit()
 
+    # L4: one of Echo's inbox writes (its gap and job are SET NULL, so
+    # the row stands alone here).
+    async with sessionmaker() as session:
+        session.add(
+            models.EchoChangeset(vault_ref="echo_export_test", card_ids=[1], created_at=now, confirmed_at=now)
+        )
+        await session.commit()
+
 
 # --- contents ---
 
@@ -535,3 +543,16 @@ async def test_claude_changeset_export_has_no_text_or_path_columns():
         "created_at", "last_write_at", "undone_at",
     }
     assert not any("path" in n or "text" in n for n in names)
+
+
+async def test_echo_changeset_export_has_no_text_path_or_hash_columns():
+    """L4 (the L4 spec section 6): Echo's inbox ledger carries ids and
+    times only -- no note name, path, text or hash."""
+    from app.db.models import EchoChangeset
+
+    names = set(EchoChangeset.__table__.columns.keys())
+    assert names == {
+        "id", "vault_ref", "lens_gap_id", "study_job_id", "card_ids",
+        "created_at", "confirmed_at", "undone_at",
+    }
+    assert not any(part in n for n in names for part in ("path", "text", "name", "sha", "url"))

@@ -34,6 +34,7 @@ from app.core.idle import (
     CRITIQUE,
     IDLE_RUN,
     LENS_GARDEN,
+    LENS_RESEARCH,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -50,9 +51,12 @@ logger = logging.getLogger(__name__)
 # order itself never changed across 6a-6d. L3 puts the weekly lens
 # garden after critique and before research (the L3 spec section 1): it
 # is cheap, weekly and bounded, while research may take the day's
-# shared /study quota.
+# shared /study quota. L4 puts lens research right after the garden (the
+# L4 spec section 2): the user tapped for it and its quota is already
+# spent, while idle research would only spend what is left of it.
 PRIORITY: tuple[str, ...] = (
-    BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, LENS_GARDEN, RESEARCH, CANARY,
+    BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, LENS_GARDEN, LENS_RESEARCH, RESEARCH,
+    CANARY,
 )
 
 

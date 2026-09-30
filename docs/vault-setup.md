@@ -184,7 +184,8 @@ Two things set a class:
   or `anchor: never`, exactly, at the top level of its properties;
 - **a folder rule** in `Anchor/settings.md`. Copy
   `docs/vault/settings.md` into the vault as `Anchor/settings.md` and
-  edit the lists (section 8 adds the two lens ones). A rule covers its
+  edit the lists (section 8 adds the two lens ones, section 10 the
+  `echo_inbox` folder). A rule covers its
   folder and everything below it.
 
 When the two disagree, **the stricter class wins**: `never` beats
@@ -316,6 +317,65 @@ the vault stay until you delete them, or `/delete` removes them with
 the bot's other files in `Anchor/Memory/` and `Anchor/Journal/`. A report from before a `/delete`, re-uploaded by
 a device that was offline, has the old epoch in its name and is
 deleted, never adopted.
+
+## 10. Lens research: Echo's inbox (L4)
+
+Under a gap in the garden message you can tap «исследовать». The bot
+searches a small list of sites (`PACKET_LENS`), sends what it found as
+its own message, and «в Inbox» writes it into the vault as **one new
+knowledge note** in Echo's inbox. Nothing is written unless you tap.
+
+**Deploy the vault service first**, before you set `echo_inbox` or turn
+research on. The inbox is a new settings key, and an older vault
+service treats an `Anchor/settings.md` with a key it does not know as
+invalid, and then reads no note at all; it also has no route to write
+the note.
+Then turn on `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED`
+and `IDLE_ENABLED` on the bot.
+
+**Where the notes go: `echo_inbox`.** By default the inbox is
+`Echo/Inbox`, created on the first adoption. Set your own in
+`Anchor/settings.md`:
+
+```yaml
+echo_inbox: Research/Echo
+```
+
+- The inbox is knowledge: its notes are indexed like your other
+  knowledge notes, and `search_library` and Claude's write tools reach
+  them. Check first whether you already have an `Echo/Inbox` folder:
+  its notes without a mark become knowledge too.
+- It must not sit inside a lens, personal or `never` folder, nor under
+  `Anchor/`: the vault service rejects such a settings file. If the
+  default `Echo/Inbox` would conflict with one of your rules, there is
+  simply no inbox (the bot then says «Не получилось записать в Inbox.»)
+  and your settings stay valid; name another folder.
+- With no `Anchor/settings.md` at all there is no inbox.
+
+**What the vault service allows Echo**: a new `.md` file directly in
+the inbox, never a subfolder, never another folder, never an edit, a
+rename or a delete. The name is the proposed note's title (or «A — B»
+for a tension or a bridge); a taken name gets ` 2` up to ` 9`. The note
+must say `anchor: knowledge` and carry only `source_urls` and `gap`
+besides; the service stamps it `anchor_edited_by: echo`. Echo has its
+own limits (one file per write, 20 writes a day, 4 undos an hour), which
+Claude's limits never touch, and Claude cannot undo Echo's writes nor
+the other way round.
+
+**Undo:** `/lens undo` in Telegram removes Echo's newest note within 14
+days, unless you have edited it since (then it stays, and you delete it
+yourself if you want).
+
+**Promotion is yours, and takes two steps.** To make a note part of the
+lens, move it into a lens folder **and** change `anchor: knowledge` to
+`anchor: lens`. The mark alone does nothing (the inbox's knowledge rule
+wins over it), and so does the move alone (the note's own
+`anchor: knowledge` keeps it out). Read it first: that is the point of
+the inbox.
+
+`/delete` leaves the inbox notes where they are (they are ordinary
+knowledge notes, yours) and forgets which ones Echo wrote, so
+`/lens undo` can no longer take them back.
 
 ## Turning it off
 

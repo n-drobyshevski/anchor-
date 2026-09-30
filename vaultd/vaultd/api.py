@@ -36,12 +36,12 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, frontmatter, graph, knowledge, paths
+from vaultd import classes, echo, frontmatter, graph, knowledge, paths
 from vaultd import limits as limits_mod
-from vaultd.config import BODY_MAX_BYTES, NOTE_MAX_BYTES
+from vaultd.config import BODY_MAX_BYTES, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
 from vaultd.store import Conflict, Missing, Store
-from vaultd.undo import CapExceeded, FileEntry, UndoStore
+from vaultd.undo import CLAUDE, ECHO, WRITERS, CapExceeded, FileEntry, UndoStore
 
 logger = logging.getLogger("vaultd.api")
 
@@ -498,14 +498,76 @@ def _build_graph(store: Store) -> dict:
     return graph.build_graph(store.vault_path, rules)
 
 
+async def put_echo_inbox(request: web.Request) -> web.Response:
+    """`PUT /v1/echo/inbox` (lens L4, echo.py): Echo's one write, a new
+    knowledge note in the inbox. Body `{name, content, changeset}`; the
+    answer `{name, sha256, replayed}`, where `name` is the basename
+    vaultd chose (`name 2` .. `name 9` when taken). A refusal is the
+    same bare 403 as the knowledge routes', its reason in the log only.
+    The log line carries no name, path or content."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"name", "content", "changeset"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    name, content, changeset = body["name"], body["content"], body["changeset"]
+    if not isinstance(name, str) or not isinstance(content, str):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            replay = await asyncio.to_thread(undo_store.echo_replay, changeset)
+        except CapExceeded as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        if replay is not None:
+            rel, sha = replay
+            logger.info("echo_write", extra={"event": "echo_replayed"})
+            return web.json_response({"name": rel.rsplit("/", 1)[-1], "sha256": sha, "replayed": True})
+        try:
+            planned = await asyncio.to_thread(echo.plan, store, name, content, now=now)
+            await asyncio.to_thread(undo_store.precheck_echo, changeset)
+            rel, sha = await asyncio.to_thread(echo.perform, store, planned)
+        except (knowledge.Refused, CapExceeded) as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        except OSError:
+            return _json_error("io_error", 500)
+        if planned.new_folders:
+            await asyncio.to_thread(
+                undo_store.append_folders, changeset, "write", list(planned.new_folders), writer=ECHO
+            )
+        await asyncio.to_thread(
+            undo_store.append, changeset, "write", [FileEntry(rel, None, sha)], writer=ECHO
+        )
+    logger.info("echo_write", extra={"event": "echo_put", "count": len(planned.new_folders)})
+    return web.json_response({"name": rel.rsplit("/", 1)[-1], "sha256": sha, "replayed": False})
+
+
 async def get_changes(request: web.Request) -> web.Response:
     changes = await asyncio.to_thread(request.app[UNDO_KEY].list_changes)
     return web.json_response({"changes": changes})
 
 
 async def undo_changeset(request: web.Request) -> web.Response:
+    """`POST /v1/undo?changeset=<id>[&writer=claude|echo]`. The writer
+    (default `claude`) must be the changeset's own, in both directions
+    (lens L4: Claude's undo tool can never take back Echo's note, nor
+    `/lens undo` a Claude write), and each writer's undos count against
+    its own hourly cap: the user's `undos_per_hour` for Claude, the
+    constant `ECHO_UNDOS_PER_HOUR` for Echo."""
     changeset = request.query.get("changeset", "")
     if not _CHANGESET_RE.match(changeset):
+        return _json_error("bad_body", 400)
+    writer = request.query.get("writer", CLAUDE)
+    if writer not in WRITERS:
         return _json_error("bad_body", 400)
     store = request.app[STORE_KEY]
     undo_store = request.app[UNDO_KEY]
@@ -516,9 +578,16 @@ async def undo_changeset(request: web.Request) -> web.Response:
         if kind == "undo":
             _log_refused(request, "undo_of_undo")
             return _refused()
-        undos_per_hour = (await asyncio.to_thread(undo_store.limits.get)).undos_per_hour
-        if await asyncio.to_thread(undo_store.count_recent, "undo") >= undos_per_hour:
-            _log_refused(request, "cap_undos")
+        if await asyncio.to_thread(undo_store.writer_of, changeset) != writer:
+            _log_refused(request, "changeset_writer_mismatch")
+            return _refused()
+        if writer == ECHO:
+            undos_per_hour, cap_reason = ECHO_UNDOS_PER_HOUR, "cap_echo"
+        else:
+            undos_per_hour = (await asyncio.to_thread(undo_store.limits.get)).undos_per_hour
+            cap_reason = "cap_undos"
+        if await asyncio.to_thread(undo_store.count_recent, "undo", writer) >= undos_per_hour:
+            _log_refused(request, cap_reason)
             return _refused()
         entries = await asyncio.to_thread(undo_store.files_of, changeset)
         restored = 0
@@ -544,7 +613,7 @@ async def undo_changeset(request: web.Request) -> web.Response:
             await asyncio.to_thread(knowledge.remove_folder_if_empty, store, folder)
         if recorded:
             undo_id = undo_store.new_undo_id()
-            await asyncio.to_thread(undo_store.append, undo_id, "undo", recorded)
+            await asyncio.to_thread(undo_store.append, undo_id, "undo", recorded, writer=writer)
             await asyncio.to_thread(undo_store.mark_undone, changeset)
     logger.info("knowledge_undo", extra={"event": "knowledge_undo", "count": restored})
     return web.json_response({"restored": restored, "refused": refused})
@@ -615,6 +684,7 @@ def make_app(
     app.router.add_post("/v1/knowledge/rename", rename_knowledge)
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/knowledge/graph", get_knowledge_graph)
+    app.router.add_put("/v1/echo/inbox", put_echo_inbox)
     app.router.add_get("/v1/changes", get_changes)
     app.router.add_post("/v1/undo", undo_changeset)
     app.router.add_get("/v1/limits", get_limits)

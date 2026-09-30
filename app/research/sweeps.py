@@ -53,6 +53,25 @@ full determinism over *this* module's behaviour -- it just cannot also
 fake the moment a fixture row claims to have been created, which no
 test here needs it to.
 
+**Lens L4** (anchor-lens-plan.md section 9; the L4 spec section 4 with
+the owner's amendment (b): a lens research's result is its own Telegram
+message, sent when the job finishes). A lens card's clock starts when
+the user could first see it, not when it was distilled -- the result
+message can wait out quiet hours, a pause or the welfare cooldown:
+
+- a lens card expires `RESEARCH_CARD_TTL_DAYS` after its job's
+  `offered_at` (the result message went out);
+- a lens card never offered expires twice that long after it was
+  made, so a result that could never be sent does not wait forever;
+- a lens card whose job lost its gap (`lens_gap_id` SET NULL: the
+  garden went away) expires at once -- nothing can act on it any more.
+
+And a lens job still unfinished `LENS_STALE_DAYS` after it was queued
+fails as `stale` (app/research/jobs.py's `fail_stale_lens_jobs`): idle
+may be off, and the gap must not wait forever. The garden hook then
+sends its «ничего не нашлось» like any spent research's. Part of the
+same daily job, for the same reasons as the two sweeps above.
+
 **Logging.** app/log.py's `SAFE_EXTRA_KEYS` is the enforced allowlist;
 both functions log only `event` and `count` (ids of individual cards or
 clips are not logged, deliberately -- a list of which cards expired
@@ -65,12 +84,14 @@ from __future__ import annotations
 import datetime
 import logging
 
+from sqlalchemy import and_, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.clock import Clock
-from app.db.models import StudyCard, StudyClip
+from app.db.models import StudyCard, StudyClip, StudyJob
+from app.research import jobs as research_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +99,10 @@ logger = logging.getLogger(__name__)
 # why they share one job kind but still log distinguishably).
 EXPIRE_CARDS = "expire_cards"
 FORGET_CLIP_TEXT = "forget_clip_text"
+STALE_LENS_JOBS = "stale_lens_jobs"
+
+# L4 (module docstring): a lens card never offered gets this many TTLs.
+NEVER_OFFERED_FACTOR = 2
 
 # Plan section 4: "set study_clip.text = null 30 days after fetched_at".
 RETENTION_DAYS = 30
@@ -122,17 +147,49 @@ async def expire_cards(session: AsyncSession, settings: Settings, clock: Clock) 
     use. Idempotent by construction -- an already-`expired` card is not
     `pending` and is never matched again.
 
+    L4: a lens card follows the module docstring's three rules instead,
+    all keyed on its job (`offered_at`, `lens_gap_id`), with the same
+    strict boundaries; a /study or /read card is untouched by them.
+
     Returns the number of cards expired, for the caller to log.
     """
-    cutoff = clock.now_utc() - datetime.timedelta(days=settings.RESEARCH_CARD_TTL_DAYS)
+    now = clock.now_utc()
+    ttl = datetime.timedelta(days=settings.RESEARCH_CARD_TTL_DAYS)
+    cutoff = now - ttl
     result = await session.execute(
         sql_update(StudyCard)
         .where(StudyCard.status == "pending")
+        .where(StudyCard.kind != research_jobs.LENS_CARD)
         .where(StudyCard.created_at < cutoff)
         .values(status=_EXPIRED)
     )
+    lens_jobs = select(StudyJob.id).where(
+        or_(
+            StudyJob.lens_gap_id.is_(None),
+            StudyJob.offered_at < cutoff,
+        )
+    )
+    never_offered = select(StudyJob.id).where(
+        StudyJob.lens_gap_id.is_not(None), StudyJob.offered_at.is_(None)
+    )
+    lens_result = await session.execute(
+        sql_update(StudyCard)
+        .where(StudyCard.status == "pending")
+        .where(StudyCard.kind == research_jobs.LENS_CARD)
+        .where(
+            or_(
+                StudyCard.job_id.in_(lens_jobs),
+                and_(
+                    StudyCard.job_id.in_(never_offered),
+                    StudyCard.created_at < now - NEVER_OFFERED_FACTOR * ttl,
+                ),
+            )
+        )
+        .values(status=_EXPIRED)
+        .execution_options(synchronize_session=False)
+    )
     await session.commit()
-    count = result.rowcount or 0
+    count = (result.rowcount or 0) + (lens_result.rowcount or 0)
     logger.info("cards expired", extra={"event": EXPIRE_CARDS, "count": count})
     return count
 
@@ -182,6 +239,16 @@ async def forget_clip_text(
     return count
 
 
+async def fail_stale_lens_jobs(session: AsyncSession, clock: Clock) -> int:
+    """L4 (module docstring): every lens job unfinished
+    `LENS_STALE_DAYS` after it was queued fails as `stale`. The job
+    module owns the rule; this commits it and logs the count."""
+    count = await research_jobs.fail_stale_lens_jobs(session, clock.now_utc())
+    await session.commit()
+    logger.info("stale lens jobs failed", extra={"event": STALE_LENS_JOBS, "count": count})
+    return count
+
+
 async def run_daily_sweep(
     session: AsyncSession, settings: Settings, clock: Clock
 ) -> tuple[int, int]:
@@ -199,6 +266,9 @@ async def run_daily_sweep(
     """
     expired = await expire_cards(session, settings, clock)
     forgotten = await forget_clip_text(session, clock)
+    # L4: counted in its own log line, not in the return value, which
+    # callers (and their tests) read as the two sweeps' counts.
+    await fail_stale_lens_jobs(session, clock)
     return expired, forgotten
 
 
@@ -206,8 +276,11 @@ __all__ = [
     "EXPIRE_CARDS",
     "FORGET_CLIP_TEXT",
     "RESEARCH_SWEEP",
+    "NEVER_OFFERED_FACTOR",
     "RETENTION_DAYS",
+    "STALE_LENS_JOBS",
     "expire_cards",
+    "fail_stale_lens_jobs",
     "forget_clip_text",
     "run_daily_sweep",
 ]

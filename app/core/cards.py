@@ -29,6 +29,16 @@ looking at the column plan section 12 says is the one that must never
 be adoptable. Belt and braces, cheaply, on the one table where the
 belt matters.
 
+**A lens card is unreachable here too** (lens L4; the L4 spec section
+4). A gap-seeded lens research writes `study_card(kind='lens')` rows,
+which are adopted only into the vault's inbox, through the result
+message's «в Inbox» (app/core/echo_write.py), never into a memory.
+`pending_page` leaves them out, `get_card` returns None, and `adopt`/
+`reject` refuse them as `FORBIDDEN`, exactly as for a hidden card.
+Without this, a /notes press -- or a web `r:a:<id>` press, which
+ingress lets through for ordinary cards -- would turn a stranger's page,
+found for the lens, into a `technique` memory the persona reads.
+
 **Why `adopt`/`reject` do not call `get_card` to fetch the row.**
 `get_card` treats "hidden" and "does not exist" identically, which is
 exactly right for a user paging through cards -- plan section 9's /card
@@ -54,6 +64,11 @@ from app.db.models import StudyCard
 
 PAGE_SIZE = 5
 
+# study_card.kind of a lens research's card (app/research/jobs.py's
+# LENS_CARD; spelled out rather than imported, as this module needs
+# nothing else from the research pipeline).
+LENS_KIND = "lens"
+
 ADOPTED = "adopted"
 REJECTED = "rejected"
 ALREADY = "already"
@@ -67,16 +82,19 @@ async def pending_page(session: AsyncSession, *, page: int) -> tuple[list[StudyC
     Filtering on `status == 'pending'` is what keeps a hidden card off
     every page by construction -- there is no offset or filter flag
     that could ever surface one, unlike a "show hidden" toggle would
-    invite. Newest first (plan section 9's /notes row), unlike
+    invite. Lens cards are left out the same way (module docstring).
+    Newest first (plan section 9's /notes row), unlike
     app/tg/memory.py's oldest-first /memories: a freshly finished job's
     cards are what the user came to look at, not the oldest backlog.
     """
     total = await session.scalar(
-        select(func.count()).select_from(StudyCard).where(StudyCard.status == "pending")
+        select(func.count())
+        .select_from(StudyCard)
+        .where(StudyCard.status == "pending", StudyCard.kind != LENS_KIND)
     )
     rows = await session.execute(
         select(StudyCard)
-        .where(StudyCard.status == "pending")
+        .where(StudyCard.status == "pending", StudyCard.kind != LENS_KIND)
         .order_by(StudyCard.created_at.desc(), StudyCard.id.desc())
         .offset(page * PAGE_SIZE)
         .limit(PAGE_SIZE)
@@ -85,9 +103,10 @@ async def pending_page(session: AsyncSession, *, page: int) -> tuple[list[StudyC
 
 
 async def get_card(session: AsyncSession, card_id: int) -> StudyCard | None:
-    """A card by id, any status except `'hidden'`, which is invisible here too."""
+    """A card by id, any status except `'hidden'`, which is invisible here
+    too -- and never a lens card (module docstring)."""
     card = await session.get(StudyCard, card_id)
-    if card is None or card.status == "hidden":
+    if card is None or card.status == "hidden" or card.kind == LENS_KIND:
         return None
     return card
 
@@ -107,6 +126,10 @@ async def _refuse(session: AsyncSession, card_id: int, *, already: str) -> tuple
     if card is None:
         return None, GONE
     if card.status == "hidden" or card.risk_final == "high":
+        return None, FORBIDDEN
+    if card.kind == LENS_KIND:
+        # L4 (module docstring): adopted only into the inbox, by
+        # app/core/echo_write.py, never into a memory from here.
         return None, FORBIDDEN
     if card.status == already:
         return None, ALREADY

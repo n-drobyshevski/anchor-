@@ -28,7 +28,7 @@ from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finis
 from app.core.idle.research import pick_topic as research_pick_topic
 from app.core.spend import today_idle_usd, today_usd
 from app.db.models import IdleRun, UserState
-from app.research.jobs import study_quota_used
+from app.research.jobs import next_lens_job, study_quota_used
 
 ACTIVE_STATUSES = ("queued", "running")
 
@@ -142,6 +142,13 @@ async def load_idle_facts(
     if config_from_settings(settings).garden_enabled:
         garden = await lens_garden_gate_facts(session)
 
+    # L4: shared with app/core/idle/lens_research.py's own job, which
+    # takes the same oldest queued lens job. Queried only while lens
+    # research is switched on, as the garden's facts above.
+    lens_job_queued = False
+    if config_from_settings(settings).lens_research_enabled:
+        lens_job_queued = await next_lens_job(session) is not None
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -166,6 +173,7 @@ async def load_idle_facts(
         garden_last_version_id=garden.last_version_id if garden else None,
         garden_version_id=garden.version_id if garden else None,
         garden_done=garden.done if garden else 0,
+        lens_job_queued=lens_job_queued,
     )
 
 

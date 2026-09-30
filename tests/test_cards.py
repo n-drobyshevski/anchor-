@@ -415,3 +415,56 @@ async def test_reject_on_a_missing_card_is_gone(sessionmaker):
     async with sessionmaker() as session:
         outcome = await cards.reject(session, 999999, clock=_clock())
     assert outcome == cards.GONE
+
+
+# --- lens L4: a lens card is unreachable here (the L4 spec section 4) ----------
+
+
+async def _lens_card(session, **overrides) -> StudyCard:
+    """A lens research's card: a `study` job on the lens packet, a
+    `kind='lens'` card, pending and visible -- adoptable only into the
+    vault's inbox (app/core/echo_write.py), never from here."""
+    job = StudyJob(
+        kind="study", packet="lens", query="requisite variety", local_date=LOCAL_DATE, status="done"
+    )
+    session.add(job)
+    await session.flush()
+    clip = StudyClip(job_id=job.id, url="https://plato.stanford.edu/x", domain="plato.stanford.edu", text="t")
+    session.add(clip)
+    await session.flush()
+    return await _add_card(session, job, clip, kind="lens", text="Карточка линзы.", **overrides)
+
+
+async def test_pending_page_never_returns_a_lens_card(sessionmaker):
+    async with sessionmaker() as session:
+        job, clip = await _job_and_clip(session)
+        await _add_card(session, job, clip, text="Видимая карточка.")
+        await _lens_card(session)
+
+        rows, total = await cards.pending_page(session, page=0)
+
+    assert total == 1
+    assert [row.text for row in rows] == ["Видимая карточка."]
+
+
+async def test_get_card_on_a_lens_card_is_none(sessionmaker):
+    async with sessionmaker() as session:
+        card = await _lens_card(session)
+        assert await cards.get_card(session, card.id) is None
+
+
+@pytest.mark.parametrize("action", ["adopt", "reject"])
+async def test_adopt_and_reject_on_a_lens_card_are_forbidden(sessionmaker, action):
+    """Otherwise a /notes-shaped press -- a web `r:a:<id>` included, which
+    ingress lets through -- would turn a page found for the lens into a
+    `technique` memory the persona reads."""
+    async with sessionmaker() as session:
+        card = await _lens_card(session)
+
+        outcome = await getattr(cards, action)(session, card.id, clock=_clock())
+
+        assert outcome == cards.FORBIDDEN
+        await session.refresh(card)
+        assert (card.status, card.memory_id, card.decided_at) == ("pending", None, None)
+        assert (await session.execute(select(Memory))).scalars().all() == []
+        assert (await session.execute(select(StateChange))).scalars().all() == []

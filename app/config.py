@@ -559,6 +559,23 @@ class Settings(BaseSettings):
         "en.wikipedia.org",
     )
     PACKET_GUIDES: Annotated[tuple[str, ...], NoDecode] = ()
+    # Lens L4 (anchor-lens-plan.md section 9; the L4 spec section 3):
+    # the only domains a gap-seeded lens research may read. Its own
+    # packet, so philosophy sources never widen /study's, and not one of
+    # /study's names (`/study lens` stays refused: jobs.PACKETS). At
+    # most 12 domains. `archive.org` is left out of the plan's list on
+    # purpose (owner amendment (a)): `domain_matches` accepts
+    # subdomains, so it would admit `web.archive.org`, which serves a
+    # copy of any site. Empty turns lens research off.
+    PACKET_LENS: Annotated[tuple[str, ...], NoDecode] = (
+        "plato.stanford.edu",
+        "iep.utm.edu",
+        "philpapers.org",
+        "arxiv.org",
+        "en.wikipedia.org",
+        "pangaro.com",
+        "asc-cybernetics.org",
+    )
 
     # Fetcher limits (plan section 5). These are the numbers
     # app/research/fetch.py enforces; it takes them as arguments rather
@@ -727,7 +744,7 @@ class Settings(BaseSettings):
     # would truncate ten gaps of Russian JSON.
     GARDEN_MAX_TOKENS: int = 2000
 
-    @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", mode="before")
+    @field_validator("PACKET_FORUMS", "PACKET_REF", "PACKET_GUIDES", "PACKET_LENS", mode="before")
     @classmethod
     def _parse_packet(cls, value):
         """Accept "a.com,b.com" from the environment, and refuse junk loudly.
@@ -775,6 +792,18 @@ class Settings(BaseSettings):
         """
         if len(value) > 5:
             raise ValueError(f"PACKET_GUIDES takes at most 5 domains, got {len(value)}")
+        return value
+
+    @field_validator("PACKET_LENS")
+    @classmethod
+    def _cap_lens(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Lens plan section 9 caps this packet at twelve domains. Refused,
+        not trimmed, like PACKET_GUIDES: which twelve to keep is the
+        user's call."""
+        if len(value) > PACKET_LENS_MAX:
+            raise ValueError(
+                f"PACKET_LENS takes at most {PACKET_LENS_MAX} domains, got {len(value)}"
+            )
         return value
 
     @field_validator("TICK_HOURS", mode="before")
@@ -1010,6 +1039,9 @@ VAULT_TOKEN_MIN_CHARS = 32
 # 8e: the most note chunks of one class a prompt may ever carry. A
 # constant, so a deploy cannot paste a variable that floods the prompt.
 NOTES_IN_PROMPT_MAX = 5
+# L4: the most domains PACKET_LENS may hold (lens plan section 9).
+PACKET_LENS_MAX = 12
+
 # L1: the ceiling on LENS_CATALOG_MAX_NOTES. vaultd's graph stops at
 # 2000 nodes (knowledge and lens together), so a larger limit could
 # never be reached honestly.

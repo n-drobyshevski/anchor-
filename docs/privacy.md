@@ -39,7 +39,12 @@ and that both name Obsidian (8e).
   lens notes' titles, summaries or the start of the text, the links
   between them, and how many links each has to knowledge notes (never
   their titles); with `/lens code on` Claude Code can read its proposals
-  too. In `sync` mode, editing or
+  too. If you tap «исследовать» under a garden gap, the model gets that
+  gap and the titles and summaries of its notes, the search query goes
+  to Exa (through OpenRouter), and pages come only from the sites in
+  `PACKET_LENS`; what you accept («в Inbox») becomes a knowledge note in
+  `Echo/Inbox`, which you can undo for 14 days (`/lens undo`). In `sync`
+  mode, editing or
   deleting a fact file in Anchor's folder changes Anchor's memory.
 - Server logs hold only codes, counts and cost -- never text.
 - `/export` downloads all of your own data as one file.
