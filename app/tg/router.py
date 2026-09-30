@@ -2309,7 +2309,7 @@ def build_router(
     @router.callback_query(F.data.startswith("lg:"))
     async def lens_garden_decision(callback: CallbackQuery) -> None:
         """L3: `lg:d:<gap id>:<epoch>` / `lg:n:<gap id>:<epoch>` -- the lens
-        garden message's «N · сделал» / «N · не нужно» (app/tg/garden.py).
+        garden message's «N · закрыл» / «N · не нужно» (app/tg/garden.py).
         L4: `lg:r:` «N · исследовать» (paid research, spent at the tap),
         and on a research's result message `lg:a:` «в Inbox» (a write
         into the user's vault) and `lg:x:` «не нужно». The settings

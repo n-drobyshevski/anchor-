@@ -227,7 +227,7 @@ REPORT_STILL_OPEN_HEADER = "## Ещё открыто"
 REPORT_STRUCTURE_HEADER = "## Структура"
 REPORT_STATUS = {
     "open": "открыто",
-    "done": "сделано, проверю в следующем саду",
+    "done": "закрыто, проверю в следующем саду",
     "dismissed": "не нужно",
     "resolved": "закрыто",
     "researched": "исследовано",

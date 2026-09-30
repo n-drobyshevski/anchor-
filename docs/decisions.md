@@ -2913,7 +2913,7 @@ details; you amended two of them (one message per run, and
 - **One message per run** (your amendment; the spec had one card per
   gap, up to ~15 at once). The header has the week, the counts of new,
   reopened and older open gaps, and the report's path; then the gaps,
-  numbered. The keyboard has a row per open gap, «N · сделал» and «N ·
+  numbered. The keyboard has a row per open gap, «N · закрыл» and «N ·
   не нужно» (`lg:d:<id>:<epoch>` and `lg:n:<id>:<epoch>`; the epoch
   makes a pre-`/delete` button stale). A tap updates that gap and
   edits the same message: the item gains «— отмечено: …», its row

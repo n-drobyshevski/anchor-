@@ -180,7 +180,7 @@ async def test_press_rejects_delete_callback_prefix(sessionmaker):
 
 
 async def test_press_rejects_the_lens_garden_buttons(sessionmaker):
-    """L3: the garden's «сделал» / «не нужно» are Telegram's alone, refused
+    """L3: the garden's «закрыл» / «не нужно» are Telegram's alone, refused
     before the allowlist even when a keyboard somehow carried them."""
     hub = WebHub()
     buttons = ["lg:d:1:k3f7qa", "lg:n:1:k3f7qa", "lg:r:1:k3f7qa"]

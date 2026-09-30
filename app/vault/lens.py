@@ -1799,7 +1799,7 @@ async def mark_research_adopted(
     session: AsyncSession, gap_id: int, now: datetime.datetime
 ) -> bool:
     """The research's note is in the inbox: `researched` -> `done`, as if
-    the user had tapped «сделал». The next garden run rechecks it and
+    the user had tapped «закрыл». The next garden run rechecks it and
     resolves it (the note exists, the link is there) or reopens it with
     «снова». Adopting a note closes its gap: that is the user's own act.
     False when the gap is gone or no longer researched. Flushes, never

@@ -15,7 +15,7 @@ which had one card per gap, up to ~15 at once): a header -- the week,
 the counts of new, reopened and older open gaps, and the report's path
 once written -- then the gaps, numbered, each with its kind, titles,
 proposed title, detail and «снова» when a later run found a gap marked
-done still undone. The keyboard has a row per open gap, «N · сделал»
+done still undone. The keyboard has a row per open gap, «N · закрыл»
 (`lg:d:<gap id>:<epoch>`) and «N · не нужно» (`lg:n:<gap id>:<epoch>`).
 A tap updates that gap, answers the callback and edits the *same*
 message: the item gains «— отмечено: …», its row goes, and the keyboard
@@ -145,7 +145,7 @@ KIND_LABELS = {
 }
 AGAIN_MARK = " (снова)"
 MENTIONED_BY = " — упоминают {titles}"
-MARK_DONE = "— отмечено: сделал (проверю в следующем саду)"
+MARK_DONE = "— отмечено: закрыл (проверю в следующем саду)"
 MARK_DISMISSED = "— отмечено: не нужно"
 MARK_CLOSED = "— закрыто"
 MARK_MOVED = "— перенесено в новое сообщение сада"
@@ -155,11 +155,11 @@ MARK_RESEARCHED = "— исследовано, итог — в отдельно�
 MARK_ADOPTED = "— записано в Inbox (проверю в следующем саду)"
 MARK_RESEARCH_SPENT = "— исследовано, в Inbox ничего не записано"
 
-DONE_BUTTON = "{n} · сделал"
+DONE_BUTTON = "{n} · закрыл"
 DISMISS_BUTTON = "{n} · не нужно"
 RESEARCH_BUTTON = "{n} · исследовать"
 
-DONE_ANSWER = "Отмечено: сделал."
+DONE_ANSWER = "Отмечено: закрыл."
 DISMISSED_ANSWER = "Отмечено: не нужно."
 RESEARCH_ANSWER = "Исследую."
 STALE_ANSWER = "Устарело"
@@ -779,7 +779,7 @@ async def handle_callback(
     message_text: str | None = None,
     client_factory: Callable[[Settings], VaultClient] = VaultClient.from_settings,
 ) -> None:
-    """A tap on «N · сделал», «N · не нужно» or «N · исследовать» on a
+    """A tap on «N · закрыл», «N · не нужно» or «N · исследовать» on a
     garden message, or on «в Inbox» / «не нужно» on a research's result
     message (L4; `message_text` is that message's text as Telegram hands
     it back, which the edit keeps).

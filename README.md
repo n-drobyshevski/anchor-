@@ -1397,9 +1397,9 @@ missing (`anchor-lens-plan.md` §8). Off by default: set
   the report: the week, how many gaps are new, back again and still
   open from earlier weeks, the report's path, then the gaps, numbered
   (kind, notes, proposed title, one sentence of detail, «снова» if it
-  came back). Each open gap has a row of two buttons, «N · сделал» and
+  came back). Each open gap has a row of two buttons, «N · закрыл» and
   «N · не нужно». A tap marks that gap in the same message («—
-  отмечено: сделал (проверю в следующем саду)» or «— отмечено: не
+  отмечено: закрыл (проверю в следующем саду)» or «— отмечено: не
   нужно») and removes its row; the keyboard goes when no row is left.
   The message waits for quiet hours, `/quiet`, a pause and the welfare
   cooldown to pass. Telegram's 4096-character limit may shorten the
@@ -1452,7 +1452,7 @@ vault service first** (docs/vault-setup.md, section 10).
    welfare cooldown): the gap, up to six «• card (domain)» lines,
    «скрыто: H», and «в Inbox» / «не нужно». A tap edits that message
    and removes the buttons. Nothing found sends «ничего не нашлось»,
-   and the gap is open again (its «сделал» / «не нужно» back, no second
+   and the gap is open again (its «закрыл» / «не нужно» back, no second
    research); so is a result left untapped until its cards expire
    (`RESEARCH_CARD_TTL_DAYS`, 14). A gap the garden closes while its
    research runs (the note now exists) is rechecked like an open one;

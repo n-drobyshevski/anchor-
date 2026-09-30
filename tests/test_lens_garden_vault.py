@@ -210,7 +210,7 @@ def test_render_report_layout():
     assert order == sorted(order)
     assert f"- [[Ashby]] · [[Wiener]]: {render.report_escape(DETAIL)} _(открыто)_" in content
     # A proposed note is plain text: a link to it would create it.
-    assert "«Гомеостат» — [[Beer]]: Заметки нет. _(сделано, проверю в следующем саду)_" in content
+    assert "«Гомеостат» — [[Beer]]: Заметки нет. _(закрыто, проверю в следующем саду)_" in content
     assert "_(не нужно, снова)_" in content and "_(закрыто)_" in content
     # A note that left the lens shows its stored title, unlinked.
     assert "[[Beer]] · Gone: Мост?" in content and "[[Gone]]" not in content

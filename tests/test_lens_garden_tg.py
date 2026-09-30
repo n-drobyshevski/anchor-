@@ -5,7 +5,7 @@ owner's amendment (b): one message per run) and its `lg:` buttons.
   welfare cooldown), one message per run with its header and numbered
   gaps, the mark after the send, an empty run marked without a message,
   a reopened gap carried into the new run's message with «снова»;
-- the callback, through the real router: «сделал» and «не нужно» edit
+- the callback, through the real router: «закрыл» and «не нужно» edit
   the same message, the item gains its mark and loses its row, the
   keyboard goes with the last row; a stale epoch, a replay, `lg:r:` on
   a `link` gap (L4), a malformed press and a button on a message the
@@ -172,8 +172,8 @@ async def test_one_message_per_run_with_header_items_and_one_row_per_gap(session
     assert text.count(DETAIL) == 2
     assert "снова" not in text.split("\n", 2)[2]
     assert _rows(fake.sent[0].reply_markup) == [
-        [("1 · сделал", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
-        [("2 · сделал", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")],
+        [("1 · закрыл", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
+        [("2 · закрыл", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")],
     ]
 
 
@@ -207,8 +207,8 @@ async def test_two_runs_recorded_before_the_first_send_share_one_message(session
     assert len(fake.sent) == 1
     a, b = earlier.new_ids[0], later.new_ids[0]
     assert _rows(fake.sent[0].reply_markup) == [
-        [("1 · сделал", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
-        [("2 · сделал", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")],
+        [("1 · закрыл", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
+        [("2 · закрыл", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")],
     ]
     async with sessionmaker() as session:
         assert await lens.decide_gap(session, a, EPOCH, "done", NOW, message_id=1) == "ok"
@@ -313,16 +313,16 @@ async def test_done_marks_the_item_and_drops_its_row_in_the_same_message(session
 
     await dp.feed_update(bot, _press(bot, 1, f"lg:d:{a}:{EPOCH}", message_id))
 
-    assert fake.answered[-1].text == "Отмечено: сделал."
+    assert fake.answered[-1].text == "Отмечено: закрыл."
     assert fake.sent == []  # an edit, never a new message
     edit = fake.edits[-1]
     assert edit.message_id == message_id
     lines = edit.text.splitlines()
     first = lines.index("1. Связь: «Ashby» — «Beer»")
-    assert lines[first + 2] == "— отмечено: сделал (проверю в следующем саду)"
+    assert lines[first + 2] == "— отмечено: закрыл (проверю в следующем саду)"
     assert "— отмечено" not in "\n".join(lines[first + 3 :])
     assert _rows(edit.reply_markup) == [
-        [("2 · сделал", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")]
+        [("2 · закрыл", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")]
     ]
     assert await _status(sessionmaker, a) == "done"
 
@@ -430,8 +430,8 @@ async def test_a_reopened_gap_moves_to_the_new_run_s_message(sessionmaker):
     assert text.splitlines()[1] == "Новых: 1 · снова: 1 · открыто с прошлых недель: 1"
     assert "1. Связь: «Ashby» — «Beer» (снова)" in text.splitlines()
     assert _rows(send_fake.sent[0].reply_markup) == [
-        [("1 · сделал", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
-        [("2 · сделал", f"lg:d:{c}:{EPOCH}"), ("2 · не нужно", f"lg:n:{c}:{EPOCH}")],
+        [("1 · закрыл", f"lg:d:{a}:{EPOCH}"), ("1 · не нужно", f"lg:n:{a}:{EPOCH}")],
+        [("2 · закрыл", f"lg:d:{c}:{EPOCH}"), ("2 · не нужно", f"lg:n:{c}:{EPOCH}")],
     ]
 
     # The old message's button for the moved gap is stale; the old
@@ -443,7 +443,7 @@ async def test_a_reopened_gap_moves_to_the_new_run_s_message(sessionmaker):
     assert edit.message_id == first_message
     assert "— перенесено в новое сообщение сада" in edit.text
     assert _rows(edit.reply_markup) == [
-        [("2 · сделал", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")]
+        [("2 · закрыл", f"lg:d:{b}:{EPOCH}"), ("2 · не нужно", f"lg:n:{b}:{EPOCH}")]
     ]
 
     # The new message's button works.
