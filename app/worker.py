@@ -640,6 +640,12 @@ async def process_one_job(
             # the hook above, not part of it, so neither can stop the
             # other. It retries an unsent run on every pass.
             await _send_garden_cards(sessionmaker, bot, settings, clock)
+            # L4 (the owner's amendment (b)): each finished lens
+            # research's own result message, as soon as the job is done
+            # -- another sibling with its own try/except, so a failed
+            # result send never holds the garden message back, nor the
+            # other way round.
+            await _send_research_results(sessionmaker, bot, settings, clock)
 
     return True
 
@@ -741,6 +747,24 @@ async def _send_garden_cards(
         await garden_ui.send_pending(sessionmaker, bot, settings, clock)
     except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
         logger.warning("lens garden send failed", extra={"event": type(exc).__name__})
+
+
+async def _send_research_results(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+) -> None:
+    """Lens research results (L4, app/tg/garden.py's
+    `send_research_results`): a finished job's «в Inbox» / «не нужно»
+    message, or «ничего не нашлось», under the garden message's holds.
+    A failure is logged by type only and never fails the pass; an unsent
+    result stays unsent (its job's `offered_at` null) for the next
+    minute's pass."""
+    try:
+        await garden_ui.send_research_results(sessionmaker, bot, settings, clock)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning("lens research send failed", extra={"event": type(exc).__name__})
 
 
 async def _send_amendment_result(

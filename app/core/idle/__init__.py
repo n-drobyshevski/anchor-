@@ -15,8 +15,10 @@ handler in app/core/idle/runner.py.
 
 L3 (anchor-lens-plan.md section 8) adds `LENS_GARDEN`, the weekly lens
 garden (app/core/idle/lens_garden.py); migration b3e9f5a1c7d2 adds it to
-`ck_idle_run_kind`, which still equals `KINDS` (L4's `lens_research`
-waits for its own milestone).
+`ck_idle_run_kind`, which still equals `KINDS`. L4 (section 9) adds
+`LENS_RESEARCH`, the research a garden tap asked for
+(app/core/idle/lens_research.py); migration e9a4c2f7b1d8 adds it to the
+constraint.
 """
 
 from __future__ import annotations
@@ -27,10 +29,21 @@ REFLECT = "reflect"
 PREBRIEF = "prebrief"
 CRITIQUE = "critique"
 LENS_GARDEN = "lens_garden"
+LENS_RESEARCH = "lens_research"
 RESEARCH = "research"
 CANARY = "canary"
 
-KINDS = (BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, LENS_GARDEN, RESEARCH, CANARY)
+KINDS = (
+    BACKFILL,
+    CONSOLIDATE,
+    REFLECT,
+    PREBRIEF,
+    CRITIQUE,
+    LENS_GARDEN,
+    LENS_RESEARCH,
+    RESEARCH,
+    CANARY,
+)
 
 # The job kind app/db/jobs.py's `job.kind` carries and app/worker.py's
 # `_run_job` dispatches on -- one job kind for every idle kind, since
@@ -44,6 +57,7 @@ __all__ = [
     "PREBRIEF",
     "CRITIQUE",
     "LENS_GARDEN",
+    "LENS_RESEARCH",
     "RESEARCH",
     "CANARY",
     "KINDS",

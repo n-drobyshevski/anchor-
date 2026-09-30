@@ -76,9 +76,11 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # section 8), and hold messages are never sent to the web chat. `cw:`
 # is `/claude limits`' +/- keyboard, which only ever exists in Telegram
 # (the web app edits the same caps through its own card). `lg:` is the
-# lens garden message's «сделал» / «не нужно» (app/tg/garden.py, L3):
-# that message is only ever sent to Telegram, like a hold's. A tuple,
-# because str.startswith takes one.
+# lens garden message's «сделал» / «не нужно» (app/tg/garden.py, L3),
+# and since L4 its «исследовать» (paid research) and a research result's
+# «в Inbox» (a write into the vault) / «не нужно»: those messages are
+# only ever sent to Telegram, like a hold's. A tuple, because
+# str.startswith takes one.
 BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:")
 
 

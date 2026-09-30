@@ -249,6 +249,9 @@ class FakeSession(BaseSession):
         self.rich: list[SendRichMessage] = []
         self.chat_actions: list[SendChatAction] = []
         self.edits: list[EditMessageText] = []
+        # Keyboard-only edits (L4: a stale press on a lens result
+        # message removes its keyboard and leaves its text alone).
+        self.markup_edits: list[EditMessageReplyMarkup] = []
         self.answered: list[AnswerCallbackQuery] = []
         self.documents: list[SendDocument] = []
         self._next_message_id = 1
@@ -317,6 +320,7 @@ class FakeSession(BaseSession):
                 context={"bot": bot},
             )
         if isinstance(method, EditMessageReplyMarkup):
+            self.markup_edits.append(method)
             return True
         raise NotImplementedError(f"FakeSession cannot handle {method!r}")
 

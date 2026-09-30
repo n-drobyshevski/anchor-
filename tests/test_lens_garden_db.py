@@ -328,7 +328,9 @@ async def test_the_report_role_and_the_garden_idle_kind(sessionmaker):
         with pytest.raises(IntegrityError, match="ck_vault_file_role"):
             await session.commit()
     async with sessionmaker() as session:
-        session.add(IdleRun(kind="lens_research", local_date=datetime.date(2026, 9, 30)))
+        # L4's `lens_research` joined the check with migration
+        # e9a4c2f7b1d8; any other kind is still refused.
+        session.add(IdleRun(kind="lens_reflect", local_date=datetime.date(2026, 9, 30)))
         with pytest.raises(IntegrityError, match="ck_idle_run_kind"):
             await session.commit()
 

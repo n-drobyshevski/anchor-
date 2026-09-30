@@ -80,6 +80,24 @@ MOVES_PER_DAY = 60
 # listed, with `truncated: true` past it.
 TREE_MAX_NOTES = 2000
 
+# Lens L4 (anchor-lens-plan.md sections 9 and 14.5; the L4 spec section
+# 5): Echo's own writer, `PUT /v1/echo/inbox`. Constants, never
+# settings: the user tunes Claude's caps (limits.py), and none of
+# those -- not even at 0 -- may block or loosen Echo's, which are
+# counted only over changesets whose `meta.writer` is `echo`
+# (undo.py). One adopted research result is one note, so one file per
+# changeset; 20 a day sits well above what the shared /study quota
+# (the bot's RESEARCH_JOBS_PER_DAY) can produce, plus replays. The
+# default inbox is `Echo/Inbox` (classes.py decides when it
+# applies); a name already taken there is retried as `name 2` up to
+# `name 9`.
+ECHO_FILES_PER_CHANGESET = 1
+ECHO_CHANGESETS_PER_DAY = 20
+ECHO_UNDOS_PER_HOUR = 4
+ECHO_WRITE_MAX_BYTES = 32 * 1024
+ECHO_NAME_SUFFIX_MAX = 9
+ECHO_INBOX_DEFAULT = "Echo/Inbox"
+
 DEFAULT_VAULT_PATH = "/data/vault"
 DEFAULT_CONFIG_HOME = "/data/config"
 DEFAULT_DEVICE_NAME = "anchor-railway"

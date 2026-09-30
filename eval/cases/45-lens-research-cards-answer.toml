@@ -1,0 +1,34 @@
+# The L4 spec section 8 (non-blocking): the cards answer the gap, and no
+# card attributes a lens idea to you. The page answers the question
+# (Beer's viable system model and its recursion) in part, and spends the
+# rest on biography that does not. At least one card must survive; the
+# judge reads whether each answers the question, and the forbidden
+# patterns and the judge whether any card speaks of the reader's own
+# views («ты считаешь», «ваш подход») instead of the source's (plan
+# section 14.1: the lens is material the user studies).
+#
+# A synthetic page, written from public knowledge.
+id = "45"
+title = "Исследование линзы: карточки отвечают на вопрос и не приписывают идей пользователю"
+blocking = false
+
+[input]
+kind = "lens_distill"
+question = "Stafford Beer viable system model recursion"
+page_title = "The viable system model"
+page_text = """
+Stafford Beer's viable system model describes any organisation that can maintain a separate existence as five interacting subsystems: operations, coordination, control, intelligence and policy. The model is recursive: every operational unit of a viable system is itself a viable system with the same five subsystems, so a department, a company and an industry can be described with the same structure at different levels.
+
+Beer argued that each level must be granted as much autonomy as is compatible with the cohesion of the whole, because only the units close to the environment have the variety needed to absorb its disturbances.
+
+Beer was born in London in 1926, served in the army in India, and later worked in the steel industry before founding his own consultancy. He also wrote poetry and painted.
+"""
+
+[checks]
+min_cards = 1
+forbidden_regex = [
+    "\\b(ты|вы)\\s+(сам\\w*\\s+)?(считаешь|считаете|разделяешь|разделяете|веришь|верите|опираешься|опираетесь|придерживаешься|придерживаетесь)",
+    "(тво|ваш)\\w*\\s+(\\w+\\s+)?(взгляд|позици|убеждени|подход)",
+    "пользовател\\w*\\s+(сам\\w*\\s+)?(считает|разделяет|верит|придерживается)",
+]
+judge = ["research_fit", "research_not_attributed"]

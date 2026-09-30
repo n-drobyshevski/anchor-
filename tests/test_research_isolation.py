@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import inspect
 import pathlib
+import re
 
 import pytest
 
@@ -294,3 +295,105 @@ def test_the_fetcher_takes_its_limits_as_arguments_not_from_settings():
     code = _code_without_docstrings(pathlib.Path("app/research/fetch.py"))
     assert "Settings" not in code
     assert "get_settings" not in code
+
+
+# --- L4: the lens research query (the L4 spec sections 2 and 7) ------------------
+
+LENS_QUERY = RESEARCH / "lens_query.py"
+# What app/research/lens_query.py may import beyond the standard library:
+# the provider interface, the two secret screens and the injection list.
+# No database, no Settings, no logging, no lens module, no network.
+LENS_QUERY_ALLOWED = frozenset(
+    {"app.llm.provider", "app.core.redact", "app.vault.secrets", "app.research.injection"}
+)
+
+
+def _lens_query_violations(source: str) -> list[str]:
+    import sys
+
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                found.append("a relative import")
+                continue
+            module = node.module or ""
+            if module in LENS_QUERY_ALLOWED:
+                continue
+            if module.split(".")[0] in stdlib:
+                modules = [module]
+            else:
+                modules = [f"{module}.{alias.name}" for alias in node.names]
+        else:
+            continue
+        for name in modules:
+            if name in LENS_QUERY_ALLOWED:
+                continue
+            if name.split(".")[0] in stdlib and name.split(".")[0] != "logging":
+                continue
+            found.append(name)
+    return found
+
+
+def test_lens_query_imports_only_its_allowlist():
+    """The query call's module is pure (the L4 spec section 2): whatever it
+    builds its messages from arrives as a GapSeed argument, which only
+    app/vault/lens.py's `gap_seed` makes. It may not reach the database,
+    Settings, logging or the lens module itself."""
+    source = LENS_QUERY.read_text(encoding="utf-8")
+    assert _lens_query_violations(source) == []
+    code = _code_without_docstrings(LENS_QUERY)
+    for name in ("Settings", "get_settings", "AsyncSession", "sqlalchemy", "getLogger"):
+        assert name not in code, name
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import logging\n",
+        "from sqlalchemy import select\n",
+        "from app.config import Settings\n",
+        "from app.vault import lens\n",
+        "from app.vault import secrets, lens\n",
+        "import app.db.models\n",
+        "from app.research import search\n",
+        "from . import injection\n",
+    ],
+)
+def test_the_lens_query_allowlist_catches_a_violation(source):
+    assert _lens_query_violations(source)
+
+
+def test_the_lens_query_allowlist_lets_its_own_imports_through():
+    source = (
+        "from __future__ import annotations\n"
+        "import json\n"
+        "from dataclasses import dataclass\n"
+        "from app.llm.provider import LLMMessage, LLMProvider\n"
+        "from app.core import redact\n"
+        "from app.vault import secrets as vault_secrets\n"
+        "from app.research import injection\n"
+    )
+    assert _lens_query_violations(source) == []
+
+
+def test_the_lens_query_call_never_asks_for_a_web_search():
+    """app/research/search.py's `find_urls` stays the only call site that
+    asks for one (tests/test_web_search_isolation.py); the query call
+    builds a query and nothing else (the L4 spec section 2)."""
+    code = _code_without_docstrings(LENS_QUERY)
+    for name in ("web_search", "WebSearch", "find_urls", "app.research.search"):
+        assert not re.search(rf"\b{name}\b", code), name
+
+
+def test_the_lens_query_module_is_pure_at_runtime():
+    """The static allowlist above, checked once more on the loaded
+    module: nothing it holds is a session, a Settings or a logger."""
+    from app.research import lens_query
+
+    for value in vars(lens_query).values():
+        module = getattr(value, "__module__", "") or ""
+        assert not module.startswith(("sqlalchemy", "app.config", "app.db", "logging")), value

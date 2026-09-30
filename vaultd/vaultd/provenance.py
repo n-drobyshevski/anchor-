@@ -1,7 +1,11 @@
-"""Provenance stamps on every file vaultd writes for Claude (write-plan section 6.6).
+"""Provenance stamps on every file vaultd writes for Claude or Echo (write-plan section 6.6).
 
-`anchor_edited_by: claude` and `anchor_edited_at: "<UTC ISO, seconds, Z>"`
-are set by vaultd itself, never taken from the request: any
+`anchor_edited_by: <writer>` and `anchor_edited_at: "<UTC ISO, seconds, Z>"`
+are set by vaultd itself, never taken from the request. The writer is
+`claude` (the knowledge routes) or, from lens L4, `echo` (Echo's inbox
+writer, echo.py; anchor-lens-plan.md section 14.5). The caller names
+it -- `by` has no default, so no call site can stamp the wrong one by
+omission -- and anything else is a ValueError. Any
 `anchor_edited_*` line already in the incoming frontmatter is dropped,
 and vaultd's own two lines are appended. Every other line is kept
 **byte for byte** -- this never loads the YAML into a dict and
@@ -18,6 +22,7 @@ from __future__ import annotations
 from vaultd.config import FRONTMATTER_MAX_BYTES
 
 _STRIPPED_KEYS = (b"anchor_edited_by", b"anchor_edited_at")
+WRITERS = ("claude", "echo")
 
 
 def _line_key(line: bytes) -> bytes:
@@ -54,9 +59,11 @@ def _locate_fence(data: bytes) -> tuple[int, int, int] | None:
         pos = end + 1
 
 
-def apply(data: bytes, edited_at_iso: str) -> bytes:
-    """`data` with `anchor_edited_by`/`anchor_edited_at` set, everything else kept as is."""
-    stamp = f"anchor_edited_by: claude\nanchor_edited_at: \"{edited_at_iso}\"\n".encode()
+def apply(data: bytes, edited_at_iso: str, *, by: str) -> bytes:
+    """`data` with `anchor_edited_by: <by>`/`anchor_edited_at` set, everything else kept as is."""
+    if by not in WRITERS:
+        raise ValueError(f"unknown writer: {by!r}")
+    stamp = f"anchor_edited_by: {by}\nanchor_edited_at: \"{edited_at_iso}\"\n".encode()
     located = _locate_fence(data)
     if located is None:
         return b"---\n" + stamp + b"---\n" + data

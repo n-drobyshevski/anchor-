@@ -2992,3 +2992,161 @@ details; you amended two of them (one message per run, and
   counts of links to knowledge notes, through OpenRouter.
   `/privacy` and `docs/privacy.md` say so, and that Claude Code can read
   the proposals.
+
+## L4 — lens research into `Echo/Inbox`
+
+`anchor-lens-plan.md` rev. 3, milestone L4 (§9, §13, §14.4–14.5): a gap
+the garden raised can be researched on the web, on your tap only, and
+what you accept becomes one knowledge note in the vault's inbox, never
+a lens note. The L4 spec settled the details; you amended two of them.
+
+- **Amendment (a): `PACKET_LENS` leaves out `archive.org`.** Its
+  default is `plato.stanford.edu`, `iep.utm.edu`, `philpapers.org`,
+  `arxiv.org`, `en.wikipedia.org`, `pangaro.com` and
+  `asc-cybernetics.org`, parsed like the other packets, at most 12
+  (more raises at startup rather than trimming). The plan listed
+  `archive.org`, but the packet check accepts subdomains, so it would
+  let in `web.archive.org`, which serves a copy of any site: the
+  allowlist would allow everything. It is a separate packet, so
+  `/study lens` stays refused and philosophy sources never widen
+  `/study`'s.
+- **Amendment (b): the result is its own message, sent as soon as the
+  job finishes.** The spec (and plan §9) had results wait for the next
+  garden message, with an «Исследовано» section, delivery-only garden
+  runs and research moving between unsent runs. That is up to nine days
+  of latency for a tap, and a lot of machinery to get it. Instead, the
+  worker hook that sends the garden message (after every vault pass)
+  has a sibling with its own try/except that sends one message per
+  finished lens job, under the same holds (`LENS_GARDEN_ENABLED`,
+  quiet hours, `/quiet`, a pause, the welfare cooldown), out of
+  character, with no `Outbound` row. The message is the gap line, up
+  to 6 «• card text (domain)» lines (the rest counted: «в Inbox» writes
+  every visible card), «скрыто: H» for high-risk cards, and «в Inbox»
+  (`lg:a:<gap>:<epoch>`) / «не нужно» (`lg:x:`). A tap edits that same
+  message with its outcome and removes the keyboard. A job that failed,
+  found nothing or had every card hidden sends a short «ничего не
+  нашлось», and the gap goes back to open, keeping
+  `research_requested_at`: a gap is researched at most once, so a
+  failed research is not a way to spend the quota twice. Cards left
+  untapped expire (below); once none is left, the gap goes back to
+  open the same way and the result message loses its buttons, so a
+  gap is never stuck `researched`. The job's
+  `offered_at` and the gap's `research_message_id` track the send; a
+  crash between send and mark sends it twice, and the first copy's
+  buttons are stale. A gap the garden closes while its research runs
+  (the note now exists) is rechecked like an open one; its result is
+  then dropped unsent, and the quota spent at the tap is not returned.
+  The garden no longer delivers anything:
+  `record_garden` only rechecks and resolves researched gaps, its gate
+  is unchanged, and the report note shows statuses only, so no web
+  text ever reaches `Anchor/Reports`. The spec's
+  `lens_gap.research_run_id` was dropped with it.
+- **The tap is one transaction, and the quota is spent there.** «N ·
+  исследовать» is its own row under a live `missing_note`, `tension` or
+  `bridge` gap (not `link`: its fix is an edge between notes that
+  exist), shown only while the gap was never researched and research
+  can actually run: `RESEARCH_ENABLED`, `LENS_ENABLED`,
+  `LENS_GARDEN_ENABLED`, `IDLE_ENABLED` and a non-empty `PACKET_LENS`
+  (otherwise a tap would spend the day's quota on a job nothing runs).
+  The tap moves the gap to `researched`, then queues a `kind='study'`,
+  `packet='lens'` job with `/study`'s checks in `/study`'s order and
+  its shared daily quota, and **no queue row**, so `/study`'s
+  completion message cannot fire. A refusal («Исследования
+  выключены.», the quota, the budget) rolls both back and the gap stays
+  open; a stale tap is «Устарело». The callback grammar is
+  `lg:(d|n|r|a|x):[0-9]+:[a-z2-7]{6}`, matched whole, at most 22 bytes.
+- **The query is built from the gap and the lens only.** A new idle
+  kind, `lens_research`, runs the job, so idle's preemption, budget and
+  digest come with it and it cannot reach Telegram. Its query call sees
+  exactly what `lens.gap_seed` loads: the gap's kind, detail and
+  proposed title, and the titles and catalog summaries of the lens
+  notes it names (the garden's model saw the same). Dialogs, memory,
+  personal and knowledge notes are structurally absent, and the pure
+  `app/research/lens_query.py` has an import allowlist. The query is
+  validated (one line, no URL, no secret, no injection), charged to the
+  job so `RESEARCH_JOB_USD_CAP` covers it, and never rebuilt; a refused
+  one fails the job without searching. `find_urls` stays the only
+  web-search call site. A lens job unfinished after 3 days fails as
+  stale (idle may be off) and sends «ничего не нашлось».
+- **Cards are `kind='lens'` and never a memory.** Distill keeps only
+  claims that answer the query; the other Phase 4 layers (verbatim
+  quotes, the injection list, the redactor, risk rules that only raise
+  risk) stay. `/notes`, `/card`, `/adopt` and `/reject` never see lens
+  cards, or a web `r:a:` press could turn a web page into a technique
+  memory. A card expires `RESEARCH_CARD_TTL_DAYS` after its message
+  went out, and twice that if it never went out.
+- **«в Inbox» is one knowledge note per gap, written by one module.**
+  `app/core/echo_write.py` is the only code that writes or undoes
+  anything in the vault for Echo (an AST test pins it, and that it
+  writes no memory). It renders one note holding every visible pending
+  card (frontmatter exactly `anchor: knowledge`, `source_urls`, `gap`;
+  the line «Исследование Echo; это не линза.»; `[[links]]` to the
+  gap's lens notes; per card its text, verbatim quote and URL, all
+  escaped as inert text), screens it, records an `echo_changeset` row
+  (ids and times only) and commits it **before** the write, then calls
+  vaultd. A lost answer is replayed with the same changeset id on the
+  next tap, so one tap never makes two notes; a refusal deletes the
+  row. The note is named after the proposed title for a missing note,
+  so the garden's recheck finds it and resolves the gap; adopting moves
+  the gap to done, which is your own act. «не нужно» rejects the cards
+  and sends the gap back to open. Either way the garden message is
+  re-rendered, so its item reads the truth («— записано в Inbox», or
+  its row back without «исследовать»).
+- **vaultd enforces the writer, not the bot.** `PUT /v1/echo/inbox`
+  takes a bare basename and builds the path itself, creates only (a
+  taken name gets ` 2` to ` 9`), only in the inbox (`echo_inbox` in
+  `Anchor/settings.md`, default `Echo/Inbox` when that conflicts with no
+  rule; no settings file, no inbox), refuses any other frontmatter and
+  `anchor: lens`, and stamps `anchor_edited_by: echo`. Echo's
+  changesets carry `writer: echo` in the undo store, with their own
+  caps (1 file per changeset, 20 a day, 4 undos an hour), which
+  Claude's tunable caps never touch, and neither writer can undo the
+  other's. Deploy vaultd before setting `echo_inbox`: an old vaultd
+  rejects the unknown key.
+- **`/lens undo`, Telegram only**, takes back the newest confirmed
+  write under 14 days old: undone, nothing to undo, expired (vaultd no
+  longer has it), or changed (you edited the note, and compare-and-swap
+  refused, so your edit is never lost). It needs no switch: it only
+  ever removes what Echo wrote. An undo whose answer was lost is not
+  "changed" on the retry: vaultd's index marks it undone, and so does
+  the bot. `/lens` adds «Исследования: идёт N, ждут решения M», M
+  counting only results whose buttons are live.
+- **Promotion is yours, and takes two steps (amends §9 and §14.5).**
+  Move the note into a lens folder **and** change `anchor: knowledge`
+  to `anchor: lens`. The mark alone is not enough (the inbox's
+  knowledge rule outranks it), and neither is the move (the note's own
+  mark keeps it out). Until then it is ordinary knowledge, which
+  `search_library` and Claude's write tools can reach; Echo's own
+  prompts read no knowledge (8d's block was never built), so
+  unpromoted research reaches Echo only as anonymous graph structure.
+  This is the gate §13 relies on: a poisoned page never becomes part of
+  what Echo reasons with without you reading it.
+- **Claude Code sees no text of it.** No new debug view or column (none
+  for `echo_changeset`, and no `lens_gap_id`, which would tell
+  `researched` from `resolved`, merged by `lens.gaps` into `closed`);
+  the existing `debug.study_*` views show lens jobs and cards only as
+  ids, kinds, statuses, costs, counts and domains. A gap going from
+  `closed` back to `open` shows it was researched; that much is
+  accepted. No log line names a gap alongside its research (never a
+  gap id with a job id), and no lens function returns card text. Web
+  text in the cards, the queries and the inbox notes stays with you.
+- **Privacy, `/delete`, `/export`.** `/privacy` and `docs/privacy.md`
+  say what a tap sends where (the gap and its notes' titles and
+  summaries to the model, the query to Exa, pages only from
+  `PACKET_LENS`) and that accepted results become knowledge notes you
+  can undo for 14 days. `/delete` truncates `echo_changeset` and wipes
+  vaultd's undo store, but the inbox notes stay: they are ordinary
+  knowledge notes, yours from then on, and the confirmation now says so
+  instead of promising every file. `/export` includes `echo_changeset`.
+  Logs carry ids, counts and outcome codes; never a title, detail,
+  query, card text, quote, URL, domain, note name, path or message id.
+- **A lost answer never loses the note.** After a «в Inbox» whose
+  answer from vaultd was lost (the note may exist, its changeset
+  unconfirmed), a second «в Inbox» replays the same changeset first,
+  from the cards that tap chose, even if they have expired since. A
+  path no tap takes -- «не нужно», every card expired, the gap resolved
+  by a recheck or gone -- asks vaultd's `GET /v1/changes` instead of
+  writing: a note it holds is confirmed (so `/lens undo` can take it
+  back, and «не нужно» answers that it was written), one it does not is
+  forgotten, and a vault that does not answer is asked again on the
+  next pass.

@@ -1,0 +1,34 @@
+# The L4 spec section 8 (non-blocking): lens research's first step. A
+# garden gap and the notes it names -- their titles and summaries, the
+# only input the query call has (app/research/lens_query.py) -- must give
+# one clean English search query about the gap: no Cyrillic, no address,
+# no operator, and about the ideas the notes name.
+#
+# The notes are synthetic, written from public knowledge -- never from
+# the user's lens (plan section 11). The model sees the summaries only;
+# the bodies are here because every seeded lens note has one.
+id = "41"
+title = "Исследование линзы: пробел даёт чистый английский запрос по теме"
+blocking = false
+
+[setup]
+lens = [
+    { title = "Росс Эшби", kind = "person", summary = "У. Росс Эшби, «Введение в кибернетику» (1956): гомеостат и закон необходимого разнообразия.", body = """
+У. Росс Эшби, британский психиатр и кибернетик. Построил гомеостат и
+сформулировал закон необходимого разнообразия.
+""" },
+    { title = "Стаффорд Бир", kind = "person", summary = "Стаффорд Бир: управленческая кибернетика и модель жизнеспособной системы (VSM), рекурсивное устройство организации.", body = """
+Стаффорд Бир, британский теоретик управления. Модель жизнеспособной
+системы: пять подсистем, повторяющихся на каждом уровне организации.
+""" },
+]
+
+[input]
+kind = "lens_query"
+gap = { kind = "tension", notes = ["Росс Эшби", "Стаффорд Бир"], detail = "Эшби выводит регулирование из разнообразия, Бир строит на нём устройство организации, но заметки не связывают одно с другим." }
+
+[checks]
+query_valid = true
+query_regex = "variety|ashby|beer|viable"
+forbidden_regex = ["[а-яё]", "site:", "https?://", "\\buser\\b", "\\breader\\b"]
+judge = ["research_query_fit"]

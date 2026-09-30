@@ -39,6 +39,25 @@ call that costs money. A job can sit in the queue for a while behind
 other work, and the daily budget the enqueue-time check saw is not
 necessarily the one still true when the job is claimed.
 
+**Lens L4: gap-seeded research** (anchor-lens-plan.md section 9; the L4
+spec sections 1-4 with the owner's amendments). A tap on «исследовать»
+under a lens garden gap calls `enqueue_lens_study`: the same checks as
+/study, in the same order, then a `kind='study'`, `packet='lens'` job
+with `lens_gap_id` set and **no queue row** -- nothing here reaches
+Telegram, and `/study`'s completion message never fires for it. The
+idle kind `lens_research` takes the oldest (`next_lens_job`), has its
+query built from the gap (app/research/lens_query.py) and charged to
+the job (`record_lens_query`), then runs `run_research_job` over
+`PACKET_LENS`. The finished job's result goes out as its own Telegram
+message (app/worker.py's garden hook: `unsent_lens_results`, then
+`mark_offered`); its cards are `kind='lens'`, never a memory, and are
+adopted into the vault's inbox (`adopt_lens_cards`, from
+app/core/echo_write.py) or declined (`reject_lens_cards`). A lens job
+still unfinished after `LENS_STALE_DAYS` fails as `stale`
+(`fail_stale_lens_jobs`): idle may be off, and the gap must not wait
+forever. Nothing here imports the lens module: a job knows its gap only
+by id.
+
 **Why no safety_events row.** `app/core/extract.py` records one on
 every run of its own job, and this module's docstring template asked
 for the same here. But `app/core/safety_events.py`'s `kind` column is
@@ -58,7 +77,7 @@ import decimal
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -99,6 +118,25 @@ EMPTY_TOPIC = "empty_topic"
 
 # study_job.status, set by app/core/purge.py when /delete runs.
 CANCELLED = "cancelled"
+
+# L4 (module docstring): the packet of a gap-seeded lens research. Not
+# one of PACKETS: `/study lens` stays refused.
+LENS = "lens"
+# study_card.kind of a lens research's cards, set by code.
+LENS_CARD = "lens"
+# error_code values a lens job can end with besides the pipeline's own:
+# the gap went away before the query was built, the query was refused
+# by lens_query.validate (nothing was searched), or the job waited too
+# long to run.
+GAP_GONE = "gap_gone"
+QUERY_REFUSED = "query_refused"
+STALE = "stale"
+LENS_STALE_DAYS = 3
+# lens_job_outcomes / unsent_lens_results.
+RUNNING = "running"
+READY = "ready"
+SPENT = "spent"
+ADOPTED = "adopted"
 
 # A job in one of these has finished and will never do more work. Every
 # other status is a job that was mid-run when something stopped it.
@@ -159,6 +197,16 @@ def packet_domains(settings: Settings, packet: str | None) -> tuple[str, ...] | 
         "guides": settings.PACKET_GUIDES,
         "ref": settings.PACKET_REF,
     }[packet]
+
+
+def _job_domains(settings: Settings, packet: str | None) -> tuple[str, ...] | None:
+    """The allowlist a queued study job searches and fetches within: its
+    packet's, or -- L4 -- `PACKET_LENS` for a lens job (the L4 spec
+    section 3). Not folded into `packet_domains`, which is /study's
+    vocabulary: `/study lens` stays refused (`PACKETS` is unchanged)."""
+    if packet == LENS:
+        return settings.PACKET_LENS
+    return packet_domains(settings, packet)
 
 
 async def _quota_used(session: AsyncSession, kind: str, local_date) -> int:
@@ -560,7 +608,13 @@ async def _distill_into_cards(
     Returns `(visible, hidden)`. Zero of both is an ordinary outcome:
     a page can simply have nothing in it worth a card, and plan section
     7 says that is `done`, not a failure.
+
+    L4: a lens job (`packet == LENS`) distills in lens mode, its query
+    as the question, and its cards are `LENS_CARD` -- set here, by
+    code, never from the reply (the L4 spec section 4). Keyed on the
+    packet, not `lens_gap_id`, which SET NULL may have cleared.
     """
+    mode = distill.LENS if job.packet == LENS else distill.STUDY
     response = await distill.call(
         provider,
         topic=topic,
@@ -569,6 +623,7 @@ async def _distill_into_cards(
         clip_id=clip.id,
         min_cards=settings.RESEARCH_CARDS_MIN,
         max_cards=settings.RESEARCH_CARDS_MAX,
+        mode=mode,
     )
     await _ledger(session, settings, clock, timezone, job, response)
     await session.commit()
@@ -591,7 +646,7 @@ async def _distill_into_cards(
     await session.commit()
 
     distilled = distill.validate(
-        payload, clip_text=clip.text, max_cards=settings.RESEARCH_CARDS_MAX
+        payload, clip_text=clip.text, max_cards=settings.RESEARCH_CARDS_MAX, mode=mode
     )
 
     visible = hidden = 0
@@ -600,7 +655,9 @@ async def _distill_into_cards(
             StudyCard(
                 job_id=job.id,
                 clip_id=clip.id,
-                kind=card.kind,
+                # Set by code: a lens job's cards are LENS_CARD whatever
+                # the reply said (distill.validate sets it too).
+                kind=LENS_CARD if mode == distill.LENS else card.kind,
                 text=card.text,
                 quote=card.quote,
                 # Set by code, never from model output (plan section 12).
@@ -842,12 +899,20 @@ async def _run_study(
     "reports clearly that Reddit blocked the fetch", and an empty
     result would not be that report.
     """
-    allowed = packet_domains(settings, job.packet)
+    allowed = _job_domains(settings, job.packet)
     if not allowed:
         # Only reachable if the packet was emptied in config between
         # enqueue and run; enqueue_study refuses this case outright.
         return await _finish(
             session, clock, job, status="failed", error_code=EMPTY_PACKET, visible=0, hidden=0
+        )
+    if job.packet == LENS and not job.query:
+        # L4: a lens job searches only for the query its idle kind built
+        # and stored (record_lens_query). Never reached through that
+        # kind, which runs the pipeline only once a query is stored; a
+        # lens job has no queue row for app/worker.py to run it by.
+        return await _finish(
+            session, clock, job, status="failed", error_code=QUERY_REFUSED, visible=0, hidden=0
         )
 
     job_created_at = job.created_at
@@ -948,26 +1013,467 @@ async def _run_study(
     )
 
 
+# --- L4: gap-seeded lens research (module docstring) ---------------------------------
+
+
+@dataclass(frozen=True)
+class LensJob:
+    """A queued lens research, as the idle kind takes it: the gap it is
+    for (None once the garden is gone) and its query (None until built)."""
+
+    id: int
+    gap_id: int | None
+    query: str | None
+
+
+@dataclass(frozen=True)
+class LensCard:
+    """One visible, pending lens card: its text, its verbatim quote, and
+    the page it came from (the URL and its domain, both set by code from
+    the fetched clip, never by the model)."""
+
+    id: int
+    text: str
+    quote: str
+    source_url: str
+    domain: str
+
+
+@dataclass(frozen=True)
+class LensCards:
+    """A gap's research, as the result message and «в Inbox» need it: its
+    visible pending cards by id, and how many were hidden (high risk)."""
+
+    gap_id: int | None
+    job_id: int
+    cards: tuple[LensCard, ...]
+    hidden: int
+
+
+@dataclass(frozen=True)
+class LensResult:
+    """A finished lens research whose result message has not gone out:
+    `READY` with at least one visible pending card, else `SPENT` (it
+    failed, found nothing, or every card was hidden). `gap_id` is None
+    when the garden went away meanwhile: nothing to send, only to mark."""
+
+    job_id: int
+    gap_id: int | None
+    outcome: str
+    cards: tuple[LensCard, ...]
+    hidden: int
+
+
+def lens_research_enabled(settings: Settings) -> bool:
+    """Every switch lens research needs (the L4 spec section 1): research
+    itself, the lens and its garden (the gap comes from there), and idle
+    (the only thing that runs the job). With any one off, a tap would
+    spend the day's quota on a job that never runs."""
+    return (
+        settings.RESEARCH_ENABLED
+        and settings.LENS_ENABLED
+        and settings.LENS_GARDEN_ENABLED
+        and settings.IDLE_ENABLED
+    )
+
+
+async def enqueue_lens_study(
+    session: AsyncSession,
+    settings: Settings,
+    clock: Clock,
+    *,
+    gap_id: int,
+    timezone: str,
+) -> tuple[int | None, str | None]:
+    """Queue a lens research for one gap, or refuse it: `DISABLED`,
+    `EMPTY_PACKET`, `QUOTA`, `CAP`, in `enqueue_study`'s order. The quota
+    is /study's own (the job is `kind='study'`), shared with idle
+    research, and spent at the tap. No queue row: the idle kind
+    `lens_research` runs it. The caller has already moved the gap to
+    `researched` in this transaction and rolls both back on a refusal.
+    Flushes, never commits. Returns `(job_id, None)` or `(None, code)`."""
+    if not lens_research_enabled(settings):
+        return None, DISABLED
+    if not settings.PACKET_LENS:
+        return None, EMPTY_PACKET
+    local_date = clock_module.local_date(clock, timezone)
+    if await _quota_used(session, STUDY, local_date) >= settings.RESEARCH_JOBS_PER_DAY:
+        return None, QUOTA
+    if await check_cap(session, settings, clock, timezone):
+        return None, CAP
+    job = StudyJob(
+        kind=STUDY, status="queued", packet=LENS, query=None, lens_gap_id=gap_id, local_date=local_date
+    )
+    session.add(job)
+    await session.flush()
+    # The job's id only, never its gap's (the L4 spec section 6): the job
+    # id joins debug.study_*, and the pair would link a gap to its research.
+    logger.info("lens study job queued", extra={"job_id": job.id})
+    return job.id, None
+
+
+async def next_lens_job(session: AsyncSession) -> LensJob | None:
+    """The oldest queued lens research, or None. The idle gate's fact and
+    the job's own first step read the same answer."""
+    row = (
+        await session.execute(
+            select(StudyJob.id, StudyJob.lens_gap_id, StudyJob.query)
+            .where(StudyJob.packet == LENS, StudyJob.status == "queued")
+            .order_by(StudyJob.id)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return None
+    return LensJob(id=row[0], gap_id=row[1], query=row[2])
+
+
+async def _queued_lens_job(session: AsyncSession, job_id: int) -> StudyJob | None:
+    job = await session.get(StudyJob, job_id)
+    if job is None or job.packet != LENS or job.status != "queued":
+        return None
+    return job
+
+
+async def record_lens_query(
+    session: AsyncSession,
+    settings: Settings,
+    clock: Clock,
+    *,
+    timezone: str,
+    job_id: int,
+    response,
+    query: str | None,
+) -> bool:
+    """Charge the query call to the job and store its query (the L4 spec
+    section 2). The call's cost goes to `spend_ledger` and onto the
+    job's `usd_cost`, exactly as a search or a distill does, so
+    `RESEARCH_JOB_USD_CAP` covers it. `query` is lens_query.validate's
+    answer: None (or anything that is not one line of at most
+    `QUERY_MAX` characters) fails the job as `QUERY_REFUSED`, and
+    nothing is searched. True when the query was stored; False when it
+    was refused, or the job is no longer a queued lens job (the call is
+    then not charged to it). A stored query is never rebuilt. Flushes,
+    never commits."""
+    job = await _queued_lens_job(session, job_id)
+    if job is None:
+        return False
+    await _ledger(session, settings, clock, timezone, job, response)
+    cleaned = query.strip() if isinstance(query, str) else ""
+    if not cleaned or len(cleaned) > QUERY_MAX or "\n" in cleaned or "\r" in cleaned:
+        job.status = "failed"
+        job.error_code = QUERY_REFUSED
+        job.finished_at = clock.now_utc()
+        await session.flush()
+        logger.info(
+            "lens study query refused", extra={"job_id": job.id, "error_code": QUERY_REFUSED}
+        )
+        return False
+    job.query = cleaned
+    await session.flush()
+    logger.info("lens study query built", extra={"job_id": job.id, "usd_cost": str(job.usd_cost)})
+    return True
+
+
+async def fail_lens_job(session: AsyncSession, clock: Clock, job_id: int, error_code: str) -> bool:
+    """End a queued lens job before it searched (`GAP_GONE`, or the spend
+    cap before the query call). False when it is not a queued lens job.
+    Flushes, never commits."""
+    job = await _queued_lens_job(session, job_id)
+    if job is None:
+        return False
+    job.status = "failed"
+    job.error_code = error_code
+    job.finished_at = clock.now_utc()
+    await session.flush()
+    logger.info("lens study job failed", extra={"job_id": job.id, "error_code": error_code})
+    return True
+
+
+async def fail_stale_lens_jobs(session: AsyncSession, now: datetime.datetime) -> int:
+    """Every lens job still unfinished `LENS_STALE_DAYS` after it was
+    queued fails as `STALE` (the owner's amendment (b)): idle may be off,
+    or the job was stuck, and the gap must not wait forever. Its result
+    message («ничего не нашлось») then goes out like any spent job's.
+    Returns how many. Flushes, never commits."""
+    cutoff = now - datetime.timedelta(days=LENS_STALE_DAYS)
+    failed = (
+        await session.execute(
+            update(StudyJob)
+            .where(
+                StudyJob.packet == LENS,
+                StudyJob.status.not_in(TERMINAL_STATUSES),
+                StudyJob.created_at < cutoff,
+            )
+            .values(status="failed", error_code=STALE, finished_at=now)
+            .returning(StudyJob.id)
+        )
+    ).scalars().all()
+    await session.flush()
+    if failed:
+        logger.info("lens study jobs went stale", extra={"count": len(failed), "error_code": STALE})
+    return len(failed)
+
+
+async def _lens_cards(
+    session: AsyncSession, job_ids: list[int]
+) -> tuple[dict[int, list[LensCard]], dict[int, int]]:
+    """(job id -> visible pending cards by id, job id -> hidden count)."""
+    visible: dict[int, list[LensCard]] = {job_id: [] for job_id in job_ids}
+    hidden: dict[int, int] = {job_id: 0 for job_id in job_ids}
+    if not job_ids:
+        return visible, hidden
+    rows = await session.execute(
+        select(
+            StudyCard.id,
+            StudyCard.job_id,
+            StudyCard.status,
+            StudyCard.text,
+            StudyCard.quote,
+            StudyCard.source_url,
+            StudyClip.domain,
+        )
+        .join(StudyClip, StudyClip.id == StudyCard.clip_id)
+        .where(StudyCard.job_id.in_(job_ids), StudyCard.kind == LENS_CARD)
+        .order_by(StudyCard.id)
+    )
+    for card_id, job_id, status, card_text, quote, url, domain in rows:
+        if status == "pending":
+            visible[job_id].append(LensCard(card_id, card_text, quote, url, domain))
+        elif status == "hidden":
+            hidden[job_id] += 1
+    return visible, hidden
+
+
+async def lens_card_views(session: AsyncSession, gap_ids) -> dict[int, LensCards]:
+    """gap id -> its research's visible pending cards and hidden count,
+    for every given gap that has a lens job."""
+    ids = sorted({int(i) for i in gap_ids})
+    if not ids:
+        return {}
+    jobs = dict(
+        (
+            await session.execute(
+                select(StudyJob.id, StudyJob.lens_gap_id).where(StudyJob.lens_gap_id.in_(ids))
+            )
+        ).all()
+    )
+    visible, hidden = await _lens_cards(session, list(jobs))
+    return {
+        gap_id: LensCards(
+            gap_id=gap_id, job_id=job_id, cards=tuple(visible[job_id]), hidden=hidden[job_id]
+        )
+        for job_id, gap_id in jobs.items()
+    }
+
+
+async def lens_job_outcomes(session: AsyncSession) -> dict[int, str]:
+    """gap id -> where its research stands: `RUNNING` (not finished),
+    `READY` (finished, a visible card still pending), `ADOPTED` (its
+    cards went into the inbox) or `SPENT` (finished with nothing left:
+    it failed, found nothing, or every card was hidden, declined or
+    expired). Gaps with no lens job are absent."""
+    jobs = (
+        await session.execute(
+            select(StudyJob.id, StudyJob.lens_gap_id, StudyJob.status).where(
+                StudyJob.lens_gap_id.is_not(None)
+            )
+        )
+    ).all()
+    if not jobs:
+        return {}
+    tallies: dict[int, dict[str, int]] = {}
+    for job_id, status, count in await session.execute(
+        select(StudyCard.job_id, StudyCard.status, func.count())
+        .where(StudyCard.job_id.in_([row[0] for row in jobs]), StudyCard.kind == LENS_CARD)
+        .group_by(StudyCard.job_id, StudyCard.status)
+    ):
+        tallies.setdefault(job_id, {})[status] = count
+    outcomes: dict[int, str] = {}
+    for job_id, gap_id, status in jobs:
+        tally = tallies.get(job_id, {})
+        if status not in TERMINAL_STATUSES:
+            outcomes[gap_id] = RUNNING
+        elif tally.get("adopted"):
+            outcomes[gap_id] = ADOPTED
+        elif tally.get("pending"):
+            outcomes[gap_id] = READY
+        else:
+            outcomes[gap_id] = SPENT
+    return outcomes
+
+
+async def unsent_lens_results(session: AsyncSession) -> list[LensResult]:
+    """Finished lens researches (`done` or `failed`) whose result message
+    has not gone out (`offered_at` is null), oldest first, each with its
+    visible pending cards and hidden count (the owner's amendment (b):
+    one message per research, as soon as it finishes). The sender marks
+    each with `mark_offered` once sent -- or at once, unsent, when the
+    gap is gone or no longer researched."""
+    jobs = (
+        await session.execute(
+            select(StudyJob.id, StudyJob.lens_gap_id)
+            .where(
+                StudyJob.packet == LENS,
+                StudyJob.status.in_(("done", "failed")),
+                StudyJob.offered_at.is_(None),
+            )
+            .order_by(StudyJob.id)
+        )
+    ).all()
+    visible, hidden = await _lens_cards(session, [row[0] for row in jobs])
+    return [
+        LensResult(
+            job_id=job_id,
+            gap_id=gap_id,
+            outcome=READY if visible[job_id] else SPENT,
+            cards=tuple(visible[job_id]),
+            hidden=hidden[job_id],
+        )
+        for job_id, gap_id in jobs
+    ]
+
+
+async def mark_offered(session: AsyncSession, job_ids, now: datetime.datetime) -> int:
+    """Stamp `offered_at` on these finished lens jobs (once: an already
+    offered job keeps its time; an unfinished one is left alone). The
+    cards' expiry counts from it. Returns how many. Flushes, never
+    commits."""
+    ids = sorted({int(i) for i in job_ids})
+    if not ids:
+        return 0
+    marked = (
+        await session.execute(
+            update(StudyJob)
+            .where(
+                StudyJob.id.in_(ids),
+                StudyJob.packet == LENS,
+                StudyJob.status.in_(TERMINAL_STATUSES),
+                StudyJob.offered_at.is_(None),
+            )
+            .values(offered_at=now)
+        )
+    ).rowcount or 0
+    await session.flush()
+    return marked
+
+
+async def reject_lens_cards(session: AsyncSession, gap_id: int, now: datetime.datetime) -> int:
+    """«не нужно» on a result message: every pending card of the gap's
+    research becomes `rejected`. Returns how many. Flushes, never
+    commits."""
+    rejected = (
+        await session.execute(
+            update(StudyCard)
+            .where(
+                StudyCard.kind == LENS_CARD,
+                StudyCard.status == "pending",
+                StudyCard.job_id.in_(select(StudyJob.id).where(StudyJob.lens_gap_id == gap_id)),
+            )
+            .values(status="rejected", decided_at=now)
+        )
+    ).rowcount or 0
+    await session.flush()
+    logger.info("lens cards rejected", extra={"count": rejected})
+    return rejected
+
+
+async def adopt_lens_cards(
+    session: AsyncSession, card_ids, changeset_id: int, now: datetime.datetime
+) -> int:
+    """The inbox note holding these cards is written: each still-pending
+    lens card among them becomes `adopted`, pointing at the
+    `echo_changeset` row instead of a memory
+    (`ck_study_card_adopted_has_memory`). Only app/core/echo_write.py
+    calls this. Returns how many. Flushes, never commits."""
+    ids = sorted({int(i) for i in card_ids})
+    if not ids:
+        return 0
+    adopted = (
+        await session.execute(
+            update(StudyCard)
+            .where(
+                StudyCard.id.in_(ids),
+                StudyCard.kind == LENS_CARD,
+                StudyCard.status == "pending",
+            )
+            .values(status="adopted", echo_changeset_id=changeset_id, decided_at=now)
+        )
+    ).rowcount or 0
+    await session.flush()
+    logger.info("lens cards adopted", extra={"count": adopted})
+    return adopted
+
+
+async def lens_cards_by_id(session: AsyncSession, card_ids) -> list[LensCard]:
+    """These lens cards, by id and whatever their status now, in id order
+    (hidden ones excepted: they were never in a note). For
+    app/core/echo_write.py's replay of a write whose answer was lost: the
+    note must hold the cards the tap chose, even if the sweep has since
+    expired them (an expired card keeps its text)."""
+    ids = sorted({int(i) for i in card_ids})
+    if not ids:
+        return []
+    rows = await session.execute(
+        select(
+            StudyCard.id, StudyCard.text, StudyCard.quote, StudyCard.source_url, StudyClip.domain
+        )
+        .join(StudyClip, StudyClip.id == StudyCard.clip_id)
+        .where(
+            StudyCard.id.in_(ids), StudyCard.kind == LENS_CARD, StudyCard.status != "hidden"
+        )
+        .order_by(StudyCard.id)
+    )
+    return [LensCard(card_id, text, quote, url, domain) for card_id, text, quote, url, domain in rows]
+
+
 
 
 __all__ = [
+    "ADOPTED",
     "BAD_URL",
     "CAP",
     "DISABLED",
     "EMPTY_PACKET",
     "EMPTY_TOPIC",
+    "GAP_GONE",
     "INTERRUPTED",
+    "LENS",
+    "LENS_CARD",
+    "LENS_STALE_DAYS",
     "PACKETS",
     "QUERY_MAX",
+    "QUERY_REFUSED",
     "QUOTA",
     "READ",
+    "READY",
     "RESEARCH",
+    "RUNNING",
+    "SPENT",
+    "STALE",
     "STUDY",
     "TOPIC_TOO_LONG",
     "UNKNOWN_PACKET",
+    "LensCard",
+    "LensCards",
+    "LensJob",
+    "LensResult",
     "ResearchOutcome",
+    "adopt_lens_cards",
+    "enqueue_lens_study",
     "enqueue_read",
     "enqueue_study",
+    "fail_lens_job",
+    "fail_stale_lens_jobs",
+    "lens_card_views",
+    "lens_cards_by_id",
+    "lens_job_outcomes",
+    "lens_research_enabled",
+    "mark_offered",
+    "next_lens_job",
+    "record_lens_query",
+    "reject_lens_cards",
+    "unsent_lens_results",
     "packet_domains",
     "run_research_job",
     "study_quota_used",

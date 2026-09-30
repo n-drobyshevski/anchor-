@@ -34,6 +34,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     LENS_GARDEN,
+    LENS_RESEARCH,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -78,6 +79,11 @@ GARDEN_OFF = KIND_RULE_PREFIX + "garden_off"
 LENS_SIZE = KIND_RULE_PREFIX + "lens_size"
 NOT_DUE = KIND_RULE_PREFIX + "not_due"
 UNCHANGED = KIND_RULE_PREFIX + "unchanged"
+# L4 (anchor-lens-plan.md section 9; the L4 spec section 2), in the order
+# `_lens_research_rule` checks them.
+LENS_RESEARCH_OFF = KIND_RULE_PREFIX + "lens_research_off"
+EMPTY_LENS_PACKET = KIND_RULE_PREFIX + "empty_lens_packet"
+NO_LENS_JOB = KIND_RULE_PREFIX + "no_lens_job"
 
 # L3: the garden needs a lens with some shape to it -- under three notes
 # there is no structure to garden -- and runs at most once in 168 hours
@@ -103,6 +109,7 @@ KIND_DAILY_MAX: dict[str, int] = {
     PREBRIEF: 1,
     CRITIQUE: 1,
     LENS_GARDEN: 1,
+    LENS_RESEARCH: 1,
     RESEARCH: 1,
     CANARY: 1,
 }
@@ -179,6 +186,13 @@ class IdleConfig:
     # L3: `LENS_CATALOG_MAX_NOTES`. Over it the lens is not gardened, as
     # the review does not use it (app/vault/lens.py's `lens_active`).
     lens_max_notes: int = 300
+    # L4: the switches lens research needs besides `IDLE_ENABLED` (row 1)
+    # -- `RESEARCH_ENABLED`, `LENS_ENABLED` and `LENS_GARDEN_ENABLED`, the
+    # same set app/research/jobs.py's `lens_research_enabled` checks at
+    # the tap (a test pins the two equal) -- and whether `PACKET_LENS`
+    # has a domain to search.
+    lens_research_enabled: bool = False
+    lens_packet: bool = False
 
 
 def config_from_settings(settings) -> IdleConfig:
@@ -206,6 +220,10 @@ def config_from_settings(settings) -> IdleConfig:
             and settings.VAULT_MODE in SYNC_MODES
         ),
         lens_max_notes=settings.LENS_CATALOG_MAX_NOTES,
+        lens_research_enabled=(
+            settings.RESEARCH_ENABLED and settings.LENS_ENABLED and settings.LENS_GARDEN_ENABLED
+        ),
+        lens_packet=bool(settings.PACKET_LENS),
     )
 
 
@@ -275,6 +293,11 @@ class IdleFacts:
     garden_last_version_id: int | None = None
     garden_version_id: int | None = None
     garden_done: int = 0
+    # L4: a lens research is queued (app/research/jobs.py's
+    # `next_lens_job`, which the job itself takes its work from, so the
+    # gate and the job can never disagree). Left False while lens
+    # research is switched off, when facts.py does not query it.
+    lens_job_queued: bool = False
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -371,6 +394,26 @@ def _lens_garden_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
     return GateResult(True, OK)
 
 
+def _lens_research_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    """The L4 spec section 2, in order:
+
+    1. `lens_research_off`: research, the lens or its garden switched off;
+    2. `empty_lens_packet`: `PACKET_LENS` has no domain;
+    3. `no_lens_job`: no lens research is queued.
+
+    No quota check: the job's own `study_job` row already counts
+    against the day it was tapped (app/research/jobs.py's
+    `enqueue_lens_study`), and a second check here would refuse the
+    very job that spent it."""
+    if not config.lens_research_enabled:
+        return GateResult(False, LENS_RESEARCH_OFF)
+    if not config.lens_packet:
+        return GateResult(False, EMPTY_LENS_PACKET)
+    if not facts.lens_job_queued:
+        return GateResult(False, NO_LENS_JOB)
+    return GateResult(True, OK)
+
+
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
 # per-kind predicates"), each taking (facts, config) -- most only need
 # facts, but prebrief/critique/canary/research also need settings-derived
@@ -384,6 +427,7 @@ KIND_RULES: dict[str, Callable[[IdleFacts, IdleConfig], GateResult]] = {
     RESEARCH: _research_rule,
     CANARY: _canary_rule,
     LENS_GARDEN: _lens_garden_rule,
+    LENS_RESEARCH: _lens_research_rule,
 }
 
 
@@ -439,6 +483,7 @@ __all__ = [
     "BUSY",
     "DAILY_LIMIT",
     "DISABLED",
+    "EMPTY_LENS_PACKET",
     "GARDEN_INTERVAL",
     "GARDEN_MIN_NOTES",
     "GARDEN_OFF",
@@ -446,6 +491,7 @@ __all__ = [
     "KIND_RULE_PREFIX",
     "KIND_DAILY_MAX",
     "KIND_RULES",
+    "LENS_RESEARCH_OFF",
     "LENS_SIZE",
     "MAX_JOBS",
     "NOT_ENOUGH_CLUSTERS",
@@ -459,6 +505,7 @@ __all__ = [
     "NO_NEW_REPLIES",
     "NOT_CANARY_DOW",
     "NOT_DUE",
+    "NO_LENS_JOB",
     "PREBRIEF_AFTER_HOUR",
     "OK",
     "PAUSED",

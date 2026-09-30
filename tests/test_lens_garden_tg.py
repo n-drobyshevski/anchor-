@@ -7,9 +7,9 @@ owner's amendment (b): one message per run) and its `lg:` buttons.
   a reopened gap carried into the new run's message with «снова»;
 - the callback, through the real router: «сделал» and «не нужно» edit
   the same message, the item gains its mark and loses its row, the
-  keyboard goes with the last row; a stale epoch, a replay, `lg:r:`, a
-  malformed press and a button on a message the gap has left are all
-  «Устарело»;
+  keyboard goes with the last row; a stale epoch, a replay, `lg:r:` on
+  a `link` gap (L4), a malformed press and a button on a message the
+  gap has left are all «Устарело»;
 - the web chat is refused twice (router and ingress);
 - the worker's hook sends after a vault pass, and its failure never
   fails the pass;
@@ -365,14 +365,17 @@ async def test_a_stale_epoch_is_stale(sessionmaker):
     assert await _status(sessionmaker, a) == "open"
 
 
-async def test_research_is_reserved_and_stale(sessionmaker):
-    """«Исследовать» waits for L4: `lg:r:` must never become paid research."""
+async def test_research_on_a_link_gap_is_stale(sessionmaker):
+    """L4 made `lg:r:` research, but never for a `link` gap (its fix is an
+    edge between notes that exist): a forged press is stale, and the
+    re-render leaves the message as it was, with no «исследовать» row
+    (tests/test_lens_research_tg.py covers research itself)."""
     await _seed(sessionmaker)
     (a, _b), message_id = await _sent(sessionmaker)
     dp, bot, fake = _dispatcher(sessionmaker)
     await dp.feed_update(bot, _press(bot, 1, f"lg:r:{a}:{EPOCH}", message_id))
     assert fake.answered[-1].text == "Устарело"
-    assert fake.edits == []
+    assert all("исследовать" not in text for row in _rows(fake.edits[-1].reply_markup) for text, _ in row)
     assert await _status(sessionmaker, a) == "open"
 
 
@@ -386,8 +389,8 @@ async def test_research_is_reserved_and_stale(sessionmaker):
         "lg:d:1:k3f7qa:x",
         "lg:d:1:K3F7QA",
         "lg:d:1:k3f9qa",  # 9 is not base32
-        "lg:x:1:k3f7qa",
-        "lg:r:1:k3f7qa",
+        "lg:q:1:k3f7qa",
+        "lg:D:1:k3f7qa",
         "lg:d:-1:k3f7qa",
         "lg:d:0:k3f7qa",
         "lg:d:١:k3f7qa",
@@ -405,6 +408,8 @@ def test_the_callback_grammar(data):
 def test_the_callback_grammar_accepts_both_actions():
     assert garden.parse_callback("lg:d:12:k3f7qa") == ("done", 12, "k3f7qa")
     assert garden.parse_callback("lg:n:12:k3f7qa") == ("dismissed", 12, "k3f7qa")
+    # L4's three (tests/test_lens_research_tg.py).
+    assert garden.parse_callback("lg:r:12:k3f7qa") == ("research", 12, "k3f7qa")
 
 
 async def test_a_reopened_gap_moves_to_the_new_run_s_message(sessionmaker):
@@ -463,7 +468,7 @@ async def test_a_press_through_the_web_sink_is_refused(sessionmaker):
 
 def test_ingress_blocks_the_garden_buttons():
     """Layer one, before the router's own is_web_sink guard."""
-    for data in ("lg:d:1:k3f7qa", "lg:n:1:k3f7qa", "lg:r:1:k3f7qa"):
+    for data in ("lg:d:1:k3f7qa", "lg:n:1:k3f7qa", "lg:r:1:k3f7qa", "lg:a:1:k3f7qa", "lg:x:1:k3f7qa"):
         assert data.startswith(ingress.BLOCKED_CALLBACK_PREFIX)
 
 

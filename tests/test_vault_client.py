@@ -439,3 +439,64 @@ async def test_a_malformed_or_revealing_graph_is_refused(stub, body) -> None:
     with pytest.raises(VaultError) as exc:
         await _client(stub).knowledge_graph()
     assert exc.value.code == errors.BAD_RESPONSE
+
+
+# --- L4: Echo's inbox writer (anchor-lens-plan.md section 14.5) -------------------
+
+
+async def test_put_echo_note_sends_a_basename_and_parses_the_answer(stub) -> None:
+    stub.respond("PUT", "/v1/echo/inbox", 200, {"name": "Идея 2.md", "sha256": "f" * 64, "replayed": False})
+    put = await _client(stub).put_echo_note("Идея.md", "---\nanchor: knowledge\n---\n", "echo_1")
+    assert put == client_module.EchoPut(name="Идея 2.md", sha256="f" * 64, replayed=False)
+    assert stub.calls() == [("PUT", "/v1/echo/inbox")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "Echo/Inbox/x.md", "sha256": "f" * 64, "replayed": False},
+        {"name": "x.txt", "sha256": "f" * 64, "replayed": False},
+        {"name": "x.md", "sha256": 3, "replayed": False},
+        {"name": "x.md", "sha256": "f" * 64, "replayed": "no"},
+        {"name": "x.md", "sha256": "f" * 64},
+    ],
+)
+async def test_put_echo_note_refuses_a_malformed_answer(stub, body) -> None:
+    stub.respond("PUT", "/v1/echo/inbox", 200, body)
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).put_echo_note("x.md", "x", "echo_1")
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def test_put_echo_note_refused_is_refused(stub) -> None:
+    stub.respond("PUT", "/v1/echo/inbox", 403, b"")
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).put_echo_note("x.md", "x", "echo_1")
+    assert exc.value.code == errors.REFUSED
+
+
+async def test_undo_changeset_names_the_writer(stub) -> None:
+    stub.respond("POST", "/v1/undo", 200, {"restored": 1, "refused": 0})
+    await _client(stub).undo_changeset("chg1")
+    await _client(stub).undo_changeset("echo_1", writer="echo")
+    assert [r.query for r in stub.requests] == [
+        {"changeset": "chg1", "writer": "claude"},
+        {"changeset": "echo_1", "writer": "echo"},
+    ]
+    with pytest.raises(ValueError):
+        await _client(stub).undo_changeset("echo_1", writer="grok")
+
+
+async def test_list_changes_reads_the_writer(stub) -> None:
+    entry = {"kind": "write", "time": "2026-09-27T10:00:00Z", "undone": False, "files": []}
+    stub.respond(
+        "GET",
+        "/v1/changes",
+        200,
+        {"changes": [{**entry, "id": "old"}, {**entry, "id": "e", "writer": "echo"}]},
+    )
+    changes = await _client(stub).list_changes()
+    assert [(c.id, c.writer) for c in changes] == [("old", "claude"), ("e", "echo")]
+    stub.respond("GET", "/v1/changes", 200, {"changes": [{**entry, "id": "x", "writer": "grok"}]})
+    with pytest.raises(VaultError):
+        await _client(stub).list_changes()

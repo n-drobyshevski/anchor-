@@ -29,6 +29,17 @@ that survived `validate()` -- `garden_checks`:
 
 - `garden_link` -- is there a link gap between exactly these two notes?
 - `min_gaps`    -- did at least this many gaps survive?
+
+L4 adds four for lens research's two steps (the L4 spec section 8) --
+`research_checks`, over what code let through:
+
+- `query_valid` -- did the query call's reply pass `lens_query.validate`?
+- `query_regex` -- does the validated query match this pattern?
+- `min_cards`   -- did at least this many lens cards survive distill?
+- `max_cards`   -- did at most this many survive (0: an off-topic page)?
+
+A refused query is not a failure unless the case says `query_valid`: a
+refusal is one of the two safe answers to an instruction in a summary.
 """
 
 from __future__ import annotations
@@ -367,4 +378,57 @@ def garden_checks(spec: dict, *, gaps: list[dict] | None) -> list[Result]:
         results.append(garden_link(gaps, spec["garden_link"]))
     if "min_gaps" in spec:
         results.append(min_gaps(gaps, spec["min_gaps"]))
+    return results
+
+
+# --- L4: lens research ----------------------------------------------------------
+
+
+def query_valid(query: str | None, expected: bool) -> Result:
+    """The query call's reply passed (or, `expected=False`, failed)
+    `lens_query.validate`."""
+    shown = f"«{query}»" if query is not None else "отказ"
+    return Result("query_valid", (query is not None) == expected, f"запрос: {shown}")
+
+
+def query_regex(query: str | None, pattern: str) -> Result:
+    """The validated query matches `pattern` (case-insensitive): it is
+    about the gap. A refused query matches nothing."""
+    found = query is not None and re.search(pattern, query, re.IGNORECASE) is not None
+    return Result("query_regex", found, f"запрос: «{query}»" if query else "запроса нет")
+
+
+def min_cards(cards: list[dict], minimum: int) -> Result:
+    """At least `minimum` lens cards survived distill's checks."""
+    return Result(
+        "min_cards", len(cards) >= minimum, f"карточек: {len(cards)} (нужно не меньше {minimum})"
+    )
+
+
+def max_cards(cards: list[dict], maximum: int) -> Result:
+    """At most `maximum` lens cards survived: an off-topic page must yield
+    none."""
+    return Result(
+        "max_cards", len(cards) <= maximum, f"карточек: {len(cards)} (нужно не больше {maximum})"
+    )
+
+
+def research_checks(
+    spec: dict, *, query: str | None = None, cards: list[dict] | None = None, parsed: bool = True
+) -> list[Result]:
+    """The research checks a case asked for, in a fixed order. `parsed`
+    False means the distill reply did not parse, which fails the card
+    checks (an unparsed reply proves nothing either way)."""
+    results: list[Result] = []
+    if "query_valid" in spec:
+        results.append(query_valid(query, spec["query_valid"]))
+    if spec.get("query_regex"):
+        results.append(query_regex(query, spec["query_regex"]))
+    if "min_cards" in spec or "max_cards" in spec:
+        if not parsed or cards is None:
+            return results + [Result("distill_parsed", False, "ответ модели не разобран")]
+        if "min_cards" in spec:
+            results.append(min_cards(cards, spec["min_cards"]))
+        if "max_cards" in spec:
+            results.append(max_cards(cards, spec["max_cards"]))
     return results

@@ -48,6 +48,23 @@ garden reads is lens-only, plus knowledge notes as anonymous file ids
 and, for local checks only, their titles (`GardenView`'s docstring):
 no knowledge title may reach a model or Claude Code.
 
+**L4: lens research** (plan section 9; the L4 spec with the owner's
+amendments -- a research's result is its own Telegram message, sent as
+soon as the job finishes). A tap on «исследовать» under an open gap
+goes through `request_research` (open -> `researched`, once per gap:
+`research_requested_at` is never cleared). The idle kind
+`lens_research` asks `gap_seed` for the only input its query call may
+see -- the gap's kind, detail and proposed title, and the titles and
+catalog summaries of the lens notes it names (a `GapSeed`, app/research/
+lens_query.py's dataclass). When the job has finished, the result
+message shows `research_gaps`' line for the gap and is recorded with
+`mark_research_sent`; «в Inbox» checks the tap with `research_target`
+and, once the note is written, `mark_research_adopted` moves the gap to
+`done`, which the next garden rechecks. A research that found nothing,
+or results the user declined, send the gap back to `open`
+(`reopen_researched`). A `researched` gap is also rechecked by the
+garden like an open one: PASS or GONE resolves it.
+
 **Who may import this module** is pinned by
 tests/test_vault_notes_isolation.py: the sync pass (app/vault/sync.py)
 writes, /lens (app/tg/lens.py) reads counts and flips the switch, and
@@ -93,6 +110,7 @@ from app.db.models import (
     UserState,
     VaultFile,
 )
+from app.research.lens_query import GapSeed, NoteSummary
 from app.vault._chunks import NotesConsentOff
 
 __all__ = [
@@ -116,6 +134,10 @@ __all__ = [
     "GardenStatus",
     "GardenView",
     "KnownGap",
+    "RECHECKED_STATUSES",
+    "RESEARCHABLE_KINDS",
+    "ResearchGap",
+    "ResearchTarget",
     "LastRound",
     "Link",
     "MessageGap",
@@ -137,16 +159,23 @@ __all__ = [
     "garden_facts",
     "garden_status",
     "garden_view",
+    "gap_seed",
     "iso_week",
     "known_gaps",
     "last_round",
     "lens_active",
+    "mark_research_adopted",
+    "mark_research_sent",
     "mark_run_sent",
     "message_run_id",
     "note_count",
     "record_garden",
     "report_data",
     "report_path",
+    "reopen_researched",
+    "request_research",
+    "research_gaps",
+    "research_target",
     "run_message_state",
     "unsent_run",
     "record_round",
@@ -684,6 +713,13 @@ GAP_KINDS = ("link", "missing_note", "tension", "bridge")
 GAP_STATUSES = ("open", "done", "dismissed", "resolved", "researched")
 # What a tap may make of an open gap: «Сделал» and «Не нужно».
 GAP_DECISIONS = ("done", "dismissed")
+# The statuses every garden run rechecks (and may resolve). L4 adds
+# `researched`: a research in flight does not keep a gap alive once the
+# lens itself has closed it.
+RECHECKED_STATUSES = ("open", "done", "researched")
+# L4 (the L4 spec section 1): the gaps a web search can help with. Not
+# `link`: its fix is an edge between two notes that already exist.
+RESEARCHABLE_KINDS = ("missing_note", "tension", "bridge")
 # ck_lens_gap_title_len and ck_lens_gap_detail_len.
 GAP_TITLE_MAX = 80
 GAP_DETAIL_MAX = 300
@@ -1061,8 +1097,9 @@ async def record_garden(
 
     1. the `lens_garden_run` row (UNIQUE on `iso_week`: a second run in
        the same week fails with IntegrityError -- the gate prevents it);
-    2. `resolved_ids`: open or done gaps whose recheck passed or whose
-       note is gone become `resolved` (any other status is left alone);
+    2. `resolved_ids`: open, done or (L4) researched gaps whose recheck
+       passed or whose note is gone become `resolved` (any other status
+       is left alone);
     3. `reopened_ids`: done gaps whose recheck failed become open again,
        `reopened` + 1, their decision and message cleared, and move to
        this run -- so this run's message carries them, marked «снова»;
@@ -1102,7 +1139,7 @@ async def record_garden(
     if resolve:
         result = await session.execute(
             update(LensGap)
-            .where(LensGap.id.in_(resolve), LensGap.status.in_(("open", "done")))
+            .where(LensGap.id.in_(resolve), LensGap.status.in_(RECHECKED_STATUSES))
             .values(status="resolved", resolved_at=stamp)
         )
         resolved = result.rowcount or 0
@@ -1509,6 +1546,250 @@ async def delete_garden(session: AsyncSession) -> int:
     await session.execute(delete(LensGardenRun))
     await session.flush()
     return gaps
+
+
+# --- L4: lens research (plan section 9) ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResearchGap:
+    """A researched gap as its result message shows it: the gap line
+    (kind, the notes' titles as raised, the proposed title, the detail),
+    its status now, and the id of the result message whose buttons act
+    on it (None until sent)."""
+
+    id: int
+    kind: str
+    titles: tuple[str, ...]
+    title: str | None
+    detail: str
+    status: str
+    research_message_id: int | None
+
+
+@dataclass(frozen=True)
+class ResearchTarget:
+    """What «в Inbox» needs to name and link the note (the L4 spec
+    section 5): the gap's id and kind, the proposed title (a missing
+    note's, else None), and the current titles of the lens notes it
+    names, in the gap's order -- a note that has left the lens is
+    skipped, so the note never links (or names) one that is no longer
+    the user's lens."""
+
+    gap_id: int
+    kind: str
+    title: str | None
+    titles: tuple[str, ...]
+
+
+async def request_research(
+    session: AsyncSession,
+    gap_id: int,
+    epoch: str,
+    now: datetime.datetime,
+    *,
+    message_id: int | None = None,
+) -> str:
+    """A tap on «исследовать»: `ok` when it moved an open gap to
+    `researched`, `stale` otherwise. The same conditions as
+    `decide_gap` (the vault epoch, an open gap with live buttons, on
+    this message when `message_id` is given), plus a researchable kind
+    (`RESEARCHABLE_KINDS`) and no earlier request: each gap is researched
+    at most once, and `research_requested_at` is never cleared. The
+    caller queues the job in the same transaction and rolls both back on
+    a refusal. Flushes, never commits."""
+    if epoch != await _epoch(session):
+        return "stale"
+    conditions = [
+        LensGap.id == gap_id,
+        LensGap.status == "open",
+        LensGap.tg_message_id.is_not(None),
+        LensGap.kind.in_(RESEARCHABLE_KINDS),
+        LensGap.research_requested_at.is_(None),
+    ]
+    if message_id is not None:
+        conditions.append(LensGap.tg_message_id == message_id)
+    requested = (
+        await session.execute(
+            update(LensGap)
+            .where(*conditions)
+            .values(status="researched", research_requested_at=now)
+            .returning(LensGap.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    outcome = "ok" if requested is not None else "stale"
+    logger.info(
+        "lens research requested",
+        # No gap id (the L4 spec section 6): a research log line that
+        # named its gap would tell `researched` apart from `resolved` in
+        # Railway's logs, which `lens.gaps()` shows alike as `closed`.
+        extra={"event": "researched" if requested else "stale"},
+    )
+    return outcome
+
+
+async def gap_seed(session: AsyncSession, gap_id: int) -> GapSeed | None:
+    """The one input lens research's query call may see (plan sections 9,
+    10 and 13; the L4 spec section 2): the gap's kind, detail and
+    proposed title, and each lens note it names -- title and catalog
+    summary (the frontmatter summary, else the start of the text,
+    exactly as `catalog` gives it), in the gap's order.
+
+    None -- the job fails as `gap_gone` -- when the gap is gone, no
+    longer `researched` (a recheck resolved it), or names a note that
+    has left the lens: its detail may name that note, which may now be
+    a knowledge or personal note (L3's rule for `lens.gaps`).
+
+    Nothing else is read. The two SELECTs name their columns one by
+    one, and tests pin them: no dialog, memory, journal, personal or
+    knowledge note has a way in."""
+    row = (
+        await session.execute(
+            select(LensGap.kind, LensGap.detail, LensGap.title, LensGap.note_ids, LensGap.status)
+            .where(LensGap.id == gap_id)
+        )
+    ).first()
+    if row is None:
+        return None
+    kind, detail, title, note_ids, status = row
+    if status != "researched":
+        return None
+    ids = [int(i) for i in (note_ids or ())]
+    found = {
+        note_id: (note_title, summary, head)
+        for note_id, note_title, summary, head in await session.execute(
+            select(
+                LensNote.id,
+                LensNote.title,
+                LensNote.summary,
+                func.left(LensNote.body, SUMMARY_FALLBACK_CHARS * 4),
+            ).where(LensNote.id.in_(ids))
+        )
+    } if ids else {}
+    if any(note_id not in found for note_id in ids):
+        return None
+    notes = []
+    for note_id in dict.fromkeys(ids):
+        note_title, summary, head = found[note_id]
+        described = _collapse(summary or "") or _collapse(head)[:SUMMARY_FALLBACK_CHARS]
+        notes.append(NoteSummary(title=note_title, summary=described))
+    return GapSeed(kind=kind, detail=detail, title=title, notes=tuple(notes))
+
+
+async def research_gaps(session: AsyncSession, gap_ids: Iterable[int]) -> dict[int, ResearchGap]:
+    """The gaps with these ids, whatever their status, for the result
+    message and its re-render after a tap (a gap that is gone is simply
+    absent)."""
+    ids = sorted({int(i) for i in gap_ids})
+    if not ids:
+        return {}
+    rows = (await session.execute(select(LensGap).where(LensGap.id.in_(ids)))).scalars()
+    return {
+        row.id: ResearchGap(
+            id=row.id,
+            kind=row.kind,
+            titles=tuple(row.titles or ()),
+            title=row.title,
+            detail=row.detail,
+            status=row.status,
+            research_message_id=row.research_message_id,
+        )
+        for row in rows
+    }
+
+
+async def mark_research_sent(session: AsyncSession, gap_id: int, message_id: int) -> bool:
+    """Record the result message a researched gap went out in: its
+    «в Inbox» and «не нужно» buttons act only while the gap is
+    `researched` and the tap comes from this message
+    (`research_target`). False when the gap is gone or no longer
+    researched. Flushes, never commits."""
+    marked = (
+        await session.execute(
+            update(LensGap)
+            .where(LensGap.id == gap_id, LensGap.status == "researched")
+            .values(research_message_id=message_id)
+            .returning(LensGap.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return marked is not None
+
+
+async def research_target(
+    session: AsyncSession, gap_id: int, epoch: str, *, message_id: int
+) -> ResearchTarget | None:
+    """A tap on a result message's «в Inbox» (or «не нужно»): the gap it
+    acts on, or None when the tap is stale -- the wrong vault epoch (a
+    button from before /delete), a gap that is gone or no longer
+    `researched` (adopted, declined, or resolved by a recheck), or a
+    message that is not the gap's result message. Reads only."""
+    if epoch != await _epoch(session):
+        return None
+    row = (
+        await session.execute(
+            select(LensGap.kind, LensGap.title, LensGap.note_ids).where(
+                LensGap.id == gap_id,
+                LensGap.status == "researched",
+                LensGap.research_message_id == message_id,
+            )
+        )
+    ).first()
+    if row is None:
+        return None
+    kind, title, note_ids = row
+    ids = [int(i) for i in (note_ids or ())]
+    current = dict(
+        (await session.execute(select(LensNote.id, LensNote.title).where(LensNote.id.in_(ids)))).all()
+    ) if ids else {}
+    titles = tuple(current[i] for i in dict.fromkeys(ids) if i in current)
+    return ResearchTarget(gap_id=gap_id, kind=kind, title=title, titles=titles)
+
+
+async def mark_research_adopted(
+    session: AsyncSession, gap_id: int, now: datetime.datetime
+) -> bool:
+    """The research's note is in the inbox: `researched` -> `done`, as if
+    the user had tapped «сделал». The next garden run rechecks it and
+    resolves it (the note exists, the link is there) or reopens it with
+    «снова». Adopting a note closes its gap: that is the user's own act.
+    False when the gap is gone or no longer researched. Flushes, never
+    commits."""
+    adopted = (
+        await session.execute(
+            update(LensGap)
+            .where(LensGap.id == gap_id, LensGap.status == "researched")
+            .values(status="done", decided_at=now)
+            .returning(LensGap.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    logger.info(
+        "lens research adopted", extra={"event": "done" if adopted else "stale"}
+    )
+    return adopted is not None
+
+
+async def reopen_researched(session: AsyncSession, gap_id: int) -> bool:
+    """A research that found nothing (it failed, found no card, or every
+    card was hidden), or results the user declined («не нужно»): the gap
+    goes back to `open`, keeping `research_requested_at` -- it is never
+    researched again -- and its garden message and buttons. False when
+    the gap is gone or no longer researched. Flushes, never commits."""
+    reopened = (
+        await session.execute(
+            update(LensGap)
+            .where(LensGap.id == gap_id, LensGap.status == "researched")
+            .values(status="open")
+            .returning(LensGap.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    logger.info(
+        "lens research closed", extra={"event": "open" if reopened else "stale"}
+    )
+    return reopened is not None
 
 
 # --- reads -----------------------------------------------------------------------

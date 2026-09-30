@@ -30,6 +30,19 @@ come from `self.limits` (limits.py, `<root>/limits.json`), which the
 user tunes via the bot; config.py holds the defaults. `precheck` is called before any byte touches disk, so a
 refusal here never needs an undo of its own.
 
+**Two writers** (lens L4, the L4 spec section 5). `meta.writer` is
+`claude` (the default: every changeset written before L4 has none) or
+`echo` (Echo's inbox writer, echo.py). It filters every counter: the
+Claude prechecks (`precheck`, `precheck_moves`, `precheck_folders`)
+and their `count_recent`/`_recent_sum` count Claude's changesets only,
+so Echo's writes never spend Claude's budget, and Echo's own caps
+(config.py's `ECHO_*` constants, `precheck_echo`, the undo route) count
+Echo's only and ignore the user's tunable limits and counter reset:
+Claude's caps, even at 0, never block Echo. Joining another writer's
+changeset is refused (`changeset_writer_mismatch`), and so is undoing
+one with the wrong `?writer=` (api.py), in both directions.
+`GET /v1/changes` carries each changeset's writer.
+
 **The clock is injectable** (`clock`, default `datetime.now(UTC)`),
 the same shape as `Supervisor`'s `monotonic` -- tests freeze it to
 exercise the 14-day TTL and the per-hour caps without a real sleep.
@@ -46,10 +59,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from vaultd.config import UNDO_TTL_DAYS
+from vaultd.config import (
+    ECHO_CHANGESETS_PER_DAY,
+    ECHO_FILES_PER_CHANGESET,
+    UNDO_TTL_DAYS,
+)
 from vaultd.limits import LimitsStore
 
 Clock = Callable[[], datetime]
+
+# Lens L4: who wrote a changeset (module docstring). A meta without the
+# key predates L4, and is Claude's.
+CLAUDE = "claude"
+ECHO = "echo"
+WRITERS = (CLAUDE, ECHO)
 
 
 def utc_now() -> datetime:
@@ -105,6 +128,13 @@ REFUSAL_REASONS = frozenset(
         "cap_moves_day",
         # api.py: GET /v1/knowledge, file simply absent
         "missing",
+        # Lens L4 (the L4 spec section 5): Echo's inbox writer (echo.py)
+        # and the writer split in this module.
+        "inbox_unavailable",
+        "bad_name",
+        "frontmatter_keys",
+        "changeset_writer_mismatch",
+        "cap_echo",
     }
 )
 
@@ -138,6 +168,7 @@ class ChangeSummary:
     time: str
     undone: bool
     files: list[dict] = field(default_factory=list)
+    writer: str = CLAUDE
 
     def as_json(self) -> dict:
         return {
@@ -146,7 +177,12 @@ class ChangeSummary:
             "time": self.time,
             "undone": self.undone,
             "files": self.files,
+            "writer": self.writer,
         }
+
+
+def _writer(meta: dict) -> str:
+    return meta.get("writer", CLAUDE)
 
 
 class UndoStore:
@@ -210,6 +246,12 @@ class UndoStore:
         meta = self._read_meta(changeset_id)
         return meta["kind"] if meta else None
 
+    def writer_of(self, changeset_id: str) -> str | None:
+        """`claude` or `echo`, or None for an unknown (or expired) id."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        return _writer(meta) if meta else None
+
     def files_of(self, changeset_id: str) -> list[FileEntry]:
         """The stored FileEntry list for `changeset_id`, pre-images included."""
         self.sweep()
@@ -244,35 +286,40 @@ class UndoStore:
                     time=meta["time"],
                     undone=bool(meta.get("undone", False)),
                     files=[{"path": f["path"], "sha256": f.get("written_sha256")} for f in meta["files"]],
+                    writer=_writer(meta),
                 ).as_json()
             )
         out.sort(key=lambda m: m["time"])
         return out
 
-    def _since(self, window: timedelta) -> datetime:
+    def _since(self, window: timedelta, writer: str = CLAUDE) -> datetime:
         """The start of a counting window: `window` ago, or the user's
-        last counter reset if that is later (limits.py)."""
+        last counter reset if that is later (limits.py). The reset is
+        Claude's: Echo's windows ignore it (module docstring)."""
         cutoff = self._clock() - window
+        if writer != CLAUDE:
+            return cutoff
         reset_at = self.limits.get().counters_reset_at
         if reset_at:
             cutoff = max(cutoff, datetime.fromtimestamp(reset_at, tz=timezone.utc))
         return cutoff
 
-    def count_recent(self, kind: str) -> int:
-        """How many `kind` changesets started within the last hour
-        (since the last counter reset, if later)."""
+    def count_recent(self, kind: str, writer: str = CLAUDE, *, hours: int = 1) -> int:
+        """How many `kind` changesets of `writer` started within the last
+        `hours` (since the last counter reset, if later and the writer
+        is Claude)."""
         self.sweep()
-        cutoff = self._since(timedelta(hours=1))
+        cutoff = self._since(timedelta(hours=hours), writer)
         count = 0
         for meta_dict in self.list_changes():
-            if meta_dict["kind"] != kind:
+            if meta_dict["kind"] != kind or meta_dict["writer"] != writer:
                 continue
             if datetime.fromisoformat(meta_dict["time"]) >= cutoff:
                 count += 1
         return count
 
     def _recent_sum(self, field: str) -> int:
-        """Sum of `field` across every 'write' changeset started within
+        """Sum of `field` across every Claude 'write' changeset started within
         the last 24h (rolling, not calendar-day) -- MOVES_PER_DAY's and
         FOLDERS_PER_DAY's own counters (rev. 3). `field` is either an
         int counter (`move_files`) or a list whose length is the count
@@ -288,7 +335,7 @@ class UndoStore:
             scanned = []
         for entry in scanned:
             meta = self._read_meta(entry.name)
-            if meta is None or meta.get("kind") != "write":
+            if meta is None or meta.get("kind") != "write" or _writer(meta) != CLAUDE:
                 continue
             try:
                 when = datetime.fromisoformat(meta["time"])
@@ -311,7 +358,8 @@ class UndoStore:
         reads the `content_files` counter, never `len(meta["files"])`.
 
         Pure read: never creates the changeset or writes a blob, so a
-        cap refusal here leaves nothing to roll back.
+        cap refusal here leaves nothing to roll back. Claude's only: an
+        Echo changeset is refused whole (`changeset_writer_mismatch`).
         """
         self.sweep()
         limits = self.limits.get()
@@ -321,6 +369,8 @@ class UndoStore:
                 raise CapExceeded("cap_changesets")
             current_files = 0
         else:
+            if _writer(meta) != CLAUDE:
+                raise CapExceeded("changeset_writer_mismatch")
             if meta["kind"] != kind:
                 raise CapExceeded("changeset_kind_mismatch")
             current_files = meta.get("content_files", 0)
@@ -344,6 +394,8 @@ class UndoStore:
                 raise CapExceeded("cap_changesets")
             current = 0
         else:
+            if _writer(meta) != CLAUDE:
+                raise CapExceeded("changeset_writer_mismatch")
             if meta["kind"] != "write":
                 raise CapExceeded("changeset_kind_mismatch")
             current = meta.get("move_files", 0)
@@ -361,23 +413,77 @@ class UndoStore:
         self.sweep()
         limits = self.limits.get()
         meta = self._read_meta(changeset_id)
+        if meta is not None and _writer(meta) != CLAUDE:
+            raise CapExceeded("changeset_writer_mismatch")
         current = len(meta.get("folders", [])) if meta else 0
         if current + n_folders > limits.folders_per_changeset:
             raise CapExceeded("cap_folders")
         if self._recent_sum("folders") + n_folders > limits.folders_per_day:
             raise CapExceeded("cap_folders_day")
 
+    def precheck_echo(self, changeset_id: str) -> None:
+        """Echo's caps (lens L4), before any byte is written: a new
+        changeset needs room under ECHO_CHANGESETS_PER_DAY (rolling 24h,
+        Echo's changesets only, no counter reset), an existing one must
+        be Echo's and hold fewer than ECHO_FILES_PER_CHANGESET files.
+        Claude's limits are never read. A replay of a changeset that
+        already holds its note never reaches here (`echo_replay`)."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            if self.count_recent("write", ECHO, hours=24) >= ECHO_CHANGESETS_PER_DAY:
+                raise CapExceeded("cap_echo")
+            return
+        if _writer(meta) != ECHO:
+            raise CapExceeded("changeset_writer_mismatch")
+        if meta.get("content_files", 0) + 1 > ECHO_FILES_PER_CHANGESET:
+            raise CapExceeded("cap_echo")
+
+    def echo_replay(self, changeset_id: str) -> tuple[str, str] | None:
+        """(path, sha256) of the note an Echo changeset already created,
+        for a replayed `PUT /v1/echo/inbox` (the bot retries a write
+        whose answer it never got, with the same changeset id); None
+        for a new changeset. Another writer's id is refused."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            return None
+        if _writer(meta) != ECHO:
+            raise CapExceeded("changeset_writer_mismatch")
+        for entry in meta["files"]:
+            if entry.get("written_sha256"):
+                return entry["path"], entry["written_sha256"]
+        return None
+
     # -- writing -------------------------------------------------------------
 
+    def _new_meta(self, changeset_id: str, kind: str, writer: str) -> dict:
+        if writer not in WRITERS:
+            raise ValueError(f"unknown writer: {writer!r}")
+        return {
+            "id": changeset_id,
+            "kind": kind,
+            "time": _iso(self._clock()),
+            "undone": False,
+            "files": [],
+            "writer": writer,
+        }
+
     def _append_files(
-        self, changeset_id: str, kind: str, entries: list[FileEntry], counter: str, count: int
+        self,
+        changeset_id: str,
+        kind: str,
+        entries: list[FileEntry],
+        counter: str,
+        count: int,
+        writer: str = CLAUDE,
     ) -> None:
         cdir = self._dir(changeset_id)
         blobs_dir = cdir / "blobs"
         blobs_dir.mkdir(parents=True, exist_ok=True)
         meta = self._read_meta(changeset_id)
         if meta is None:
-            meta = {"id": changeset_id, "kind": kind, "time": _iso(self._clock()), "undone": False, "files": []}
+            meta = self._new_meta(changeset_id, kind, writer)
         next_index = sum(1 for _ in blobs_dir.iterdir())
         for entry in entries:
             pre_image_file = None
@@ -391,14 +497,15 @@ class UndoStore:
         meta[counter] = meta.get(counter, 0) + count
         self._write_meta(changeset_id, meta)
 
-    def append(self, changeset_id: str, kind: str, entries: list[FileEntry]) -> None:
+    def append(self, changeset_id: str, kind: str, entries: list[FileEntry], *, writer: str = CLAUDE) -> None:
         """Add `entries` to `changeset_id` as content-write files,
         creating it (with `kind`) if new. Callers must have called
         `precheck` for the same counts first, under the same lock --
         this does not re-check caps, only writes. A content write's
         `entries` is always one FileEntry per file, so the counter is
-        `len(entries)`."""
-        self._append_files(changeset_id, kind, entries, "content_files", len(entries))
+        `len(entries)`. `writer` stamps a new changeset (an existing
+        one keeps its own; the prechecks refused a mismatch)."""
+        self._append_files(changeset_id, kind, entries, "content_files", len(entries), writer)
 
     def append_move(self, changeset_id: str, kind: str, entries: list[FileEntry], n_files: int) -> None:
         """Same as `append`, but for a rename's moved file and its
@@ -415,7 +522,9 @@ class UndoStore:
         it has."""
         self._append_files(changeset_id, kind, entries, "move_files", n_files)
 
-    def append_folders(self, changeset_id: str, kind: str, folders: list[str]) -> None:
+    def append_folders(
+        self, changeset_id: str, kind: str, folders: list[str], *, writer: str = CLAUDE
+    ) -> None:
         """Record folders created for `changeset_id` (rev. 3) -- for the
         per-changeset/per-day cap, and so undo can remove them again
         (deepest first, only if still empty). Callers must have called
@@ -424,7 +533,7 @@ class UndoStore:
         cdir.mkdir(parents=True, exist_ok=True)
         meta = self._read_meta(changeset_id)
         if meta is None:
-            meta = {"id": changeset_id, "kind": kind, "time": _iso(self._clock()), "undone": False, "files": []}
+            meta = self._new_meta(changeset_id, kind, writer)
         meta.setdefault("folders", [])
         meta["folders"].extend(folders)
         self._write_meta(changeset_id, meta)

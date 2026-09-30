@@ -26,12 +26,12 @@ from pathlib import Path
 
 import pytest
 
-from vaultd import knowledge, undo
+from vaultd import echo, knowledge, undo
 from vaultd.undo import REFUSAL_REASONS
 
 from tests.conftest import AUTH, write
 
-_SOURCE_FILES = [Path(knowledge.__file__), Path(undo.__file__)]
+_SOURCE_FILES = [Path(knowledge.__file__), Path(undo.__file__), Path(echo.__file__)]
 
 
 def sha(data: bytes | str) -> str:

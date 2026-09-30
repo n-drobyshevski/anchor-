@@ -27,6 +27,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     LENS_GARDEN,
+    LENS_RESEARCH,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -65,6 +66,10 @@ RESEARCH_LINE = "• Поиск: «{topic}» → {cards} {noun} (/notes)"
 # and the ones its recheck resolved. Counts only; the gaps themselves are
 # in the run's Telegram message and its Obsidian report.
 LENS_GARDEN_LINE = "• Сад линзы: новых {new}, решено {resolved}"
+# L4 (the L4 spec section 2): one line per done lens research run that
+# took a job -- counts only. The gap and the cards are in the result
+# message the garden hook sends, never here.
+LENS_RESEARCH_LINE = "• Исследование линзы: {cards} {noun}, скрыто {hidden}"
 SKIPS_LINE = "Пропуски: {items}"
 
 _CARD_FORMS = ("карточка", "карточки", "карточек")
@@ -236,6 +241,29 @@ async def build_digest(
             )
         )
 
+    # L4: one line per done lens research run that took a job, newest
+    # first, like the research lines above -- but with counts only, since
+    # the gap's words stay on its result message. A run that only built
+    # its query, or whose query was refused, still shows: 0 cards is the
+    # news for a research the user asked for.
+    lens_research_runs = sorted(
+        (
+            r
+            for r in done
+            if r.kind == LENS_RESEARCH and (r.summary or {}).get("job_id") is not None
+        ),
+        key=lambda r: r.id,
+        reverse=True,
+    )
+    for run in lens_research_runs:
+        summary = run.summary or {}
+        cards = int(summary.get("cards", 0) or 0)
+        lines.append(
+            LENS_RESEARCH_LINE.format(
+                cards=cards, noun=_card_noun(cards), hidden=int(summary.get("hidden", 0) or 0)
+            )
+        )
+
     undoable = tuple(
         r.id
         for r in sorted(done, key=lambda r: r.id, reverse=True)
@@ -263,6 +291,7 @@ __all__ = [
     "CANARY_REGRESSION_LINE",
     "RESEARCH_LINE",
     "LENS_GARDEN_LINE",
+    "LENS_RESEARCH_LINE",
     "Digest",
     "build_digest",
 ]

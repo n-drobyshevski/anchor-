@@ -26,6 +26,7 @@ from app.db.models import (
     AccessGrant,
     ClaudeChangeset,
     ClaudeWriteLimit,
+    EchoChangeset,
     OauthConnection,
     OauthRequest,
     OauthToken,
@@ -444,12 +445,14 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         garden = LensGardenRun(iso_week="2026-W40", lens_version_id=version.id, findings={"wanted": ["Land"]})
         session.add(garden)
         await session.flush()
-        session.add(
-            LensGap(
-                garden_run_id=garden.id, kind="missing_note", note_ids=[1], titles=["CCRU"],
-                title="Land", detail="Стоит ли завести заметку?", signature="0" * 64,
-            )
+        gap = LensGap(
+            garden_run_id=garden.id, kind="missing_note", note_ids=[1], titles=["CCRU"],
+            title="Land", detail="Стоит ли завести заметку?", signature="0" * 64,
         )
+        session.add(gap)
+        await session.flush()
+        # L4: one of Echo's inbox writes for that gap.
+        session.add(EchoChangeset(vault_ref="echo_delete_test", lens_gap_id=gap.id, created_at=now))
         session.add(VaultStatus(id=1, last_ok_at=now))
         await session.commit()
 

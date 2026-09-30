@@ -981,6 +981,17 @@ class StudyJob(Base):
     `local_date` is the day the quota counts against, stamped from the
     user's timezone by the caller rather than derived here, because
     "today" is a clock question and app/core/clock.py owns those.
+
+    **Lens L4** (anchor-lens-plan.md section 9; the L4 spec sections 1
+    and 6): a tap on «исследовать» under a lens garden gap makes a
+    `kind='study'` job with `packet='lens'` and `lens_gap_id` set, and
+    no queue row -- the idle kind `lens_research` runs it, builds its
+    query (`query` stays NULL until then) and searches `PACKET_LENS`
+    only. It spends the same daily /study quota. `lens_gap_id` is SET
+    NULL when the garden goes (the job keeps `packet='lens'`, which is
+    what the pipeline keys on), and unique while set: one research per
+    gap. `offered_at` is when its result message went to Telegram --
+    the cards' expiry counts from it.
     """
 
     __tablename__ = "study_job"
@@ -1007,9 +1018,23 @@ class StudyJob(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    lens_gap_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_gap.id", ondelete="SET NULL")
+    )
+    offered_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint("kind in ('study', 'read')", name="ck_study_job_kind"),
+        CheckConstraint(
+            "lens_gap_id is null or (kind = 'study' and packet = 'lens')",
+            name="ck_study_job_lens",
+        ),
+        Index(
+            "ux_study_job_lens_gap_id",
+            "lens_gap_id",
+            unique=True,
+            postgresql_where=text("lens_gap_id is not null"),
+        ),
         CheckConstraint(
             "status in ('queued', 'searching', 'fetching', 'distilling', "
             "'done', 'failed', 'cancelled')",
@@ -1091,6 +1116,12 @@ class StudyCard(Base):
     listed, never adoptable. Stored rather than dropped so that "the
     filter is working" is observable in /export rather than inferred
     from an absence.
+
+    **Lens L4** (the L4 spec sections 4-6): a lens research's cards are
+    `kind='lens'`, set by code, never by the model. They never become a
+    memory: adopting them writes one knowledge note into the vault's
+    inbox, and each adopted card points at that write's
+    `echo_changeset` instead. /notes never lists them.
     """
 
     __tablename__ = "study_card"
@@ -1116,6 +1147,9 @@ class StudyCard(Base):
         String, nullable=False, default="pending", server_default=sa.text("'pending'")
     )
     memory_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("memory.id"))
+    echo_changeset_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("echo_changeset.id")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1123,7 +1157,7 @@ class StudyCard(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('technique', 'routine', 'checkin_format', 'definition')",
+            "kind in ('technique', 'routine', 'checkin_format', 'definition', 'lens')",
             name="ck_study_card_kind",
         ),
         CheckConstraint('char_length("text") <= 300', name="ck_study_card_text_length"),
@@ -1148,9 +1182,18 @@ class StudyCard(Base):
         CheckConstraint(
             "risk_final <> 'high' or status = 'hidden'", name="ck_study_card_high_is_hidden"
         ),
+        # L4: an adopted lens card has the inbox write instead.
         CheckConstraint(
-            "status <> 'adopted' or memory_id is not null",
+            "status <> 'adopted' or memory_id is not null "
+            "or (kind = 'lens' and echo_changeset_id is not null)",
             name="ck_study_card_adopted_has_memory",
+        ),
+        # L4: a lens card never has a memory, and only a lens card has
+        # an inbox write.
+        CheckConstraint(
+            "(kind = 'lens' and memory_id is null) "
+            "or (kind <> 'lens' and echo_changeset_id is null)",
+            name="ck_study_card_lens_target",
         ),
         # /notes pages pending cards newest first; the expiry sweep reads
         # the same two columns.
@@ -1856,9 +1899,10 @@ class IdleRun(Base):
     __table_args__ = (
         CheckConstraint(
             # L3 (anchor-lens-plan.md section 8; migration b3e9f5a1c7d2):
-            # the weekly lens garden. `lens_research` waits for L4.
+            # the weekly lens garden. L4 (section 9): `lens_research`,
+            # which runs the research a garden tap asked for.
             "kind in ('backfill', 'consolidate', 'reflect', 'prebrief', 'critique', "
-            "'lens_garden', 'research', 'canary')",
+            "'lens_garden', 'lens_research', 'research', 'canary')",
             name="ck_idle_run_kind",
         ),
         CheckConstraint(
@@ -2537,8 +2581,19 @@ class LensGap(Base):
     next run tests (an edge, a title, a path). `status` moves open ->
     done | dismissed on a tap, open | done -> resolved on a recheck (or
     when a note is gone), and done -> open again (`reopened` + 1) when a
-    done gap fails its recheck. `researched` is L4's.
-    `tg_message_id` is the message whose keyboard carries it.
+    done gap fails its recheck. `tg_message_id` is the message whose
+    keyboard carries it.
+
+    **L4** (the L4 spec sections 1 and 6, with the owner's amendment
+    (b)): a tap on «исследовать» moves an open gap to `researched` and
+    stamps `research_requested_at`, which is never cleared -- each gap
+    is researched at most once. When its research finishes, the result
+    goes out as its own Telegram message, whose id is
+    `research_message_id` (the «в Inbox» and «не нужно» buttons are
+    that message's). Adopting the results moves it to `done` (the next
+    garden rechecks it); a research that found nothing, or results the
+    user declined, move it back to `open`; a recheck PASS or GONE
+    resolves it like an open gap.
     """
 
     __tablename__ = "lens_gap"
@@ -2572,6 +2627,10 @@ class LensGap(Base):
     )
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    research_requested_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    research_message_id: Mapped[int | None] = mapped_column(BigInteger)
 
     __table_args__ = (
         CheckConstraint(
@@ -2594,5 +2653,58 @@ class LensGap(Base):
             "signature",
             unique=True,
             postgresql_where=sa.text("status <> 'resolved'"),
+        ),
+    )
+
+
+class EchoChangeset(Base):
+    """One of Echo's own writes to the vault (lens L4; anchor-lens-plan.md
+    sections 9 and 14.5, the L4 spec section 5): adopting a lens
+    research writes one knowledge note into the inbox through vaultd's
+    `PUT /v1/echo/inbox`, and this row is its ledger entry.
+
+    No path, no name, no text, no hash -- ids and times only, like
+    `claude_changeset`. `vault_ref` is vaultd's changeset id (minted by
+    app/core/echo_write.py, which is the only writer of this table): the
+    row is committed *before* the write, so a write whose answer was
+    lost is replayed with the same id (vaultd answers `replayed`) rather
+    than made twice; `confirmed_at` is set once vaultd has answered, and
+    at most one unconfirmed row may exist per gap. `card_ids` are the
+    `study_card` rows the note holds, which point back here once
+    adopted. `undone_at` is set by `/lens undo`. The gap and the job are
+    SET NULL, so the ledger outlives the garden. No debug view, as for
+    `claude_changeset`: `/export` carries it, `/delete` truncates it,
+    and vaultd's own undo store is wiped by `POST /v1/purge`.
+    """
+
+    __tablename__ = "echo_changeset"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    vault_ref: Mapped[str] = mapped_column(String, nullable=False)
+    lens_gap_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("lens_gap.id", ondelete="SET NULL")
+    )
+    study_job_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("study_job.id", ondelete="SET NULL")
+    )
+    card_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), nullable=False, default=list, server_default=text("'{}'")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("vault_ref", name="uq_echo_changeset_vault_ref"),
+        # vaultd's own changeset id rule (vaultd/vaultd/api.py).
+        CheckConstraint("vault_ref ~ '^[A-Za-z0-9_-]{1,64}$'", name="ck_echo_changeset_vault_ref"),
+        CheckConstraint(
+            "undone_at is null or confirmed_at is not null", name="ck_echo_changeset_undone"
+        ),
+        Index(
+            "ux_echo_changeset_open_gap",
+            "lens_gap_id",
+            unique=True,
+            postgresql_where=text("confirmed_at is null"),
         ),
     )

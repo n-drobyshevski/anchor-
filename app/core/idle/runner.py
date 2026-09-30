@@ -45,6 +45,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     LENS_GARDEN,
+    LENS_RESEARCH,
     PREBRIEF,
     REFLECT,
     RESEARCH,
@@ -378,6 +379,21 @@ async def run_idle(
             # into the "idle run done" log call's `extra` below.
             summary = result.summary()
             reversible = False
+        elif kind == LENS_RESEARCH:
+            from app.core.idle.lens_research import run_lens_research
+
+            result = await run_lens_research(
+                session_factory, settings, safety_provider, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            # Preempted before it built a query, searched or ended a job:
+            # nothing was written. A query stored before a later
+            # preemption stays for the next run (app/core/idle/
+            # lens_research.py). Not reversible: it proposes, and the
+            # user decides every card on the result message.
+            preempted_and_empty = result.preempted and not result.acted
+            summary = result.summary()
+            reversible = False
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
     except Exception as exc:  # noqa: BLE001 - never retried, see module docstring
@@ -393,13 +409,15 @@ async def run_idle(
         return
 
     usd_cost = await spend_since(session_factory, started_at)
-    if kind == RESEARCH:
+    if kind in (RESEARCH, LENS_RESEARCH):
         # research's spend is ledgered under "research" (distill.
         # RESEARCH_CATEGORY), unchanged, never "idle:research" -- see
         # app/core/idle/research.py's own docstring on why -- so
         # spend_since's `LIKE 'idle:%'` match above never sees it.
         # Folded in explicitly here so idle_run.usd_cost still reflects
-        # what this run actually spent.
+        # what this run actually spent. L4's lens research ledgers the
+        # same way, its query call included (app/core/idle/
+        # lens_research.py), and returns only what this run added.
         usd_cost += result.usd_cost
 
     if preempted_and_empty:

@@ -12,8 +12,11 @@ from app.core.idle.gate import (
     BUSY,
     DAILY_LIMIT,
     DISABLED,
+    EMPTY_LENS_PACKET,
     IDLE_CAP,
     KIND_DAILY_MAX,
+    KIND_RULES,
+    LENS_RESEARCH_OFF,
     MAX_JOBS,
     MORNING_DISABLED,
     NOT_CANARY_DOW,
@@ -22,6 +25,7 @@ from app.core.idle.gate import (
     NOTHING_TO_BACKFILL,
     NOTE_EXISTS,
     NO_INDEPENDENT_JUDGE,
+    NO_LENS_JOB,
     NO_NEW_REPLIES,
     NO_NEW_SUMMARY,
     NO_TOPICS,
@@ -38,7 +42,17 @@ from app.core.idle.gate import (
     idle_gate,
     parse_window,
 )
-from app.core.idle import BACKFILL, CANARY, CONSOLIDATE, CRITIQUE, PREBRIEF, REFLECT, RESEARCH
+from app.core.idle import (
+    BACKFILL,
+    CANARY,
+    CONSOLIDATE,
+    CRITIQUE,
+    KINDS,
+    LENS_RESEARCH,
+    PREBRIEF,
+    REFLECT,
+    RESEARCH,
+)
 
 TZ = datetime.timezone.utc
 NOW = datetime.datetime(2026, 9, 23, 12, 0, tzinfo=TZ)
@@ -237,6 +251,38 @@ def test_row10_kind_rule_research_disabled_by_default():
     assert idle_gate(RESEARCH, facts, NOW, _config()) == (False, RESEARCH_DISABLED)
 
 
+# --- L4 kind rule: lens_research ------------------------------------------
+
+
+def test_row10_kind_rule_lens_research_off_by_default():
+    """A bare `IdleConfig` has lens research off, as the switches are."""
+    facts = _facts(lens_job_queued=True)
+    assert idle_gate(LENS_RESEARCH, facts, NOW, _config()) == (False, LENS_RESEARCH_OFF)
+
+
+def test_row10_kind_rule_lens_research_empty_packet():
+    facts = _facts(lens_job_queued=True)
+    config = _config(lens_research_enabled=True, lens_packet=False)
+    assert idle_gate(LENS_RESEARCH, facts, NOW, config) == (False, EMPTY_LENS_PACKET)
+
+
+def test_row10_kind_rule_lens_research_no_job():
+    config = _config(lens_research_enabled=True, lens_packet=True)
+    assert idle_gate(LENS_RESEARCH, _facts(), NOW, config) == (False, NO_LENS_JOB)
+
+
+def test_row10_kind_rule_lens_research_allows_a_queued_job_without_a_quota_check():
+    """The job's own row already counts against its day's quota: a spent
+    quota must not refuse the job that spent it."""
+    facts = _facts(lens_job_queued=True, research_quota_used=True)
+    config = _config(lens_research_enabled=True, lens_packet=True)
+    assert idle_gate(LENS_RESEARCH, facts, NOW, config) == (True, OK)
+
+
+def test_every_kind_has_a_rule():
+    assert set(KIND_RULES) == set(KINDS) == set(KIND_DAILY_MAX)
+
+
 # --- 6c kind rules: prebrief, critique, canary ---------------------------
 
 
@@ -368,5 +414,5 @@ def test_row10_per_kind_daily_limit():
     )
     assert KIND_DAILY_MAX == {
         "backfill": 3, "consolidate": 1, "reflect": 1, "prebrief": 1,
-        "critique": 1, "lens_garden": 1, "research": 1, "canary": 1,
+        "critique": 1, "lens_garden": 1, "lens_research": 1, "research": 1, "canary": 1,
     }

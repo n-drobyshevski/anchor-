@@ -206,12 +206,12 @@ It adds a new seed and a new destination.
 
 **The seed.**
 - Only a gap you tap «исследовать» becomes a `study_job` with `lens_gap_id` (§14.4). The garden report offers the option; nothing researches on its own.
-- The idle kind `lens_research` builds the query in its own call. That call receives **only the gap's detail and the summaries of the lens notes it names**, never dialogs, memory or personal notes. The existing redactor screens the query before it leaves.
-- It shares `/study`'s daily quota and `RESEARCH_JOB_USD_CAP`. It sends no completion message; the cards arrive in the next garden report.
+- The idle kind `lens_research` builds the query in its own call. That call receives **only the gap's kind, detail and proposed title, and the titles and summaries of the lens notes it names** (amended in L4, see docs/decisions.md), never dialogs, memory or personal notes. The existing redactor screens the query before it leaves.
+- It shares `/study`'s daily quota and `RESEARCH_JOB_USD_CAP`. The result is its own Telegram message as soon as the job finishes, not part of the next garden report (amended in L4, see docs/decisions.md).
 
 **The domain packet for this work** is a separate `PACKET_LENS`, so philosophy sources don't widen `/study`'s packet. Proposed default:
 - `plato.stanford.edu`, `iep.utm.edu`, `philpapers.org`, `arxiv.org`
-- `en.wikipedia.org`, `archive.org`
+- `en.wikipedia.org`, `archive.org` (dropped in L4: it lets in `web.archive.org`; see docs/decisions.md)
 - `pangaro.com` (cybernetics archives), `asc-cybernetics.org`
 
 You edit it like the other packets. At most 12 domains.
@@ -223,7 +223,7 @@ You edit it like the other packets. At most 12 domains.
   - a body with the distilled points, each with its verbatim quote and URL;
   - `[[links]]` to the lens notes the gap named.
 - The write goes through vaultd with compare-and-swap, the class boundary, caps and 14-day undo. It is recorded in `echo_changeset`, and undone with `/lens undo`.
-- **The note is never lens.** You promote it by moving it into a lens folder or marking it `anchor: lens`, after reading it. This is the gate that stops a poisoned page from becoming part of what Echo reasons with.
+- **The note is never lens.** You promote it by moving it into a lens folder **and** marking it `anchor: lens`, after reading it (amended in L4, see docs/decisions.md). This is the gate that stops a poisoned page from becoming part of what Echo reasons with.
 - Declined or expired cards (14 days) are gone. High-risk cards stay hidden, as today.
 
 ## 10. What each class may reach (8e §7, extended)
@@ -235,7 +235,7 @@ You edit it like the other packets. At most 12 domains.
 | Notebook and idle reflect, via the selector (L5) | never | never | **yes** |
 | Critique | never | never | lens ids only (L5) |
 | Garden (§8) | never; outside links counted, not named | graph and titles, for context | **yes**: graph, summaries |
-| Research query building (§9) | **never, in any phase** | never | **gap detail and summaries only** |
+| Research query building (§9) | **never, in any phase** | never | **gap kind, detail and proposed title, and its lens notes' titles and summaries only** |
 | Claude connector (`search_library`) | never | yes, under C3's switch | yes, as knowledge |
 | W2 write tools | never | yes | **never** (only you change the lens) |
 | Echo's inbox writes (§9) | never | new notes in `echo_inbox` only | never |
@@ -284,7 +284,7 @@ The first two show what Echo read and which notes each round picked (never the s
 
 ## 12. Milestones
 
-Status: L1 (PR #56, open); L2 and L3 on the same branch.
+Status: L1–L3 merged (PR #56). L4 built on its own branch, with your amendments to §9: `PACKET_LENS` leaves out `archive.org`, a research's result is its own Telegram message as soon as the job finishes (not the next garden report), and promotion is a move into a lens folder **and** `anchor: lens` (docs/decisions.md, "L4 — lens research into `Echo/Inbox`").
 
 - **L1: class, pipe, graph, Claude Code.**
   - vaultd: `lens`, the settings keys, `/v1/knowledge/graph`, the write refusal.
