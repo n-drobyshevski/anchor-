@@ -1009,6 +1009,22 @@ class Settings(BaseSettings):
         """
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_boolean_flags(cls, value, info):
+        """Trim whitespace around every boolean flag's value.
+
+        A dashboard field kept the space after `true` in
+        LENS_GARDEN_ENABLED, pydantic refused "true " as a boolean, and
+        the bot could not start -- not even far enough to run its
+        migrations. A flag's meaning never lives in its whitespace.
+        Keyed on the annotation rather than a list, so a flag added
+        later is covered too.
+        """
+        if isinstance(value, str) and cls.model_fields[info.field_name].annotation is bool:
+            return value.strip()
+        return value
+
 
 def get_settings() -> Settings:
     """Build a fresh Settings instance from the current environment."""
