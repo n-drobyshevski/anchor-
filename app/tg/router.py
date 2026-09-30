@@ -165,7 +165,7 @@ PRIVACY_TEXT = (
     "(или начало текста) заметок линзы, связи между ними и сколько у каждой связей "
     "с заметками знаний (без их названий); его предложения при "
     "/lens code on видит и Claude Code. "
-    "Если нажать «исследовать» под пунктом сада, модели уходят этот пункт, названия и краткие "
+    "Если нажать «исследовать и написать» под пунктом сада, модели уходят этот пункт, названия и краткие "
     "описания его заметок, поисковый запрос — в Exa (через OpenRouter), страницы берутся только с сайтов из "
     "PACKET_LENS; принятое («в Inbox») становится заметкой знаний в Echo/Inbox, её можно "
     "отменить 14 дней (/lens undo). "
@@ -2309,8 +2309,8 @@ def build_router(
     @router.callback_query(F.data.startswith("lg:"))
     async def lens_garden_decision(callback: CallbackQuery) -> None:
         """L3: `lg:d:<gap id>:<epoch>` / `lg:n:<gap id>:<epoch>` -- the lens
-        garden message's «N · сделал» / «N · не нужно» (app/tg/garden.py).
-        L4: `lg:r:` «N · исследовать» (paid research, spent at the tap),
+        garden message's «N · закрыл» / «N · не нужно» (app/tg/garden.py).
+        L4: `lg:r:` «N · исследовать и написать» (paid research, spent at the tap),
         and on a research's result message `lg:a:` «в Inbox» (a write
         into the user's vault) and `lg:x:` «не нужно». The settings
         decide whether research may run; the vault client is looked up

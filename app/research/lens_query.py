@@ -1,7 +1,7 @@
 """The lens research query: built from a gap and its lens notes, nothing else (lens L4).
 
 anchor-lens-plan.md sections 9, 10 and 13, the L4 spec section 2. A tap
-on «исследовать» under a garden gap queues a research of the web for
+on «исследовать и написать» under a garden gap queues a research of the web for
 it; before anything is searched, one model call turns the gap into one
 English search query. **That call's input is structurally lens-only**:
 its one argument is a `GapSeed`, and the only code that builds one is

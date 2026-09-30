@@ -1,4 +1,4 @@
-"""Lens research in Telegram (lens L4): the «исследовать» tap, the result
+"""Lens research in Telegram (lens L4): the «исследовать и написать» tap, the result
 message, its buttons, and `/lens undo`.
 
 anchor-lens-plan.md section 9, the L4 spec sections 1, 4, 5 and 7, with
@@ -9,7 +9,7 @@ with «в Inbox» (`lg:a:`) and «не нужно» (`lg:x:`) that edit that sam
 message; a spent job sends «ничего не нашлось» and the gap goes back to
 open, never to be researched twice. This file asserts:
 
-- the «N · исследовать» row: only for `missing_note`, `tension` and
+- the «N · исследовать и написать» row: only for `missing_note`, `tension` and
   `bridge`, only on a live gap never researched, only with every switch
   on and a packet to search;
 - the `lg:` grammar, now `(d|n|r|a|x)`, at most 22 bytes;
@@ -243,20 +243,20 @@ async def _deliver(sessionmaker, settings=None, clock=None) -> tuple[int, FakeSe
     return sent, fake
 
 
-# --- the «исследовать» row -------------------------------------------------------------
+# --- the «исследовать и написать» row -------------------------------------------------------------
 
 
 async def test_the_research_row_is_under_each_researchable_gap(sessionmaker):
     g = await _garden(sessionmaker)
     assert _rows(g["garden_markup"]) == [
-        [("1 · сделал", f"lg:d:{g['missing']}:{EPOCH}"), ("1 · не нужно", f"lg:n:{g['missing']}:{EPOCH}")],
-        [("1 · исследовать", f"lg:r:{g['missing']}:{EPOCH}")],
-        [("2 · сделал", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")],
-        [("2 · исследовать", f"lg:r:{g['tension']}:{EPOCH}")],
+        [("1 · закрыл", f"lg:d:{g['missing']}:{EPOCH}"), ("1 · не нужно", f"lg:n:{g['missing']}:{EPOCH}")],
+        [("1 · исследовать и написать", f"lg:r:{g['missing']}:{EPOCH}")],
+        [("2 · закрыл", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")],
+        [("2 · исследовать и написать", f"lg:r:{g['tension']}:{EPOCH}")],
         # No research for a link: its fix is an edge between existing notes.
-        [("3 · сделал", f"lg:d:{g['link']}:{EPOCH}"), ("3 · не нужно", f"lg:n:{g['link']}:{EPOCH}")],
-        [("4 · сделал", f"lg:d:{g['bridge']}:{EPOCH}"), ("4 · не нужно", f"lg:n:{g['bridge']}:{EPOCH}")],
-        [("4 · исследовать", f"lg:r:{g['bridge']}:{EPOCH}")],
+        [("3 · закрыл", f"lg:d:{g['link']}:{EPOCH}"), ("3 · не нужно", f"lg:n:{g['link']}:{EPOCH}")],
+        [("4 · закрыл", f"lg:d:{g['bridge']}:{EPOCH}"), ("4 · не нужно", f"lg:n:{g['bridge']}:{EPOCH}")],
+        [("4 · исследовать и написать", f"lg:r:{g['bridge']}:{EPOCH}")],
     ]
 
 
@@ -320,7 +320,7 @@ async def test_the_tap_queues_one_job_without_a_queue_row_and_marks_the_item(ses
     assert lines[first + 2] == "— исследую, итог придёт отдельным сообщением"
     rows = _rows(edit.reply_markup)
     assert all(g["missing"] != int(data.split(":")[2]) for row in rows for _t, data in row)
-    assert [("2 · исследовать", f"lg:r:{g['tension']}:{EPOCH}")] in rows
+    assert [("2 · исследовать и написать", f"lg:r:{g['tension']}:{EPOCH}")] in rows
 
     (job,) = await _jobs(sessionmaker)
     assert (job.kind, job.packet, job.lens_gap_id, job.query, job.status) == (
@@ -364,7 +364,7 @@ async def test_each_refusal_rolls_back_and_leaves_the_gap_open(sessionmaker, set
     await _assert_rolled_back(sessionmaker, g["missing"])
     # The re-render shows the gap open, its row still there.
     rows = _rows(fake.edits[-1].reply_markup)
-    assert ("1 · сделал", f"lg:d:{g['missing']}:{EPOCH}") in rows[0]
+    assert ("1 · закрыл", f"lg:d:{g['missing']}:{EPOCH}") in rows[0]
 
 
 async def test_the_budget_refusal_rolls_back(sessionmaker):
@@ -492,12 +492,12 @@ async def test_a_spent_research_says_nothing_found_and_reopens_the_gap(sessionma
     async with sessionmaker() as session:
         assert (await session.get(StudyJob, job_id)).offered_at == NOW
     # The garden message is re-rendered: the gap's row is back, without
-    # «исследовать» (never twice), and the item says what happened.
+    # «исследовать и написать» (never twice), and the item says what happened.
     edit = fake.edits[-1]
     assert edit.message_id == GARDEN_MESSAGE
     rows = _rows(edit.reply_markup)
-    assert [("2 · сделал", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in rows
-    assert ("2 · исследовать", f"lg:r:{g['tension']}:{EPOCH}") not in [b for row in rows for b in row]
+    assert [("2 · закрыл", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in rows
+    assert ("2 · исследовать и написать", f"lg:r:{g['tension']}:{EPOCH}") not in [b for row in rows for b in row]
     assert "— исследовано, в Inbox ничего не записано" in edit.text
     # And a new tap on it is stale.
     fake2 = await _tap_research(sessionmaker, g["tension"])
@@ -537,7 +537,7 @@ async def test_a_result_whose_cards_all_expired_gives_the_gap_back(sessionmaker)
     gap = await _gap(sessionmaker, g["tension"])
     assert (gap["status"], gap["research_requested_at"]) == ("open", NOW)
     garden_edit = next(e for e in fake.edits if e.message_id == GARDEN_MESSAGE)
-    assert [("2 · сделал", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in _rows(
+    assert [("2 · закрыл", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in _rows(
         garden_edit.reply_markup
     )
     # Once only.
@@ -652,7 +652,7 @@ async def test_decline_rejects_the_cards_reopens_the_gap_and_edits_the_same_mess
     gap = await _gap(sessionmaker, g["tension"])
     assert (gap["status"], gap["research_requested_at"]) == ("open", NOW)
     garden_edit = next(e for e in fake.edits if e.message_id == GARDEN_MESSAGE)
-    assert [("2 · сделал", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in _rows(
+    assert [("2 · закрыл", f"lg:d:{g['tension']}:{EPOCH}"), ("2 · не нужно", f"lg:n:{g['tension']}:{EPOCH}")] in _rows(
         garden_edit.reply_markup
     )
     assert vault.notes == {}

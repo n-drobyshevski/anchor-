@@ -291,7 +291,7 @@ The gaps' text is read through `lens.gaps(n)`, logged like the rest.
 
 ### Lens research (L4): no new view, no text
 
-L4 adds research on a garden gap (a tap on «исследовать»), its web
+L4 adds research on a garden gap (a tap on «исследовать и написать»), its web
 cards, and Echo's notes in the vault's inbox (`Echo/Inbox` by default,
 «в Inbox»), recorded in `echo_changeset`. **No text of it is readable
 by Claude Code**, and none should be. What is readable is ids, codes,

@@ -40,7 +40,7 @@ other work, and the daily budget the enqueue-time check saw is not
 necessarily the one still true when the job is claimed.
 
 **Lens L4: gap-seeded research** (anchor-lens-plan.md section 9; the L4
-spec sections 1-4 with the owner's amendments). A tap on «исследовать»
+spec sections 1-4 with the owner's amendments). A tap on «исследовать и написать»
 under a lens garden gap calls `enqueue_lens_study`: the same checks as
 /study, in the same order, then a `kind='study'`, `packet='lens'` job
 with `lens_gap_id` set and **no queue row** -- nothing here reaches

@@ -1,7 +1,7 @@
 """The `lens_research` idle kind (anchor-lens-plan.md sections 9, 10 and
 13; the L4 spec section 2 with the owner's amendments; milestone L4).
 
-A tap on «исследовать» under a lens garden gap queues a `study_job`
+A tap on «исследовать и написать» under a lens garden gap queues a `study_job`
 (`kind='study'`, `packet='lens'`, `lens_gap_id` set) with **no queue
 row** (app/research/jobs.py's `enqueue_lens_study`). This kind is the
 only thing that runs one. Being an idle kind gives it preemption, the

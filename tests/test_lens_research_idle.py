@@ -244,7 +244,7 @@ async def seed_garden(sessionmaker, **state) -> dict[str, int]:
 
 
 async def tap(sessionmaker, gap_id: int, settings: Settings | None = None) -> int:
-    """«исследовать»: the gap and the job in one transaction, as the router
+    """«исследовать и написать»: the gap and the job in one transaction, as the router
     does it."""
     settings = settings or lens_settings()
     async with sessionmaker() as session:
