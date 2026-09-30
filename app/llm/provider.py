@@ -92,6 +92,10 @@ class LLMResponse:
     usage: LLMUsage
     model: str
     citations: tuple[Citation, ...] = ()
+    # The API's own stop reason (`stop`, `length`, `content_filter`...),
+    # lowercase letters and underscores only, else None. Content-free,
+    # so a caller may log it.
+    finish_reason: str | None = None
 
 
 class LLMError(Exception):

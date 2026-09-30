@@ -32,6 +32,7 @@ reliability feature here, never a correctness one.
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 
 import openai
@@ -196,6 +197,19 @@ def _raise_for_body_error(response) -> None:
     raise LLMError(f"openrouter body error code={code}")
 
 
+_FINISH_REASON = re.compile(r"[a-z_]{1,24}")
+
+
+def _extract_finish_reason(response) -> str | None:
+    """choices[0].finish_reason when it is a short enum-like word, else
+    None: it is logged, so nothing free-form gets through."""
+    choices = getattr(response, "choices", None) or []
+    reason = getattr(choices[0], "finish_reason", None) if choices else None
+    if isinstance(reason, str) and _FINISH_REASON.fullmatch(reason):
+        return reason
+    return None
+
+
 def _extract_usage(response) -> LLMUsage:
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -355,6 +369,7 @@ class OpenRouterProvider:
             usage=usage,
             model=self._model,
             citations=_extract_citations(response),
+            finish_reason=_extract_finish_reason(response),
         )
 
     async def close(self) -> None:
