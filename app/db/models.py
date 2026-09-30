@@ -983,7 +983,7 @@ class StudyJob(Base):
     "today" is a clock question and app/core/clock.py owns those.
 
     **Lens L4** (anchor-lens-plan.md section 9; the L4 spec sections 1
-    and 6): a tap on «исследовать» under a lens garden gap makes a
+    and 6): a tap on «исследовать и написать» under a lens garden gap makes a
     `kind='study'` job with `packet='lens'` and `lens_gap_id` set, and
     no queue row -- the idle kind `lens_research` runs it, builds its
     query (`query` stays NULL until then) and searches `PACKET_LENS`
@@ -2621,7 +2621,7 @@ class LensGap(Base):
     keyboard carries it.
 
     **L4** (the L4 spec sections 1 and 6, with the owner's amendment
-    (b)): a tap on «исследовать» moves an open gap to `researched` and
+    (b)): a tap on «исследовать и написать» moves an open gap to `researched` and
     stamps `research_requested_at`, which is never cleared -- each gap
     is researched at most once. When its research finishes, the result
     goes out as its own Telegram message, whose id is

@@ -34,7 +34,7 @@ no model call, no outbound).
 | The lens (L1, L2): knowledge notes you mark `lens` (people and concepts) are kept whole with their link graph, and Claude Code can read them through the `anchor_lens` role. The weekly review picks the notes that fit its week and grounds its proposals in them (L2) | **off** | `LENS_ENABLED` (on top of the notes switches above); `LENS_CATALOG_MAX_NOTES` (300): above it the review does not use the lens and `/lens` warns; `LENS_ROUND_MAX_NOTES` (6, 1–12) and `LENS_ROUND_MAX_CHARS` (24000, 2000–100000) cap what one review round reads; Claude Code's access is `/lens code on` |
 | The lens garden (L3): once a week an idle job looks for gaps in the lens (missing links, missing notes, tensions, bridges), sends one Telegram message with a button row per gap, and writes a report to `Anchor/Reports` | **off** | `LENS_GARDEN_ENABLED` (on top of `LENS_ENABLED`, and `VAULT_MODE` `mirror` or `sync`); `GARDEN_MAX_TOKENS` (4000, 1000–8000) caps the model's answer; `GARDEN_MODEL` (empty: `LLM_MODEL_SAFETY`) moves the garden alone to another model. Deploy the vault service first (docs/vault-setup.md) |
 | The lens in reflection (L5): the idle reflection picks the lens notes that fit its draft notebook changes and may rephrase the draft's open threads on them (never observations about you); critique records which lens notes stood behind the replies it rated | **off** | `LENS_REFLECT_ENABLED` (on top of `LENS_ENABLED`) for the reflection; critique's ids need only `LENS_ENABLED`; the same `LENS_ROUND_MAX_NOTES` and `LENS_ROUND_MAX_CHARS` bound a reflection round, and its two extra calls count against `IDLE_JOB_USD_CAP` |
-| Lens research (L4): «исследовать» under a garden gap searches `PACKET_LENS` in the background, sends the result as its own message, and «в Inbox» writes it as one knowledge note into the vault's inbox (`Echo/Inbox`); `/lens undo` takes the newest back | **off** | all of `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and `IDLE_ENABLED`; `PACKET_LENS` (7 domains by default, at most 12; empty turns it off); shares `/study`'s `RESEARCH_JOBS_PER_DAY` and `RESEARCH_JOB_USD_CAP`. Deploy the vault service first (docs/vault-setup.md) |
+| Lens research (L4): «исследовать и написать» under a garden gap searches `PACKET_LENS` in the background, sends the result as its own message, and «в Inbox» writes it as one knowledge note into the vault's inbox (`Echo/Inbox`); `/lens undo` takes the newest back | **off** | all of `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and `IDLE_ENABLED`; `PACKET_LENS` (7 domains by default, at most 12; empty turns it off); shares `/study`'s `RESEARCH_JOBS_PER_DAY` and `RESEARCH_JOB_USD_CAP`. Deploy the vault service first (docs/vault-setup.md) |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -1226,7 +1226,7 @@ it, and extends the isolation tests.
 | `Anchor/Reports` in the vault (L3) | never | never named | titles, as `[[links]]` to lens notes |
 | The weekly review | never | never | **yes, via the selector (L2)**: the catalog and the notes it picks, never with the week's own input |
 | Idle research, `/study`, `/read`, distill, search, anything that leaves the system | **never, in any phase** | not in 8e; a later plan may allow it | never, except lens research below |
-| Lens research's query call, an idle job (L4), after your tap on «исследовать» | **never, in any phase** | never | **the gap's kind, detail and proposed title, and the titles and catalog summaries of its lens notes**, to the model; the query it writes goes to Exa, pages only from `PACKET_LENS` |
+| Lens research's query call, an idle job (L4), after your tap on «исследовать и написать» | **never, in any phase** | never | **the gap's kind, detail and proposed title, and the titles and catalog summaries of its lens notes**, to the model; the query it writes goes to Exa, pages only from `PACKET_LENS` |
 | Echo's inbox writes (L4, «в Inbox») | never | **new notes in `echo_inbox` only** (vaultd-enforced: create-only, `anchor: knowledge`, `anchor_edited_by: echo`, undo for 14 days) | never: only you promote a note (move it into a lens folder and mark it `anchor: lens`) |
 | `/grok` and the MCP endpoint xAI reads | not grantable in 8e | not grantable in 8e | never |
 | Claude connector's `search_library` (C3) | never | yes, under `/claude library on` | yes, as knowledge |
@@ -1432,7 +1432,7 @@ never a lens note (`anchor-lens-plan.md` §9). Off unless
 vault service first** (docs/vault-setup.md, section 10).
 
 1. **The tap.** Under a live `missing_note`, `tension` or `bridge` gap
-   the garden message has a row «N · исследовать» (never for `link`,
+   the garden message has a row «N · исследовать и написать» (never for `link`,
    never twice for one gap). A tap spends one of `/study`'s
    `RESEARCH_JOBS_PER_DAY` and queues the research, or answers
    «Исследования выключены.», the quota or the budget text and changes

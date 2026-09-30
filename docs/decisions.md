@@ -3043,7 +3043,7 @@ a lens note. The L4 spec settled the details; you amended two of them.
   text ever reaches `Anchor/Reports`. The spec's
   `lens_gap.research_run_id` was dropped with it.
 - **The tap is one transaction, and the quota is spent there.** «N ·
-  исследовать» is its own row under a live `missing_note`, `tension` or
+  исследовать и написать» is its own row under a live `missing_note`, `tension` or
   `bridge` gap (not `link`: its fix is an edge between notes that
   exist), shown only while the gap was never researched and research
   can actually run: `RESEARCH_ENABLED`, `LENS_ENABLED`,
@@ -3092,7 +3092,7 @@ a lens note. The L4 spec settled the details; you amended two of them.
   the gap to done, which is your own act. «не нужно» rejects the cards
   and sends the gap back to open. Either way the garden message is
   re-rendered, so its item reads the truth («— записано в Inbox», or
-  its row back without «исследовать»).
+  its row back without «исследовать и написать»).
 - **vaultd enforces the writer, not the bot.** `PUT /v1/echo/inbox`
   takes a bare basename and builds the path itself, creates only (a
   taken name gets ` 2` to ` 9`), only in the inbox (`echo_inbox` in

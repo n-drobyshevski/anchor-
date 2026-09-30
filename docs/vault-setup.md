@@ -320,7 +320,7 @@ deleted, never adopted.
 
 ## 10. Lens research: Echo's inbox (L4)
 
-Under a gap in the garden message you can tap «исследовать». The bot
+Under a gap in the garden message you can tap «исследовать и написать». The bot
 searches a small list of sites (`PACKET_LENS`), sends what it found as
 its own message, and «в Inbox» writes it into the vault as **one new
 knowledge note** in Echo's inbox. Nothing is written unless you tap.

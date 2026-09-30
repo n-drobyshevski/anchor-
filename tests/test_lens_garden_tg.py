@@ -368,7 +368,7 @@ async def test_a_stale_epoch_is_stale(sessionmaker):
 async def test_research_on_a_link_gap_is_stale(sessionmaker):
     """L4 made `lg:r:` research, but never for a `link` gap (its fix is an
     edge between notes that exist): a forged press is stale, and the
-    re-render leaves the message as it was, with no «исследовать» row
+    re-render leaves the message as it was, with no «исследовать и написать» row
     (tests/test_lens_research_tg.py covers research itself)."""
     await _seed(sessionmaker)
     (a, _b), message_id = await _sent(sessionmaker)

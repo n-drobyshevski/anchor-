@@ -50,7 +50,7 @@ no knowledge title may reach a model or Claude Code.
 
 **L4: lens research** (plan section 9; the L4 spec with the owner's
 amendments -- a research's result is its own Telegram message, sent as
-soon as the job finishes). A tap on «исследовать» under an open gap
+soon as the job finishes). A tap on «исследовать и написать» under an open gap
 goes through `request_research` (open -> `researched`, once per gap:
 `research_requested_at` is never cleared). The idle kind
 `lens_research` asks `gap_seed` for the only input its query call may
@@ -1638,7 +1638,7 @@ async def request_research(
     *,
     message_id: int | None = None,
 ) -> str:
-    """A tap on «исследовать»: `ok` when it moved an open gap to
+    """A tap on «исследовать и написать»: `ok` when it moved an open gap to
     `researched`, `stale` otherwise. The same conditions as
     `decide_gap` (the vault epoch, an open gap with live buttons, on
     this message when `message_id` is given), plus a researchable kind

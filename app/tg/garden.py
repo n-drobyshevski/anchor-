@@ -48,7 +48,7 @@ stale.
 **L4: lens research** (anchor-lens-plan.md section 9, the L4 spec
 section 1 with the owner's amendments). Below a live gap's row, a
 `missing_note`, `tension` or `bridge` gap gets its own row «N ·
-исследовать» (`lg:r:`) while the gap was never researched (it has no
+исследовать и написать» (`lg:r:`) while the gap was never researched (it has no
 lens job: `research_requested_at` and the job are committed together,
 and study jobs are never deleted short of /delete) and research can
 run at all (`research_on`: RESEARCH_ENABLED, LENS_ENABLED,
@@ -157,7 +157,7 @@ MARK_RESEARCH_SPENT = "— исследовано, в Inbox ничего не з
 
 DONE_BUTTON = "{n} · закрыл"
 DISMISS_BUTTON = "{n} · не нужно"
-RESEARCH_BUTTON = "{n} · исследовать"
+RESEARCH_BUTTON = "{n} · исследовать и написать"
 
 DONE_ANSWER = "Отмечено: закрыл."
 DISMISSED_ANSWER = "Отмечено: не нужно."
@@ -229,7 +229,7 @@ def _gap_line(kind: str, titles, title: str | None, title_cap: int | None) -> st
 
 
 def research_on(settings: Settings) -> bool:
-    """Whether «исследовать» may be offered at all (the L4 spec section 1):
+    """Whether «исследовать и написать» may be offered at all (the L4 spec section 1):
     every switch lens research needs (`jobs.lens_research_enabled`), and
     a packet to search. A dead button is worse than none."""
     return jobs.lens_research_enabled(settings) and bool(settings.PACKET_LENS)
@@ -259,7 +259,7 @@ def _mark(
         if not _live(message, gap):
             return MARK_MOVED
         # Back from a research that found nothing, or whose cards were
-        # declined: its row is live again, without «исследовать».
+        # declined: its row is live again, without «исследовать и написать».
         return MARK_RESEARCH_SPENT if outcome == jobs.SPENT else None
     return MARK_CLOSED
 
@@ -346,7 +346,7 @@ def keyboard(
     research: Mapping[int, str] | None = None,
 ) -> InlineKeyboardMarkup | None:
     """One row per gap still live on this message, numbered as in the
-    text, and (L4) below it a row «N · исследовать» when `research_on`,
+    text, and (L4) below it a row «N · исследовать и написать» when `research_on`,
     the gap's kind is researchable and it has never been researched (it
     is not in `research`, `jobs.lens_job_outcomes()`). None when no row
     is left, which removes the keyboard."""
@@ -779,7 +779,7 @@ async def handle_callback(
     message_text: str | None = None,
     client_factory: Callable[[Settings], VaultClient] = VaultClient.from_settings,
 ) -> None:
-    """A tap on «N · закрыл», «N · не нужно» or «N · исследовать» on a
+    """A tap on «N · закрыл», «N · не нужно» or «N · исследовать и написать» on a
     garden message, or on «в Inbox» / «не нужно» on a research's result
     message (L4; `message_text` is that message's text as Telegram hands
     it back, which the edit keeps).
@@ -846,7 +846,7 @@ async def _handle_research(
     gap_id: int,
     epoch: str,
 ) -> None:
-    """«N · исследовать» (the L4 spec section 1): one transaction.
+    """«N · исследовать и написать» (the L4 spec section 1): one transaction.
     `lens.request_research` moves the open gap this message carries to
     `researched` (stale otherwise: a wrong epoch, a replay, a `link`
     gap, a gap already researched once), then `jobs.enqueue_lens_study`
