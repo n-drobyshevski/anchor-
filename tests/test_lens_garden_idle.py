@@ -639,8 +639,27 @@ async def test_a_parse_failure_logs_whether_it_hit_the_cap(
             await _run(sessionmaker, FakeLLMProvider(text=truncated, usage=usage),
                        settings=_settings(GARDEN_MAX_TOKENS=4000))
     [record] = [r for r in caplog.records if r.getMessage() == "lens garden reply did not parse"]
-    assert (record.count, record.event) == (output_tokens, event)
+    assert (record.count, record.tokens_in, record.tokens_out) == (len(truncated), 100, output_tokens)
+    assert (record.event, record.error_code, record.fields) == (event, "not_json", "finish=none")
     assert "note_ids" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("text", "failure"),
+    [
+        ("", "empty"),
+        ("  \n", "empty"),
+        ("Вот пробелы:", "not_json"),
+        ('{"clusters": [], "gaps": [', "not_json"),
+        ('{"clusters": []}', "no_gaps"),
+        ('{"clusters": [], "gaps": {}}', "gaps_not_list"),
+        ('{"clusters": [], "gaps": []}', None),
+    ],
+)
+def test_shape_failure_names_why_a_reply_cannot_be_read(text, failure):
+    from app.core.extract import parse_json
+
+    assert lens_garden._shape_failure(text, parse_json(text)) == failure
 
 
 async def test_a_provider_error_writes_nothing(sessionmaker):

@@ -15,6 +15,7 @@ from openai.types.chat import ChatCompletion
 
 from app.llm.openrouter import (
     OpenRouterProvider,
+    _extract_finish_reason,
     _extract_text,
     _extract_usage,
     _raise_for_body_error,
@@ -205,3 +206,20 @@ async def test_ordinary_call_sends_no_plugins_and_no_tools():
     assert "tools" not in kwargs
     assert "tool_choice" not in kwargs
     assert "functions" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("stop", "stop"), ("length", "length"), ("content_filter", "content_filter"),
+     (None, None), ("Stop!", None), ("x" * 25, None), ("error: upstream said something", None)],
+)
+def test_finish_reason_passes_only_short_enum_words(reason, expected):
+    """It is logged (lens garden), so only an enum-shaped word gets through."""
+    response = ChatCompletion.construct(
+        **{**_BASE, "choices": [{"index": 0, "finish_reason": reason, "message": {"role": "assistant", "content": "ок"}}]}
+    )
+    assert _extract_finish_reason(response) == expected
+
+
+def test_finish_reason_of_an_empty_choices_list_is_none():
+    assert _extract_finish_reason(_response()) is None
