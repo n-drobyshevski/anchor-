@@ -48,6 +48,7 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_CHEAP",
     "LLM_MODEL_SAFETY",
     "LLM_MODEL_JUDGE",
+    "GARDEN_MODEL",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
     "WEB_PASSPHRASE_HASH",
@@ -744,6 +745,13 @@ class Settings(BaseSettings):
     # would truncate ten gaps of Russian JSON. 2000 was too few for a
     # lens of ~90 notes: the first real run's reply was cut off.
     GARDEN_MAX_TOKENS: int = 4000
+    # The garden's model; "" means LLM_MODEL_SAFETY. Its own setting
+    # because the first real runs on gemini-2.5-flash-lite stopped
+    # mid-reply with finish_reason `error`, every time, on a lens of ~90
+    # notes: this moves the garden alone, not every safety call. A model
+    # other than the three priced ones is billed at the vendor-reported
+    # cost, else at the main model's prices (app/core/spend.py).
+    GARDEN_MODEL: str = ""
     # --- L5: the lens in idle reflect (plan sections 7 and 10; the L5
     # spec section 3) ---
     #

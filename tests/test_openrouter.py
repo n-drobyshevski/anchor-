@@ -16,6 +16,7 @@ from openai.types.chat import ChatCompletion
 from app.llm.openrouter import (
     OpenRouterProvider,
     _extract_finish_reason,
+    _extract_native_finish_reason,
     _extract_text,
     _extract_usage,
     _raise_for_body_error,
@@ -223,3 +224,16 @@ def test_finish_reason_passes_only_short_enum_words(reason, expected):
 
 def test_finish_reason_of_an_empty_choices_list_is_none():
     assert _extract_finish_reason(_response()) is None
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("STOP", "STOP"), ("RECITATION", "RECITATION"), ("max_tokens", "max_tokens"),
+     (None, None), ("OTHER: upstream detail", None), ("X" * 33, None)],
+)
+def test_native_finish_reason_passes_only_short_words(reason, expected):
+    choice = {"index": 0, "finish_reason": "error", "message": {"role": "assistant", "content": "ок"}}
+    if reason is not None:
+        choice["native_finish_reason"] = reason
+    response = ChatCompletion.construct(**{**_BASE, "choices": [choice]})
+    assert _extract_native_finish_reason(response) == expected
