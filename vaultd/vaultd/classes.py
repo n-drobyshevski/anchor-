@@ -43,6 +43,13 @@ would appear. An unknown key is fatal for the same reason: a typo like
 (docs/decisions.md, "8e -- the settings file"). A missing file is fine:
 no folder rules.
 
+**A case-mismatched name (`Anchor/Settings.md` on a case-sensitive
+disk) is also fine, and just as invisible as a missing file** --
+`wrong_case_settings_present` only reports the mismatch for the
+manifest's diagnostic `settings` field (manifest.py); it is never read
+as rules. Reading it would mean guessing the user meant this file,
+which the fail-closed rule above exists to avoid.
+
 **Folder names are compared segment by segment after NFC on both
 sides**, because macOS can write a Cyrillic folder name in NFD. `Life`
 covers `Life/Diary/x.md` and not `Lifestyle/x.md`. A `never` rule also
@@ -71,6 +78,7 @@ rules everywhere a class is resolved (`knowledge_rules`).
 
 from __future__ import annotations
 
+import os
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +92,7 @@ from vaultd.frontmatter import NoteMark
 
 SETTINGS_PATH = "Anchor/settings.md"
 SETTINGS_MARK = "settings"
+_SETTINGS_NAME = SETTINGS_PATH.rsplit("/", 1)[1]  # "settings.md"
 
 NoteClass = Literal["personal", "knowledge", "lens"]
 LensKind = Literal["person", "concept"]
@@ -272,6 +281,42 @@ def load_rules(root: Path) -> FolderRules:
     if data is None:
         return SETTINGS_ABSENT
     return parse_settings(data)
+
+
+def wrong_case_settings_present(root: Path) -> bool:
+    """True when `Anchor/settings.md` is absent but `Anchor/` holds a
+    regular file whose NFC-normalised name matches it case-insensitively
+    (the production bug: `Anchor/Settings.md` on a case-sensitive Linux
+    disk, written by a case-insensitive client). Only called once
+    `load_rules` has already found the exact path missing.
+
+    **Never reads the file.** Reporting `wrong_case` is diagnostic only
+    -- the manifest still carries no folder rules, exactly as if nothing
+    were there (module docstring: fail closed)."""
+    try:
+        with paths.open_root(root) as root_fd:
+            dir_fd = paths.open_dir(root_fd, ["Anchor"])
+            if dir_fd is None:
+                return False
+            try:
+                for entry in os.scandir(dir_fd):
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    name = unicodedata.normalize("NFC", entry.name)
+                    if name == _SETTINGS_NAME:
+                        continue  # the exact name -- load_rules would have found it
+                    if name.casefold() == _SETTINGS_NAME.casefold():
+                        return True
+                return False
+            finally:
+                os.close(dir_fd)
+    except paths.Refused:
+        return False
 
 
 def is_settings_file(rel: str) -> bool:

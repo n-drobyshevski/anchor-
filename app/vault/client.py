@@ -17,7 +17,9 @@ a link to a note that exists but is not the bot's to see -- must carry
 nothing but its source: an answer that names it is refused whole,
 never stored. The manifest's `summary` holds
 counts and the settings file's state, never a path: the bot cannot know
-the names of notes it may not see.
+the names of notes it may not see. **8f's `knowledge_roots` is the one
+exception** -- the user's own `knowledge_folders` values from
+`Anchor/settings.md`, not a note's path.
 
 **L4: Echo's inbox writer** (`PUT /v1/echo/inbox`, anchor-lens-plan.md
 section 14.5). `put_echo_note` sends a bare basename and the note;
@@ -87,7 +89,14 @@ LENS_KINDS = ("person", "concept")
 # vaultd truncates a note's frontmatter `summary` to this many
 # characters; the bot cuts again rather than trusting it did.
 GRAPH_SUMMARY_MAX_CHARS = 300
-SETTINGS_STATES = ("ok", "absent", "invalid")
+# 8f: "valid"/"missing"/"invalid"/"wrong_case" -- vaultd's own
+# vocabulary (vaultd/vaultd/manifest.py's `_STATE_LABELS`), not the
+# folder-rules module's internal "ok"/"absent"/"invalid". An old vaultd
+# still sending "ok"/"absent" fails this same `_require` -- the manifest
+# becomes a protocol error and the notes line drops until it redeploys,
+# exactly the "old vaultd behind a new bot" pattern (docs/decisions.md),
+# just with the two swapped.
+SETTINGS_STATES = ("valid", "missing", "invalid", "wrong_case")
 
 
 @dataclass(frozen=True)
@@ -104,12 +113,17 @@ class ManifestEntry:
 
 @dataclass(frozen=True)
 class NotesSummary:
-    """What vaultd says about notes it does not list. Counts only."""
+    """What vaultd says about notes it does not list. Counts only.
+
+    `knowledge_roots` (8f) is the one exception to "no path": it carries
+    the user's own `knowledge_folders` values from `Anchor/settings.md`,
+    never a note's path (vaultd/vaultd/manifest.py's own docstring)."""
 
     conflict: int
     legacy_read: int
     unknown_value: int
     settings: str
+    knowledge_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -269,6 +283,17 @@ def _note_class(scope: str, item: dict) -> str | None:
     return note_class
 
 
+def _knowledge_roots(raw: Any) -> tuple[str, ...]:
+    # Defaulted rather than required: an old vaultd predating 8f simply
+    # omits the field, and `settings` above already fails the whole
+    # manifest closed for that build (it does not yet send "valid"
+    # either) -- this default only matters once both sides agree on the
+    # rest of the shape.
+    roots = raw.get("knowledge_roots", [])
+    _require(isinstance(roots, list) and all(isinstance(r, str) for r in roots))
+    return tuple(roots)
+
+
 def _lens_kind(note_class: str | None, item: dict) -> str | None:
     """A lens note must say whether it is a person or a concept; nothing
     else may carry a kind at all (a null is tolerated)."""
@@ -328,6 +353,7 @@ def _summary(raw: Any) -> NotesSummary:
         legacy_read=_count(raw.get("legacy_read")),
         unknown_value=_count(raw.get("unknown_value")),
         settings=settings,
+        knowledge_roots=_knowledge_roots(raw),
     )
 
 

@@ -101,7 +101,10 @@ async def probe(
 
 @dataclass(frozen=True)
 class NotesOverview:
-    """Counts for `/vault`'s notes line (8e). Never a path or a title."""
+    """Counts for `/vault`'s notes line (8e). Never a path or a title.
+
+    `knowledge_roots` (8f) is the one exception -- the user's own
+    `knowledge_folders` values, never a note's path."""
 
     personal: int
     knowledge: int
@@ -109,6 +112,7 @@ class NotesOverview:
     legacy_read: int
     unknown_value: int
     settings: str
+    knowledge_roots: tuple[str, ...] = ()
     # L1: lens notes, already counted in `knowledge` above -- lens is a
     # kind of knowledge (anchor-lens-plan.md section 3).
     lens: int = 0
@@ -142,6 +146,7 @@ async def notes_overview(
         legacy_read=summary.legacy_read,
         unknown_value=summary.unknown_value,
         settings=summary.settings,
+        knowledge_roots=summary.knowledge_roots,
         lens=classes.count("lens"),
     )
 

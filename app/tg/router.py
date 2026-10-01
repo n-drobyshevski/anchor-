@@ -552,13 +552,28 @@ def build_router(
         status table), plus the Claude connection only for the vault
         section and the planner credential only for the planner section
         -- neither query runs for a section that shows nothing of it.
+
+        8f: `settings_state`/`knowledge_roots` need vaultd's manifest,
+        so they are fetched the same way /vault itself does (below) --
+        a status probe, then the manifest, and only for the vault
+        section, and only while notes consent is on. Consent off (or
+        any other section) leaves both at their "not fetched" default,
+        exactly like `format_notes_line`'s own `notes=None`.
         """
         connection = None
         credential = None
+        settings_state = None
+        knowledge_roots: tuple[str, ...] = ()
         async with sessionmaker() as session:
             user_state = await get_state(session)
             if section == "vault" and settings.CLAUDE_ACCESS_ENABLED:
                 connection = await oauth_store.current_connection(session, clock)
+            if section == "vault" and user_state.notes_consent:
+                health = await vault_status.probe(session, settings, clock)
+                overview = await vault_status.notes_overview(settings, health)
+                if overview is not None:
+                    settings_state = overview.settings
+                    knowledge_roots = overview.knowledge_roots
             if section == "planner" and settings.PLANNER_ENABLED:
                 credential = await planner_auth.get_status(session)
         return menu.MenuView(
@@ -574,6 +589,8 @@ def build_router(
             library_write=bool(connection.library_write) if connection else False,
             planner_status=credential.status if credential else None,
             planner_enabled=bool(credential.enabled) if credential else False,
+            settings_state=settings_state,
+            knowledge_roots=knowledge_roots,
         )
 
     async def _edit_menu(
