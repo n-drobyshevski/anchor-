@@ -71,7 +71,7 @@ You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/setting
 - A note in a lens folder that says `anchor: knowledge` is not lens. That is how you exclude one note.
 - A note that says `anchor: lens` inside `personal_folders` or `never_folders` is not lens.
 
-**Lens is a kind of knowledge** for every existing consumer. `search_library` finds it, and the knowledge index includes it. **W2's write tools refuse it**, so a claude.ai conversation cannot rewrite what Echo reasons with. `list_tree` marks lens notes as lens.
+**Lens is a kind of knowledge** for every existing consumer. `search_library` finds it, and the knowledge index includes it. **W2 may edit a lens note in place** (`update_note`, and a rename rewriting a link inside one), but never moves one, creates in a lens folder, or adds or drops the lens mark: which notes are lens stays the user's (decisions.md, "W2 may edit lens notes"). `list_tree` marks lens notes as lens.
 
 `Anchor/settings.md` still fails closed. It gains three keys:
 - `lens_folders`;
@@ -86,7 +86,7 @@ You set it on the note (`anchor: lens`) or with a folder rule in `Anchor/setting
   - Nodes: knowledge and lens notes, each with `{path, title, class, aliases, tags, summary, chars}`.
   - Edges: `{src, dst}` between visible knowledge and lens notes, and `{src, unresolved: "<target text>"}` for links to notes that do not exist.
   - **A link to a note that exists but is personal, never or unclassified is counted, not named:** `{src, outside: true}`. The graph never reveals that such a note exists or what it is called.
-- The knowledge write routes refuse lens (the existing "not knowledge" refusal).
+- The knowledge write routes edit a lens note in place, but refuse to rename one, create in a lens folder, move into one, or add or drop the lens mark (the existing "not knowledge" and "reclassify" refusals).
 - **A new provenance value, `anchor_edited_by: echo`**, for §9's inbox notes. Today the stamp is hard-coded to `claude` (`provenance.py:59`). The caller passes it, and vaultd accepts only `claude` or `echo`.
 - **`Anchor/Reports/`** joins `ANCHOR_DIRS`, so the garden report (§8) can be written as a note in a bot-owned folder, next to `Memory/` and `Journal/`.
 - Logs keep carrying no path, name or text.
@@ -237,7 +237,7 @@ You edit it like the other packets. At most 12 domains.
 | Garden (§8) | never; outside links counted, not named | graph and titles, for context | **yes**: graph, summaries |
 | Research query building (§9) | **never, in any phase** | never | **gap kind, detail and proposed title, and its lens notes' titles and summaries only** |
 | Claude connector (`search_library`) | never | yes, under C3's switch | yes, as knowledge |
-| W2 write tools | never | yes | **never** (only you change the lens) |
+| W2 write tools | never | yes | **edit in place only** (membership stays yours) |
 | Echo's inbox writes (§9) | never | new notes in `echo_inbox` only | never |
 | Claude Code (§11) | never | never | **yes**, through `anchor_lens` only |
 | Grok | never | never | never |
@@ -314,7 +314,7 @@ L5 built on its own branch, behind `LENS_REFLECT_ENABLED` (off by default), with
 - **Private data leaving in a search query.** The query is built in its own call, whose input is gap detail and lens summaries only. Personal notes and dialogs are structurally absent, not filtered out. The redactor runs on the query as well.
 - **The selector cherry-picking** (always the same notes, or ones that justify a drift it's already on). `rounds_since_used` and the rotation rule; every selection recorded with its rationale; the eval set includes "a round where the relevant note is not the favourite".
 - **An idea read too literally.** A lens note arguing for intensity or acceleration must not produce an intensity-raising proposal. The review's prohibitions win, and an eval case pins it. Amendments still pass the trial with an independent judge.
-- **Injection through a lens note.** You write lens notes; W2 cannot. The block frames them as content, with an eval case.
+- **Injection through a lens note.** You write lens notes, and W2 may edit them, through its instruction filter, caps, the daily digest and undo. The block frames them as content, with an eval case.
 - **The garden revealing personal notes.** Outside links are counted, never named or resolved. There is a test for each class pair.
 - **Lens text leaking into the repo** from a coding session. The CLAUDE.md rule; `lens_read` shows how often Claude Code reads.
 - **Runaway spend or loops.** Idle caps, the `/study` daily quota, one garden run a week, research only on your tap. A card or gap can never trigger another research job on its own.

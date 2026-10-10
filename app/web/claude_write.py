@@ -412,8 +412,8 @@ async def list_tree(client: VaultClient) -> dict:
     folders and note titles, no body text -- gated by the write switch,
     like `list_changes`, and Claude-only (never Grok's route). L1
     (anchor-lens-plan.md section 3): each note says its `class`,
-    `knowledge` or `lens`, so Claude can see which notes its write tools
-    will refuse."""
+    `knowledge` or `lens`, so Claude can see which notes it may edit but
+    not move."""
     try:
         tree = await client.knowledge_tree()
     except VaultError as exc:
