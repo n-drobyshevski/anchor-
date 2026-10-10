@@ -65,7 +65,8 @@ USAGE = (
     "/claude library write on|off — включить или выключить запись в библиотеку\n"
     "/claude undo — откатить последнее изменение Claude\n"
     "/claude undo all — откатить все изменения Claude за последние 24 часа\n"
-    "/claude limits — лимиты записи Claude (изменить: /claude limits КЛЮЧ ЧИСЛО)"
+    "/claude limits — лимиты записи Claude (изменить: /claude limits КЛЮЧ ЧИСЛО)\n"
+    "/claude limits counters — обнулить счётчики записи за час и день"
 )
 NO_CONNECTION = (
     "Нет подключения.\n\n"
