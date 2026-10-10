@@ -10,7 +10,12 @@ every module in app/, eval/ and scripts/:
 
 - `put_echo_note` is named only by the client that defines it and by
   echo_write.py;
-- an undo with `writer="echo"` appears only in echo_write.py;
+- an undo with `writer="echo"` appears only in echo_write.py and in
+  app/tg/graph.py, whose `/graph undo` names only changesets whose
+  purpose is `prune` (footer link pruning, the user's own tap);
+- `graph_prune_apply`, Echo's other write (footer link pruning), is
+  named only by the client and app/tg/graph.py: a press or a typed
+  `/graph apply <hash>`, never an idle job or a web route;
 - `echo_changeset` (the ledger) is named only by echo_write.py, besides
   the models, purge (/delete) and export (/export);
 - echo_write.py imports nothing that writes a memory: a lens card is
@@ -28,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCANNED = ("app", "eval", "scripts")
 WRITER = "app/core/echo_write.py"
 CLIENT = "app/vault/client.py"
+GRAPH = "app/tg/graph.py"
 LEDGER_EXEMPT = ("app/db/models.py", "app/core/purge.py", "app/core/export.py")
 # An id column (study_card's) and a log key: ids, never the ledger.
 NOT_LEDGER_WORDS = ("echo_changeset_id",)
@@ -95,7 +101,9 @@ def _violations(path: Path, rel: str) -> list[str]:
     found = []
     if "put_echo_note" in words and rel not in (WRITER, CLIENT):
         found.append(f"{rel}: names put_echo_note")
-    if _echo_undo_calls(tree) and rel != WRITER:
+    if "graph_prune_apply" in words and rel not in (GRAPH, CLIENT):
+        found.append(f"{rel}: names graph_prune_apply")
+    if _echo_undo_calls(tree) and rel not in (WRITER, GRAPH):
         found.append(f"{rel}: undoes with writer='echo'")
     if rel not in (WRITER, *LEDGER_EXEMPT) and any(
         ("echo_changeset" in word.lower() or "EchoChangeset" in word) and word not in NOT_LEDGER_WORDS
