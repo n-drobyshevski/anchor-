@@ -1,10 +1,12 @@
 """Lens notes on the knowledge routes (lens plan sections 3-4).
 
 Lens is a kind of knowledge for every reader -- `GET /v1/knowledge` and
-the tree include it -- and for no writer: `PUT /v1/knowledge` and the
-rename refuse a lens note as the note written, as the destination, and
-as a backlink a rename would have to rewrite. Only the user changes the
-lens. Every refusal is the same bare 403 as any other class refusal.
+the tree include it -- and an editable one: `PUT /v1/knowledge` updates
+a lens note in place, and a rename rewrites a link inside one. What
+stays the user's alone is lens membership: a lens note is never renamed
+or moved, nothing is created in a lens folder or moved into one, and no
+content gains the lens mark it did not carry. Every refusal is the same
+bare 403 as any other class refusal.
 """
 
 from __future__ import annotations
@@ -112,31 +114,48 @@ async def test_the_tree_lists_lens_notes_with_their_class_but_not_lens_folders(c
 # -- writing ----------------------------------------------------------------------
 
 
-async def test_updating_a_lens_note_is_refused(client, vault: Path, caplog):
+async def test_a_lens_note_can_be_edited_in_place(client, vault: Path):
     for rel, content in (
         ("Lens/Cybernetics.md", note(None)),
         ("Lens/People/Fisher.md", note("lens")),
         ("Elsewhere/Ashby.md", note("lens")),
+        ("Library/Marked.md", note("lens")),  # a knowledge folder outranks the mark
     ):
         write(vault, rel, content)
-        with caplog.at_level(logging.INFO):
-            resp = await _put(client, rel, content + "More.\n", sha(content))
-        assert resp.status == 403
-        assert await resp.read() == b""
-        assert (vault / rel).read_text() == content
-    assert _reasons(caplog) == ["not_knowledge"] * 3
+        resp = await _put(client, rel, content + "More.\n", sha(content))
+        assert resp.status == 200, rel
+        text = (vault / rel).read_text()
+        assert text.endswith("Body.\nMore.\n")
+        assert "anchor_edited_by: claude" in text
+    tree = await (await client.get("/v1/knowledge/tree", headers=AUTH)).json()
+    classes = {n["path"]: n["class"] for n in tree["notes"]}
+    assert classes["Lens/Cybernetics.md"] == "lens"
+    assert classes["Lens/People/Fisher.md"] == "lens"
+    assert classes["Elsewhere/Ashby.md"] == "lens"
 
 
-async def test_a_note_marked_lens_in_a_knowledge_folder_is_not_writable_either(client, vault: Path, caplog):
-    """It resolves to knowledge (the folder is stricter), but the user
-    asked for lens: a Claude write must not edit it, or keep the mark
-    on content that would become lens with one settings edit."""
-    content = note("lens")
-    write(vault, "Library/Marked.md", content)
+async def test_an_edit_cannot_take_a_note_out_of_the_lens(client, vault: Path, caplog):
+    marked = note("lens")
+    plain = note(None)
+    write(vault, "Elsewhere/Ashby.md", marked)
+    write(vault, "Lens/Cybernetics.md", plain)
     with caplog.at_level(logging.INFO):
-        resp = await _put(client, "Library/Marked.md", content + "More.\n", sha(content))
+        dropped = await _put(client, "Elsewhere/Ashby.md", "Body.\n", sha(marked))
+        demoted = await _put(client, "Lens/Cybernetics.md", note("knowledge"), sha(plain))
+    assert dropped.status == 403
+    assert demoted.status == 403
+    assert (vault / "Elsewhere/Ashby.md").read_text() == marked
+    assert (vault / "Lens/Cybernetics.md").read_text() == plain
+    assert _reasons(caplog) == ["reclassify", "reclassify"]
+
+
+async def test_a_lens_mark_in_a_personal_folder_stays_unwritable(client, vault: Path, caplog):
+    content = note("lens")
+    write(vault, "Life/Мысль.md", content)
+    with caplog.at_level(logging.INFO):
+        resp = await _put(client, "Life/Мысль.md", content + "More.\n", sha(content))
     assert resp.status == 403
-    assert (vault / "Library/Marked.md").read_text() == content
+    assert (vault / "Life/Мысль.md").read_text() == content
     assert _reasons(caplog) == ["not_knowledge"]
 
 
@@ -199,32 +218,23 @@ async def test_renaming_into_the_lens_is_refused(client, vault: Path, caplog):
     assert _reasons(caplog) == ["dest_not_knowledge", "dest_not_knowledge"]
 
 
-async def test_a_rename_that_would_rewrite_a_lens_note_is_refused(client, vault: Path, caplog):
-    target = note(None)
-    lens = note(None, "See [[Open]].\n")
-    write(vault, "Library/Open.md", target)
-    write(vault, "Lens/Cybernetics.md", lens)
-    with caplog.at_level(logging.INFO):
-        resp = await _rename(client, "Library/Open.md", "Library/Opened.md", sha(target))
-    assert resp.status == 403
-    assert (vault / "Lens/Cybernetics.md").read_text() == lens
-    assert (vault / "Library/Open.md").exists()
-    assert _reasons(caplog) == ["linked_from_non_knowledge"]
-
-
-async def test_a_lens_link_differing_only_in_case_still_refuses_the_rename(client, vault: Path, caplog):
+async def test_a_rename_rewrites_a_link_inside_a_lens_note(client, vault: Path):
     """The graph resolves `[[open]]` to `Open.md`, as Obsidian does; the
-    rename's backlink scan must see the same link, or a claude.ai rename
-    would leave the lens pointing nowhere."""
+    rename's backlink scan sees the same link, so the lens is not left
+    pointing nowhere."""
     target = note(None)
-    lens = note(None, "See [[open]].\n")
+    lens = note(None, "See [[Open]] and [[open]].\n")
+    marked = note("lens", "Also [[Open]].\n")
     write(vault, "Library/Open.md", target)
     write(vault, "Lens/Cybernetics.md", lens)
-    with caplog.at_level(logging.INFO):
-        resp = await _rename(client, "Library/Open.md", "Library/Opened.md", sha(target))
-    assert resp.status == 403
-    assert (vault / "Lens/Cybernetics.md").read_text() == lens
-    assert _reasons(caplog) == ["linked_from_non_knowledge"]
+    write(vault, "Elsewhere/Ashby.md", marked)
+    resp = await _rename(client, "Library/Open.md", "Library/Opened.md", sha(target))
+    assert resp.status == 200
+    assert (vault / "Lens/Cybernetics.md").read_text().endswith("\nSee [[Opened]] and [[Opened]].\n")
+    ashby = (vault / "Elsewhere/Ashby.md").read_text()
+    assert ashby.endswith("\nAlso [[Opened]].\n")
+    assert "anchor: lens" in ashby
+    assert not (vault / "Library/Open.md").exists()
 
 
 async def test_a_knowledge_backlink_differing_in_case_or_in_a_table_is_rewritten(client, vault: Path):

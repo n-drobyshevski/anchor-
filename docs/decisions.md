@@ -2712,7 +2712,7 @@ today; people and concepts by folder (`lens_person_folders`).
     exactly this.)
   - a `lens_person_folders` entry outside every lens folder: a person
     rule that covers nothing.
-- **W2 cannot write lens notes.** `PUT /v1/knowledge` and
+- **W2 cannot write lens notes** (edits in place now allowed: see "W2 may edit lens notes" below). `PUT /v1/knowledge` and
   `POST /v1/knowledge/rename` refuse a lens note as the source, and a
   write or move whose destination would be lens, with the existing
   "not knowledge" refusal. The lens is what Echo will reason with when
@@ -3328,3 +3328,26 @@ idle one.
   garden's Telegram message keeps its own holds (quiet hours, pause,
   welfare), so a run started at night reports in the morning.
 
+## W2 may edit lens notes
+
+Lens notes were read-only to W2 (the "W2 cannot write lens notes"
+entry above). That kept the lens yours, but it also meant a claude.ai
+chat could not tidy, extend or correct the notes Echo reasons with,
+and could not rename a knowledge note any lens note links to. Now:
+
+- **Edited in place.** `PUT /v1/knowledge` with `if_sha256` accepts a
+  note whose effective class is lens, or that is marked `anchor: lens`
+  (also where a knowledge folder outranks the mark). It gets the same
+  compare-and-swap, caps, instruction and secret filters, provenance,
+  daily digest and 14-day undo as any knowledge write.
+- **Backlinks rewritten.** A rename rewrites `[[old]]` inside lens
+  notes like inside knowledge notes, so it no longer refuses for them.
+- **Membership stays yours.** Still refused: renaming or moving a lens
+  note, creating in a lens folder, moving into one, and any content that
+  adds the `anchor: lens` mark or drops it (`reclassify`). An edit can
+  change what a lens note says, never which notes are lens.
+- **Risk.** Text Claude read can now reach the lens through an edit,
+  not only knowledge. The instruction filter still refuses
+  model-directed text; what remains is a subtle, instruction-free
+  rewrite, which the digest names within a day and undo reverts.
+  `/claude library write off` stops it at once.

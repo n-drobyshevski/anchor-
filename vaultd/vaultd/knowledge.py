@@ -5,17 +5,19 @@ single lock, before a byte is written:
 
 1. **The path**: `.md` only, no dot segment, never under `Anchor/`,
    reached without a symlink (paths.py's O_NOFOLLOW walk).
-2. **The existing file's effective class is `knowledge`** -- folder
-   rules and the note's own property, stricter wins (classes.py),
-   exactly as the manifest resolves it. **Never `lens`** (lens plan
-   section 4): the lens is what Echo reasons with, and only the user
-   changes it. A note that *says* `anchor: lens` is refused too, even
-   where a knowledge folder outranks it, and no new content may carry
-   that mark: a Claude write never puts a note one settings edit away
-   from the lens. Lens notes are still readable here, and listed in
-   the tree and the graph.
+2. **The existing file's effective class is `knowledge` or `lens`** --
+   folder rules and the note's own property, stricter wins
+   (classes.py), exactly as the manifest resolves it. A lens note may
+   be **edited** in place (`PUT` with `if_sha256`), and a rename may
+   rewrite a link inside one, because neither changes lens membership.
+   What stays the user's alone is *which* notes are lens: a lens note
+   is never renamed or moved, nothing is created in a lens folder, no
+   move lands in one, and no content gains the `anchor: lens` mark it
+   did not already carry -- a Claude write never puts a note into the
+   lens, or one settings edit away from it.
 3. **A write cannot reclassify**: the new content's `anchor:` property
-   must equal the old one, or both must be absent.
+   must equal the old one, or both must be absent. An edited lens
+   note therefore stays lens.
 4. **A new file** goes only into an *existing* folder whose own rule is
    `knowledge`, and the new content's own class must also resolve to
    `knowledge`.
@@ -147,12 +149,23 @@ def _class_of(rel: str, data: bytes, rules: classes.FolderRules) -> str | None:
 
 
 def _writable_knowledge(rel: str, data: bytes, rules: classes.FolderRules) -> bool:
-    """Knowledge a Claude write may touch: effective class knowledge, and
+    """Knowledge a Claude write may move: effective class knowledge, and
     not marked `anchor: lens` (module docstring, item 2)."""
     mark = frontmatter.note_mark(data)
     if mark in ("unknown", "lens"):
         return False
     return classes.effective_class(rel, mark, rules).note_class == "knowledge"
+
+
+def _editable(rel: str, data: bytes, rules: classes.FolderRules) -> bool:
+    """A note a Claude write may edit in place: knowledge or lens, by
+    effective class or by its own `anchor: lens` mark (module docstring,
+    item 2). An edit keeps the path and, by the reclassify check, the
+    mark, so it never changes what is lens."""
+    mark = frontmatter.note_mark(data)
+    if mark == "unknown":
+        return False
+    return classes.effective_class(rel, mark, rules).note_class in classes.READABLE_KNOWLEDGE
 
 
 def _safe_segment(seg: str) -> bool:
@@ -284,14 +297,20 @@ def remove_folder_if_empty(store: Store, rel: str) -> bool:
         return False
 
 
-def check_new_content(rel: str, data: bytes, rules: classes.FolderRules, *, for_create: bool) -> None:
-    """Raise Refused unless `data` may become the note at `rel`."""
+def check_new_content(
+    rel: str, data: bytes, rules: classes.FolderRules, *, for_create: bool, old_mark: str | None = None
+) -> None:
+    """Raise Refused unless `data` may become the note at `rel`.
+
+    `old_mark` is the edited note's own `frontmatter.note_mark` (None
+    for a create): content may carry `anchor: lens` only where the note
+    already did."""
     if len(data) > KNOWLEDGE_WRITE_MAX_BYTES:
         raise Refused("too_large")
     mark = frontmatter.note_mark(data)
     if mark == "unknown":
         raise Refused("bad_frontmatter")
-    if mark == "lens":
+    if mark == "lens" and (for_create or old_mark != "lens"):
         raise Refused("content_not_knowledge")  # only the user marks a note lens
     if for_create:
         if classes._folder_class(rel, rules) != "knowledge":  # noqa: SLF001 - same package
@@ -340,11 +359,11 @@ def perform_put(
     else:
         if current is None:
             raise Missing
-        if not _writable_knowledge(rel, current, rules):
+        if not _editable(rel, current, rules):
             raise Refused("not_knowledge")
         if sha256(current) != if_sha256:
             raise Conflict
-        check_new_content(rel, data, rules, for_create=False)
+        check_new_content(rel, data, rules, for_create=False, old_mark=frontmatter.note_mark(current))
         old_anchor = frontmatter.raw_anchor(current)
         pre_image = current
 
@@ -362,7 +381,7 @@ class RenamePlan:
     new_rel: str
     old_data: bytes
     old_sha256: str
-    # (rel, current bytes, rewritten text) for every knowledge note that links here.
+    # (rel, current bytes, rewritten text) for every knowledge or lens note that links here.
     backlinks: tuple[tuple[str, bytes, str], ...]
     # New folder rel-paths (shallow to deep) the destination needs (rev. 3); () if
     # `new_rel`'s folder already exists.
@@ -432,9 +451,9 @@ def plan_rename(root: Path, old_rel: str, new_rel: str, if_sha256: str) -> Renam
             continue
         if _first_segment(rel) == _ANCHOR_TOP:
             raise Refused("linked_from_non_knowledge")  # a fact/journal page (or any other Anchor file) links here
-        if not _writable_knowledge(rel, data, rules):
-            # a personal/never/unclassified note links here -- or a lens
-            # note, whose link a rename would have to rewrite
+        if not _editable(rel, data, rules):
+            # a personal/never/unclassified note links here; a lens note's
+            # link is rewritten like a knowledge note's (an edit in place)
             raise Refused("linked_from_non_knowledge")
         backlinks.append((rel, data, new_text))
     if ambiguous:
