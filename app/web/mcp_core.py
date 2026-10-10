@@ -184,7 +184,10 @@ TOOLS = {
     },
     "update_note": {
         "scope": WRITE_SCOPE,
-        "description": "Replace a knowledge note's body. Requires the hash from a previous read (base_hash).",
+        "description": (
+            "Replace a knowledge or lens note's body. Requires the hash from a previous read "
+            "(base_hash). A note's `anchor:` property must stay as it is."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -222,7 +225,8 @@ TOOLS = {
     "rename_note": {
         "scope": WRITE_SCOPE,
         "description": (
-            "Rename or move a knowledge note, rewriting every knowledge note that links to it. Use "
+            "Rename or move a knowledge note, rewriting every knowledge or lens note that links to "
+            "it. A lens note itself cannot be renamed or moved. Use "
             "this to reorganise the library instead of recreating a note elsewhere. Moves have their "
             "own budget, separate from creating or editing notes."
         ),
@@ -252,9 +256,9 @@ TOOLS = {
             "the most specific existing folder that fits, match the existing naming style, and "
             "create a new subfolder (inside a knowledge folder only) only when it groups several "
             "related notes -- never at the top level. Use rename_note to reorganise; moves have "
-            "their own budget. Each note carries its class: a `lens` note is the user's own lens "
-            "and is read-only -- update_note and rename_note refuse it. Only while the write "
-            "switch is on."
+            "their own budget. Each note carries its class: a `lens` note is the user's own lens; "
+            "update_note may edit it, but rename_note refuses to move it and nothing new goes "
+            "into a lens folder. Only while the write switch is on."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _WRITE_READ_ONLY,

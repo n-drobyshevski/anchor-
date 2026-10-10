@@ -99,11 +99,12 @@ new connection.
 - **What stops it:**
   - vaultd accepts only notes that are knowledge at write time, never
     `Anchor/`, and never a change of a note's class;
-  - **lens notes are never written** (L1, `anchor-lens-plan.md` §3):
-    `update_note` and `rename_note` refuse a lens note, and a create or
-    a move whose destination would make the note lens. Only you change
-    the lens Echo reasons with. `search_library` still finds lens notes,
-    as knowledge;
+  - **lens notes may be edited, never moved** (`anchor-lens-plan.md`
+    §3): `update_note` edits a lens note in place and a rename rewrites
+    links inside one, but `rename_note` refuses a lens note, and a
+    create or a move whose destination would make the note lens. No
+    write adds or drops the lens mark, so which notes are lens stays
+    yours. `search_library` still finds lens notes, as knowledge;
   - a new folder is only ever built from an existing folder already
     covered by your `knowledge_folders` settings, and never at the top
     level;

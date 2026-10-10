@@ -88,6 +88,7 @@ from app.tg import garden as garden_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
+from app.tg import graph as graph_ui
 from app.tg import lens as lens_ui
 from app.tg import memory as memory_ui
 from app.tg import menu
@@ -238,6 +239,8 @@ BOT_COMMANDS = [
     BotCommand(command="vault", description="Хранилище Obsidian"),
     # L1 (anchor-lens-plan.md section 11): the lens and Claude Code's door.
     BotCommand(command="lens", description="Линза и доступ Claude Code"),
+    # Footer link pruning (app/tg/graph.py): dry run, apply, undo.
+    BotCommand(command="graph", description="Чистка ссылок в футерах заметок"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1236,6 +1239,27 @@ def build_router(
         await send_keyboard(message.bot, message.chat.id, text, None)
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/lens]", scene_id=scene_id
+        )
+
+    @router.message(Command("graph"))
+    async def graph_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """Footer link pruning (app/tg/graph.py): `/graph` dry run,
+        `/graph apply <hash>`, `/graph undo`. Telegram only: applying
+        edits the vault."""
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        reply = await graph_ui.command(
+            sessionmaker, settings, clock, command.args, client_factory=VaultClient.from_settings
+        )
+        await graph_ui.send(message.bot, message.chat.id, reply)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/graph]", scene_id=scene_id
         )
 
     @router.message(Command("revoke"))
@@ -2352,6 +2376,24 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             message_text=getattr(callback.message, "text", None),
+            client_factory=VaultClient.from_settings,
+        )
+
+    @router.callback_query(F.data.startswith("gp:"))
+    async def graph_prune_decision(callback: CallbackQuery) -> None:
+        """`gp:a:<plan hash>` «применить» / `gp:u:<changeset>` «отменить»
+        (app/tg/graph.py). Refused from the web chat, like `lg:`."""
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await graph_ui.handle_callback(
+            settings,
+            callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            message_text=getattr(callback.message, "text", None),
+            data=callback.data,
             client_factory=VaultClient.from_settings,
         )
 

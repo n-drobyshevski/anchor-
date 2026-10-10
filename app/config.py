@@ -48,6 +48,7 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_CHEAP",
     "LLM_MODEL_SAFETY",
     "LLM_MODEL_JUDGE",
+    "GARDEN_MODEL",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
     "WEB_PASSPHRASE_HASH",
@@ -707,6 +708,13 @@ class Settings(BaseSettings):
     # Rollout flips knowledge first and personal later, separately.
     VAULT_KNOWLEDGE_ENABLED: bool = False
     VAULT_PERSONAL_ENABLED: bool = False
+    # Footer link pruning (vaultd/vaultd/prune.py, app/tg/graph.py): a
+    # weekly dry run sent to Telegram as a report; nothing is edited
+    # until /graph apply. Needs a VAULT_MODE other than `off`.
+    # GRAPH_PRUNE_WEEKDAY is 0 (Monday) to 6 (Sunday), local time,
+    # at GRAPH_PRUNE_TIME (app/core/scheduler.py).
+    GRAPH_PRUNE_ENABLED: bool = True
+    GRAPH_PRUNE_WEEKDAY: int = 6
     VAULT_KNOWLEDGE_IN_PROMPT: int = 2
     VAULT_PERSONAL_IN_PROMPT: int = 2
     # --- L1: the lens (anchor-lens-plan.md sections 3, 5 and 11) ---
@@ -741,8 +749,16 @@ class Settings(BaseSettings):
     LENS_GARDEN_ENABLED: bool = False
     # The garden's own output cap. It builds its own provider on
     # LLM_MODEL_SAFETY, whose shared cap (LLM_SAFETY_MAX_TOKENS, 400)
-    # would truncate ten gaps of Russian JSON.
-    GARDEN_MAX_TOKENS: int = 2000
+    # would truncate ten gaps of Russian JSON. 2000 was too few for a
+    # lens of ~90 notes: the first real run's reply was cut off.
+    GARDEN_MAX_TOKENS: int = 4000
+    # The garden's model; "" means LLM_MODEL_SAFETY. Its own setting
+    # because the first real runs on gemini-2.5-flash-lite stopped
+    # mid-reply with finish_reason `error`, every time, on a lens of ~90
+    # notes: this moves the garden alone, not every safety call. A model
+    # other than the three priced ones is billed at the vendor-reported
+    # cost, else at the main model's prices (app/core/spend.py).
+    GARDEN_MODEL: str = ""
     # --- L5: the lens in idle reflect (plan sections 7 and 10; the L5
     # spec section 3) ---
     #
@@ -1020,6 +1036,13 @@ class Settings(BaseSettings):
         does a prefix comparison.
         """
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("GRAPH_PRUNE_WEEKDAY")
+    @classmethod
+    def _graph_prune_weekday(cls, value: int) -> int:
+        if not 0 <= value <= 6:
+            raise ValueError("GRAPH_PRUNE_WEEKDAY must be 0 (Monday) to 6 (Sunday)")
+        return value
 
     @field_validator("*", mode="before")
     @classmethod

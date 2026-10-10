@@ -624,6 +624,44 @@ async def _garden_rows(sessionmaker) -> int:
         return 0 if await lens.garden_status(session) is None else 1
 
 
+@pytest.mark.parametrize(("output_tokens", "event"), [(4000, "at_cap"), (1200, "under_cap")])
+async def test_a_parse_failure_logs_whether_it_hit_the_cap(
+    sessionmaker, caplog, monkeypatch, output_tokens, event
+):
+    """Counts only: the reply itself is never logged. Alembic's
+    in-process run disables existing loggers, hence the re-enable."""
+    monkeypatch.setattr(logging.getLogger(lens_garden.__name__), "disabled", False)
+    await _seed(sessionmaker)
+    truncated = '{"clusters": [], "gaps": [{"kind": "link", "note_ids": [1,'
+    usage = LLMUsage(input_tokens=100, cached_tokens=0, output_tokens=output_tokens, cost_usd=None)
+    with caplog.at_level(logging.WARNING, logger=lens_garden.__name__):
+        with pytest.raises(lens_garden.GardenOutputError):
+            await _run(sessionmaker, FakeLLMProvider(text=truncated, usage=usage),
+                       settings=_settings(GARDEN_MAX_TOKENS=4000))
+    [record] = [r for r in caplog.records if r.getMessage() == "lens garden reply did not parse"]
+    assert (record.count, record.tokens_in, record.tokens_out) == (len(truncated), 100, output_tokens)
+    assert (record.event, record.error_code, record.fields) == (event, "not_json", "finish=none native=none")
+    assert "note_ids" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("text", "failure"),
+    [
+        ("", "empty"),
+        ("  \n", "empty"),
+        ("Вот пробелы:", "not_json"),
+        ('{"clusters": [], "gaps": [', "not_json"),
+        ('{"clusters": []}', "no_gaps"),
+        ('{"clusters": [], "gaps": {}}', "gaps_not_list"),
+        ('{"clusters": [], "gaps": []}', None),
+    ],
+)
+def test_shape_failure_names_why_a_reply_cannot_be_read(text, failure):
+    from app.core.extract import parse_json
+
+    assert lens_garden._shape_failure(text, parse_json(text)) == failure
+
+
 async def test_a_provider_error_writes_nothing(sessionmaker):
     await _seed(sessionmaker)
     provider = FakeLLMProvider(raises=[RuntimeError("down")])
@@ -853,3 +891,10 @@ def test_the_garden_provider_is_the_safety_model_at_zero_with_its_own_cap():
 class _Client:
     async def close(self):
         return None
+
+
+@pytest.mark.parametrize(("garden_model", "expected"), [("", "google/gemini-2.5-flash-lite"), ("openai/gpt-4.1-mini", "openai/gpt-4.1-mini")])
+def test_garden_model_overrides_the_safety_model_for_the_garden_alone(garden_model, expected):
+    settings = _settings(GARDEN_MODEL=garden_model, LLM_MODEL_SAFETY="google/gemini-2.5-flash-lite")
+    provider = lens_garden.build_garden_provider(settings, client=object())
+    assert provider._model == expected

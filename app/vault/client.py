@@ -166,6 +166,8 @@ class ChangeEntry:
     undone: bool
     files: list[ChangeFile]
     writer: str = "claude"
+    # An Echo changeset's purpose: None (the inbox) or "prune" (graph pruning).
+    purpose: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,33 @@ class UndoResult:
 
 # L4: vaultd's two writers (vaultd/vaultd/undo.py's `WRITERS`).
 WRITERS = ("claude", "echo")
+
+
+@dataclass(frozen=True)
+class PrunePlan:
+    """`GET /v1/graph/prune`'s body: a dry run of footer link pruning.
+    `report` is Markdown with note titles: it goes to the user only (a
+    Telegram document), never to a log line."""
+
+    plan_hash: str
+    config_error: str | None
+    notes: int
+    edges_before: int
+    edges_after: int
+    removals: int
+    files: int
+    unresolved: int
+    orphans: int
+    report: str
+
+
+@dataclass(frozen=True)
+class PruneApplied:
+    """`POST /v1/graph/prune`'s body."""
+
+    files: int
+    removed: int
+    replayed: bool
 
 
 @dataclass(frozen=True)
@@ -357,12 +386,23 @@ def _summary(raw: Any) -> NotesSummary:
     )
 
 
+def _purpose(value: Any) -> str | None:
+    _require(value is None or value == "prune")
+    return value
+
+
+def _count(value: Any) -> int:
+    _require(isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+    return value
+
+
 def _status_error(status: int) -> str:
     if status == 401:
         return errors.UNAUTHORIZED
     if status == 404:
         return errors.NOT_FOUND
-    if status == 412:
+    if status in (409, 412):
+        # 409 is only `POST /v1/graph/prune`'s `plan_changed`.
         return errors.CONFLICT
     if status in (400, 403, 413, 422):
         return errors.REFUSED
@@ -639,6 +679,7 @@ class VaultClient:
                     undone=undone,
                     files=parsed_files,
                     writer=writer,
+                    purpose=_purpose(item.get("purpose")),
                 )
             )
         return out
@@ -657,6 +698,34 @@ class VaultClient:
         _require(isinstance(restored, int) and not isinstance(restored, bool) and restored >= 0)
         _require(isinstance(refused, int) and not isinstance(refused, bool) and refused >= 0)
         return UndoResult(restored=restored, refused=refused)
+
+    # -- Footer link pruning (vaultd/vaultd/prune.py) --------------------------------
+
+    async def graph_prune_plan(self) -> PrunePlan:
+        """The dry run. Writes nothing. REFUSED when the vault holds more
+        notes than the graph shows, or the plan more files than one apply
+        may touch."""
+        data = await self._request("GET", "/v1/graph/prune")
+        plan_hash, config_error, report = (data.get(k) for k in ("plan_hash", "config_error", "report"))
+        _require(isinstance(plan_hash, str) and len(plan_hash) == 32)
+        _require(config_error is None or isinstance(config_error, str))
+        _require(isinstance(report, str))
+        counts = {
+            k: _count(data.get(k))
+            for k in ("notes", "edges_before", "edges_after", "removals", "files", "unresolved", "orphans")
+        }
+        return PrunePlan(plan_hash=plan_hash, config_error=config_error, report=report, **counts)
+
+    async def graph_prune_apply(self, plan_hash: str, changeset: str) -> PruneApplied:
+        """Apply the plan with this hash as one Echo changeset. CONFLICT
+        when the vault no longer matches it (nothing written); the same
+        `changeset` replays safely after a lost answer."""
+        data = await self._request(
+            "POST", "/v1/graph/prune", body={"plan_hash": plan_hash, "changeset": changeset}
+        )
+        replayed = data.get("replayed")
+        _require(isinstance(replayed, bool))
+        return PruneApplied(files=_count(data.get("files")), removed=_count(data.get("removed")), replayed=replayed)
 
     # -- L4: Echo's inbox writer ----------------------------------------------------
 

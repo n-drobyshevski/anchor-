@@ -13,8 +13,8 @@ the vault pass, which also writes the run's report note.
 **Two steps.** Step 1 is code, app/core/lens_graph.py: orphans, dead
 ends, wanted notes, unlinked mentions, hubs, clusters, structural
 holes, people without concepts, stale notes -- and the recheck of every
-open and done gap. Step 2 is one model call on `LLM_MODEL_SAFETY` at
-temperature 0 with a strict schema: it names the clusters and proposes
+open and done gap. Step 2 is one model call on `GARDEN_MODEL` (default
+`LLM_MODEL_SAFETY`) at temperature 0 with a strict schema: it names the clusters and proposes
 up to ten gaps, which `validate()` re-checks in code, trusting nothing.
 
 **The input is lens-only** (spec section 6, narrowing plan section 10's
@@ -569,8 +569,16 @@ def validate(payload: Mapping, prepared: Prepared) -> Plan:
     return Plan(gaps=tuple(kept), cluster_names=names, proposed=len(items), invalid=invalid)
 
 
-def _well_shaped(payload) -> bool:
-    return isinstance(payload, dict) and isinstance(payload.get("gaps"), list)
+def _shape_failure(text: str, payload) -> str | None:
+    """None for a reply `validate` can read, else why not, as a fixed
+    code for the log (the reply itself is never logged)."""
+    if payload is None:
+        return "empty" if not text.strip() else "not_json"
+    if "gaps" not in payload:
+        return "no_gaps"
+    if not isinstance(payload["gaps"], list):
+        return "gaps_not_list"
+    return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -580,6 +588,8 @@ class Proposal:
 
     response: LLMResponse
     plan: Plan | None
+    # Why `plan` is None (`_shape_failure`), for the log.
+    failure: str | None = None
 
 
 async def propose(
@@ -592,13 +602,15 @@ async def propose(
         messages(prepared), conversation_id=conversation_id, json_schema=GARDEN_SCHEMA
     )
     payload = parse_json(response.text)
-    if not _well_shaped(payload):
-        return Proposal(response=response, plan=None)
+    failure = _shape_failure(response.text, payload)
+    if failure is not None:
+        return Proposal(response=response, plan=None, failure=failure)
     return Proposal(response=response, plan=validate(payload, prepared))
 
 
 def build_garden_provider(settings: Settings, client) -> LLMProvider:
-    """`LLM_MODEL_SAFETY` at temperature 0 with `GARDEN_MAX_TOKENS` --
+    """`GARDEN_MODEL` (default `LLM_MODEL_SAFETY`) at temperature 0 with
+    `GARDEN_MAX_TOKENS` --
     constructed like app/core/idle/critique.py's judge provider, since
     the shared safety provider's 400-token cap would truncate the JSON.
     Also what eval/run.py builds for the garden cases."""
@@ -606,7 +618,7 @@ def build_garden_provider(settings: Settings, client) -> LLMProvider:
 
     return OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
-        model=settings.LLM_MODEL_SAFETY,
+        model=settings.GARDEN_MODEL or settings.LLM_MODEL_SAFETY,
         max_tokens=settings.GARDEN_MAX_TOKENS,
         # The spec's temperature, not LLM_SAFETY_TEMPERATURE: a garden
         # run is compared week to week, and 0 keeps it repeatable.
@@ -734,6 +746,25 @@ async def run_lens_garden(
         await session.commit()
 
     if proposal.plan is None:
+        # Counts and fixed codes only, never the reply: its length, the
+        # token counts (both 0 when the API sent no usage), whether it
+        # reached GARDEN_MAX_TOKENS, the API's stop reason, and why it
+        # did not parse.
+        output_tokens = response.usage.output_tokens
+        logger.warning(
+            "lens garden reply did not parse",
+            extra={
+                "count": len(response.text),
+                "tokens_in": response.usage.input_tokens,
+                "tokens_out": output_tokens,
+                "event": "at_cap" if output_tokens >= settings.GARDEN_MAX_TOKENS else "under_cap",
+                "error_code": proposal.failure,
+                "fields": (
+                    f"finish={response.finish_reason or 'none'} "
+                    f"native={response.native_finish_reason or 'none'}"
+                ),
+            },
+        )
         raise GardenOutputError("lens garden reply did not parse")
     plan = proposal.plan
 
