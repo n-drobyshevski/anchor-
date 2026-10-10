@@ -98,6 +98,10 @@ ECHO_WRITE_MAX_BYTES = 32 * 1024
 ECHO_NAME_SUFFIX_MAX = 9
 ECHO_INBOX_DEFAULT = "Echo/Inbox"
 
+# Footer link pruning (prune.py): one apply edits at most this many
+# notes, as one Echo changeset (writer `echo`, purpose `prune`).
+PRUNE_MAX_FILES = 500
+
 DEFAULT_VAULT_PATH = "/data/vault"
 DEFAULT_CONFIG_HOME = "/data/config"
 DEFAULT_DEVICE_NAME = "anchor-railway"

@@ -3351,3 +3351,51 @@ and could not rename a knowledge note any lens note links to. Now:
   model-directed text; what remains is a subtle, instruction-free
   rewrite, which the digest names within a day and undo reverts.
   `/claude library write off` stops it at once.
+
+## Footer link pruning (`/graph`)
+
+The user keeps each note's links twice: in the body, where they carry
+meaning, and in a final `## Связи` footer listing neighbours. Over time
+the footers make the graph dense with pairs that are already joined
+through a third note. The rule below was applied once by hand; this
+automates it without changing it.
+
+- **Where it runs.** vaultd computes the plan (vaultd/vaultd/prune.py)
+  because it already holds the one link parser and resolver
+  (links.py, graph.py), the class boundary, provenance and undo. The
+  bot only asks (`GET /v1/graph/prune`), shows, and on request applies
+  (`POST /v1/graph/prune`). No cron, launchd or Obsidian plugin: the
+  vault lives on the server, so the bot's scheduler runs the weekly
+  dry run.
+- **The rule.** Undirected graph over knowledge and lens notes. A-B may
+  go only if every existing direction is footer-only, A and B still
+  share a neighbour afterwards, the graph's components do not change
+  (implied by the previous point, asserted anyway), and nothing
+  protects the pair (`Anchor/graph.md`, or `graph-keep` in either
+  note). Greedy by degree sum (before removals; ties by path), the
+  shared neighbour re-checked against the current graph after every
+  removal. Body links are never candidates: the vault is dense
+  clusters, and the same rule over body links would remove about half
+  of it, obvious pairs (Deleuze and Guattari) included. A footer item
+  that is more than one link (prose around it) is left alone.
+- **Dry run first, apply by hash.** The weekly job and `/graph` send the
+  report as a Markdown document. `/graph apply <hash>` (or the button)
+  applies only the plan with that hash: vaultd recomputes it under its
+  lock and answers 409 `plan_changed` if any note it would edit changed
+  since, or if the plan itself would differ. Every file is
+  compare-and-swap written; a race with `ob` mid-apply puts back what
+  was already written.
+- **Undo instead of a backup or git commit.** The server vault is not a
+  git repository. One apply is one Echo changeset (`writer: echo`,
+  `purpose: prune`), so `/graph undo` restores every file from its
+  stored pre-image in one step, for 14 days, refusing per file any
+  note edited since.
+- **Frontmatter.** Footer edits leave every byte outside the removed
+  items as it was, except Echo's provenance stamp
+  (`anchor_edited_by: echo`, `anchor_edited_at`): every vaultd write
+  carries it, and the user chose to keep it here too.
+- **Lens notes are pruned like knowledge notes** (the user's choice):
+  footer links only, never membership. This is the first time Echo
+  edits an existing note rather than adding one to its inbox.
+- **Privacy.** The report names notes; it goes to Telegram only. vaultd
+  and the bot log counts and outcome codes.

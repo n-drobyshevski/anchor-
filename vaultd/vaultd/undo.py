@@ -135,6 +135,10 @@ REFUSAL_REASONS = frozenset(
         "frontmatter_keys",
         "changeset_writer_mismatch",
         "cap_echo",
+        # prune.py: footer link pruning
+        "plan_changed",
+        "prune_config",
+        "prune_too_large",
     }
 )
 
@@ -169,9 +173,11 @@ class ChangeSummary:
     undone: bool
     files: list[dict] = field(default_factory=list)
     writer: str = CLAUDE
+    # What an Echo changeset was for: None (the inbox) or "prune".
+    purpose: str | None = None
 
     def as_json(self) -> dict:
-        return {
+        out = {
             "id": self.id,
             "kind": self.kind,
             "time": self.time,
@@ -179,6 +185,9 @@ class ChangeSummary:
             "files": self.files,
             "writer": self.writer,
         }
+        if self.purpose is not None:
+            out["purpose"] = self.purpose
+        return out
 
 
 def _writer(meta: dict) -> str:
@@ -287,6 +296,7 @@ class UndoStore:
                     undone=bool(meta.get("undone", False)),
                     files=[{"path": f["path"], "sha256": f.get("written_sha256")} for f in meta["files"]],
                     writer=_writer(meta),
+                    purpose=meta.get("purpose"),
                 ).as_json()
             )
         out.sort(key=lambda m: m["time"])
@@ -506,6 +516,27 @@ class UndoStore:
         `len(entries)`. `writer` stamps a new changeset (an existing
         one keeps its own; the prechecks refused a mismatch)."""
         self._append_files(changeset_id, kind, entries, "content_files", len(entries), writer)
+
+    def append_prune(self, changeset_id: str, entries: list[FileEntry], removed: int) -> None:
+        """Record one footer-pruning apply (prune.py) as a new Echo
+        changeset, `purpose: prune`. Every file is a content write, so
+        `/v1/undo?writer=echo` restores it like any other."""
+        self._append_files(changeset_id, "write", entries, "content_files", len(entries), ECHO)
+        meta = self._read_meta(changeset_id)
+        meta["purpose"] = "prune"
+        meta["removed"] = removed
+        self._write_meta(changeset_id, meta)
+
+    def prune_replay(self, changeset_id: str) -> dict | None:
+        """A pruning apply already recorded under this id -- the bot
+        retrying a request whose answer it lost -- or None if the id is
+        new. Any other changeset under the id is refused."""
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            return None
+        if _writer(meta) != ECHO or meta.get("purpose") != "prune":
+            raise CapExceeded("changeset_writer_mismatch")
+        return {"files": len(meta["files"]), "removed": meta.get("removed", 0)}
 
     def append_move(self, changeset_id: str, kind: str, entries: list[FileEntry], n_files: int) -> None:
         """Same as `append`, but for a rename's moved file and its

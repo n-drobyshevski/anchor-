@@ -36,7 +36,7 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, echo, frontmatter, graph, knowledge, paths
+from vaultd import classes, echo, frontmatter, graph, knowledge, paths, prune
 from vaultd import limits as limits_mod
 from vaultd.config import BODY_MAX_BYTES, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
@@ -551,6 +551,89 @@ async def put_echo_inbox(request: web.Request) -> web.Response:
     return web.json_response({"name": rel.rsplit("/", 1)[-1], "sha256": sha, "replayed": False})
 
 
+_PLAN_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _plan_summary(plan: prune.Plan) -> dict:
+    return {
+        "plan_hash": plan.plan_hash,
+        "config_error": plan.config_error,
+        "notes": plan.notes,
+        "edges_before": plan.edges_before,
+        "edges_after": plan.edges_after,
+        "removals": len(plan.removals),
+        "files": len(plan.files),
+        "unresolved": len(plan.unresolved),
+        "orphans": len(plan.orphans),
+    }
+
+
+async def get_graph_prune(request: web.Request) -> web.Response:
+    """`GET /v1/graph/prune` (prune.py): the dry run -- the plan's counts,
+    its hash, and the report as Markdown. Writes nothing. The log line
+    carries counts only."""
+    store = request.app[STORE_KEY]
+    when = request.app[CLOCK_KEY]().strftime("%Y-%m-%d")
+    async with request.app[LOCK_KEY]:
+        try:
+            plan = await asyncio.to_thread(prune.build_plan, store.vault_path)
+        except prune.TooLarge:
+            _log_refused(request, "prune_too_large")
+            return _refused()
+    body = _plan_summary(plan)
+    body["report"] = prune.report(plan, when=when)
+    logger.info("graph_prune", extra={"event": "graph_prune_plan", "count": body["removals"]})
+    return web.json_response(body)
+
+
+async def post_graph_prune(request: web.Request) -> web.Response:
+    """`POST /v1/graph/prune` (prune.py): apply the plan whose hash the
+    caller read in a dry run, as one Echo changeset (`purpose: prune`).
+    Body `{plan_hash, changeset}`; the answer `{files, removed,
+    replayed}`. A plan that no longer matches the vault is 409
+    `plan_changed` (nothing written); a replayed changeset id answers
+    what it recorded. An empty plan writes nothing and records no
+    changeset."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"plan_hash", "changeset"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    plan_hash, changeset = body["plan_hash"], body["changeset"]
+    if not (isinstance(plan_hash, str) and _PLAN_HASH_RE.match(plan_hash)):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            replay = await asyncio.to_thread(undo_store.prune_replay, changeset)
+        except CapExceeded as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        if replay is not None:
+            return web.json_response({**replay, "replayed": True})
+        try:
+            plan, written = await asyncio.to_thread(prune.apply_plan, store, plan_hash, now=now)
+        except prune.PlanChanged:
+            _log_refused(request, "plan_changed")
+            return _json_error("plan_changed", 409)
+        except prune.TooLarge:
+            _log_refused(request, "prune_too_large")
+            return _refused()
+        except OSError:
+            return _json_error("io_error", 500)
+        if written:
+            entries = [FileEntry(rel, pre, sha) for rel, pre, sha in written]
+            await asyncio.to_thread(undo_store.append_prune, changeset, entries, len(plan.removals))
+    logger.info("graph_prune", extra={"event": "graph_prune_apply", "count": len(written)})
+    return web.json_response({"files": len(written), "removed": len(plan.removals), "replayed": False})
+
+
 async def get_changes(request: web.Request) -> web.Response:
     changes = await asyncio.to_thread(request.app[UNDO_KEY].list_changes)
     return web.json_response({"changes": changes})
@@ -685,6 +768,8 @@ def make_app(
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/knowledge/graph", get_knowledge_graph)
     app.router.add_put("/v1/echo/inbox", put_echo_inbox)
+    app.router.add_get("/v1/graph/prune", get_graph_prune)
+    app.router.add_post("/v1/graph/prune", post_graph_prune)
     app.router.add_get("/v1/changes", get_changes)
     app.router.add_post("/v1/undo", undo_changeset)
     app.router.add_get("/v1/limits", get_limits)
