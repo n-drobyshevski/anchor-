@@ -377,6 +377,46 @@ the inbox.
 knowledge notes, yours) and forgets which ones Echo wrote, so
 `/lens undo` can no longer take them back.
 
+## 11. Footer link pruning: `/graph`
+
+Once a week (Sunday 11:00 local, `GRAPH_PRUNE_WEEKDAY` to move it)
+Echo sends a **dry run**: a Markdown report of which links in the
+`## Связи` footers of your knowledge and lens notes could go, with the
+note each pair still meets through. Nothing changes until you press
+«применить» or type `/graph apply <hash>`; `/graph` runs a dry run on
+demand, `/graph undo` takes the newest apply back (14 days, one step
+for every file). A week with nothing to report sends nothing.
+
+A connection A-B is proposed only when neither note links the other
+from its body, they still share a neighbour after the removal (checked
+again after every removal, highest-degree pairs first), and nothing
+protects it. Body links are never touched, and neither is anything
+but the footer items: the item and one ` · ` go, a `**Label:**` line
+left empty goes, and the frontmatter gains only Echo's
+`anchor_edited_by: echo` stamp.
+
+What protects a pair, in `Anchor/graph.md` (create it in Obsidian; an
+unknown key stops the dry run with a message rather than guessing):
+
+```yaml
+---
+protected_pairs:
+  - [CCRU, Cybernetics]
+protected:              # a note name, a note path, or a folder
+  - Library/Resources/Music
+  - Angelism
+  - True Detective
+  - Nigredo
+  - Nigredo Terms Explained
+footer_heading: "## Связи"   # default
+separator: " · "             # default
+small_component_max: 3       # the report lists components up to this size
+---
+```
+
+and, per note, `graph-keep: [Target, ...]` in its own frontmatter,
+which the pruning honours and never writes.
+
 ## Turning it off
 
 Set `VAULT_MODE=off` on the bot. The bot then makes no request to the

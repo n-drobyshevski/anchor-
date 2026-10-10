@@ -708,6 +708,13 @@ class Settings(BaseSettings):
     # Rollout flips knowledge first and personal later, separately.
     VAULT_KNOWLEDGE_ENABLED: bool = False
     VAULT_PERSONAL_ENABLED: bool = False
+    # Footer link pruning (vaultd/vaultd/prune.py, app/tg/graph.py): a
+    # weekly dry run sent to Telegram as a report; nothing is edited
+    # until /graph apply. Needs a VAULT_MODE other than `off`.
+    # GRAPH_PRUNE_WEEKDAY is 0 (Monday) to 6 (Sunday), local time,
+    # at GRAPH_PRUNE_TIME (app/core/scheduler.py).
+    GRAPH_PRUNE_ENABLED: bool = True
+    GRAPH_PRUNE_WEEKDAY: int = 6
     VAULT_KNOWLEDGE_IN_PROMPT: int = 2
     VAULT_PERSONAL_IN_PROMPT: int = 2
     # --- L1: the lens (anchor-lens-plan.md sections 3, 5 and 11) ---
@@ -1029,6 +1036,13 @@ class Settings(BaseSettings):
         does a prefix comparison.
         """
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("GRAPH_PRUNE_WEEKDAY")
+    @classmethod
+    def _graph_prune_weekday(cls, value: int) -> int:
+        if not 0 <= value <= 6:
+            raise ValueError("GRAPH_PRUNE_WEEKDAY must be 0 (Monday) to 6 (Sunday)")
+        return value
 
     @field_validator("*", mode="before")
     @classmethod

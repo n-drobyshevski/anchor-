@@ -60,7 +60,9 @@ from app.web.hub import WebHub
 # connection (app/tg/claude.py): Telegram is the only approval channel.
 # `lens` joins it for the same reason: `/lens code on` opens a database
 # login for Claude Code (app/tg/lens.py, anchor-lens-plan.md section 11).
-BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude", "lens"})
+# `graph` joins it because `/graph apply` edits the vault's notes
+# (app/tg/graph.py).
+BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claude", "lens", "graph"})
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
 # confirm_keyboard: "d:yes:<epoch>" / "d:no"). Rejected outright rather
@@ -81,7 +83,7 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # «в Inbox» (a write into the vault) / «не нужно»: those messages are
 # only ever sent to Telegram, like a hold's. A tuple, because
 # str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:")
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:", "gp:")
 
 
 class BlockedCommand(Exception):

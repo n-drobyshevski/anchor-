@@ -102,9 +102,11 @@ from app.core import review as review_module
 from app.core.review import REVIEW_EXPIRY
 from app.core.scheduler import (
     CLAUDE_LIBRARY_DIGEST,
+    GRAPH_PRUNE,
     TICK_DECIDE,
     heartbeat,
     maybe_enqueue_backup,
+    maybe_enqueue_graph_prune,
     maybe_enqueue_library_digest,
     maybe_enqueue_notebook_expiry,
     maybe_enqueue_obligation_sweep,
@@ -145,6 +147,7 @@ from app.tg import research as research_ui
 from app.tg import vault as vault_ui
 from app.tg import garden as garden_ui
 from app.tg import claude as claude_ui
+from app.tg import graph as graph_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
 from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
@@ -542,6 +545,14 @@ async def _run_job(
             await claude_ui.run_library_digest(session, settings, clock, bot, payload)
         return ExtractOutcome()
 
+    if kind == GRAPH_PRUNE:
+        # Footer link pruning's weekly dry run (app/tg/graph.py). One
+        # vaultd read and one Telegram send; held by may_report_now
+        # inside run_weekly, which raises Deferred, as the digest does.
+        if bot is not None:
+            await graph_ui.run_weekly(session, settings, clock, bot)
+        return ExtractOutcome()
+
     raise ValueError(f"unknown job kind: {kind}")
 
 
@@ -894,6 +905,11 @@ async def _heartbeat_loop(
             async with sessionmaker() as session:
                 state = await get_state(session)
                 await maybe_enqueue_library_digest(session, settings, clock, state.timezone)
+            # Footer link pruning's weekly dry run, same cadence and same
+            # "not inside heartbeat()" reasoning as the digest above.
+            async with sessionmaker() as session:
+                state = await get_state(session)
+                await maybe_enqueue_graph_prune(session, settings, clock, state.timezone)
             # 6a: idle planning, same cadence and same "not inside
             # heartbeat()" reasoning as the four sweeps above -- see
             # app/core/scheduler.py's module docstring. plan_idle opens

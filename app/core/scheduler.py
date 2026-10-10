@@ -654,6 +654,42 @@ async def maybe_enqueue_library_digest(
     return enqueued
 
 
+GRAPH_PRUNE = "graph_prune"
+# The weekly dry run's local time, on settings.GRAPH_PRUNE_WEEKDAY.
+GRAPH_PRUNE_TIME = datetime.time(11, 0)
+
+
+def graph_prune_dedup_key(local_date: datetime.date) -> str:
+    """One dry run per ISO week, ever."""
+    year, week, _ = local_date.isocalendar()
+    return f"{GRAPH_PRUNE}:{year}-W{week:02d}"
+
+
+async def maybe_enqueue_graph_prune(
+    session: AsyncSession, settings: Settings, clock: Clock, timezone: str
+) -> bool:
+    """Queue the week's footer-pruning dry run (app/tg/graph.py), once per
+    ISO week, from GRAPH_PRUNE_TIME on GRAPH_PRUNE_WEEKDAY (local) or any
+    later day of that week, so a missed tick is caught up rather than
+    skipped. The job itself asks `may_report_now` and sends nothing when
+    there is nothing to report."""
+    if not settings.GRAPH_PRUNE_ENABLED or settings.VAULT_MODE == "off":
+        return False
+    local_date = clock_module.local_date(clock, timezone)
+    weekday = settings.GRAPH_PRUNE_WEEKDAY
+    if local_date.weekday() < weekday:
+        return False
+    target = clock_module.combine_local(
+        local_date - datetime.timedelta(days=local_date.weekday() - weekday), GRAPH_PRUNE_TIME, timezone
+    )
+    if clock.now_utc() < target:
+        return False
+    enqueued = await enqueue_job(session, GRAPH_PRUNE, {}, dedup_key=graph_prune_dedup_key(local_date))
+    if enqueued:
+        logger.info("graph prune queued", extra={"event": GRAPH_PRUNE})
+    return enqueued
+
+
 def planner_sync_dedup_key(local_date: datetime.date, hour: int, bucket: int) -> str:
     """One planner sync per (local date, hour, bucket) -- mirrors tick_dedup_key.
 
