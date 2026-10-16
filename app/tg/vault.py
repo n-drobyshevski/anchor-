@@ -10,6 +10,11 @@ many notes of each class vaultd lists and how many need a look. Counts
 only: vaultd never tells the bot the name of a note it may not see, so
 there is nothing else to show.
 
+8f adds a second line, next to it: what `Anchor/settings.md` is doing
+for knowledge roots (missing, invalid, wrong case, or the folders it
+actually names) -- the line that would have told the user their
+`Anchor/Settings.md` (capital S) was never read.
+
 Every line here is a reply to a command, so it is sent whatever the
 pause, quiet or welfare state; `may_report_now` governs unsolicited
 vault messages (8c), not this.
@@ -69,6 +74,19 @@ NOTES_CHECK_CONFLICT = "конфликт {n}"
 NOTES_CHECK_LEGACY = "anchor: read {n}"
 NOTES_UNREAD = " · не прочитано: неизвестная метка {n}"
 
+# 8f: what Anchor/settings.md's own state means for knowledge roots --
+# a second line next to the notes counts above, and the same wording
+# the "Хранилище и знания" menu screen shows (app/tg/menu.py, which
+# duplicates rather than imports these, matching that module's own
+# state_view/menu split). `notes.settings == "invalid"` never reaches
+# `format_settings_line`: NOTES_SETTINGS_INVALID_LINE already replaces
+# the whole notes line for that case, above.
+NOTES_ROOTS_LIST = "Корни знаний: {roots}"
+NOTES_ROOTS_EMPTY = "Корни знаний: не заданы — добавь knowledge_folders в Anchor/settings.md"
+NOTES_ROOTS_MISSING = "Anchor/settings.md не найден — корней знаний нет"
+NOTES_ROOTS_WRONG_CASE = "Файл настроек называется не так: переименуй его в Anchor/settings.md (регистр важен)"
+ROOTS_SHOWN = 5
+
 # The plan's text, without its Markdown backticks: every reply is plain
 # text (app/tg/send.py).
 NOTES_ON_REPLY = (
@@ -96,6 +114,27 @@ def _when(moment: datetime.datetime | None, timezone: str, clock: Clock) -> str:
     return local.strftime("%d.%m %H:%M")
 
 
+def format_settings_line(settings_state: str, knowledge_roots: tuple[str, ...] = ()) -> str:
+    """The one line about `Anchor/settings.md` and its knowledge roots
+    (8f) -- shown by both `/vault` (next to the notes counts, below)
+    and the "Хранилище и знания" menu screen. Never called with
+    `settings_state == "invalid"`: that state replaces the whole notes
+    line instead (NOTES_SETTINGS_INVALID_LINE), so there is nothing to
+    add here for it.
+    """
+    if settings_state == "missing":
+        return NOTES_ROOTS_MISSING
+    if settings_state == "wrong_case":
+        return NOTES_ROOTS_WRONG_CASE
+    if not knowledge_roots:
+        return NOTES_ROOTS_EMPTY
+    shown = knowledge_roots[:ROOTS_SHOWN]
+    text = ", ".join(shown)
+    if len(knowledge_roots) > ROOTS_SHOWN:
+        text += f" и ещё {len(knowledge_roots) - ROOTS_SHOWN}"
+    return NOTES_ROOTS_LIST.format(roots=text)
+
+
 def format_notes_line(consent: bool, notes: vault_status.NotesOverview | None) -> str | None:
     """The notes line, or None when there is nothing true to say."""
     if not consent:
@@ -114,6 +153,7 @@ def format_notes_line(consent: bool, notes: vault_status.NotesOverview | None) -
         line += NOTES_CHECK.format(items=", ".join(check))
     if notes.unknown_value:
         line += NOTES_UNREAD.format(n=notes.unknown_value)
+    line += "\n" + format_settings_line(notes.settings, notes.knowledge_roots)
     return line
 
 

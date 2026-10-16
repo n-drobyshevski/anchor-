@@ -352,6 +352,14 @@ class MenuView:
     matching `oauth_store.current_connection`'s own `None`.
     `planner_status` is `planner_credential.status` ("active" /
     "revoked"), or None if the planner was never linked.
+
+    `settings_state`/`knowledge_roots` (8f) mirror
+    `NotesOverview.settings`/`.knowledge_roots` (app/vault/status.py):
+    the manifest's report on `Anchor/settings.md`, fetched -- like the
+    counts app/tg/vault.py's own notes line shows -- only while notes
+    consent is on. `settings_state=None` means "not fetched" (consent
+    off, or the manifest did not answer), same shape as
+    `format_notes_line`'s own `notes=None`.
     """
 
     now: datetime.datetime | None = None
@@ -366,6 +374,8 @@ class MenuView:
     library_write: bool = False
     planner_status: str | None = None
     planner_enabled: bool = False
+    settings_state: str | None = None
+    knowledge_roots: tuple[str, ...] = ()
 
 
 def _tz(view: MenuView) -> ZoneInfo:
@@ -486,6 +496,39 @@ PLANNER_LINK_HINT = "Подключить планер — /planner_link."
 # The hint shown in the vault status table next to "выкл" when there is
 # no Claude connection at all -- nothing for a button to switch yet.
 _LIB_NO_CONNECTION = "нет подключения"
+
+# 8f: the knowledge-roots hint, shown right under the vault section's
+# title while notes consent is on. Same wording app/tg/vault.py's own
+# `format_settings_line` gives `/vault` -- duplicated, not imported,
+# matching this module's own `_table` (state_view.py's twin): the two
+# UI modules stay independently pure.
+_ROOTS_LIST = "Корни знаний: {roots}"
+_ROOTS_EMPTY = "Корни знаний: не заданы — добавь knowledge_folders в Anchor/settings.md"
+_ROOTS_MISSING = "Anchor/settings.md не найден — корней знаний нет"
+_ROOTS_WRONG_CASE = "Файл настроек называется не так: переименуй его в Anchor/settings.md (регистр важен)"
+_ROOTS_INVALID = "Anchor/settings.md с ошибкой — ни одна заметка не читается"
+_ROOTS_SHOWN = 5
+
+
+def _settings_hint(state: str | None, roots: tuple[str, ...]) -> str | None:
+    """None when there is nothing to say yet (notes consent off, or the
+    manifest never answered) -- same as the vault section simply having
+    no hint before 8f."""
+    if state is None:
+        return None
+    if state == "invalid":
+        return _ROOTS_INVALID
+    if state == "missing":
+        return _ROOTS_MISSING
+    if state == "wrong_case":
+        return _ROOTS_WRONG_CASE
+    if not roots:
+        return _ROOTS_EMPTY
+    shown = roots[:_ROOTS_SHOWN]
+    text = ", ".join(shown)
+    if len(roots) > _ROOTS_SHOWN:
+        text += f" и ещё {len(roots) - _ROOTS_SHOWN}"
+    return _ROOTS_LIST.format(roots=text)
 
 
 def _lib_value(read: bool | None, write: bool) -> str:
@@ -620,7 +663,8 @@ def _render_vault(settings: Settings, *, web: bool, view: MenuView) -> Section:
 
     rows.append([_action_btn("vault")])
     rows.append(_nav_row())
-    return Section(title=VAULT_TITLE, hint=None, table_rows=table_rows, rows=rows)
+    hint = _settings_hint(view.settings_state, view.knowledge_roots)
+    return Section(title=VAULT_TITLE, hint=hint, table_rows=table_rows, rows=rows)
 
 
 def _render_planner(settings: Settings, *, web: bool, view: MenuView) -> Section:

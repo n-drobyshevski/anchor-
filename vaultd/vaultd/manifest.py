@@ -15,6 +15,18 @@ section 4): the `summary` says how many notes disagreed with their
 folder, still say `anchor: read`, or carry a value Anchor does not
 know, and whether the settings file is usable.
 
+**The settings file's reported state is one of four** (8f):
+`missing` (no `Anchor/settings.md` at all -- fine, no folder rules),
+`valid`, `invalid` (unusable: fails closed, no note is listed), and
+`wrong_case` (`Anchor/` holds a file matching the name in any case but
+not exactly -- the production bug behind this: `Anchor/Settings.md` on
+a case-sensitive disk). `wrong_case` behaves exactly like `missing`
+internally (classes.py never reads it), it is just reported
+differently so `/vault` can name the actual problem instead of silently
+saying "no knowledge roots". `knowledge_roots` carries the user's own
+`knowledge_folders` values (never a note path) when `valid`, and a
+count -- both empty otherwise.
+
 **Only the mark is cached per file; the class is not.** The rules are
 read once per scan and every class is recomputed from the cached mark,
 so an edit to `Anchor/settings.md` reclassifies every note on the next
@@ -69,6 +81,29 @@ class Entry:
         return out
 
 
+#: The manifest's own vocabulary for the settings file's state -- distinct
+#: from classes.SettingsState ("ok"/"absent"/"invalid"), which stays
+#: internal. "wrong_case" has no FolderRules.state of its own: a
+#: wrong-case file is still "absent" internally (fail closed), and only
+#: reported differently here so the bot can tell the two apart.
+_STATE_LABELS = {"ok": "valid", "absent": "missing", "invalid": "invalid"}
+
+
+def _settings_report_state(rules: "classes.FolderRules", root: Path) -> str:
+    if rules.state == "absent" and classes.wrong_case_settings_present(root):
+        return "wrong_case"
+    return _STATE_LABELS[rules.state]
+
+
+def _knowledge_roots(rules: "classes.FolderRules") -> tuple[str, ...]:
+    """The user's own `knowledge_folders` values, joined per rule --
+    never a note path (module docstring). Only when settings are
+    actually usable; every other state has no rules to report."""
+    if rules.state != "ok":
+        return ()
+    return tuple("/".join(segments) for segments in rules.knowledge)
+
+
 @dataclass
 class Summary:
     """Counts over the notes considered, and the settings file's state. No paths."""
@@ -76,7 +111,10 @@ class Summary:
     conflict: int = 0
     legacy_read: int = 0
     unknown_value: int = 0
-    settings: str = "absent"
+    settings: str = "missing"
+    # The user's own knowledge_folders values (not a note path), when
+    # `settings == "valid"`; empty otherwise.
+    knowledge_roots: tuple[str, ...] = ()
 
     def as_json(self) -> dict:
         return {
@@ -84,6 +122,8 @@ class Summary:
             "legacy_read": self.legacy_read,
             "unknown_value": self.unknown_value,
             "settings": self.settings,
+            "knowledge_roots": list(self.knowledge_roots),
+            "knowledge_roots_count": len(self.knowledge_roots),
         }
 
 
@@ -113,10 +153,11 @@ class Manifest:
 
     def scan(self) -> Scan:
         rules = classes.load_rules(self.root)
-        self._note_settings_state(rules.state)
+        report_state = _settings_report_state(rules, self.root)
+        self._note_settings_state(report_state)
         entries: list[Entry] = []
         seen: set[str] = set()
-        summary = Summary(settings=rules.state)
+        summary = Summary(settings=report_state, knowledge_roots=_knowledge_roots(rules))
         self.last_reads = 0
         self._walk(self.root, "", entries, seen, rules, summary)
         for gone in set(self._cache) - seen:
@@ -126,12 +167,17 @@ class Manifest:
 
     def _note_settings_state(self, state: str) -> None:
         """Log a change of the settings file's state: the state only."""
-        if state != self._settings_state:
-            if state == "invalid":
-                logger.warning("settings unusable; no note is listed", extra={"event": "settings_invalid"})
-            elif self._settings_state is not None:
-                logger.info("settings usable", extra={"event": f"settings_{state}"})
-            self._settings_state = state
+        if state == self._settings_state:
+            return
+        if state == "invalid":
+            logger.warning("settings unusable; no note is listed", extra={"event": "settings_invalid"})
+        elif state == "wrong_case":
+            logger.warning(
+                "settings file name case mismatch; no note is listed", extra={"event": "settings_wrong_case"}
+            )
+        elif self._settings_state is not None:
+            logger.info("settings usable", extra={"event": f"settings_{state}"})
+        self._settings_state = state
 
     def _walk(
         self,

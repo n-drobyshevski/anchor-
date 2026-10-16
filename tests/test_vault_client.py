@@ -130,7 +130,7 @@ def _manifest_body(notes: int) -> bytes:
         {"path": f"Notes/n{i}.md", "sha256": "a" * 64, "size": 10, "scope": "note", "class": "knowledge"}
         for i in range(notes)
     ]
-    summary = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "ok"}
+    summary = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "valid"}
     return json.dumps({"files": files, "summary": summary}).encode()
 
 
@@ -177,7 +177,13 @@ async def test_the_other_routes(stub) -> None:
         "GET", "/v1/manifest", 200,
         {
             "files": [{"path": "Бег.md", "sha256": sha, "size": 10, "scope": "note", "class": "personal"}],
-            "summary": {"conflict": 1, "legacy_read": 2, "unknown_value": 3, "settings": "ok"},
+            "summary": {
+                "conflict": 1,
+                "legacy_read": 2,
+                "unknown_value": 3,
+                "settings": "valid",
+                "knowledge_roots": ["Library"],
+            },
         },
     )
     stub.respond(
@@ -191,7 +197,9 @@ async def test_the_other_routes(stub) -> None:
     manifest = await client.manifest()
     [entry] = manifest.entries
     assert (entry.path, entry.scope, entry.note_class) == ("Бег.md", "note", "personal")
-    assert manifest.summary == NotesSummary(conflict=1, legacy_read=2, unknown_value=3, settings="ok")
+    assert manifest.summary == NotesSummary(
+        conflict=1, legacy_read=2, unknown_value=3, settings="valid", knowledge_roots=("Library",)
+    )
     got = await client.get_file("Бег.md")
     assert (got.content, got.note_class) == ("текст", "personal")
     assert await client.put_file("Anchor/Memory/0001-abcdef.md", "факт", None) == sha
@@ -222,7 +230,7 @@ def test_an_unknown_code_cannot_be_raised() -> None:
         VaultError("some free text from a server")
 
 
-SUMMARY = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "absent"}
+SUMMARY = {"conflict": 0, "legacy_read": 0, "unknown_value": 0, "settings": "missing"}
 NOTE = {"path": "Бег.md", "sha256": "a" * 64, "size": 10, "scope": "note"}
 FACT = {"path": "Anchor/Memory/0001-abcdef.md", "sha256": "a" * 64, "size": 10, "scope": "anchor"}
 
@@ -246,6 +254,13 @@ FACT = {"path": "Anchor/Memory/0001-abcdef.md", "sha256": "a" * 64, "size": 10, 
         {"files": [], "summary": {**SUMMARY, "conflict": True}},
         {"files": [], "summary": {**SUMMARY, "unknown_value": "3"}},
         {"files": [], "summary": {k: v for k, v in SUMMARY.items() if k != "legacy_read"}},
+        # 8f: an old vaultd's "ok"/"absent" vocabulary is no longer known.
+        {"files": [], "summary": {**SUMMARY, "settings": "ok"}},
+        {"files": [], "summary": {**SUMMARY, "settings": "absent"}},
+        # knowledge_roots, when present, must be a list of strings.
+        {"files": [], "summary": {**SUMMARY, "knowledge_roots": "Library"}},
+        {"files": [], "summary": {**SUMMARY, "knowledge_roots": [1]}},
+        {"files": [], "summary": {**SUMMARY, "knowledge_roots": None}},
     ],
 )
 async def test_a_manifest_with_a_bad_class_or_summary_is_refused(stub, body) -> None:
@@ -253,6 +268,17 @@ async def test_a_manifest_with_a_bad_class_or_summary_is_refused(stub, body) -> 
     with pytest.raises(VaultError) as exc:
         await _client(stub).manifest()
     assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def test_a_wrong_case_settings_state_parses(stub) -> None:
+    """8f: vaultd's fourth settings state, and the default when a build
+    predating it simply omits `knowledge_roots`."""
+    stub.respond(
+        "GET", "/v1/manifest", 200, {"files": [], "summary": {**SUMMARY, "settings": "wrong_case"}}
+    )
+    manifest = await _client(stub).manifest()
+    assert manifest.summary.settings == "wrong_case"
+    assert manifest.summary.knowledge_roots == ()
 
 
 async def test_a_file_with_a_foreign_class_is_refused(stub) -> None:
