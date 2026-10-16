@@ -1,31 +1,54 @@
 version: 2
+
+# One grouped pull request per ecosystem per month, majors included, so
+# the bot opens at most five a month instead of one per dependency per
+# week. A major that breaks CI holds its group back; split it out with
+# an `ignore` entry or update it by hand. The groups cover version
+# updates only: security updates (when enabled in the repo settings)
+# are not grouped or scheduled and still arrive on their own.
+#
+# Python uses the "uv" ecosystem, not "pip": "pip" only raised the lower
+# bound in pyproject.toml and left uv.lock alone, so CI (`uv sync
+# --frozen`) kept testing the old locked versions and the PR proved
+# nothing. "uv" updates uv.lock with the bump.
 updates:
-  # uv reads pyproject.toml/uv.lock; Dependabot's "pip" ecosystem
-  # understands both (pyproject.toml dependency blocks and a uv.lock
-  # lockfile), so no separate "uv" ecosystem entry is needed.
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    groups:
+      python:
+        patterns: ["*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
 
   # Phase 8: the vault service (vaultd/) has its own locks and image.
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/vaultd"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      vaultd-python:
+        patterns: ["*"]
 
   - package-ecosystem: "npm"
     directory: "/vaultd"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      vaultd-npm:
+        patterns: ["*"]
 
   - package-ecosystem: "docker"
     directory: "/vaultd"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      vaultd-docker:
+        patterns: ["*"]
