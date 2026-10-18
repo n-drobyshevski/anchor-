@@ -479,6 +479,33 @@ def idle_gate(
     return KIND_RULES[kind](facts, config)
 
 
+def _manual_rows(
+    facts: IdleFacts, now: datetime.datetime, config: IdleConfig, self_run_id: int | None
+) -> GateResult | None:
+    """The rows every run the user asked for still obeys (`manual_garden_gate`,
+    `manual_lens_research_gate`): the switch and the pause, the welfare
+    cooldown, `busy`, and every money row. None when all pass."""
+    if not config.enabled:
+        return GateResult(False, DISABLED)
+    if not facts.persona_active:
+        return GateResult(False, PAUSED)
+    if facts.welfare_at is not None and now - facts.welfare_at < datetime.timedelta(
+        hours=WELFARE_COOLDOWN_HOURS
+    ):
+        return GateResult(False, WELFARE_COOLDOWN)
+    active = set(facts.active_run_ids)
+    active.discard(self_run_id)
+    if active:
+        return GateResult(False, BUSY)
+    if facts.jobs_today >= config.max_jobs_per_day:
+        return GateResult(False, MAX_JOBS)
+    if facts.idle_spend_today + config.job_usd_cap > config.usd_cap:
+        return GateResult(False, IDLE_CAP)
+    if facts.spend_today + config.job_usd_cap > facts.daily_usd_cap - config.reserve_usd:
+        return GateResult(False, RESERVE)
+    return None
+
+
 def manual_garden_gate(
     facts: IdleFacts,
     now: datetime.datetime,
@@ -498,24 +525,9 @@ def manual_garden_gate(
     week could not record its gaps anyway. The garden's Telegram message
     keeps its own holds (quiet hours, pause, welfare) in app/tg/garden.py.
     """
-    if not config.enabled:
-        return GateResult(False, DISABLED)
-    if not facts.persona_active:
-        return GateResult(False, PAUSED)
-    if facts.welfare_at is not None and now - facts.welfare_at < datetime.timedelta(
-        hours=WELFARE_COOLDOWN_HOURS
-    ):
-        return GateResult(False, WELFARE_COOLDOWN)
-    active = set(facts.active_run_ids)
-    active.discard(self_run_id)
-    if active:
-        return GateResult(False, BUSY)
-    if facts.jobs_today >= config.max_jobs_per_day:
-        return GateResult(False, MAX_JOBS)
-    if facts.idle_spend_today + config.job_usd_cap > config.usd_cap:
-        return GateResult(False, IDLE_CAP)
-    if facts.spend_today + config.job_usd_cap > facts.daily_usd_cap - config.reserve_usd:
-        return GateResult(False, RESERVE)
+    shared = _manual_rows(facts, now, config, self_run_id)
+    if shared is not None:
+        return shared
     if not config.garden_enabled:
         return GateResult(False, GARDEN_OFF)
     if not GARDEN_MIN_NOTES <= facts.garden_notes <= config.lens_max_notes:
@@ -525,6 +537,24 @@ def manual_garden_gate(
     ):
         return GateResult(False, NOT_DUE)
     return GateResult(True, OK)
+
+
+def manual_lens_research_gate(
+    facts: IdleFacts,
+    now: datetime.datetime,
+    config: IdleConfig,
+    *,
+    self_run_id: int | None = None,
+) -> GateResult:
+    """`/lens research now`: run the queued lens research without waiting
+    for an idle slot. Like `manual_garden_gate`, it drops `user_active`,
+    `window` and the kind's once-a-day limit (the /study quota, spent at
+    the tap, already bounds the jobs) and keeps `_manual_rows`. Then the
+    kind's own rule: research on, a lens packet, and a queued job."""
+    shared = _manual_rows(facts, now, config, self_run_id)
+    if shared is not None:
+        return shared
+    return _lens_research_rule(facts, config)
 
 
 __all__ = [
@@ -543,6 +573,7 @@ __all__ = [
     "LENS_SIZE",
     "MAX_JOBS",
     "manual_garden_gate",
+    "manual_lens_research_gate",
     "NOT_ENOUGH_CLUSTERS",
     "NOT_IMPLEMENTED",
     "NOTHING_TO_BACKFILL",

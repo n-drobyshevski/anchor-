@@ -52,7 +52,12 @@ from app.core.idle import (
 )
 from app.core.idle.candidates import REFLECTED_SCENE_IDS
 from app.core.idle.facts import load_idle_facts
-from app.core.idle.gate import config_from_settings, idle_gate, manual_garden_gate
+from app.core.idle.gate import (
+    config_from_settings,
+    idle_gate,
+    manual_garden_gate,
+    manual_lens_research_gate,
+)
 from app.db.models import IdleChange, IdleRun, SpendLedger, TelegramUpdate, UserState
 from app.llm.provider import LLMProvider, LLMUsage
 
@@ -200,6 +205,14 @@ async def spend_since(
         return decimal.Decimal(result.scalar_one())
 
 
+# The kinds a user can start by hand, and the gate each one's run is
+# re-checked against (app/core/idle/gate.py).
+_MANUAL_GATES = {
+    LENS_GARDEN: manual_garden_gate,
+    LENS_RESEARCH: manual_lens_research_gate,
+}
+
+
 async def run_idle(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -213,10 +226,11 @@ async def run_idle(
 ) -> None:
     """Claim `run_id`, re-check the gate, run its kind, record the outcome.
 
-    `manual` (a lens garden the user asked for with `/lens garden now`,
-    app/core/idle/planner.py's `plan_manual_garden`) re-checks against
-    `manual_garden_gate` and is never preempted: the user's own
-    messages are what preemption guards against, and they asked for it.
+    `manual` (a lens garden or lens research the user asked for with
+    `/lens garden now` or `/lens research now`, app/core/idle/
+    planner.py's `plan_manual_*`) re-checks against the kind's manual
+    gate and is never preempted: the user's own messages are what
+    preemption guards against, and they asked for it.
 
     `job_id` (6c) is threaded through to the `canary` kind only, for its
     own job-lease refresh across a ~13-case blocking trial -- see
@@ -248,9 +262,9 @@ async def run_idle(
         timezone = state.timezone
         facts = await load_idle_facts(session, settings, clock, timezone)
         config = config_from_settings(settings)
-        manual = manual and kind == LENS_GARDEN
+        manual = manual and kind in _MANUAL_GATES
         if manual:
-            verdict = manual_garden_gate(facts, clock.now_utc(), config, self_run_id=run_id)
+            verdict = _MANUAL_GATES[kind](facts, clock.now_utc(), config, self_run_id=run_id)
         else:
             verdict = idle_gate(kind, facts, clock.now_utc(), config, self_run_id=run_id)
         already_preempted = (
@@ -407,6 +421,7 @@ async def run_idle(
             result = await run_lens_research(
                 session_factory, settings, safety_provider, clock,
                 run_id=run_id, started_at=started_at, timezone=timezone,
+                manual=manual,
             )
             # Preempted before it built a query, searched or ended a job:
             # nothing was written. A query stored before a later

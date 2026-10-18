@@ -135,18 +135,20 @@ async def run_lens_research(
     run_id: int,
     started_at: datetime.datetime,
     timezone: str,
+    manual: bool = False,
 ) -> LensResearchResult:
     """The `lens_research` idle kind body, called by app/core/idle/runner.py
     after its gate re-check and first preemption check (module
     docstring). `provider` is the shared safety provider, as for idle
     `research`: the query call, the searches and the distills all run on
-    it, as app/worker.py's `RESEARCH` branch runs a /study."""
+    it, as app/worker.py's `RESEARCH` branch runs a /study. A `manual`
+    run (`/lens research now`) is never preempted: the user asked for it."""
     # Lazy, as in research.py: runner.py imports facts.py, which imports
     # app.research.jobs, and runner.py imports this module in its branch.
     from app.core.idle.runner import is_preempted
 
     async with session_factory() as session:
-        if await is_preempted(session, clock, started_at):
+        if not manual and await is_preempted(session, clock, started_at):
             return LensResearchResult(preempted=True)
         job = await research_jobs.next_lens_job(session)
         if job is None:
@@ -186,7 +188,7 @@ async def run_lens_research(
         built = 1
 
     async with session_factory() as session:
-        if await is_preempted(session, clock, started_at):
+        if not manual and await is_preempted(session, clock, started_at):
             usd_cost = await _job_cost(session, job.id) - cost_before
             return LensResearchResult(
                 job_id=job.id, built=built, usd_cost=usd_cost, preempted=True
@@ -209,7 +211,7 @@ async def run_lens_research(
 
     async with session_factory() as session:
         usd_cost = await _job_cost(session, job.id) - cost_before
-        still_preempted = await is_preempted(session, clock, started_at)
+        still_preempted = not manual and await is_preempted(session, clock, started_at)
 
     logger.info(
         "lens research ran",
