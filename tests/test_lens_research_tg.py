@@ -422,7 +422,10 @@ async def test_a_finished_research_is_its_own_message_sent_once(sessionmaker):
     assert sent == 1 and len(fake.sent) == 1
     lines = fake.sent[0].text.splitlines()
     assert lines[:2] == ["Сад линзы: исследование.", f"Нет заметки: «{PROPOSED}» — упоминают «Ashby»"]
-    assert lines[2:8] == [f"• {CARD_TEXT} {i} ({DOMAIN})" for i in range(6)]
+    # The domain, then its kind (app/research/sources.py).
+    assert lines[2:8] == [
+        f"• {CARD_TEXT} {i} ({DOMAIN} · рецензируемая энциклопедия)" for i in range(6)
+    ]
     assert lines[8:] == ["Ещё карточек: 2 — войдут в заметку.", "скрыто: 2"]
     assert "скрытая" not in fake.sent[0].text
     assert _rows(fake.sent[0].reply_markup) == [

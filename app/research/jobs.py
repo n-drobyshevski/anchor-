@@ -79,6 +79,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import Settings
 from app.core import clock as clock_module
@@ -87,8 +88,8 @@ from app.core.clock import Clock
 from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
 from app.db.models import SpendLedger, StudyCard, StudyClip, StudyJob
-from app.llm.provider import LLMProvider, with_max_tokens
-from app.research import distill, search
+from app.llm.provider import LLMError, LLMProvider, LLMRetryableError, with_max_tokens
+from app.research import crosscheck, distill, search, sources
 from app.research.addresses import parse_target
 from app.research.fetch import Clip, FetchFailure, fetch as default_fetch, make_robots_cache
 
@@ -692,6 +693,82 @@ async def _distill_into_cards(
     return visible, hidden
 
 
+async def _crosscheck(
+    session: AsyncSession,
+    settings: Settings,
+    provider: LLMProvider,
+    clock: Clock,
+    timezone: str,
+    job: StudyJob,
+    clips: list[StudyClip],
+    created_at,
+) -> bool:
+    """Check every visible card against the research's pages of another
+    publisher (app/research/crosscheck.py): one call per page that has
+    any such card, its verdict kept on each card when it is stronger
+    than the one it has (`crosscheck.stronger`).
+
+    Lens jobs only, after every page is distilled. Optional by design:
+    the budget running out, a provider error or a reply that does not
+    parse ends or skips the checking and leaves the cards as they are
+    (unchecked), never the job, whose cards are already made. Each call
+    is ledgered like any other and runs at the distill's output cap.
+    Returns False when /delete took the job meanwhile (`_still_ours`)."""
+    cards = (
+        await session.execute(
+            select(StudyCard)
+            .where(StudyCard.job_id == job.id, StudyCard.status == "pending")
+            .order_by(StudyCard.id)
+        )
+    ).scalars().all()
+    owners = {clip.id: sources.publisher(clip.domain) for clip in clips}
+    checker = with_max_tokens(provider, settings.RESEARCH_DISTILL_MAX_TOKENS)
+    for clip in clips:
+        claims = [
+            card for card in cards
+            if card.clip_id in owners and owners[card.clip_id] != owners[clip.id]
+        ]
+        if not claims:
+            continue
+        if not await _still_ours(session, job.id, created_at):
+            return False
+        if await _capped(session, settings, clock, timezone, job):
+            break
+        try:
+            response = await crosscheck.call(
+                checker, claims=[card.text for card in claims], title=clip.title,
+                text=clip.text or "", clip_id=clip.id,
+            )
+        except (LLMError, LLMRetryableError):
+            logger.warning(
+                "clip cross-check failed", extra={"job_id": job.id, "clip_id": clip.id}
+            )
+            break
+        await _ledger(session, settings, clock, timezone, job, response)
+        checked = crosscheck.validate(
+            response.text, claim_count=len(claims), clip_text=clip.text or ""
+        )
+        for card, verdict in zip(claims, checked.verdicts):
+            if crosscheck.stronger(card.corroboration, verdict.verdict):
+                card.corroboration = verdict.verdict
+                card.corroboration_clip_id = clip.id if verdict.quote else None
+                card.corroboration_quote = verdict.quote
+        await session.commit()
+        logger.info(
+            "clip cross-checked",
+            extra={
+                "job_id": job.id,
+                "clip_id": clip.id,
+                "domain": clip.domain,
+                "cards": len(claims),
+                "supported": checked.count(crosscheck.SUPPORTED),
+                "contradicted": checked.count(crosscheck.CONTRADICTED),
+                "event": "parse_fail" if checked.parse_failed else "ok",
+            },
+        )
+    return True
+
+
 async def _finish(
     session: AsyncSession,
     clock: Clock,
@@ -973,7 +1050,10 @@ async def _run_study(
 
     visible = hidden = 0
     last_error: str | None = None
-    for candidate in outcome.urls:
+    read: list[StudyClip] = []
+    # Different publishers first, the best tier first among them
+    # (app/research/sources.py): the provider ranks for relevance only.
+    for candidate in sources.reading_order(outcome.urls):
         if job.pins_used >= settings.RESEARCH_MAX_PINS:
             break
         # Re-read per candidate rather than once: a /study job makes
@@ -1007,6 +1087,7 @@ async def _run_study(
         )
         visible += got_visible
         hidden += got_hidden
+        read.append(clip)
 
     if job.pins_used == 0:
         # Every candidate refused us. Report the wall, not an absence.
@@ -1014,6 +1095,10 @@ async def _run_study(
             session, clock, job, status="failed", error_code=last_error or search.NO_RESULTS,
             visible=0, hidden=0,
         )
+    if job.packet == LENS and visible and not await _crosscheck(
+        session, settings, provider, clock, timezone, job, read, job_created_at
+    ):
+        return _cancelled_outcome(job.id, visible, hidden)
     return await _finish(
         session, clock, job, status="done", error_code=None, visible=visible, hidden=hidden
     )
@@ -1043,6 +1128,18 @@ class LensCard:
     quote: str
     source_url: str
     domain: str
+    # Cross-checking (app/research/crosscheck.py): the verdict, NULL when
+    # never checked, and the page that settled it with its quote.
+    corroboration: str | None = None
+    corroborating_url: str | None = None
+    corroborating_domain: str | None = None
+    corroborating_quote: str | None = None
+
+    @property
+    def tier(self) -> str:
+        """The source's kind as shown beside its domain ("" for none),
+        app/research/sources.py's `tier_of`."""
+        return sources.tier_of(self.domain).label
 
 
 @dataclass(frozen=True)
@@ -1230,25 +1327,40 @@ async def _lens_cards(
     if not job_ids:
         return visible, hidden
     rows = await session.execute(
+        _lens_card_select(StudyCard.job_id, StudyCard.status).where(
+            StudyCard.job_id.in_(job_ids), StudyCard.kind == LENS_CARD
+        )
+    )
+    for job_id, status, *card in rows:
+        if status == "pending":
+            visible[job_id].append(LensCard(*card))
+        elif status == "hidden":
+            hidden[job_id] += 1
+    return visible, hidden
+
+
+def _lens_card_select(*leading):
+    """`leading` columns, then a `LensCard`'s fields in order: the card,
+    its page's domain, and the corroborating page's URL and domain (an
+    outer join: most cards have none). In card id order."""
+    other = aliased(StudyClip)
+    return (
         select(
+            *leading,
             StudyCard.id,
-            StudyCard.job_id,
-            StudyCard.status,
             StudyCard.text,
             StudyCard.quote,
             StudyCard.source_url,
             StudyClip.domain,
+            StudyCard.corroboration,
+            other.url,
+            other.domain,
+            StudyCard.corroboration_quote,
         )
         .join(StudyClip, StudyClip.id == StudyCard.clip_id)
-        .where(StudyCard.job_id.in_(job_ids), StudyCard.kind == LENS_CARD)
+        .outerjoin(other, other.id == StudyCard.corroboration_clip_id)
         .order_by(StudyCard.id)
     )
-    for card_id, job_id, status, card_text, quote, url, domain in rows:
-        if status == "pending":
-            visible[job_id].append(LensCard(card_id, card_text, quote, url, domain))
-        elif status == "hidden":
-            hidden[job_id] += 1
-    return visible, hidden
 
 
 async def lens_card_views(session: AsyncSession, gap_ids) -> dict[int, LensCards]:
@@ -1421,16 +1533,11 @@ async def lens_cards_by_id(session: AsyncSession, card_ids) -> list[LensCard]:
     if not ids:
         return []
     rows = await session.execute(
-        select(
-            StudyCard.id, StudyCard.text, StudyCard.quote, StudyCard.source_url, StudyClip.domain
-        )
-        .join(StudyClip, StudyClip.id == StudyCard.clip_id)
-        .where(
+        _lens_card_select().where(
             StudyCard.id.in_(ids), StudyCard.kind == LENS_CARD, StudyCard.status != "hidden"
         )
-        .order_by(StudyCard.id)
     )
-    return [LensCard(card_id, text, quote, url, domain) for card_id, text, quote, url, domain in rows]
+    return [LensCard(*card) for card in rows]
 
 
 

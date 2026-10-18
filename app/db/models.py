@@ -1218,11 +1218,37 @@ class StudyCard(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Cross-checking (app/research/crosscheck.py): the verdict of the
+    # research's other pages on this card, NULL when never checked; the
+    # page that settled it, and that page's verbatim quote (set only for
+    # `supported` or `contradicted`, and, like `quote`, web text).
+    corroboration: Mapped[str | None] = mapped_column(String)
+    corroboration_clip_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "study_clip.id", ondelete="SET NULL", name="fk_study_card_corroboration_clip_id"
+        ),
+    )
+    corroboration_quote: Mapped[str | None] = mapped_column(String)
 
     __table_args__ = (
         CheckConstraint(
             "kind in ('technique', 'routine', 'checkin_format', 'definition', 'lens')",
             name="ck_study_card_kind",
+        ),
+        CheckConstraint(
+            "corroboration is null "
+            "or corroboration in ('supported', 'contradicted', 'unverified')",
+            name="ck_study_card_corroboration",
+        ),
+        CheckConstraint(
+            "char_length(corroboration_quote) <= 240", name="ck_study_card_corroboration_quote_length"
+        ),
+        # A quote and a source stand only behind a verdict that needs them.
+        CheckConstraint(
+            "(corroboration_quote is null) "
+            "= (corroboration is null or corroboration = 'unverified')",
+            name="ck_study_card_corroboration_quote",
         ),
         CheckConstraint('char_length("text") <= 300', name="ck_study_card_text_length"),
         CheckConstraint("char_length(quote) <= 240", name="ck_study_card_quote_length"),

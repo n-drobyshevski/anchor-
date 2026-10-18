@@ -322,6 +322,11 @@ times and counts:
   `expired`, `hidden`); its clips show the domain fetched and the text
   length. Never a card's text, a quote, a query, a URL or a page. No
   view carries the gap a job was for;
+- `debug.study_card` also shows each card's cross-check verdict
+  (`corroboration`: `supported`, `contradicted`, `unverified`, or NULL
+  for never checked) and the id of the clip that settled it
+  (`corroboration_clip_id`, migration d4f8a2c6e1b3), never that clip's
+  quote (`corroboration_quote` is web text, like `quote`);
 - `lens.gaps(n)` and `debug.lens_gap` show a researched gap as
   `closed`, like a resolved one. A research that is spent or declined
   sends the gap back to `open`, which a resolved gap never does, so a

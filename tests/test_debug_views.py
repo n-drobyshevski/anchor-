@@ -40,7 +40,9 @@ CONTENT_COLUMNS = {
     "outbound": {"tick_note"},
     "study_job": {"packet", "query"},
     "study_clip": {"text", "url", "title", "text_sha256"},
-    "study_card": {"text", "quote", "source_url"},
+    # Cross-checking: the other page's verbatim quote is web text too;
+    # the verdict and the page's id are not.
+    "study_card": {"text", "quote", "source_url", "corroboration_quote"},
     "access_grant": {"token_sha256"},
     # Claude access. The client id is a URL, the redirect and resource
     # too; the challenge and the hashes are credential material.
@@ -99,6 +101,13 @@ async def test_no_debug_view_exposes_a_content_column(sessionmaker):
     for view, cols in columns.items():
         leaked = cols & CONTENT_COLUMNS.get(view, set())
         assert not leaked, f"debug.{view} exposes {leaked}"
+
+
+async def test_the_card_view_shows_the_cross_check_verdict_but_not_its_quote(sessionmaker):
+    async with sessionmaker() as session:
+        columns = (await _debug_columns(session))["study_card"]
+    assert {"corroboration", "corroboration_clip_id"} <= columns
+    assert "corroboration_quote" not in columns
 
 
 async def test_every_debug_view_source_is_classified(sessionmaker):

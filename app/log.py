@@ -142,6 +142,10 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # (app/core/echo_write.py) -- never the note's name, path, card
     # text, query or URL, and never vaultd's changeset id.
     "echo_changeset_id",
+    # Cross-checking a research's pages (app/research/jobs.py): how many
+    # of a page's claims another page supported or contradicted. Counts.
+    "supported",
+    "contradicted",
 )
 
 

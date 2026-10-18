@@ -528,7 +528,9 @@ class Settings(BaseSettings):
     # shared LLM_SAFETY_MAX_TOKENS (400) fits about two cards: a reply of
     # three to six was cut off mid-JSON, failed to parse, and every job
     # finished `done` with zero cards. Six cards at their length limits
-    # are ~1300 tokens of Russian JSON.
+    # are ~1300 tokens of Russian JSON. A lens research's cross-check
+    # (app/research/crosscheck.py: six verdicts with their quotes) runs
+    # at the same cap.
     RESEARCH_DISTILL_MAX_TOKENS: int = 2000
     # A pending card is a question waiting for an answer. After two
     # weeks the answer is "no" by default: the sweep marks it expired
