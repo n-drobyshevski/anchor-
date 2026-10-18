@@ -160,6 +160,16 @@ class LLMProvider(Protocol):
     async def close(self) -> None: ...
 
 
+def with_max_tokens(provider: LLMProvider, max_tokens: int) -> LLMProvider:
+    """`provider` with its own output cap, for the one call that needs
+    more room than the shared provider it runs on (a distill on the
+    safety provider, whose LLM_SAFETY_MAX_TOKENS of 400 cuts a reply of
+    six Russian cards off mid-JSON). A provider with no cap to change
+    (a test fake) is returned as it is."""
+    widen = getattr(provider, "with_max_tokens", None)
+    return widen(max_tokens) if widen is not None else provider
+
+
 @dataclass(frozen=True)
 class Choice:
     """One typed question for a decision model: pick one of `criteria`.

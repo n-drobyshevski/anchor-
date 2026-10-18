@@ -524,6 +524,12 @@ class Settings(BaseSettings):
 
     RESEARCH_CARDS_MIN: int = 3
     RESEARCH_CARDS_MAX: int = 6
+    # A distill's own output cap. It runs on the safety provider, whose
+    # shared LLM_SAFETY_MAX_TOKENS (400) fits about two cards: a reply of
+    # three to six was cut off mid-JSON, failed to parse, and every job
+    # finished `done` with zero cards. Six cards at their length limits
+    # are ~1300 tokens of Russian JSON.
+    RESEARCH_DISTILL_MAX_TOKENS: int = 2000
     # A pending card is a question waiting for an answer. After two
     # weeks the answer is "no" by default: the sweep marks it expired
     # rather than leaving /notes to accumulate forever.
@@ -1118,6 +1124,9 @@ ROUND_MAX_CHARS_RANGE = (2000, 100000)
 # L3: the garden's output cap. Under 1000 tokens ten gaps do not fit;
 # over 8000 is a runaway, not a report.
 GARDEN_MAX_TOKENS_RANGE = (1000, 8000)
+# A distill's output cap: under 1000 tokens six cards do not fit; over
+# 8000 is a runaway, not six cards.
+RESEARCH_DISTILL_MAX_TOKENS_RANGE = (1000, 8000)
 _VAULT_PRIVATE_SUFFIX = ".railway.internal"
 _VAULT_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
@@ -1302,6 +1311,7 @@ def check_vault_settings(settings: Settings) -> None:
         ("LENS_ROUND_MAX_NOTES", ROUND_MAX_NOTES_RANGE),
         ("LENS_ROUND_MAX_CHARS", ROUND_MAX_CHARS_RANGE),
         ("GARDEN_MAX_TOKENS", GARDEN_MAX_TOKENS_RANGE),
+        ("RESEARCH_DISTILL_MAX_TOKENS", RESEARCH_DISTILL_MAX_TOKENS_RANGE),
     ):
         value = getattr(settings, name)
         if not low <= value <= high:

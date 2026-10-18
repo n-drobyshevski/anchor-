@@ -392,6 +392,20 @@ class OpenRouterProvider:
             native_finish_reason=_extract_native_finish_reason(response),
         )
 
+    def with_max_tokens(self, max_tokens: int) -> OpenRouterProvider:
+        """The same model, temperature and client with another output cap
+        (app/llm/provider.py's `with_max_tokens`). The sibling never owns
+        the client, so closing it is a no-op and this one keeps it."""
+        return OpenRouterProvider(
+            api_key="",
+            model=self._model,
+            max_tokens=max_tokens,
+            temperature=self._temperature,
+            data_collection=self._data_collection,
+            client=self._client,
+            structured_outputs=self._structured_outputs,
+        )
+
     async def close(self) -> None:
         """Close the client, unless it was injected and belongs to someone else."""
         if self._owns_client:

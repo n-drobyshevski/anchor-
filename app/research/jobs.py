@@ -87,7 +87,7 @@ from app.core.clock import Clock
 from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
 from app.db.models import SpendLedger, StudyCard, StudyClip, StudyJob
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, with_max_tokens
 from app.research import distill, search
 from app.research.addresses import parse_target
 from app.research.fetch import Clip, FetchFailure, fetch as default_fetch, make_robots_cache
@@ -616,7 +616,9 @@ async def _distill_into_cards(
     """
     mode = distill.LENS if job.packet == LENS else distill.STUDY
     response = await distill.call(
-        provider,
+        # Its own output cap: the shared safety provider's would cut the
+        # reply off mid-JSON (RESEARCH_DISTILL_MAX_TOKENS).
+        with_max_tokens(provider, settings.RESEARCH_DISTILL_MAX_TOKENS),
         topic=topic,
         title=clip.title,
         text=clip.text,
@@ -681,6 +683,10 @@ async def _distill_into_cards(
             "domain": clip.domain,
             "cards": visible + hidden,
             "dropped": sum(distilled.dropped.values()),
+            # A reply that did not parse looks like an empty page in the
+            # counts above; this and the stop reason tell the two apart.
+            "event": "parse_fail" if distilled.parse_failed else "ok",
+            "reason": response.native_finish_reason or response.finish_reason or "",
         },
     )
     return visible, hidden

@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import json
+import logging
 
 import pytest
 import sqlalchemy
@@ -454,6 +455,58 @@ async def test_rerunning_a_finished_job_is_a_no_op(sessionmaker, clock):
             await session.execute(select(StudyCard).where(StudyCard.job_id == job_id))
         ).scalars().all()
     assert len(cards) == 1  # not duplicated by the second run
+
+
+async def test_the_distill_runs_with_its_own_output_cap(sessionmaker, clock):
+    """The shared safety provider's 400 tokens cut a reply of three to
+    six Russian cards off mid-JSON: it failed to parse, and every job
+    finished `done` with zero cards. The distill asks the provider for
+    RESEARCH_DISTILL_MAX_TOKENS instead."""
+    settings = _settings(RESEARCH_DISTILL_MAX_TOKENS=1500)
+    job_id = await _enqueue(sessionmaker, clock, settings)
+    payload = _payload(
+        [{"kind": "technique", "text": "Dim the lights before bed.", "quote": SENTENCE2, "risk": "low"}]
+    )
+    wider = FakeLLMProvider(text=payload)
+    caps = []
+
+    class _Capped(FakeLLMProvider):
+        def with_max_tokens(self, max_tokens):
+            caps.append(max_tokens)
+            return wider
+
+    provider = _Capped(text=_payload([]))
+    async with sessionmaker() as session:
+        outcome = await jobs.run_research_job(
+            session, settings, provider, job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+
+    assert caps == [1500]
+    assert provider.calls == 0
+    assert wider.calls == 1
+    assert outcome.visible_cards == 1
+
+
+async def test_a_distill_that_does_not_parse_says_so_in_its_log_line(
+    sessionmaker, clock, caplog, monkeypatch
+):
+    """`cards=0 dropped=0` is both an empty page and a cut-off reply;
+    the log line tells them apart, with codes only."""
+    settings = _settings()
+    job_id = await _enqueue(sessionmaker, clock, settings)
+    provider = FakeLLMProvider(text='{"cards": [{"kind": "techn')
+    # Alembic's fileConfig disables loggers that exist before it runs.
+    monkeypatch.setattr(logging.getLogger("app.research.jobs"), "disabled", False)
+    caplog.set_level(logging.INFO, logger="app.research.jobs")
+    async with sessionmaker() as session:
+        await jobs.run_research_job(
+            session, settings, provider, job_id=job_id, url=URL, clock=clock, timezone=TIMEZONE,
+            fetch_fn=_fetch_ok(_clip()),
+        )
+    (record,) = [r for r in caplog.records if r.getMessage() == "clip distilled"]
+    assert record.event == "parse_fail"
+    assert record.cards == 0
 
 
 async def test_a_long_url_is_queued_rather_than_refused(sessionmaker, clock):

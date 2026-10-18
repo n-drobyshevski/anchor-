@@ -237,3 +237,26 @@ def test_native_finish_reason_passes_only_short_words(reason, expected):
         choice["native_finish_reason"] = reason
     response = ChatCompletion.construct(**{**_BASE, "choices": [choice]})
     assert _extract_native_finish_reason(response) == expected
+
+
+async def test_with_max_tokens_changes_only_the_cap_and_shares_the_client():
+    """A distill's own output cap (app/research/jobs.py): same model,
+    temperature and client, another max_tokens, and closing the sibling
+    leaves the client to its owner."""
+    provider, client = _provider_and_client(_ok_response())
+    closed = []
+
+    async def _close():
+        closed.append(True)
+
+    client.close = _close
+    wider = provider.with_max_tokens(2000)
+    await wider.complete([LLMMessage(role="user", content="привет")], conversation_id="anchor-x")
+
+    kwargs = client.chat.completions.received_kwargs
+    assert kwargs["max_tokens"] == 2000
+    assert kwargs["model"] == "thedrummer/cydonia-24b-v4.1"
+    assert kwargs["temperature"] == 0.9
+    await wider.close()
+    assert closed == []
+    assert provider._max_tokens == 700
