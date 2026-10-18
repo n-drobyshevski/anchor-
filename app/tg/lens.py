@@ -32,6 +32,9 @@ L4 (the L4 spec section 5, with the owner's amendments) adds:
   was edited since, and compare-and-swap refused), refused, or the vault
   did not answer. It works with every switch off: it only ever removes
   what Echo wrote.
+- `/lens research now`: run the lens research a tap on «исследовать»
+  queued, without waiting for an idle slot (the same idea as
+  `/lens garden now`, through `manual_lens_research_gate`).
 - a status line for lens research in flight: «Исследования: идёт N,
   ждут решения M» (counts from app/research/jobs.py's
   `lens_job_outcomes`).
@@ -55,7 +58,7 @@ from app.core import clock as clock_module
 from app.core import echo_write
 from app.core.clock import Clock
 from app.core.idle import gate as idle_gate
-from app.core.idle.planner import plan_manual_garden
+from app.core.idle.planner import plan_manual_garden, plan_manual_lens_research
 from app.core.state import get_state
 from app.research import jobs
 from app.tg.vault import _ru_plural
@@ -104,7 +107,8 @@ USAGE = (
     "/lens code on — открыть Claude Code доступ к линзе (только к ней)\n"
     "/lens code off — закрыть доступ и оборвать открытые сессии\n"
     "/lens undo — отменить последнюю запись Echo в Inbox (до 14 дней)\n"
-    "/lens garden now — запустить сад сейчас, не дожидаясь фонового окна"
+    "/lens garden now — запустить сад сейчас, не дожидаясь фонового окна\n"
+    "/lens research now — запустить заказанное исследование сейчас, не дожидаясь фонового окна"
 )
 
 # `/lens garden now`: one reply per app/core/idle/gate.py's
@@ -127,6 +131,26 @@ GARDEN_NOW_REPLIES = {
     idle_gate.NOT_DUE: "Сад на этой неделе уже был. Следующий — на новой неделе.",
 }
 GARDEN_NOW_FAILED = "Не вышло запустить сад. Попробуй ещё раз."
+
+# `/lens research now`: one reply per `manual_lens_research_gate` reason.
+# The result message then follows from app/tg/garden.py, under its holds.
+RESEARCH_NOW_STARTED = (
+    "Исследование запущено. Итог придёт отдельным сообщением, когда оно "
+    "закончит (в тихие часы — после них)."
+)
+RESEARCH_NOW_REPLIES = {
+    idle_gate.DISABLED: GARDEN_NOW_REPLIES[idle_gate.DISABLED],
+    idle_gate.PAUSED: "Echo на паузе — исследование подождёт.",
+    idle_gate.WELFARE_COOLDOWN: "Сейчас не время для исследования. Попробуй завтра.",
+    idle_gate.BUSY: GARDEN_NOW_REPLIES[idle_gate.BUSY],
+    idle_gate.MAX_JOBS: GARDEN_NOW_REPLIES[idle_gate.MAX_JOBS],
+    idle_gate.IDLE_CAP: GARDEN_NOW_REPLIES[idle_gate.IDLE_CAP],
+    idle_gate.RESERVE: GARDEN_NOW_REPLIES[idle_gate.RESERVE],
+    idle_gate.LENS_RESEARCH_OFF: "Исследования выключены.",
+    idle_gate.EMPTY_LENS_PACKET: "Исследования выключены: в PACKET_LENS нет сайтов.",
+    idle_gate.NO_LENS_JOB: "Нечего запускать: сначала нажми «исследовать» под пунктом сада.",
+}
+RESEARCH_NOW_FAILED = "Не вышло запустить исследование. Попробуй ещё раз."
 
 # L4: `/lens undo`, one reply per echo_write.undo_last outcome.
 UNDO_REPLIES = {
@@ -297,6 +321,8 @@ async def command(
         return await undo(sessionmaker, settings, clock, client_factory)
     if words == ["garden", "now"]:
         return await garden_now(sessionmaker, settings, clock)
+    if words == ["research", "now"]:
+        return await research_now(sessionmaker, settings, clock)
     return USAGE
 
 
@@ -311,6 +337,18 @@ async def garden_now(sessionmaker, settings: Settings, clock: Clock) -> str:
     if run_id is not None:
         return GARDEN_NOW_STARTED
     return GARDEN_NOW_REPLIES.get(reason, GARDEN_NOW_FAILED)
+
+
+async def research_now(sessionmaker, settings: Settings, clock: Clock) -> str:
+    """`/lens research now`: run the lens research a tap on «исследовать»
+    queued, without the idle wait (app/core/idle/planner.py's
+    `plan_manual_lens_research`). It takes no quota of its own (the
+    /study quota went at the tap), and every budget row still holds."""
+    async with sessionmaker() as session:
+        run_id, reason = await plan_manual_lens_research(session, settings, clock)
+    if run_id is not None:
+        return RESEARCH_NOW_STARTED
+    return RESEARCH_NOW_REPLIES.get(reason, RESEARCH_NOW_FAILED)
 
 
 async def digest_line(session, start: datetime.datetime, end: datetime.datetime) -> str | None:

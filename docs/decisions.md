@@ -3328,6 +3328,24 @@ idle one.
   garden's Telegram message keeps its own holds (quiet hours, pause,
   welfare), so a run started at night reports in the morning.
 
+## `/lens research now`
+
+A tap on «исследовать» queues the job, but only the `lens_research`
+idle kind runs it, so the result waited `IDLE_AFTER_H` (3 hours) of
+silence, and every message pushed it back. `/lens research now` runs it
+on demand, the way `/lens garden now` runs the garden: its own gate,
+`manual_lens_research_gate`, shares the manual rows with the garden's.
+
+- **Dropped**: `user_active`, `window`, the kind's once-a-day limit
+  (the /study quota, spent at the tap, already bounds the jobs), and
+  preemption.
+- **Kept**: the switches, the pause, the welfare cooldown, `busy`, every
+  money row, and the kind's own rule (research on, a lens packet, a
+  queued job). With nothing tapped the reply says to tap first.
+- No new spend path: the run is an ordinary `lens_research` idle run
+  with `manual: true` in its job payload, and the result message keeps
+  its holds in app/tg/garden.py.
+
 ## W2 may edit lens notes
 
 Lens notes were read-only to W2 (the "W2 cannot write lens notes"
