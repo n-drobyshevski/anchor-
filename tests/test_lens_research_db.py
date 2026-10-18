@@ -677,8 +677,22 @@ async def test_outcomes_views_unsent_results_offering_rejecting_and_adopting(ses
 
 
 class _Card:
-    def __init__(self, text_: str, quote: str = CARD_QUOTE, url: str = URL) -> None:
+    def __init__(
+        self,
+        text_: str,
+        quote: str = CARD_QUOTE,
+        url: str = URL,
+        *,
+        tier: str = "",
+        corroboration: str | None = None,
+        corroborating_url: str | None = None,
+        corroborating_quote: str | None = None,
+    ) -> None:
         self.text, self.quote, self.source_url = text_, quote, url
+        self.tier = tier
+        self.corroboration = corroboration
+        self.corroborating_url = corroborating_url
+        self.corroborating_quote = corroborating_quote
 
 
 def test_the_note_has_echos_frontmatter_and_nothing_else():
@@ -692,6 +706,26 @@ def test_the_note_has_echos_frontmatter_and_nothing_else():
     assert f"> {CARD_QUOTE}" in body
     assert f"Источник: <{URL}>" in body
     assert "anchor_edited" not in content
+
+
+def test_the_note_names_the_kind_of_source_and_what_another_source_said():
+    other = "https://en.wikipedia.org/wiki/Variety"
+    card = _Card(
+        CARD_TEXT, tier="рецензируемая энциклопедия", corroboration="supported",
+        corroborating_url=other, corroborating_quote="only variety can absorb variety",
+    )
+    body = echo_note.render(gap_id=12, titles=("Ashby",), cards=[card]).split("\n---\n", 1)[1]
+    assert f"Источник: <{URL}> · рецензируемая энциклопедия" in body
+    assert f"Подтверждает: <{other}>\n\n> only variety can absorb variety" in body
+    # A contradiction says so; an unverified card and an unsafe URL say nothing.
+    contra = _Card(CARD_TEXT, corroboration="contradicted", corroborating_url=other, corroborating_quote="q" * 30)
+    assert f"Противоречит: <{other}>" in echo_note.render(gap_id=1, titles=(), cards=[contra])
+    for quiet in (
+        _Card(CARD_TEXT, corroboration="unverified"),
+        _Card(CARD_TEXT, corroboration="supported", corroborating_url="https://evil.example/a b]]", corroborating_quote="x" * 30),
+    ):
+        rendered = echo_note.render(gap_id=1, titles=(), cards=[quiet])
+        assert "Подтверждает" not in rendered and "Противоречит" not in rendered
 
 
 def test_web_text_is_inert_and_only_lens_titles_are_links():

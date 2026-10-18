@@ -3490,3 +3490,42 @@ costs the most, so Jev runs **beside** it and is never obeyed.
   content. It is purged by `/delete`, included in `/export`, and
   readable as `debug.welfare_shadow`. The shadow's cost goes to the
   ledger under `welfare_shadow`.
+
+
+## Research weighs its sources: tiers, publisher diversity, cross-checking
+
+A research read the first two pages the search provider ranked, all
+counted the same, and distilled each alone. One lens research read two
+Wikipedia pages and nothing else; a claim one page made looked the same
+as one two sources agreed on. Three changes, borrowing from maximal
+marginal relevance (Carbonell & Goldstein, 1998), Wikipedia's
+reliable-sources policy, Caulfield's SIFT ("find better coverage") and
+DeepMind's SAFE (check each fact against other sources):
+
+- **Tiers** (app/research/sources.py). Each packet domain has a kind:
+  a peer-reviewed reference work (SEP, IEP), Wikipedia, a primary
+  source (arXiv, pangaro.com, asc-cybernetics.org) or an index page
+  (PhilPapers). The kind is shown beside the domain on the result
+  message and in the inbox note, and orders the reading. Derived from
+  the domain, never stored; an unknown domain is `other`, unlabelled.
+- **Diversity** (`sources.reading_order`, every research). Every
+  publisher's first page before any publisher's second, best tier first
+  within a round, provider order within a tier. Publisher is the host's
+  last two labels, so the three Wikipedias of `/study ref` are one and
+  nothing moves there. Nothing is added to or dropped from what the
+  allowlist admitted.
+- **Cross-checking** (app/research/crosscheck.py, lens research only).
+  After every page is distilled, each page is asked about the other
+  publishers' visible cards: one isolated call per page, at the
+  distill's output cap, ledgered on the job. A `supports` or
+  `contradicts` stands only with a verbatim quote of that page that
+  passes the distill's own checks; anything else is `unverified`. A
+  contradiction outranks a support. Optional by design: the budget, a
+  provider error or an unparsed reply leaves the cards unchecked, never
+  fails the job. Two pages of one publisher never confirm each other.
+- Stored on `study_card` (`corroboration`, `corroboration_clip_id`,
+  `corroboration_quote`, migration d4f8a2c6e1b3); `debug.study_card`
+  shows the verdict and the clip id, not the quote.
+
+Not done: turning a contradiction into a lens garden `tension` gap, and
+reading a third page (`RESEARCH_MAX_PINS` stays 2).

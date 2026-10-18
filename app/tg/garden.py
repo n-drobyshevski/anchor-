@@ -64,7 +64,9 @@ owner's amendment (b), replacing the spec's delivery in the next garden
 message). `send_research_results`, called by the same worker hook as
 `send_pending` under the same holds, sends one message per finished
 lens job: the gap line, up to `RESULT_MAX_CARDS` «• card text
-(domain)» lines, «скрыто: H» for hidden cards, and «в Inbox»
+(domain · kind; подтверждает other-domain)» lines (the source's tier
+and the cross-check's verdict, when there is one), «скрыто: H» for
+hidden cards, and «в Inbox»
 (`lg:a:`) / «не нужно» (`lg:x:`). A tap edits that same message with
 its outcome and removes the keyboard: «в Inbox» goes through
 app/core/echo_write.py (one knowledge note in vaultd's inbox, the gap
@@ -166,7 +168,14 @@ STALE_ANSWER = "Устарело"
 
 # L4, the owner's amendment (b): a finished research's own message.
 RESULT_HEADER = "Сад линзы: исследование."
-RESULT_CARD_LINE = "• {text} ({domain})"
+RESULT_CARD_LINE = "• {text} ({source})"
+# Inside the parentheses: the source's kind (app/research/sources.py),
+# then what another publisher's page said (app/research/crosscheck.py).
+RESULT_TIER = " · {tier}"
+RESULT_CORROBORATION = {
+    "supported": "; подтверждает {domain}",
+    "contradicted": "; противоречит {domain}",
+}
 RESULT_MORE_LINE = "Ещё карточек: {n} — войдут в заметку."
 RESULT_HIDDEN_LINE = "скрыто: {n}"
 RESULT_NOTHING_LINE = "Ничего не нашлось. Пункт снова открыт в сообщении сада."
@@ -382,13 +391,26 @@ def keyboard(
 # --- L4: a research's result message -------------------------------------------------
 
 
+def _source(card) -> str:
+    """«domain · kind; подтверждает other-domain»: where a card came from,
+    what kind of source that is, and whether another publisher's page
+    agreed or disagreed. Domains are set by code from the fetched pages."""
+    source = card.domain
+    if card.tier:
+        source += RESULT_TIER.format(tier=card.tier)
+    check = RESULT_CORROBORATION.get(card.corroboration or "")
+    if check and card.corroborating_domain:
+        source += check.format(domain=card.corroborating_domain)
+    return source
+
+
 def _result_compose(
     gap: lens.ResearchGap, cards, hidden: int, card_cap: int, title_cap: int | None
 ) -> str:
     lines = [RESULT_HEADER, _gap_line(gap.kind, gap.titles, gap.title, title_cap)]
     shown = list(cards)[:RESULT_MAX_CARDS]
     for card in shown:
-        lines.append(RESULT_CARD_LINE.format(text=_cap(card.text, card_cap), domain=card.domain))
+        lines.append(RESULT_CARD_LINE.format(text=_cap(card.text, card_cap), source=_source(card)))
     if len(cards) > len(shown):
         lines.append(RESULT_MORE_LINE.format(n=len(cards) - len(shown)))
     if hidden:
@@ -400,7 +422,7 @@ def render_result(
     gap: lens.ResearchGap, cards, hidden: int, *, limit: int = MESSAGE_LIMIT
 ) -> str:
     """A research's result message (the owner's amendment (b)): the gap
-    line, up to `RESULT_MAX_CARDS` «• card text (domain)» lines (the
+    line, up to `RESULT_MAX_CARDS` «• card text (source)» lines (`_source`; the
     rest counted: «в Inbox» writes every visible card), and «скрыто: H»
     for cards hidden as high risk. Card text is web-derived and one
     line; it is shortened first, then the titles. Plain text, like every

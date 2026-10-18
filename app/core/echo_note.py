@@ -18,7 +18,11 @@ visible pending card of the gap, one section per distilled point:
 
     > <its verbatim quote>
 
-    Источник: <https://plato.stanford.edu/entries/...>
+    Источник: <https://plato.stanford.edu/entries/...> · рецензируемая энциклопедия
+
+    Подтверждает: <https://en.wikipedia.org/wiki/...>
+
+    > <the other page's verbatim quote>
 
 - **The frontmatter keys are exactly** `anchor`, `source_urls` and
   `gap`: vaultd refuses any other set (`frontmatter_keys`) and stamps
@@ -35,6 +39,11 @@ visible pending card of the gap, one section per distilled point:
   A source URL -- copied by code from the fetched page, never from the
   model -- is shown only when it is a plain http(s) URL with nothing
   Markdown could read as structure; the frontmatter keeps it JSON-quoted.
+- **Sources are weighed, not ranked away.** A source line carries its
+  kind (app/research/sources.py's tier label, when it has one), and a
+  card another publisher's page supported or contradicted
+  (app/research/crosscheck.py) says so, with that page's URL and its
+  verbatim quote, under the same rules as the card's own.
 - **The name** is the gap's proposed title for a missing note, so the
   garden's recheck finds the note by that title and resolves the gap;
   otherwise the two notes' titles, `A — B`. vaultd adds ` 2`..` 9` when
@@ -71,6 +80,17 @@ class Card(Protocol):
     text: str
     quote: str
     source_url: str
+    tier: str
+    corroboration: str | None
+    corroborating_url: str | None
+    corroborating_quote: str | None
+
+
+# A cross-checked card's line, by verdict (app/research/crosscheck.py).
+CORROBORATION_LINES = {
+    "supported": "Подтверждает: <{url}>",
+    "contradicted": "Противоречит: <{url}>",
+}
 
 
 def note_name(*, gap_id: int, kind: str, title: str | None, titles: Sequence[str]) -> str:
@@ -100,6 +120,20 @@ def _urls(cards: Sequence[Card]) -> list[str]:
     return list(dict.fromkeys(card.source_url for card in cards))
 
 
+def _corroboration(card: Card) -> list[str]:
+    """A cross-checked card's other source and its quote, or nothing
+    (no verdict worth a line, or a URL Markdown could read as structure)."""
+    line = CORROBORATION_LINES.get(card.corroboration or "")
+    url = card.corroborating_url or ""
+    if line is None or not _SAFE_URL.fullmatch(url):
+        return []
+    lines = [line.format(url=url), ""]
+    quote = report_escape(card.corroborating_quote or "")
+    if quote:
+        lines += [f"> {quote}", ""]
+    return lines
+
+
 def render(*, gap_id: int, titles: Sequence[str], cards: Sequence[Card]) -> str:
     """The whole note (module docstring). `titles` are the lens notes'
     current titles (app/vault/lens.py's `research_target`), `cards` the
@@ -124,5 +158,7 @@ def render(*, gap_id: int, titles: Sequence[str], cards: Sequence[Card]) -> str:
         if quote:
             lines += [f"> {quote}", ""]
         if _SAFE_URL.fullmatch(card.source_url):
-            lines += [f"Источник: <{card.source_url}>", ""]
+            kind = f" · {card.tier}" if card.tier else ""
+            lines += [f"Источник: <{card.source_url}>{kind}", ""]
+        lines += _corroboration(card)
     return "\n".join(lines).rstrip("\n") + "\n"
