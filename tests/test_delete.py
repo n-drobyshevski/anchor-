@@ -78,6 +78,7 @@ from app.db.models import (
     VaultFile,
     VaultHold,
     VaultStatus,
+    WelfareShadow,
 )
 from app.tg import data as data_ui
 from app.tg.router import build_router
@@ -192,6 +193,21 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                     kind="welfare",
                     outcome="ok",
                     model="fake-safety",
+                ),
+                # The welfare shadow: levels and timings only, still a
+                # record of how this user's turns were judged.
+                WelfareShadow(
+                    local_date=today,
+                    primary_outcome="ok",
+                    primary_level="none",
+                    primary_confidence=0.9,
+                    primary_ms=400,
+                    shadow_model="fake-decider",
+                    shadow_outcome="ok",
+                    shadow_level="none",
+                    shadow_confidence=0.95,
+                    shadow_p_real=0.01,
+                    shadow_ms=120,
                 ),
                 # Web-chat plan track 1: a live session cookie is a
                 # credential, so "delete all my data" purges it too

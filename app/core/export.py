@@ -71,6 +71,7 @@ from app.db.models import (
     WeeklyReview,
     VaultFile,
     VaultHold,
+    WelfareShadow,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,10 @@ EXPORTED_MODELS = (
     # messages that were planned and then skipped or cancelled.
     Outbound,
     SafetyEvent,
+    # The welfare shadow's comparison rows: levels and timings, no
+    # text, but a record of how this user's turns were judged -- the
+    # same reasoning as `safety_event` above.
+    WelfareShadow,
     StudyJob,
     StudyClip,
     StudyCard,

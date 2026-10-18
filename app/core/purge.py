@@ -117,6 +117,9 @@ PURGED_TABLES = (
     # record of when this user was talked to and how the checks behaved
     # while they were -- which "delete all my data" covers.
     "safety_event",
+    # The welfare shadow's comparison rows: no content, but a record of
+    # how this user's turns were judged, like `safety_event` above.
+    "welfare_shadow",
     # 4a: the research loop's three tables (phase-4 plan section 4).
     # study_clip holds text fetched from the web and study_card holds
     # quotes from it, so this is the most content-bearing addition since

@@ -134,7 +134,7 @@ from app.core import boundaries, safety_events, welfare_terms
 from app.core import attention, callbacks
 from app.core.clock import Clock
 from app.core.outbound import cancel_outbound, record_welfare
-from app.core import checkin, memory, orders, welfare
+from app.core import checkin, memory, orders, welfare, welfare_shadow
 from app.core import persona_context as persona_context_module
 from app.core.prompt import build_messages, build_neutral_messages, persona_path_for
 from app.core.scene import bump_message_count, ensure_open_scene, recent_summaries
@@ -150,7 +150,7 @@ from app.core.state import Source, get_state, update_state
 from app.core.voice import remember_nickname
 from app.db.jobs import enqueue_job
 from app.db.models import Message, SpendLedger
-from app.llm.provider import LLMError, LLMProvider, LLMRetryableError
+from app.llm.provider import DecisionProvider, LLMError, LLMProvider, LLMRetryableError
 from app.tg import planner as planner_ui
 from app.tg.send import send_reply, start_typing, stop_typing
 
@@ -768,6 +768,7 @@ async def run(
     kind: str = CHAT_KIND,
     extra_flags: list[str] | None = None,
     safety_provider: LLMProvider | None = None,
+    welfare_decider: DecisionProvider | None = None,
 ) -> None:
     """Run one idempotent chat turn. See module and plan sections 7/8 docs.
 
@@ -1092,13 +1093,28 @@ async def run(
         if run_welfare:
             async with sessionmaker() as session:
                 welfare_context = await _welfare_context(session, update_id)
+            welfare_call = welfare.classify(safety_provider, settings, welfare_context, user_text)
+            # The welfare shadow (app/core/welfare_shadow.py): a decision
+            # model asked the same question beside the classifier, whose
+            # result comes back untouched. Only ever compared, never obeyed.
+            if welfare_decider is not None:
+                welfare_call = welfare_shadow.beside(
+                    welfare_call,
+                    welfare_decider,
+                    sessionmaker,
+                    settings,
+                    clock=clock,
+                    timezone=user_state.timezone,
+                    context=welfare_context,
+                    user_text=user_text,
+                )
             if run_intent:
                 response, (verdict, welfare_usage, welfare_outcome), (
                     intent_result,
                     intent_response,
                 ) = await asyncio.gather(
                     _complete_with_retries(provider, messages, update_id=update_id),
-                    welfare.classify(safety_provider, settings, welfare_context, user_text),
+                    welfare_call,
                     planner_intent.detect(
                         safety_provider, settings, clock,
                         user_text=user_text, timezone=user_state.timezone,
@@ -1107,7 +1123,7 @@ async def run(
             else:
                 response, (verdict, welfare_usage, welfare_outcome) = await asyncio.gather(
                     _complete_with_retries(provider, messages, update_id=update_id),
-                    welfare.classify(safety_provider, settings, welfare_context, user_text),
+                    welfare_call,
                 )
         else:
             verdict, welfare_usage = welfare.Verdict(), None

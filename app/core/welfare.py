@@ -190,15 +190,21 @@ def build_messages(context: list, user_text: str) -> list[LLMMessage]:
     same reason the scene summarizer is (app/core/scene.py): handed a
     transcript, a roleplay model joins in instead of judging it.
     """
+    return [
+        LLMMessage(role="system", content=CLASSIFIER_PROMPT),
+        LLMMessage(role="user", content=transcript(context, user_text)),
+    ]
+
+
+def transcript(context: list, user_text: str) -> str:
+    """The classifier's input as one block of text. The shadow decision
+    model (app/core/welfare_shadow.py) reads exactly the same block."""
     lines = []
     for row in context:
         who = "Пользователь" if row.role == "user" else "Echo"
         lines.append(f"{who}: {row.content}")
     lines.append(f"Пользователь: {user_text}")
-    return [
-        LLMMessage(role="system", content=CLASSIFIER_PROMPT),
-        LLMMessage(role="user", content="\n".join(lines)),
-    ]
+    return "\n".join(lines)
 
 
 async def classify(

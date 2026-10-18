@@ -27,6 +27,7 @@ no model call, no outbound).
 | Research loop: `/study`, `/read`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED` |
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
+| Welfare shadow: Jev (TypeSafe's typed-decision model, via OpenRouter) is asked the welfare question beside the classifier, recorded in `welfare_shadow`, never acted on. Compare offline with `python -m eval.welfare` | **off** | `WELFARE_SHADOW_MODEL` (e.g. `typesafe/jev-1.14`); `WELFARE_SHADOW_TIMEOUT_SECONDS` (3) |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
 | Read-only access for claude.ai: an OAuth connector approved by a code typed into Telegram, reads only inside `/claude` windows; knowledge notes through a standing `/claude library on` switch (C3) | **off** | `CLAUDE_ACCESS_ENABLED` (webhook mode, https); the library also needs `/vault notes on` + `VAULT_KNOWLEDGE_ENABLED` |
 | The vault: an Obsidian vault synced through a separate `vault` service (phase 8: `status`, `mirror`, and `sync`, where your edits come back) | **off** | `VAULT_MODE` + `VAULT_API_TOKEN`; setup in [docs/vault-setup.md](docs/vault-setup.md) |
@@ -38,7 +39,8 @@ no model call, no outbound).
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
-(all via OpenRouter). Why things are the way they are is in
+(all via OpenRouter); welfare shadow, when on, `typesafe/jev-1.14` through
+OpenRouter's Decisions API. Why things are the way they are is in
 [docs/decisions.md](docs/decisions.md); the phase plans
 (`anchor-phase*-plan.md`) are the specifications.
 

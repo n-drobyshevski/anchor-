@@ -120,6 +120,17 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
                 models.SafetyEvent(
                     local_date=today, kind="welfare", outcome="ok", model="fake-safety"
                 ),
+                models.WelfareShadow(
+                    local_date=today,
+                    primary_outcome="timeout",
+                    primary_ms=8000,
+                    shadow_model="fake-decider",
+                    shadow_outcome="ok",
+                    shadow_level="scene",
+                    shadow_confidence=0.7,
+                    shadow_p_real=0.2,
+                    shadow_ms=150,
+                ),
             ]
         )
         await session.commit()

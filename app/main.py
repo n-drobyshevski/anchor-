@@ -58,8 +58,8 @@ from aiohttp import web
 from app.config import Settings, check_runtime_settings, get_settings
 from app.core.clock import Clock, SystemClock
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
-from app.llm.openrouter import OpenRouterProvider, build_client
-from app.llm.provider import LLMProvider
+from app.llm.openrouter import OpenRouterDecisionProvider, OpenRouterProvider, build_client
+from app.llm.provider import DecisionProvider, LLMProvider
 from app.log import setup_logging
 from app.planner import auth as planner_auth
 from app.planner.client import PlannerClient, build_planner_client
@@ -130,6 +130,18 @@ def build_providers(settings: Settings):
     return provider, cheap_provider, safety_provider, client
 
 
+def build_welfare_decider(settings: Settings, client) -> OpenRouterDecisionProvider | None:
+    """The welfare shadow's decision model, on the shared client; None
+    (no call, no row) unless WELFARE_SHADOW_MODEL is set."""
+    if not settings.WELFARE_SHADOW_MODEL:
+        return None
+    return OpenRouterDecisionProvider(
+        model=settings.WELFARE_SHADOW_MODEL,
+        data_collection=settings.LLM_DATA_COLLECTION,
+        client=client,
+    )
+
+
 def build_dispatcher(
     sessionmaker,
     settings: Settings,
@@ -139,6 +151,7 @@ def build_dispatcher(
     hub: WebHub | None = None,
     code_store: web_auth.CodeStore | None = None,
     claude_pending: oauth_store.PendingStore | None = None,
+    welfare_decider: DecisionProvider | None = None,
 ) -> Dispatcher:
     """`hub` and `code_store` (web-chat plan track 2) default to None so
     every caller and test predating the web UI keeps its shorter call;
@@ -157,6 +170,7 @@ def build_dispatcher(
             hub,
             code_store,
             claude_pending,
+            welfare_decider,
         )
     )
     return dp
@@ -458,6 +472,7 @@ def main() -> None:
     dp = build_dispatcher(
         sessionmaker, settings, provider, safety_provider, clock, hub, code_store,
         claude_pending=claude_pending,
+        welfare_decider=build_welfare_decider(settings, llm_client),
     )
     # planner_client/planner_http are NOT built here: see _on_startup
     # and _run_polling_mode, which build them once the event loop is
