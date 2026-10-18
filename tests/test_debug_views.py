@@ -73,6 +73,9 @@ CONTENT_COLUMNS = {
     # A run's findings carry cluster names and unresolved link text.
     "lens_gap": {"titles", "title", "detail", "signature", "recheck"},
     "lens_garden_run": {"findings"},
+    # The welfare shadow: outcomes, levels, confidences and timings, the
+    # same things welfare.py already logs. No text column exists.
+    "welfare_shadow": set(),
 }
 
 

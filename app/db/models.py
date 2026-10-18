@@ -573,6 +573,70 @@ class SafetyEvent(Base):
     )
 
 
+class WelfareShadow(Base):
+    """One row per turn the welfare shadow ran on: what the classifier
+    concluded beside what the decision model would have (app/core/
+    welfare_shadow.py). Never any content -- levels, numbers, timings.
+
+    Nothing reads it back. It exists to be compared in SQL, through
+    `debug.welfare_shadow`, before anyone decides whether the decision
+    model should ever be trusted with the verdict.
+
+    `primary_*` is the classifier: its level and confidence only when it
+    answered (`primary_outcome` 'ok'), its time always. `shadow_*` is the
+    decision model: its pick, that pick's confidence and the probability
+    it put on `real` -- the number a threshold would be set on, which is
+    why it is kept whatever was picked.
+    """
+
+    __tablename__ = "welfare_shadow"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    primary_outcome: Mapped[str] = mapped_column(String, nullable=False)
+    primary_level: Mapped[str | None] = mapped_column(String)
+    primary_confidence: Mapped[float | None] = mapped_column(Float)
+    primary_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    shadow_model: Mapped[str] = mapped_column(String, nullable=False)
+    shadow_outcome: Mapped[str] = mapped_column(String, nullable=False)
+    shadow_level: Mapped[str | None] = mapped_column(String)
+    shadow_confidence: Mapped[float | None] = mapped_column(Float)
+    shadow_p_real: Mapped[float | None] = mapped_column(Float)
+    shadow_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "primary_outcome in ('ok', 'parse_fail', 'timeout', 'error')",
+            name="ck_welfare_shadow_primary_outcome",
+        ),
+        CheckConstraint(
+            "shadow_outcome in ('ok', 'timeout', 'error')",
+            name="ck_welfare_shadow_shadow_outcome",
+        ),
+        CheckConstraint(
+            "primary_level in ('none', 'scene', 'real')",
+            name="ck_welfare_shadow_primary_level",
+        ),
+        CheckConstraint(
+            "shadow_level in ('none', 'scene', 'real')",
+            name="ck_welfare_shadow_shadow_level",
+        ),
+        # A level exactly when that side answered.
+        CheckConstraint(
+            "(primary_outcome = 'ok') = (primary_level is not null)",
+            name="ck_welfare_shadow_primary_answered",
+        ),
+        CheckConstraint(
+            "(shadow_outcome = 'ok') = (shadow_level is not null)",
+            name="ck_welfare_shadow_shadow_answered",
+        ),
+        Index("ix_welfare_shadow_local_date", "local_date"),
+    )
+
+
 class Memory(Base):
     """A durable fact about the user (phase-2 plan section 4).
 

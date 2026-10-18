@@ -39,7 +39,10 @@ import openai
 from openai import AsyncOpenAI
 
 from app.llm.provider import (
+    Choice,
+    ChoiceAnswer,
     Citation,
+    DecisionResponse,
     JSONSchema,
     LLMError,
     LLMMessage,
@@ -185,8 +188,13 @@ def _raise_for_body_error(response) -> None:
     body can echo prompt content back (privacy rule, see app/log.py).
     """
     error = getattr(response, "error", None)
-    if not error:
-        return
+    if error:
+        _raise_for_error(error)
+
+
+def _raise_for_error(error) -> None:
+    """Retryable for a 429 or a 5xx code, non-retryable otherwise.
+    Shared by the chat body above and the Decisions API's."""
     raw_code = error.get("code") if isinstance(error, dict) else getattr(error, "code", None)
     try:
         code = int(raw_code)
@@ -388,6 +396,126 @@ class OpenRouterProvider:
         """Close the client, unless it was injected and belongs to someone else."""
         if self._owns_client:
             await self._client.close()
+
+
+# OpenRouter's Decisions API, which serves typed-decision models
+# (TypeSafe's Jev). Not under /api/v1, so it is named in full: the SDK
+# sends an absolute URL as-is, with the same key and connection pool.
+# Request and response shapes verified against
+# https://openrouter.ai/docs/api/api-reference/alphadecisions on
+# 2026-10-18. "alpha" is OpenRouter's own word for it.
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+
+
+class OpenRouterDecisionProvider:
+    """`DecisionProvider` backed by OpenRouter's Decisions API.
+
+    Shares the chat providers' AsyncOpenAI client (and so their key and
+    their connection pool), and never owns it: there is no close().
+
+    Every request asks for both `data_collection` (the bot's own
+    LLM_DATA_COLLECTION, "deny" by default) and `zdr`: only endpoints
+    that keep no prompts may serve it. When no endpoint qualifies,
+    OpenRouter refuses the request rather than routing it anywhere
+    else, which is the direction this should fail in -- the only caller
+    sends the welfare classifier's input.
+    """
+
+    def __init__(self, model: str, data_collection: str, client: AsyncOpenAI) -> None:
+        self._model = model
+        self._data_collection = data_collection
+        self._client = client
+
+    async def decide(self, state: str, questions: dict[str, Choice]) -> DecisionResponse:
+        body = {
+            "model": self._model,
+            "state": state,
+            "questions": {
+                name: {
+                    "type": "choice",
+                    "instructions": question.instructions,
+                    "criteria": dict(question.criteria),
+                }
+                for name, question in questions.items()
+            },
+            "provider": {"data_collection": self._data_collection, "zdr": True},
+        }
+        try:
+            # cast_to=object: the SDK hands back the parsed JSON body.
+            payload = await self._client.post(DECISIONS_URL, cast_to=object, body=body)
+        except openai.APIConnectionError:
+            raise LLMRetryableError(retry_after=None) from None
+        except openai.RateLimitError as exc:
+            raise LLMRetryableError(retry_after=_retry_after(exc)) from None
+        except openai.APIStatusError as exc:
+            if exc.status_code >= 500:
+                raise LLMRetryableError(retry_after=_retry_after(exc)) from None
+            raise LLMError(type(exc).__name__) from None
+        except Exception as exc:  # noqa: BLE001 - any other vendor failure is non-retryable
+            raise LLMError(type(exc).__name__) from None
+
+        if not isinstance(payload, dict):
+            raise LLMError("decisions response is not an object")
+        if payload.get("error"):
+            _raise_for_error(payload["error"])
+        answers = payload.get("answers")
+        if not isinstance(answers, dict):
+            raise LLMError("decisions response has no answers")
+        return DecisionResponse(
+            answers={
+                name: _choice_answer(answers.get(name), question)
+                for name, question in questions.items()
+            },
+            usage=_decision_usage(payload.get("usage")),
+            model=self._model,
+        )
+
+
+def _number(value) -> float | None:
+    """A finite JSON number as a float; None for anything else, bools included."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if value == value and abs(value) != float("inf") else None
+
+
+def _choice_answer(raw, question: Choice) -> ChoiceAnswer:
+    """One answer, checked against the question that was asked.
+
+    The option names are the only strings a decision model can return,
+    and each must be one we sent: an answer naming anything else, or
+    missing a number, is a malformed response, not a verdict. The
+    message never quotes the answer.
+    """
+    if not isinstance(raw, dict):
+        raise LLMError("decisions answer missing")
+    choice = raw.get("choice")
+    confidence = _number(raw.get("confidence"))
+    probabilities = raw.get("probabilities")
+    if choice not in question.criteria or confidence is None or not isinstance(probabilities, dict):
+        raise LLMError("decisions answer malformed")
+    checked: dict[str, float] = {}
+    for option, probability in probabilities.items():
+        number = _number(probability)
+        if option not in question.criteria or number is None:
+            raise LLMError("decisions answer malformed")
+        checked[option] = number
+    return ChoiceAnswer(choice=choice, confidence=confidence, probabilities=checked)
+
+
+def _decision_usage(raw) -> LLMUsage:
+    """The Decisions API's usage block. Output tokens are free and come
+    back as zero; `cost` is OpenRouter's own figure, as on a chat call."""
+    raw = raw if isinstance(raw, dict) else {}
+    input_tokens = _number(raw.get("input_tokens"))
+    output_tokens = _number(raw.get("output_tokens"))
+    cost = _number(raw.get("cost"))
+    return LLMUsage(
+        input_tokens=int(input_tokens or 0),
+        cached_tokens=0,
+        output_tokens=int(output_tokens or 0),
+        cost_usd=Decimal(str(cost)) if cost is not None else None,
+    )
 
 
 def _retry_after(exc: openai.APIStatusError) -> float | None:

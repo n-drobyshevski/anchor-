@@ -158,3 +158,48 @@ class LLMProvider(Protocol):
     ) -> LLMResponse: ...
 
     async def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class Choice:
+    """One typed question for a decision model: pick one of `criteria`.
+
+    A decision model (TypeSafe's Jev) returns no text at all, only an
+    answer per question -- so there is nothing to parse and nothing a
+    model could slip past a validator. `criteria` maps each option to
+    what it means; the option names are the only strings that can come
+    back.
+
+    Only `choice` exists here because it is the only question type any
+    caller asks. The vendor's yes/no and score types would be two more
+    dataclasses beside this one, not a change to it.
+    """
+
+    instructions: str
+    criteria: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ChoiceAnswer:
+    """The decision model's answer to one `Choice`.
+
+    `probabilities` covers every option and sums to 1; `choice` is the
+    most probable of them. Keeping the whole distribution, not only the
+    winner, is the point of asking a decision model at all: a caller
+    can put its own threshold on any one option.
+    """
+
+    choice: str
+    confidence: float
+    probabilities: dict[str, float]
+
+
+@dataclass(frozen=True)
+class DecisionResponse:
+    answers: dict[str, ChoiceAnswer]
+    usage: LLMUsage
+    model: str
+
+
+class DecisionProvider(Protocol):
+    async def decide(self, state: str, questions: dict[str, Choice]) -> DecisionResponse: ...

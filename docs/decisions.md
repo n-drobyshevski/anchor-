@@ -3422,3 +3422,53 @@ refused every write, while Telegram kept showing «Знания: вкл».
 - The settings vocabulary changed on both sides (`ok`/`absent` became
   `valid`/`missing`). An old bot and a new vaultd refuse each other's
   summary, fail closed, until both have deployed.
+
+## The welfare shadow: Jev beside the classifier, never instead of it
+
+The user asked whether to try TypeSafe's Jev, a "System One" model
+that returns typed decisions (a choice, its confidence and a
+probability for every option) instead of text. The welfare classifier
+is the call that fits best: one choice from `none`/`scene`/`real` on
+every in-character turn. It is also the call where a wrong answer
+costs the most, so Jev runs **beside** it and is never obeyed.
+
+- **Shadow, not swap.** With `WELFARE_SHADOW_MODEL` set,
+  `welfare_shadow.beside` runs Jev and the classifier together inside
+  the turn's existing gather. It records both answers and returns the
+  classifier's result untouched. The verdict, the keyword backstop,
+  the reply and the persona switch are all unchanged. Jev's timeout
+  (`WELFARE_SHADOW_TIMEOUT_SECONDS`, 3 s) is shorter than the
+  classifier's (8 s), so the shadow never makes a turn wait longer.
+- **Off by default, on the user's choice.** Turning it on sends the
+  classifier's input (the last four in-character messages and the new
+  one) to one more vendor. Every request requires `zdr`, and
+  `data_collection` follows `LLM_DATA_COLLECTION`. If no endpoint
+  meets both, OpenRouter refuses the request and the row records
+  `error`.
+- **`p_real` is kept for every row.** The classifier is told to pick
+  `real` when it is torn. A choice question has no such rule: the most
+  probable option wins. So "fail toward real" for Jev would have to be
+  a threshold on the probability it puts on `real`. Each row keeps
+  that probability, whatever Jev picked, so the threshold can be chosen
+  from data rather than guessed.
+- **Speed does not matter here; agreement does.** The classifier
+  already runs alongside the slower persona generation, so a faster
+  classifier saves the turn nothing. Gemini Flash-Lite is already
+  cheap. What decides this is which way each model errs on this
+  user's own turns: a `real` that Jev misses is the one outcome that
+  rules it out.
+- **Offline first.** `python -m eval.welfare` runs the same two calls
+  over 20 labelled synthetic turns in `eval/welfare_cases.toml`. It
+  reports misses and false alarms for the classifier, for Jev by its
+  pick, and for Jev at `p_real` ≥ 0.2, 0.3 and 0.5. It compares and
+  never gates.
+- **Seam.** `Choice`, `ChoiceAnswer`, `DecisionResponse` and
+  `DecisionProvider` (app/llm/provider.py) are vendor-free, and only
+  `OpenRouterDecisionProvider` knows the wire format. It shares the
+  chat providers' client and posts to `/api/alpha/decisions`. An
+  answer naming an option that was not asked for, or carrying a
+  non-number, is an `LLMError`, never a verdict.
+- **Records.** `welfare_shadow` (migration `a7c3e1f9d2b4`) has no
+  content. It is purged by `/delete`, included in `/export`, and
+  readable as `debug.welfare_shadow`. The shadow's cost goes to the
+  ledger under `welfare_shadow`.

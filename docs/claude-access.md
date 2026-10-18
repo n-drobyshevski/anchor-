@@ -102,6 +102,19 @@ no hold payload and no chunk text. They have their own grant, because
 `9e4b2c7a1f05`'s `GRANT ... ON ALL TABLES` covered only the views that
 existed when it ran.
 
+`debug.welfare_shadow` (migration `a7c3e1f9d2b4`) has a row for each
+turn the welfare shadow ran on, while `WELFARE_SHADOW_MODEL` is set. It
+puts the classifier's level, confidence and time beside the decision
+model's pick, confidence, `p_real` and time. There is no text in it,
+only the levels and numbers that `welfare.py` already logs. To compare
+the two:
+
+```sh
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select primary_level, shadow_level, count(*) from debug.welfare_shadow where primary_outcome = 'ok' and shadow_outcome = 'ok' group by 1, 2 order by 1, 2"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select shadow_outcome, count(*), percentile_cont(0.5) within group (order by shadow_ms) as p50_ms, percentile_cont(0.5) within group (order by primary_ms) as primary_p50_ms from debug.welfare_shadow group by 1"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select width_bucket(shadow_p_real, 0, 1, 10) as bucket, primary_level, count(*) from debug.welfare_shadow where shadow_outcome = 'ok' and primary_outcome = 'ok' group by 1, 2 order by 1, 2"
+```
+
 ## Lens notes (L1)
 
 `anchor-lens-plan.md` §11. The one exception to "the vault is off

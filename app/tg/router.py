@@ -73,7 +73,7 @@ from app.core.quiet import parse as parse_quiet
 from app.core.idle.facts import idle_jobs_today, latest_canary_status
 from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state
-from app.llm.provider import LLMProvider
+from app.llm.provider import DecisionProvider, LLMProvider
 from app.ops.backup import latest_backup_status
 from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
@@ -502,6 +502,7 @@ def build_router(
     hub: WebHub | None = None,
     code_store: web_auth.CodeStore | None = None,
     claude_pending: oauth_store.PendingStore | None = None,
+    welfare_decider: DecisionProvider | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
 
@@ -536,6 +537,11 @@ def build_router(
     off the shared background model onto LLM_MODEL_SAFETY. The router
     never used it for anything else, so the old name would now describe
     the wrong model.
+
+    `welfare_decider` is the welfare shadow's decision model (app/core/
+    welfare_shadow.py), None unless WELFARE_SHADOW_MODEL is set. Only
+    the chat turn below takes it: the shadow is a comparison, and the
+    ordinary turn is where the classifier runs most.
     """
     # 3a: one clock for every handler in this router. Defaulted
     # rather than required, matching safety_provider above -- the
@@ -2155,6 +2161,7 @@ def build_router(
             update_id=event_update.update_id,
             user_text=message.text,
             safety_provider=safety_provider,
+            welfare_decider=welfare_decider,
         )
 
     @router.callback_query(F.data.startswith("m:k:"))

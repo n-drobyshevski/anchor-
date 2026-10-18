@@ -49,6 +49,7 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_SAFETY",
     "LLM_MODEL_JUDGE",
     "GARDEN_MODEL",
+    "WELFARE_SHADOW_MODEL",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
     "WEB_PASSPHRASE_HASH",
@@ -420,6 +421,18 @@ class Settings(BaseSettings):
     # extra latency ceiling it can add, not a total. On timeout the
     # normal reply goes out -- the check fails open for chat.
     WELFARE_TIMEOUT_SECONDS: float = 8.0
+    # The welfare shadow (app/core/welfare_shadow.py): a typed-decision
+    # model asked the same question beside the classifier, on the same
+    # turns, recorded for comparison and never acted on. Empty is off:
+    # no call, no row. "typesafe/jev-1.14" is the model it was written
+    # for (OpenRouter's Decisions API; zdr is always required). Turning
+    # it on sends the classifier's input -- the last few in-character
+    # messages -- to one more vendor, which is why it is off by default.
+    WELFARE_SHADOW_MODEL: str = ""
+    # Shorter than WELFARE_TIMEOUT_SECONDS: the shadow joins the same
+    # gather as the reply, and a comparison must never be what a turn
+    # waits on. Jev's vendor-reported latency is 70-500 ms.
+    WELFARE_SHADOW_TIMEOUT_SECONDS: float = 3.0
 
     # --- 3a: proactive outbound (phase-3 plan section 2) ---
     # The global kill switch. False stops every unsolicited message at
