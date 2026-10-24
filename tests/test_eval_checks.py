@@ -307,6 +307,9 @@ def test_the_rubric_is_the_plans_items():
         "notebook_no_intensity",
         "notebook_ignores_lens_instruction",
         "notebook_no_new_facts",
+        # Suggested interest topics: cases 51 and 52.
+        "suggest_fit",
+        "suggest_not_personal",
     }
 
 
@@ -352,9 +355,12 @@ def test_every_case_the_plans_describe_loads():
     # without attributing. All non-blocking. L5 (the L5 spec section 6):
     # 46-50, the idle reflect's lens round -- a fitting note, a note
     # inviting a user trait (an observation is never grounded), an
-    # acceleration note, an injection, no fit. All non-blocking.
-    assert ids == {f"{n:02d}" for n in range(1, 51)}
-    assert len(cases_module.load_all()) == 50
+    # acceleration note, an injection, no fit. All non-blocking. Suggested
+    # interest topics (anchor-interest-suggestions-plan.md section 8):
+    # 51-52, the suggestion call -- subjects and never the person, and an
+    # instruction in a summary left unobeyed. Both non-blocking.
+    assert ids == {f"{n:02d}" for n in range(1, 53)}
+    assert len(cases_module.load_all()) == 52
 
 
 def test_the_blocking_set_is_the_plans():

@@ -81,26 +81,51 @@ async def add_topic(
     then the cap -- packet and text shape first (nothing to write yet),
     the cap last (the same "refuse the expensive check last" ordering
     `app/core/orders.create_active` already uses for its own cap)."""
+    result, _topic_id = await add_topic_with_id(session, settings, packet=packet, text=text)
+    return result
+
+
+async def add_topic_with_id(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    packet: str,
+    text: str,
+    commit: bool = True,
+) -> tuple[CreateResult, int | None]:
+    """`add_topic`'s checks and write, also returning the new topic's id
+    (None on a refusal).
+
+    The suggestion buttons need both things `add_topic` alone does not
+    give them (app/research/suggest.py's `decide`): the id, to stamp on
+    the suggestion and, for «добавить и искать», to hand to
+    `enqueue_interest`; and `commit=False`, so the tap's conditional
+    UPDATE and the topic go in one transaction -- the row is flushed for
+    its id and the caller commits. A refusal writes nothing either way,
+    and the caller rolls its own staged UPDATE back."""
     packet = packet.strip().lower()
     if packet not in PACKETS:
-        return "unknown_packet"
+        return "unknown_packet", None
 
     cleaned = _clean_text(text)
     if cleaned is None:
-        return "empty"
+        return "empty", None
     if len(cleaned) > TEXT_MAX:
-        return "too_long"
+        return "too_long", None
 
     if not screen(cleaned).ok:
-        return "refused"
+        return "refused", None
 
     if await _count_active(session) >= MAX_ACTIVE_TOPICS:
-        return "cap"
+        return "cap", None
 
-    session.add(InterestTopic(text=cleaned, packet=packet, active=True))
-    await session.commit()
+    topic = InterestTopic(text=cleaned, packet=packet, active=True)
+    session.add(topic)
+    await session.flush()
+    if commit:
+        await session.commit()
     logger.info("interest topic added", extra={"event": "interest_add", "packet": packet})
-    return "ok"
+    return "ok", topic.id
 
 
 DecisionResult = str  # "ok" | "stale"
@@ -128,5 +153,6 @@ __all__ = [
     "TEXT_MAX",
     "active_topics",
     "add_topic",
+    "add_topic_with_id",
     "retire",
 ]

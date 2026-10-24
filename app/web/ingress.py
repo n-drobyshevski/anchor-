@@ -81,9 +81,13 @@ BLOCKED_COMMANDS = frozenset({"delete", "export", "planner_link", "grok", "claud
 # lens garden message's «сделал» / «не нужно» (app/tg/garden.py, L3),
 # and since L4 its «исследовать» (paid research) and a research result's
 # «в Inbox» (a write into the vault) / «не нужно»: those messages are
-# only ever sent to Telegram, like a hold's. A tuple, because
-# str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:", "gp:")
+# only ever sent to Telegram, like a hold's. `is:` is a suggested
+# interest topic's «добавить» / «добавить и искать» / ✖ (app/tg/
+# interests.py, anchor-interest-suggestions-plan.md section 5): its
+# message is only ever sent to Telegram, like the garden's, because its
+# text can be drawn from lens notes and a tap can start a paid search. A
+# tuple, because str.startswith takes one.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:", "gp:", "is:")
 
 
 class BlockedCommand(Exception):

@@ -22,6 +22,7 @@ from app.core.idle.candidates import reflect_candidates, summary_candidates
 from app.core.idle.consolidate import find_clusters
 from app.core.idle.critique import has_new_replies_since, last_done_critique_finished_at
 from app.core.idle.gate import IdleFacts, config_from_settings
+from app.core.idle.interest_suggest import gate_facts as suggest_gate_facts
 from app.core.idle.lens_garden import gate_facts as lens_garden_gate_facts
 from app.core.idle.prebrief import note_exists as prebrief_note_exists
 from app.core.idle.reflect import has_new_summary_since, last_done_reflect_finished_at
@@ -149,6 +150,15 @@ async def load_idle_facts(
     if config_from_settings(settings).lens_research_enabled:
         lens_job_queued = await next_lens_job(session) is not None
 
+    # Section 5a: shared with app/core/idle/interest_suggest.py's own
+    # body and, for "anything to suggest from", with `/interests
+    # suggest`. Queried only while the weekly batch is switched on
+    # (`RESEARCH_ENABLED` and `INTEREST_SUGGEST_WEEKLY`), as above.
+    suggest_facts = None
+    config = config_from_settings(settings)
+    if config.research_enabled and config.suggest_weekly:
+        suggest_facts = await suggest_gate_facts(session, settings, clock.now_utc())
+
     return IdleFacts(
         persona_active=state.persona_active,
         local_now=local_now,
@@ -174,6 +184,9 @@ async def load_idle_facts(
         garden_version_id=garden.version_id if garden else None,
         garden_done=garden.done if garden else 0,
         lens_job_queued=lens_job_queued,
+        suggest_has_source=suggest_facts.has_source if suggest_facts else False,
+        suggest_last_batch_at=suggest_facts.last_batch_at if suggest_facts else None,
+        suggest_open_batch_at=suggest_facts.open_batch_at if suggest_facts else None,
     )
 
 

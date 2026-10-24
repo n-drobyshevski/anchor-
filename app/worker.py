@@ -143,6 +143,8 @@ from app.planner.jobs import (
 )
 from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
+from app.research.suggest import INTEREST_SUGGEST, run_batch as run_suggest_batch
+from app.tg import interests as interests_ui
 from app.tg import research as research_ui
 from app.tg import vault as vault_ui
 from app.tg import garden as garden_ui
@@ -345,6 +347,23 @@ async def _run_job(
         )
         if bot is not None:
             await _send_research_done(bot, settings, clock, user_state, outcome)
+        return ExtractOutcome()
+
+    if kind == INTEREST_SUGGEST:
+        # `/interests suggest` (anchor-interest-suggestions-plan.md
+        # section 5): one strict-schema call on its own provider
+        # (app/research/suggest.py builds it, the lens garden's shape),
+        # validated and stored. The batch's message goes out from
+        # process_one_job once the job is marked done, through the same
+        # send hook the weekly batch uses -- "send after, not inside",
+        # as for every other message a job produces.
+        await run_suggest_batch(
+            session,
+            settings,
+            clock,
+            batch_id=payload["batch_id"],
+            timezone=user_state.timezone,
+        )
         return ExtractOutcome()
 
     if kind == RESEARCH_SWEEP:
@@ -658,6 +677,18 @@ async def process_one_job(
             # result send never holds the garden message back, nor the
             # other way round.
             await _send_research_results(sessionmaker, bot, settings, clock)
+        # `/interests suggest` (anchor-interest-suggestions-plan.md
+        # section 5, step 4): a manual batch's message, or the one line
+        # a failed one sends instead, right after its job; and after
+        # every idle run, which is where the weekly batch is made. The
+        # hook is gated inside (`may_report_now`): a held batch waits
+        # for the heartbeat's next tick.
+        if kind == INTEREST_SUGGEST and bot is not None:
+            await _send_interest_suggestions(
+                sessionmaker, bot, settings, clock, failed_batch_id=payload.get("batch_id")
+            )
+        if kind == IDLE_RUN and bot is not None:
+            await _send_interest_suggestions(sessionmaker, bot, settings, clock)
 
     return True
 
@@ -761,6 +792,32 @@ async def _send_garden_cards(
         logger.warning("lens garden send failed", extra={"event": type(exc).__name__})
 
 
+async def _send_interest_suggestions(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+    *,
+    failed_batch_id: int | None = None,
+) -> None:
+    """The newest finished, unsent suggestion batch's message, manual or
+    weekly (app/tg/interests.py's `send_suggestions`, which holds it
+    while `may_report_now` says no). With `failed_batch_id` -- an
+    INTEREST_SUGGEST job's own batch -- first the one line that batch
+    sends if it failed (`send_batch_failed`; a batch that did not fail
+    sends nothing there). A failure is logged by type only and never
+    fails the job or the heartbeat tick: the batch is already stored and
+    paid for, and stays unsent for the next pass."""
+    try:
+        if failed_batch_id is not None:
+            await interests_ui.send_batch_failed(
+                sessionmaker, bot, settings, clock, batch_id=failed_batch_id
+            )
+        await interests_ui.send_suggestions(sessionmaker, bot, settings, clock)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the job
+        logger.warning("interest suggestions send failed", extra={"event": type(exc).__name__})
+
+
 async def _send_research_results(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,
@@ -824,6 +881,7 @@ async def _heartbeat_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     clock: Clock,
+    bot: Bot | None = None,
 ) -> None:
     """Plan due intents once a minute (phase-3 plan section 6).
 
@@ -848,6 +906,14 @@ async def _heartbeat_loop(
     heartbeat that did, and neither deserves to take the other down with
     it, but a single try/except is simpler than two and the failure mode
     (log and retry next minute) is identical either way.
+
+    `bot` (anchor-interest-suggestions-plan.md section 5, step 4) is for
+    the one step here that sends: a suggestion batch held by quiet hours,
+    a pause or /quiet goes out on the first tick after the hold ends.
+    It runs after the try/except, with its own (`_send_interest_
+    suggestions`), so a failed planning step never holds a batch back
+    and a failed send never stops the planning. None (the tests that
+    drive this loop without one) skips it.
     """
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
@@ -934,6 +1000,8 @@ async def _heartbeat_loop(
                 await maybe_enqueue_vault_sync(session, settings, clock)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
+        if bot is not None:
+            await _send_interest_suggestions(sessionmaker, bot, settings, clock)
 
 
 WATCHDOG_INTERVAL_SECONDS = 60
@@ -1061,7 +1129,7 @@ async def run_worker(
     )
     recover_task = asyncio.create_task(_recover_loop(sessionmaker), name="anchor-recover-loop")
     heartbeat_task = asyncio.create_task(
-        _heartbeat_loop(sessionmaker, settings, clock), name="anchor-heartbeat-loop"
+        _heartbeat_loop(sessionmaker, settings, clock, bot), name="anchor-heartbeat-loop"
     )
     # 6e: the liveness watchdog (plan section 9.6). Started alongside
     # the heartbeat loop, not folded into it -- a heartbeat tick that

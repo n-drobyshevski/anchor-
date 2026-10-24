@@ -524,6 +524,29 @@ def test_already_proposed_includes_researched_gaps():
 
 # --- jobs.py -------------------------------------------------------------------------------
 
+async def test_a_manual_interest_run_does_not_spend_the_lens_taps_slot(sessionmaker):
+    """`/interests run` jobs are `kind='study'` rows too, but flagged
+    `manual`: the shared slot (RESEARCH_JOBS_PER_DAY=1 here) stays free
+    for the lens tap, which then closes it for the rest of the day."""
+    g = await _garden(sessionmaker)
+    async with sessionmaker() as session:
+        session.add(
+            StudyJob(
+                kind="study", packet="forums", query="бессонница", status="done",
+                local_date=NOW.date(), manual=True,
+            )
+        )
+        await session.commit()
+        assert not await jobs.study_quota_used(session, _settings(), CLOCK, TZ)
+
+    outcome, job_id, code = await _request(sessionmaker, g["missing"], settings=_settings())
+    assert (outcome, code) == ("ok", None) and job_id is not None
+    async with sessionmaker() as session:
+        assert (await session.get(StudyJob, job_id)).manual is False
+    outcome, _job, code = await _request(sessionmaker, g["tension"], settings=_settings())
+    assert code == jobs.QUOTA
+
+
 
 async def test_enqueue_lens_study_checks_in_order_and_writes_no_queue_row(sessionmaker):
     g = await _garden(sessionmaker)

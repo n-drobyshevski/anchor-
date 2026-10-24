@@ -146,6 +146,12 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # of a page's claims another page supported or contradicted. Counts.
     "supported",
     "contradicted",
+    # Suggested interest topics (app/research/suggest.py): the batch id
+    # only -- its counts go under "count", "dropped" and "closed", codes
+    # under "error_code", a tap's outcome under "event"; never a
+    # suggestion's text, packet or reason, a topic, a lens title or the
+    # model's reply.
+    "suggest_batch_id",
 )
 
 

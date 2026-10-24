@@ -49,6 +49,7 @@ _STRIPPED_FIELDS = (
     "LLM_MODEL_SAFETY",
     "LLM_MODEL_JUDGE",
     "GARDEN_MODEL",
+    "INTEREST_SUGGEST_MODEL",
     "WELFARE_SHADOW_MODEL",
     "LLM_DATA_COLLECTION",
     "TZ_DEFAULT",
@@ -511,6 +512,41 @@ class Settings(BaseSettings):
     # single distill on a page the user already chose.
     RESEARCH_JOBS_PER_DAY: int = 1
     RESEARCH_READS_PER_DAY: int = 3
+    # `/interests run` researches one saved topic on demand. It has its
+    # own daily quota so the shared /study slot above (/study, idle
+    # research, lens taps) is not spent by it; the money caps still apply.
+    RESEARCH_MANUAL_PER_DAY: int = 3
+    # `/interests suggest`: the model proposes research topics, and a
+    # topic exists only after a tap on a suggestion's button
+    # (app/research/suggest.py; docs/decisions.md, "Suggested interest
+    # topics"). It lives under RESEARCH_ENABLED -- there is no switch of
+    # its own -- and its lens input under the lens switches already in
+    # place.
+    #
+    # Manual batches per local day. The weekly idle batch is not counted
+    # (it has its own gate), and a manual batch pushes the next weekly
+    # one back.
+    INTEREST_SUGGEST_PER_DAY: int = 2
+    # The most suggestions one batch may hold, whatever the model returns.
+    INTEREST_SUGGEST_MAX: int = 5
+    # The cap on the lens note titles and summaries sent with the call,
+    # only while the lens is active (the garden sends the same material
+    # to the same provider).
+    INTEREST_SUGGEST_MAX_CHARS: int = 6000
+    # The suggestion call's model; "" means LLM_MODEL_SAFETY. Its own
+    # setting for the reason GARDEN_MODEL is: a reply this long does not
+    # fit the safety provider's shared cap, so the call builds its own
+    # provider (the lens garden's shape).
+    INTEREST_SUGGEST_MODEL: str = ""
+    # Output cap for that call: five suggestions with their one-line
+    # reasons are a few hundred tokens of Russian JSON; the cap leaves
+    # room for eight.
+    INTEREST_SUGGEST_MAX_TOKENS: int = 1200
+    # One unasked batch a week, an idle job (kind `interest_suggest`) in
+    # the lens garden's shape: it writes, and a worker hook sends when
+    # `may_report_now` allows. Also needs RESEARCH_ENABLED and
+    # IDLE_ENABLED; off, only `/interests suggest` makes batches.
+    INTEREST_SUGGEST_WEEKLY: bool = True
     # Per /study job. A search that finds nothing gets one reformulation
     # (plan section 6), so the floor for a useful job is 2.
     RESEARCH_MAX_SEARCHES: int = 4
@@ -1126,6 +1162,16 @@ ROUND_MAX_CHARS_RANGE = (2000, 100000)
 # L3: the garden's output cap. Under 1000 tokens ten gaps do not fit;
 # over 8000 is a runaway, not a report.
 GARDEN_MAX_TOKENS_RANGE = (1000, 8000)
+# `/interests suggest`: at most 8 suggestions per batch (more is a menu,
+# not a handful of ideas), and a daily quota of 0 (manual batches off)
+# to 10. Under 2000 characters of lens catalog the call has nothing to
+# draw on; over 20000 is a library, not a catalog. Under 500 output
+# tokens even three suggestions with their reasons do not fit; over 4000
+# is a runaway.
+INTEREST_SUGGEST_MAX_RANGE = (1, 8)
+INTEREST_SUGGEST_PER_DAY_RANGE = (0, 10)
+INTEREST_SUGGEST_MAX_CHARS_RANGE = (2000, 20000)
+INTEREST_SUGGEST_MAX_TOKENS_RANGE = (500, 4000)
 # A distill's output cap: under 1000 tokens six cards do not fit; over
 # 8000 is a runaway, not six cards.
 RESEARCH_DISTILL_MAX_TOKENS_RANGE = (1000, 8000)
@@ -1314,6 +1360,10 @@ def check_vault_settings(settings: Settings) -> None:
         ("LENS_ROUND_MAX_CHARS", ROUND_MAX_CHARS_RANGE),
         ("GARDEN_MAX_TOKENS", GARDEN_MAX_TOKENS_RANGE),
         ("RESEARCH_DISTILL_MAX_TOKENS", RESEARCH_DISTILL_MAX_TOKENS_RANGE),
+        ("INTEREST_SUGGEST_PER_DAY", INTEREST_SUGGEST_PER_DAY_RANGE),
+        ("INTEREST_SUGGEST_MAX", INTEREST_SUGGEST_MAX_RANGE),
+        ("INTEREST_SUGGEST_MAX_CHARS", INTEREST_SUGGEST_MAX_CHARS_RANGE),
+        ("INTEREST_SUGGEST_MAX_TOKENS", INTEREST_SUGGEST_MAX_TOKENS_RANGE),
     ):
         value = getattr(settings, name)
         if not low <= value <= high:

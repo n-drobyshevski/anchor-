@@ -58,6 +58,23 @@ still unfinished after `LENS_STALE_DAYS` fails as `stale`
 forever. Nothing here imports the lens module: a job knows its gap only
 by id.
 
+**`/interests run`: one saved topic, researched now.** Idle `research`
+reaches the `/interests` topics only after `IDLE_AFTER_H` of silence,
+which every message resets, and only while the shared /study slot is
+free. `enqueue_interest` is the manual way in: it picks one active
+topic (the one named, or the next in idle's own rotation), then queues
+an ordinary `/study` job for it -- `kind='study'`, the topic's packet
+and text as `packet` and `query`, a queue row, so app/worker.py's
+RESEARCH branch runs it and sends /study's completion line, unchanged.
+What sets it apart is `study_job.manual`: `_quota_used` filters on it
+both ways, so a manual run counts only against `RESEARCH_MANUAL_PER_DAY`
+and never against the slot /study, idle research and lens taps share
+(`RESEARCH_JOBS_PER_DAY`), and none of those ever counts against it.
+The money caps are not separate: `check_cap` at enqueue and before
+every paid call, exactly as for /study. Running a topic stamps its
+`last_run_at`, which is what idle's rotation orders on, so a topic the
+user just ran by hand goes to the back of idle's queue too.
+
 **Why no safety_events row.** `app/core/extract.py` records one on
 every run of its own job, and this module's docstring template asked
 for the same here. But `app/core/safety_events.py`'s `kind` column is
@@ -87,7 +104,7 @@ from app.core import safety_events
 from app.core.clock import Clock
 from app.core.spend import check_cap, priced
 from app.db.jobs import enqueue_job
-from app.db.models import SpendLedger, StudyCard, StudyClip, StudyJob
+from app.db.models import InterestTopic, SpendLedger, StudyCard, StudyClip, StudyJob
 from app.llm.provider import LLMError, LLMProvider, LLMRetryableError, with_max_tokens
 from app.research import crosscheck, distill, search, sources
 from app.research.addresses import parse_target
@@ -116,6 +133,15 @@ UNKNOWN_PACKET = "unknown_packet"
 EMPTY_PACKET = "empty_packet"
 TOPIC_TOO_LONG = "topic_too_long"
 EMPTY_TOPIC = "empty_topic"
+# /interests run only (enqueue_interest): there is no active topic at
+# all, or the one named by number is unknown or retired.
+NO_TOPIC = "no_topic"
+TOPIC_GONE = "topic_gone"
+
+# used_today's key for today's /interests run jobs (`study_job.manual`),
+# beside STUDY and READ. Not a study_job.kind: a manual run is a
+# `kind='study'` job, told apart only by the flag.
+MANUAL = "manual"
 
 # study_job.status, set by app/core/purge.py when /delete runs.
 CANCELLED = "cancelled"
@@ -210,19 +236,40 @@ def _job_domains(settings: Settings, packet: str | None) -> tuple[str, ...] | No
     return packet_domains(settings, packet)
 
 
-async def _quota_used(session: AsyncSession, kind: str, local_date) -> int:
+async def _quota_used(
+    session: AsyncSession, kind: str, local_date, *, manual: bool = False
+) -> int:
+    """Today's `study_job` rows of `kind`, manual (`/interests run`) or not.
+
+    **The flag is matched both ways, on purpose.** The default, `manual=
+    False`, is what every STUDY caller -- `used_today`'s STUDY count,
+    `study_quota_used`, `enqueue_study`, `enqueue_lens_study` -- has
+    always meant by "today's /study slot", and leaves a manual run out of
+    it; `manual=True` is `enqueue_interest`'s own allowance, and leaves
+    everything else out. Neither side can spend the other's quota.
+    """
     result = await session.execute(
         select(func.count())
         .select_from(StudyJob)
-        .where(StudyJob.kind == kind, StudyJob.local_date == local_date)
+        .where(
+            StudyJob.kind == kind,
+            StudyJob.local_date == local_date,
+            StudyJob.manual.is_(manual),
+        )
     )
     return result.scalar_one()
 
 
 async def used_today(session: AsyncSession, local_date) -> dict[str, int]:
-    """Today's `/study` jobs and `/read` reads: the counts the two quotas
-    (RESEARCH_JOBS_PER_DAY, RESEARCH_READS_PER_DAY) check, for display."""
-    return {STUDY: await _quota_used(session, STUDY, local_date), READ: await _read_quota_used(session, local_date)}
+    """Today's `/study` jobs, `/interests run` jobs and `/read` reads: the
+    counts the three quotas (RESEARCH_JOBS_PER_DAY, RESEARCH_MANUAL_PER_DAY,
+    RESEARCH_READS_PER_DAY) check, for display. STUDY leaves manual runs
+    out and MANUAL counts only them (`_quota_used`)."""
+    return {
+        STUDY: await _quota_used(session, STUDY, local_date),
+        MANUAL: await _quota_used(session, STUDY, local_date, manual=True),
+        READ: await _read_quota_used(session, local_date),
+    }
 
 
 async def study_quota_used(
@@ -239,6 +286,10 @@ async def study_quota_used(
     what makes the sharing symmetric: whichever of the two runs first,
     the other sees this same query return `True` for the rest of the
     day, with nothing idle-specific for a plain `/study` to know about.
+
+    A manual `/interests run` job is a `kind='study'` row too, and is
+    left out (`_quota_used`'s `manual=False`): it has its own allowance,
+    so running a topic by hand never closes idle research for the day.
     """
     local_date = clock_module.local_date(clock, timezone)
     return await _quota_used(session, STUDY, local_date) >= settings.RESEARCH_JOBS_PER_DAY
@@ -263,7 +314,8 @@ async def enqueue_study(
     plan section 3), because they cost differently -- a study job is
     one or two searches plus two distills, a read is one distill on a
     page the user already chose. Using up one must not consume the
-    other.
+    other. `/interests run` has its own allowance as well
+    (`enqueue_interest`); its manual rows are not counted here.
     """
     if not settings.RESEARCH_ENABLED:
         return None, DISABLED
@@ -294,6 +346,126 @@ async def enqueue_study(
     await enqueue_job(session, RESEARCH, {"job_id": job.id}, dedup_key=f"research:{job.id}")
     logger.info("study job queued", extra={"job_id": job.id})
     return job.id, None
+
+
+@dataclass(frozen=True)
+class InterestRun:
+    """What `enqueue_interest` answered, for the `/interests run` reply.
+
+    `refusal` is one of the closed codes (`DISABLED`, `NO_TOPIC`,
+    `TOPIC_GONE`, `EMPTY_PACKET`, `QUOTA`, `CAP`) or None for a queued
+    job, whose id is `job_id`. `packet` and `text` are the chosen topic's,
+    for the reply to name what it is searching («Ищу: ...»); an
+    `EMPTY_PACKET` refusal carries the packet alone, for «Пакет {packet}
+    пока не настроен.». Never logged: `text` is the user's own words.
+    """
+
+    refusal: str | None
+    job_id: int | None = None
+    packet: str | None = None
+    text: str | None = None
+
+
+async def _interest_topic(
+    session: AsyncSession, settings: Settings, topic_id: int | None
+) -> InterestTopic | InterestRun:
+    """The topic a `/interests run` searches, or the refusal saying why
+    there is none.
+
+    With a number, that topic and only that one: unknown or retired is
+    `TOPIC_GONE`, and a packet with no domains is `EMPTY_PACKET` rather
+    than a quiet switch to some other topic the user did not ask for.
+
+    Without one, idle's own rotation -- active topics by `last_run_at`,
+    NULLs first, then id, the order of app/core/idle/research.py's
+    `pick_topic` -- skipping any whose packet has no domains, since a
+    run of it could only be refused. Inlined rather than imported: that
+    module imports this one. No active topic at all is `NO_TOPIC`; only
+    topics whose packets are all empty is `EMPTY_PACKET`, naming the
+    first one's packet, the one the rotation would have run.
+    """
+    if topic_id is not None:
+        topic = await session.get(InterestTopic, topic_id)
+        if topic is None or not topic.active:
+            return InterestRun(refusal=TOPIC_GONE)
+        if not packet_domains(settings, topic.packet):
+            return InterestRun(refusal=EMPTY_PACKET, packet=topic.packet)
+        return topic
+
+    topics = (
+        await session.execute(
+            select(InterestTopic)
+            .where(InterestTopic.active.is_(True))
+            .order_by(InterestTopic.last_run_at.asc().nulls_first(), InterestTopic.id.asc())
+        )
+    ).scalars().all()
+    if not topics:
+        return InterestRun(refusal=NO_TOPIC)
+    for topic in topics:
+        if packet_domains(settings, topic.packet):
+            return topic
+    return InterestRun(refusal=EMPTY_PACKET, packet=topics[0].packet)
+
+
+async def enqueue_interest(
+    session: AsyncSession,
+    settings: Settings,
+    clock: Clock,
+    *,
+    timezone: str,
+    topic_id: int | None,
+) -> InterestRun:
+    """Queue a `/interests run` job for one saved topic, or refuse it
+    (module docstring, `/interests run`).
+
+    Checks in `enqueue_study`'s order, the topic standing in for the
+    packet and the text: disabled, the topic (`_interest_topic`:
+    `TOPIC_GONE`, `NO_TOPIC`, `EMPTY_PACKET`), the manual quota
+    (`RESEARCH_MANUAL_PER_DAY`, counted over manual rows only), then the
+    spend cap. No row of any kind is written on a refusal, and the
+    topic's `last_run_at` is left as it was.
+
+    On success the job is an ordinary /study one with `manual=True`, so
+    app/worker.py runs it and sends its completion line exactly as for
+    /study, and the topic's `last_run_at` is stamped now: the rotation
+    moves on, here and in idle research alike, and a second
+    `/interests run` the same day takes the next topic. The job, the
+    stamp and the queue row go in in one commit (`enqueue_job`'s).
+
+    Pause and welfare are not checked, as for /study: the user asked
+    for this now, in so many words. Logs the job id only -- never the
+    topic's id or text, which together would tie a job to a topic in
+    debug.study_job.
+    """
+    if not settings.RESEARCH_ENABLED:
+        return InterestRun(refusal=DISABLED)
+
+    picked = await _interest_topic(session, settings, topic_id)
+    if isinstance(picked, InterestRun):
+        return picked
+    topic = picked
+
+    local_date = clock_module.local_date(clock, timezone)
+    used = await _quota_used(session, STUDY, local_date, manual=True)
+    if used >= settings.RESEARCH_MANUAL_PER_DAY:
+        return InterestRun(refusal=QUOTA)
+    if await check_cap(session, settings, clock, timezone):
+        return InterestRun(refusal=CAP)
+
+    job = StudyJob(
+        kind=STUDY,
+        status="queued",
+        packet=topic.packet,
+        query=topic.text,
+        local_date=local_date,
+        manual=True,
+    )
+    session.add(job)
+    topic.last_run_at = clock.now_utc()
+    await session.flush()  # need job.id before enqueue_job's own commit
+    await enqueue_job(session, RESEARCH, {"job_id": job.id}, dedup_key=f"research:{job.id}")
+    logger.info("interest job queued", extra={"job_id": job.id})
+    return InterestRun(refusal=None, job_id=job.id, packet=topic.packet, text=topic.text)
 
 
 async def _read_quota_used(session: AsyncSession, local_date) -> int:
@@ -1554,6 +1726,8 @@ __all__ = [
     "LENS",
     "LENS_CARD",
     "LENS_STALE_DAYS",
+    "MANUAL",
+    "NO_TOPIC",
     "PACKETS",
     "QUERY_MAX",
     "QUERY_REFUSED",
@@ -1565,14 +1739,17 @@ __all__ = [
     "SPENT",
     "STALE",
     "STUDY",
+    "TOPIC_GONE",
     "TOPIC_TOO_LONG",
     "UNKNOWN_PACKET",
     "LensCard",
     "LensCards",
     "LensJob",
     "LensResult",
+    "InterestRun",
     "ResearchOutcome",
     "adopt_lens_cards",
+    "enqueue_interest",
     "enqueue_lens_study",
     "enqueue_read",
     "enqueue_study",

@@ -3346,6 +3346,62 @@ on demand, the way `/lens garden now` runs the garden: its own gate,
   with `manual: true` in its job payload, and the result message keeps
   its holds in app/tg/garden.py.
 
+## `/interests run`
+
+The saved `/interests` topics were researched only by the idle
+`research` kind, which waits `IDLE_AFTER_H` of silence (every message
+the user sends resets the wait) and shares the single daily `/study`
+slot. `/interests run [номер]` researches one saved topic on demand.
+
+- **One path, not a new one.** It queues the same `study_job` a `/study`
+  does (`kind='study'`, the topic's packet, the topic's text as the
+  query) and the worker's existing RESEARCH branch runs it, so the
+  cards, the caps, the clips and the «Готово: N карточек. /notes» line
+  are all the code that already exists. Nothing about `/study`, the
+  idle `research` kind or the lens tap changed.
+- **A quota of its own.** `study_job.manual` marks the rows, and
+  `RESEARCH_MANUAL_PER_DAY` (default 3) counts only them; every `/study`
+  count (`used_today`, `study_quota_used`, `enqueue_study`,
+  `enqueue_lens_study`) now leaves them out, so a manual search never
+  takes the slot `/study`, the idle run or a lens tap share, and those
+  never take its. `ck_study_job_manual` allows the flag only on a
+  `kind='study'` row: simpler than listing packets, and it does not need
+  touching when `PACKETS` grows.
+- **Dropped**: the shared quota, the idle rows (the wait, the window,
+  preemption), and the pause and the welfare cooldown, the same as
+  `/study`: the user typed the command, so it is no outbound.
+- **Kept**: the `RESEARCH_ENABLED` switch and the money caps, as for
+  `/study`: the daily cap is checked before the job is written, and the
+  per-job cap by the worker while it runs.
+- **Which topic.** An explicit number (`3` or `#3`, the numbers
+  `/interests` shows) must be an active topic, else «Нет такой темы.».
+  A bare run takes the topic the idle run would take next: oldest
+  `last_run_at`, never-run first, then the lowest id. The query is
+  inlined in app/research/jobs.py because app/core/idle/research.py
+  imports from there. A topic whose packet has no domains configured is
+  refused (explicit) or skipped (bare), and a list with no usable topic
+  answers with the same «пакет не настроен» text `/study` gives.
+- **The rotation moves.** An accepted run sets the topic's
+  `last_run_at`, so the idle run goes to a different topic next, and
+  two bare runs in a row pick two different ones.
+- **Quiet hours.** The «Готово» line is `/study`'s: it is dropped, not
+  deferred, in quiet hours, under a pause or `/quiet`; the cards are in
+  `/notes` either way.
+- **Replay-safe once answered.** The router gates the update with
+  `_once` (`turn.already_handled`: has this update already got its
+  stored reply?), and `_reply_once` stores the reply right after the
+  enqueue, so a redelivery after that point is dropped. The queue row's
+  dedup key is the fresh job id, so it does not guard against a replay
+  by itself. A crash between the enqueue's commit and the stored reply
+  (the same window `/study` has) can queue a second job, stamp a second
+  topic and spend a second manual-quota slot; accepted, as for `/study`.
+- **Logs.** One line, with the job id only: never the topic's text or
+  its id (app/log.py).
+- **Not done**: buttons under the list (a press would need its own
+  replay protection, and the command is two words), and an "already
+  running" check: the quota bounds the jobs, and two at once cost what
+  two in a row would.
+
 ## W2 may edit lens notes
 
 Lens notes were read-only to W2 (the "W2 cannot write lens notes"
@@ -3529,3 +3585,126 @@ DeepMind's SAFE (check each fact against other sources):
 
 Not done: turning a contradiction into a lens garden `tension` gap, and
 reading a third page (`RESEARCH_MAX_PINS` stays 2).
+
+## Suggested interest topics
+
+Research topics came only from the user (anchor-phase6-plan.md §1, "Out
+of scope: autonomous topic choice for research"; `InterestTopic`'s
+docstring). The owner amended that rule on 2026-10-24: the model may
+*propose* topics, and the decision stays with the user.
+`/interests suggest` asks for a batch, and a weekly idle job makes one
+unasked. The plan is anchor-interest-suggestions-plan.md.
+
+- **Dropped**: "topics come only from the user", for *suggestions*
+  only. A model call may now write the words of a topic the user has not
+  typed.
+- **Kept**: a topic exists only after a tap. The model writes
+  `interest_suggestion` rows, never `interest_topic` ones; a tap on
+  «N · добавить» or «N · добавить и искать» makes the topic through
+  app/core/interests.py's own `add_topic`, so the topic cap and the risk
+  screen refuse a suggestion exactly as they refuse a typed topic (the
+  refusal rolls the tap back and the suggestion stays open). Nothing is
+  searched until a topic exists and a run is asked for: «добавить и
+  искать» is `/interests run`'s path (`enqueue_interest`, its own
+  `RESEARCH_MANUAL_PER_DAY` quota and the money caps), `/interests run`
+  or idle research reaches it later. A refused run never undoes the add;
+  the toast says why.
+- **What the call sees, and only that** (app/research/suggest.py's
+  `build_input`): every saved topic, active and retired, as text and
+  packet (the user's own words, which already go to search); the last 30
+  dismissed suggestions' texts, as "do not offer again"; the configured
+  packets that have sites, each with a one-line meaning; and, **only
+  while the lens is active**, lens note titles and catalog summaries,
+  capped by `INTEREST_SUGGEST_MAX_CHARS`: what the lens garden and the
+  lens query already send to the same provider. **Never**: dialogs,
+  memory, the journal, the notebook, summaries, check-ins, personal and
+  knowledge notes, study cards. They are absent by construction, not
+  filtered out: the module imports none of them, and
+  tests/test_research_isolation.py pins its imports to an allowlist.
+  The call is single-shot, with no tools and no web search;
+  `app/research/search.py`'s `find_urls` stays the only call site that
+  asks for one (tests/test_web_search_isolation.py).
+- **Nothing the model returns is trusted** (`suggest.validate`): text 3
+  to 100 characters and a reason of at most 160, a packet that has
+  sites, no URL, domain or `site:`, the secret, injection and risk
+  screens, then a drop of anything matching a saved topic, a dismissed
+  suggestion or another in the batch. A batch with nothing left is `done`
+  with no suggestions and says «Новых тем не нашлось.».
+- **The model** is `INTEREST_SUGGEST_MODEL`, else `LLM_MODEL_SAFETY`,
+  built like the garden's provider (temperature 0.3,
+  `INTEREST_SUGGEST_MAX_TOKENS`, since the shared safety provider's
+  cap would cut the JSON). Spend is ledgered under `interest_suggest`,
+  manual and weekly alike.
+- **The command.** `/interests suggest` is Telegram only (the web chat
+  gets `WEB_ONLY_REPLY`). It answers at once, and one message arrives
+  when the worker has the batch: a numbered list with a button row per
+  suggestion. Refusals: research off, nothing to suggest from (no active
+  topic and no active lens), no packet with sites, a batch already being
+  made, the daily quota (`INTEREST_SUGGEST_PER_DAY`, manual batches
+  only) and the daily money cap. A finished batch that has not gone out
+  (quiet hours, a pause, `/quiet`) is **re-sent by the next command
+  instead of being paid for again**; that re-send ignores quiet hours,
+  since the user just asked.
+- **Buttons** carry `is:<a|r|x>:<suggestion id>:<epoch>`, the lens
+  garden's idea: the epoch is six random characters per batch, so a
+  button from before `/delete`, or from a batch a newer one expired, is
+  stale. A tap is one conditional UPDATE joined to the batch's epoch, so
+  a replayed tap changes nothing and answers «Устарело.»; the message is
+  then re-rendered by edit only (a decided row reads «N · ✓» or
+  «N · ✖»), the rule `/notes` follows. `x` dismisses, and the model is
+  told not to offer it again. `is:` is in the web ingress's
+  `BLOCKED_CALLBACK_PREFIX`: the text can be drawn from lens notes and
+  a tap can start paid search, so the batch is sent to Telegram only.
+- **The weekly batch** is a new idle kind, `interest_suggest`, in the
+  lens garden's shape: an idle job writes, a worker hook sends. It sits
+  right after `LENS_RESEARCH` in `PRIORITY`, so the garden's new gaps
+  exist before suggestions are drawn from the same lens notes, and ahead
+  of idle research. The shared idle rows apply (inactivity wait, window,
+  pause, welfare cooldown, `busy`, jobs per day, the idle cap, the
+  reserve), then its own: `RESEARCH_ENABLED` and `INTEREST_SUGGEST_WEEKLY`,
+  an active topic or an active lens (`nothing_to_suggest`), a packet with
+  sites, no batch of either kind in the last 6 days
+  (`suggested_recently`), and not `undecided`: the latest batch still
+  has open suggestions and is under 14 days old, since unanswered
+  suggestions are not met with more. Once a day at most. Its spend is
+  folded into `idle_run.usd_cost`, so `IDLE_USD_CAP` sees it. It is
+  preempted before the call and never after the batch is stored. `/digest`
+  gets one line, a count.
+- **Idle never messages, with the garden's exception and no more.** The
+  weekly job sends nothing itself. The batch message goes out through
+  the same hook as a manual one (`_send_interest_suggestions`, run after
+  every `INTEREST_SUGGEST` job, after every idle run and on every
+  heartbeat tick), gated by `may_report_now`, so a batch held by quiet
+  hours goes out once they end. A batch still unsent after 48 hours
+  expires, and so do its suggestions. The hook also holds while
+  `RESEARCH_ENABLED` is off. Run from `process_one_job` after
+  `complete_job`, not inside the job, so a redelivered job cannot send
+  twice; a lock per event loop keeps the heartbeat and the claim loop
+  from sending the same batch at once (it covers one process).
+- **A failed manual batch says so.** «Пришлю, когда будут.» is never
+  followed by silence: `send_batch_failed` sends one line, gated by
+  `may_report_now`, for a provider error or an unparsed reply, or the
+  refusal the command would have given if the run met one. A failed
+  weekly batch sends nothing.
+- **Data.** `interest_suggest_batch` (status, `origin` manual or weekly,
+  error code, local date, cost, epoch, the message id and `sent_at`) and
+  `interest_suggestion` (position, text, packet, why, status
+  `open|added|dismissed|expired`, `topic_id` SET NULL), migration
+  `a5d1c8e3f702`. A new batch expires every older open suggestion, so
+  there is no sweep. Both tables are in `/export` and `/delete`
+  (child first). The two debug views carry no text, packet, reason,
+  epoch or message id (docs/claude-access.md).
+- **Logs.** Batch ids, counts and fixed codes: never a topic, a
+  suggestion, a reason, a lens title or the model's reply
+  (`suggest_batch_id` is a safe key; app/log.py).
+- **The eval** (eval/cases/51-52, kind `interest_suggest`): the real
+  input, call and `validate` over synthetic lens summaries. The model
+  must offer subjects and never anything personal-sounding, and must not
+  obey an instruction hidden in a summary. Non-blocking, manual like the
+  rest; `python -m eval.run --dry-run` builds the call's messages with no
+  key.
+- **Not done**: suggestions drawn from anything but topics and lens
+  notes (dialogs, memory, notes of any other class), a separate on
+  switch (the feature lives under `RESEARCH_ENABLED` and the lens
+  switches), a suggestion changing a topic's packet or text before
+  adding it, and suggestions on the web chat.

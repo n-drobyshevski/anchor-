@@ -217,7 +217,23 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
             )
         )
         session.add(models.BriefNote(local_date=today, notes=["сон"]))
-        session.add(models.InterestTopic(text="сон", packet="ref"))
+        topic = models.InterestTopic(text="сон", packet="ref")
+        session.add(topic)
+        await session.flush()
+        batch = models.InterestSuggestBatch(local_date=today, status="done")
+        session.add(batch)
+        await session.flush()
+        session.add(
+            models.InterestSuggestion(
+                batch_id=batch.id,
+                position=1,
+                text="бессонница",
+                packet="forums",
+                why="рядом с темой про сон",
+                status="added",
+                topic_id=topic.id,
+            )
+        )
         await session.commit()
 
     # P2. planner_credential is deliberately not seeded here -- it is

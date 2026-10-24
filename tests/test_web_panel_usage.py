@@ -149,7 +149,7 @@ async def test_usage_quotas_follow_the_feature_switches(sessionmaker):
         cookies = await _log_in(client, fake)
         body = await (await _get(client, "/api/usage", cookies=cookies)).json()
     quotas = {q["key"]: q for q in body["quotas"]}
-    assert list(quotas) == ["unsolicited", "idle_jobs", "study", "read", "planner_writes", "web_sends"]
+    assert list(quotas) == ["unsolicited", "idle_jobs", "study", "interests_run", "read", "planner_writes", "web_sends"]
     assert quotas["unsolicited"] == {
         "key": "unsolicited", "label": "Сообщений первой", "used": 0, "limit": 3, "window": "day",
     }

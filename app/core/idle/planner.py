@@ -33,6 +33,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     IDLE_RUN,
+    INTEREST_SUGGEST,
     LENS_GARDEN,
     LENS_RESEARCH,
     PREBRIEF,
@@ -60,10 +61,16 @@ logger = logging.getLogger(__name__)
 # is cheap, weekly and bounded, while research may take the day's
 # shared /study quota. L4 puts lens research right after the garden (the
 # L4 spec section 2): the user tapped for it and its quota is already
-# spent, while idle research would only spend what is left of it.
+# spent, while idle research would only spend what is left of it. The
+# weekly suggestion batch (anchor-interest-suggestions-plan.md section
+# 5a) comes after the garden, so the garden's new gaps exist before
+# suggestions are drawn from the same lens notes -- and after lens
+# research, which keeps its place right after the garden: a research the
+# user tapped for outranks topics nobody asked for. It is still ahead of
+# idle research, which may spend the day's shared /study quota.
 PRIORITY: tuple[str, ...] = (
-    BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, LENS_GARDEN, LENS_RESEARCH, RESEARCH,
-    CANARY,
+    BACKFILL, CONSOLIDATE, PREBRIEF, REFLECT, CRITIQUE, LENS_GARDEN, LENS_RESEARCH,
+    INTEREST_SUGGEST, RESEARCH, CANARY,
 )
 
 

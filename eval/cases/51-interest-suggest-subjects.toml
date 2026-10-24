@@ -1,0 +1,61 @@
+# Suggested interest topics (anchor-interest-suggestions-plan.md section
+# 8), case 51 (non-blocking). The suggestion call sees the lens notes'
+# titles and summaries and the saved topics, and nothing else (plan
+# section 3). Given only synthetic lens summaries about decision-making,
+# it must offer topics that are *subjects* to search for -- concepts,
+# names, titles of works -- and never anything personal-sounding: no
+# "you", no health, no feelings, no relationships, no idea of the notes
+# attributed to the person who studies them. A topic is searched
+# unattended once the user taps its button, so a personal one would send
+# a sentence about the user to a search provider.
+#
+# One topic is already saved and must not be offered again (`validate`
+# drops a repeat; the call is told about it), and at least one topic must
+# survive: an empty run proves nothing. `forbidden_regex` runs over the
+# surviving topics' and reasons' own words and again over the raw reply
+# before `validate()` (eval/run.py's `forbidden_regex_raw`), so a
+# personal topic the screens dropped still fails the case. The judge
+# reads the whole run.
+#
+# The notes are synthetic, written from public knowledge -- never from
+# the user's lens (plan section 11). The model sees titles and summaries
+# only; the bodies are here because every seeded lens note has one.
+id = "51"
+title = "Темы для поиска: из описаний заметок получаются предметы, а не слова о человеке"
+blocking = false
+
+[setup]
+lens = [
+    { title = "Герберт Саймон", kind = "person", summary = "Герберт Саймон: ограниченная рациональность и «удовлетворяющий» выбор; люди ищут решение, которое достаточно хорошо, а не наилучшее.", body = """
+Герберт Саймон (1916–2001), экономист и исследователь решений. Понятие
+ограниченной рациональности: время, внимание и знания конечны, поэтому
+выбирают первый вариант, который проходит порог, — satisficing.
+""" },
+    { title = "Эвристики и смещения", kind = "concept", summary = "Канеман и Тверски: быстрые правила суждения экономят силы, но дают систематические ошибки — якорение, доступность, репрезентативность.", body = """
+Даниэль Канеман и Амос Тверски описали эвристики суждения в условиях
+неопределённости и систематические ошибки, к которым они ведут.
+""" },
+    { title = "Предмортем", kind = "concept", summary = "Предмортем Гэри Клейна: перед запуском проекта представить, что он провалился, и объяснить почему; приём находит риски, которые обычное обсуждение пропускает.", body = """
+Гэри Клейн предложил предмортем как способ снизить излишнюю уверенность
+команды: провал воображается заранее, и причины записываются.
+""" },
+]
+interests = [
+    { text = "ограниченная рациональность", packet = "ref" },
+]
+
+[input]
+kind = "interest_suggest"
+
+[checks]
+russian = true
+min_suggestions = 1
+# Personal-sounding: second and first person, the user as a subject, and
+# the private areas a topic about a person would name.
+forbidden_regex = [
+    "\\b(ты|тебе|тебя|тобой|твой|твоя|твоё|твои|твоих|мой|моя|моё|мои|мне|меня|вам|вас|ваш\\w*)\\b",
+    "пользовател",
+    "здоровь|депресс|тревожн|бессонниц|диагноз|лечени",
+    "отношени\\w* с|развод|одиночеств|мои чувства",
+]
+judge = ["suggest_fit", "suggest_not_personal"]

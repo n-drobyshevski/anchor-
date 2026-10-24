@@ -54,6 +54,20 @@ and that both name Obsidian (8e).
   `Echo/Inbox`, which you can undo for 14 days (`/lens undo`). In `sync`
   mode, editing or
   deleting a fact file in Anchor's folder changes Anchor's memory.
+  Suggested research topics (`/interests suggest`, and once a week on
+  their own): the model gets the topics you saved (and the ones you
+  retired), the texts of suggestions you dismissed, and, only while the
+  lens is on, the lens notes' titles and summaries or the first 300
+  characters of the text (a short note without a summary goes whole),
+  capped overall by `INTEREST_SUGGEST_MAX_CHARS`. It gets no
+  messages, memory, journal, notebook, summaries, check-ins, personal or
+  knowledge notes or study cards. That call goes to OpenRouter only and
+  searches nothing: nothing is sent to a search provider until you tap
+  «добавить» or «добавить и искать» under a suggestion, which saves it as
+  a topic you can remove (`/interests`); a topic is searched only when
+  you run it or idle research reaches it. The suggestions, and what you
+  did with each, are in `/export` and go with `/delete`; Claude Code
+  can see only that they exist (ids, status, times), never their text.
 - Server logs hold only codes, counts and cost -- never text.
 - `/export` downloads all of your own data as one file.
 - `/delete` deletes all data and all backups, irreversibly.

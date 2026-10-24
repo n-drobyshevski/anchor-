@@ -238,6 +238,35 @@ async def test_idle_research_today_blocks_a_later_study(sessionmaker, monkeypatc
     assert refusal == research_jobs.QUOTA
 
 
+async def test_a_manual_interest_run_leaves_the_idle_gate_open(sessionmaker):
+    """`/interests run` queues a `kind='study'` job but flags it `manual`,
+    so it is not the user's /study for the day: idle research still runs."""
+    clock = _clock()
+    await _seed_state(sessionmaker)
+    await _add_topic(sessionmaker)
+    settings = _settings(
+        RESEARCH_JOBS_PER_DAY=1, RESEARCH_MANUAL_PER_DAY=3, PACKET_FORUMS=("reddit.com",)
+    )
+
+    async with sessionmaker() as session:
+        result = await research_jobs.enqueue_interest(
+            session, settings, clock, timezone=TZ, topic_id=None
+        )
+    assert result.refusal is None
+    async with sessionmaker() as session:
+        assert (await session.get(StudyJob, result.job_id)).manual is True
+        facts = await load_idle_facts(session, settings, clock, TZ)
+    config = config_from_settings(settings)
+    assert idle_gate(RESEARCH, facts, clock.now_utc(), config) == (True, OK)
+
+    # And the other way: /study keeps its own slot beside the manual run.
+    async with sessionmaker() as session:
+        _job_id, refusal = await research_jobs.enqueue_study(
+            session, settings, clock, timezone=TZ, packet="forums", topic="что угодно"
+        )
+    assert refusal is None
+
+
 # --- the pipeline is invoked unchanged ------------------------------------
 
 
@@ -381,7 +410,10 @@ async def test_planner_picks_research_when_nothing_else_is_eligible(sessionmaker
     clock = _clock()
     await _seed_state(sessionmaker)
     await _add_topic(sessionmaker)
-    settings = _settings(CANARY_DOW=5)  # 2026-09-23 is a Wednesday (3)
+    # 2026-09-23 is a Wednesday (3). The weekly suggestion batch
+    # (anchor-interest-suggestions-plan.md section 5a) outranks research
+    # with a topic and a packet in place, so it is switched off here.
+    settings = _settings(CANARY_DOW=5, INTEREST_SUGGEST_WEEKLY=False)
     _patch_pipeline(monkeypatch)
 
     async with sessionmaker() as session:

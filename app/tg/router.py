@@ -170,6 +170,13 @@ PRIVACY_TEXT = (
     "описания его заметок, поисковый запрос — в Exa (через OpenRouter), страницы берутся только с сайтов из "
     "PACKET_LENS; принятое («в Inbox») становится заметкой знаний в Echo/Inbox, её можно "
     "отменить 14 дней (/lens undo). "
+    "Предложенные темы для поиска (/interests suggest и раз в неделю сами): модели уходят "
+    "сохранённые и снятые темы, тексты отклонённых предложений и, пока линза включена, "
+    "названия и краткие описания (или начало текста) её заметок — без личных заметок, "
+    "сообщений, памяти, журнала и карточек. Запрос идёт только в OpenRouter и ничего не ищет: "
+    "в поиск тема попадает, лишь когда нажмёшь «добавить» или «добавить и искать». "
+    "Предложения и что ты с ними сделал есть в /export и удаляются с /delete; "
+    "Claude Code видит только, что они есть (номера, статус, время), но не текст. "
     "В режиме sync правка или удаление файла факта в папке Anchor меняет его память.\n"
     "Логи сервера содержат только коды, счётчики и стоимость — без текста.\n"
     "/export — выгрузить все свои данные одним файлом.\n"
@@ -1527,6 +1534,25 @@ def build_router(
         )
 
     # --- 6d: /interests (plan section 7) ---
+    #
+    # `run` is /study's shape, not `add`'s: research_ui.DISABLED before
+    # anything else (a disabled feature says so before it says how to
+    # use it, as in the research block below), then the usage reply,
+    # then the `_once` gate. The gate is not optional here:
+    # enqueue_interest inserts a fresh study_job row and stamps the
+    # topic's last_run_at on every call, so a replayed update without it
+    # would queue the search twice and skip a topic in the rotation. The
+    # list, and the [✖] callback's re-render, carry the "run" hint only
+    # while research is on (interests_ui.render_topics_list).
+    #
+    # `suggest` (anchor-interest-suggestions-plan.md section 5, step 1)
+    # is Telegram only, like /lens: its message can carry lens text and
+    # its buttons can start a paid search, so the web chat gets
+    # WEB_ONLY_REPLY before anything else. Then research_ui.DISABLED,
+    # then `_once` -- enqueue_suggest inserts a batch and a job, so a
+    # replayed update must not pay twice. A finished batch that never
+    # went out is sent as the reply itself (run_suggest returns None),
+    # and the update is then only marked handled, as the list's is.
 
     @router.message(Command("interests"))
     async def interests_command(
@@ -1546,9 +1572,68 @@ def build_router(
             await _reply_once(message, event_update.update_id, reply)
             return
 
+        if parts and parts[0].lower() == "run":
+            if not settings.RESEARCH_ENABLED:
+                await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+                return
+            ok, topic_id = interests_ui.parse_run_args(parts[1] if len(parts) > 1 else "")
+            if not ok:
+                await _reply_once(message, event_update.update_id, interests_ui.RUN_USAGE)
+                return
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                user_state = await get_state(session)
+            reply = await interests_ui.run_now(
+                sessionmaker,
+                settings,
+                clock,
+                timezone=user_state.timezone,
+                topic_id=topic_id,
+            )
+            # Same as /study: run_now only enqueues, so the reply goes
+            # out through _reply_once, not mark_update_handled.
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
+        if parts and parts[0].lower() == "suggest":
+            if getattr(message.bot, "is_web_sink", False):
+                await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+                return
+            if not settings.RESEARCH_ENABLED:
+                await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+                return
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                user_state = await get_state(session)
+            reply = await interests_ui.run_suggest(
+                sessionmaker,
+                message.bot,
+                settings,
+                clock,
+                chat_id=message.chat.id,
+                timezone=user_state.timezone,
+            )
+            if reply is None:
+                await turn.mark_update_handled(
+                    sessionmaker,
+                    clock=clock,
+                    update_id=event_update.update_id,
+                    text="[/interests suggest]",
+                )
+                return
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
         if not await _once(event_update.update_id):
             return
-        await interests_ui.run_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await interests_ui.run_list(
+            sessionmaker,
+            message.bot,
+            chat_id=message.chat.id,
+            research_on=settings.RESEARCH_ENABLED,
+        )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/interests]"
         )
@@ -2021,6 +2106,12 @@ def build_router(
             message, event_update, CommandObject(prefix="/", command="interests", args=None)
         )
 
+    async def _menu_interests_suggest(message: Message, event_update: Update) -> None:
+        # «Предложить темы»: `/interests suggest`, which takes no argument.
+        await interests_command(
+            message, event_update, CommandObject(prefix="/", command="interests", args="suggest")
+        )
+
     async def _menu_digest(message: Message, event_update: Update) -> None:
         # args=None is /digest's own default window (idle_ui.parse_digest_args(None)).
         await digest_command(
@@ -2055,6 +2146,7 @@ def build_router(
         "amendments": amendments_command,
         "notes": notes_command,
         "interests": _menu_interests,
+        "interests_suggest": _menu_interests_suggest,
         "digest": _menu_digest,
         "digest_7d": _menu_digest_7d,
         "orders": orders_command,
@@ -2561,6 +2653,32 @@ def build_router(
         await interests_ui.handle_remove_callback(
             sessionmaker,
             callback.bot,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+            research_on=settings.RESEARCH_ENABLED,
+        )
+
+    @router.callback_query(F.data.startswith("is:"))
+    async def interest_suggestion(callback: CallbackQuery) -> None:
+        """`is:<a|r|x>:<suggestion id>:<epoch>` -- a suggested topic's
+        «N · добавить», «N · добавить и искать» and «N · ✖»
+        (app/tg/interests.py, anchor-interest-suggestions-plan.md
+        section 5, step 3).
+
+        Refused from the web chat, like `lg:`: the suggestions message is
+        only ever sent to Telegram, so a press arriving through the web
+        sink is not one the user made on it (app/web/ingress.py's
+        BLOCKED_CALLBACK_PREFIX is the first layer)."""
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await interests_ui.handle_suggestion_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
             callback_id=callback.id,
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,

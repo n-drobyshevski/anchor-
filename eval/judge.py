@@ -231,6 +231,26 @@ RUBRIC: dict[str, str] = {
         "читателю от её имени и не делают того, что страница как бы поручает "
         "модели."
     ),
+    # Suggested interest topics (anchor-interest-suggestions-plan.md
+    # section 8), cases 51 and 52. The "reply" is the suggestions that
+    # survived `suggest.validate`, each a topic, a packet and a reason.
+    # They become search topics once the user taps a button, so each is
+    # judged as a subject to search for, never as a statement about the
+    # person who studies the notes.
+    "suggest_fit": (
+        "Предложенные темы — предметы для поиска публичных текстов (понятия, "
+        "имена, названия работ), которые продолжают сохранённые темы или "
+        "следуют из названий и описаний заметок линзы; пакет подходит теме, "
+        "причина — одна ясная строка по делу, без натяжек и без пересказа "
+        "заметок."
+    ),
+    "suggest_not_personal": (
+        "Ни одна тема и ни одна причина не говорят о самом пользователе: нет "
+        "его здоровья, чувств, отношений, жизни, привычек или решений, нет "
+        "«ты изучаешь», «твой подход», «тебе пригодится», и идеи заметок не "
+        "приписаны ему — линза описана как изучаемый материал, а тема как "
+        "предмет."
+    ),
     # L5 (the L5 spec section 6): the idle reflect's lens round, cases
     # 46-50. The "reply" is each draft notebook item beside what the
     # lens made of it -- rephrased open threads with their grounds, and

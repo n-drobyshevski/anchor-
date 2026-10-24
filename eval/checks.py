@@ -57,6 +57,17 @@ which it reuses over the notebook entries -- `reflect_checks`:
 The code enforces the first two already (app/core/idle/reflect_lens.py's
 `merge`); a case asks for them anyway, so a regression in the merge
 fails the eval as well as the tests.
+
+Suggested interest topics (anchor-interest-suggestions-plan.md section
+8) add two for a suggestion case, over the suggestions that survived
+`suggest.validate` -- `suggest_checks`:
+
+- `min_suggestions` -- did at least this many suggestions survive?
+- `max_suggestions` -- did at most this many (0: nothing to offer)?
+
+Whether a topic is about a subject and not about the person is the
+text checks' job (`forbidden_regex` over the topics' and reasons' own
+words, and again over the raw reply) and the judge's.
 """
 
 from __future__ import annotations
@@ -534,4 +545,38 @@ def reflect_checks(
         results.append(draft_shape_kept(draft, final))
     if "min_grounded" in spec:
         results.append(min_grounded(final, spec["min_grounded"]))
+    return results
+
+
+# --- Suggested interest topics -----------------------------------------------------
+
+
+def min_suggestions(suggestions: list[dict], minimum: int) -> Result:
+    """At least `minimum` suggestions survived `suggest.validate`."""
+    return Result(
+        "min_suggestions",
+        len(suggestions) >= minimum,
+        f"предложений: {len(suggestions)} (нужно не меньше {minimum})",
+    )
+
+
+def max_suggestions(suggestions: list[dict], maximum: int) -> Result:
+    """At most `maximum` suggestions survived."""
+    return Result(
+        "max_suggestions",
+        len(suggestions) <= maximum,
+        f"предложений: {len(suggestions)} (нужно не больше {maximum})",
+    )
+
+
+def suggest_checks(spec: dict, *, suggestions: list[dict] | None) -> list[Result]:
+    """The suggestion checks a case asked for. `suggestions` None means
+    the reply did not parse, which fails every one of them."""
+    if suggestions is None:
+        return [Result("suggest_parsed", False, "ответ модели не разобран")]
+    results: list[Result] = []
+    if "min_suggestions" in spec:
+        results.append(min_suggestions(suggestions, spec["min_suggestions"]))
+    if "max_suggestions" in spec:
+        results.append(max_suggestions(suggestions, spec["max_suggestions"]))
     return results

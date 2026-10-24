@@ -56,6 +56,20 @@ draft item beside what the lens made of it; the text checks run over
 the final entries' words -- and over the grounding call's raw rewrites,
 before the merge drops anything -- and the reflect checks over what the
 round did (eval/checks.py's `reflect_checks`).
+
+Suggested interest topics (anchor-interest-suggestions-plan.md section
+8): an `interest_suggest` case runs the suggestion call --
+`suggest.build_input` over the topics and lens notes the case seeds,
+`suggest.call` and `suggest.validate` -- on the provider the batch builds
+for itself (`suggest.build_suggest_provider`: `INTEREST_SUGGEST_MODEL`,
+else the safety model, at temperature 0.3 with
+`INTEREST_SUGGEST_MAX_TOKENS`). Its "reply" is the surviving topics
+rendered for the report; the text checks run over their own words -- and
+over the raw reply, before `validate()` and its `screen()` drop anything
+-- and the suggestion checks over how many survived (eval/checks.py's
+`suggest_checks`). Like every case it is a manual run; its `--dry-run`,
+which builds the call's exact messages and makes none, is the part that
+needs no key (plan section 8: dry-run only in CI).
 """
 
 from __future__ import annotations
@@ -72,10 +86,12 @@ from app.core.clock import SystemClock
 from app.core.extract import parse_json
 from app.core.idle import lens_garden, reflect_lens
 from app.llm.openrouter import OpenRouterProvider, build_client
+from app.research import suggest
 from eval import checks as checks_module
 from eval import judge as judge_module
 from eval import scenario
 from eval.cases import (
+    INTEREST_SUGGEST,
     LENS_DISTILL,
     LENS_GARDEN,
     LENS_QUERY,
@@ -115,8 +131,11 @@ class Outcome:
 
 # The case kinds that generate on `LLM_MODEL_SAFETY` rather than on the
 # persona model: L2's lens round, L3's garden, L4's research steps, L5's
-# reflect lens round.
-SAFETY_MODEL_KINDS = (LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL, LENS_REFLECT)
+# reflect lens round, and the topic suggestions (whose own
+# `INTEREST_SUGGEST_MODEL`, when set, replaces the safety model for them).
+SAFETY_MODEL_KINDS = (
+    LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL, LENS_REFLECT, INTEREST_SUGGEST,
+)
 # L4: the two research kinds, run by `run_research_case`.
 RESEARCH_KINDS = (LENS_QUERY, LENS_DISTILL)
 
@@ -228,6 +247,8 @@ GROUNDING_SCHEMA_NAME = "anchor_lens_grounding"
 GARDEN_SCHEMA_NAME = lens_garden.GARDEN_SCHEMA.name
 # app/core/idle/reflect_lens.py's grounding schema name (L5).
 REFLECT_GROUNDING_SCHEMA_NAME = reflect_lens.GROUNDING_SCHEMA.name
+# app/research/suggest.py's schema name (suggested interest topics).
+SUGGEST_SCHEMA_NAME = suggest.SUGGEST_SCHEMA.name
 
 
 def raw_grounding_text(reply: str) -> str:
@@ -279,6 +300,21 @@ def raw_garden_text(reply: str) -> str:
     return "\n".join(lines)
 
 
+def raw_suggest_text(reply: str) -> str:
+    """Every raw suggestion's `text` and `why`, one per line, before
+    `validate()`; empty when the reply is not that JSON. A suggestion
+    `validate()` dropped still fails a forbidden pattern."""
+    payload = suggest.parse_json(reply)
+    items = payload.get("suggestions") if isinstance(payload, dict) else None
+    lines = []
+    for item in items if isinstance(items, list) else ():
+        if isinstance(item, dict):
+            lines.extend(
+                value for value in (item.get("text"), item.get("why")) if isinstance(value, str)
+            )
+    return "\n".join(lines)
+
+
 class _Metered:
     """Wraps a provider for one lens case: adds up what its calls cost
     and keeps the first exception. app/core/lens_review.py swallows a
@@ -298,6 +334,9 @@ class _Metered:
         self.garden_raw: str | None = None
         # L5: the reflect grounding call's reply, before the merge.
         self.reflect_raw: str | None = None
+        # Suggested interest topics: the suggestion call's reply, before
+        # `validate()`.
+        self.suggest_raw: str | None = None
 
     async def complete(self, messages, *, conversation_id, json_schema=None):
         try:
@@ -315,6 +354,8 @@ class _Metered:
             self.garden_raw = response.text
         if json_schema is not None and json_schema.name == REFLECT_GROUNDING_SCHEMA_NAME:
             self.reflect_raw = response.text
+        if json_schema is not None and json_schema.name == SUGGEST_SCHEMA_NAME:
+            self.suggest_raw = response.text
         return response
 
     async def close(self) -> None:  # pragma: no cover - the run closes the client
@@ -491,6 +532,58 @@ async def run_reflect_case(
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
 
+async def run_suggest_case(
+    sessionmaker,
+    case: Case,
+    settings: Settings,
+    clock,
+    provider,
+    judge,
+    *,
+    amendments: list[str] | None = None,
+) -> Outcome:
+    """One `interest_suggest` case for real: seed, the call, `validate()`,
+    check, judge. A reply that does not parse fails the case, as it fails
+    the batch."""
+    if provider is None:
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), 0.0,
+            "нет провайдера предложений (INTEREST_SUGGEST_MODEL / LLM_MODEL_SAFETY) для кейса тем",
+        )
+    metered = _Metered(provider)
+    try:
+        async with sessionmaker() as session:
+            await scenario.reset(session)
+            await scenario.seed(session, case, clock, amendments=amendments)
+            run = await scenario.run_interest_suggest(
+                session, scenario.suggest_settings(settings), metered
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed case, not a failed run
+        return Outcome(
+            case, "", [], judge_module.Verdict({}, [], False), metered.usd_cost,
+            metered.error or f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+
+    reply = scenario.render_suggest_run(run)
+    check_results = checks_module.run_all(run.suggestion_text if run else "", case.checks, settings)
+    if case.checks.get("forbidden_regex") and metered.suggest_raw is not None:
+        raw = checks_module.forbidden(
+            raw_suggest_text(metered.suggest_raw), case.checks["forbidden_regex"]
+        )
+        check_results.append(checks_module.Result("forbidden_regex_raw", raw.passed, raw.detail))
+    check_results += checks_module.suggest_checks(
+        case.checks, suggestions=run.suggestions if run else None
+    )
+    verdict = await judge_module.judge(
+        judge,
+        items=case.judge_items,
+        case_title=case.title,
+        prompt_text=scenario.situation(case),
+        reply=reply,
+    )
+    return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
+
+
 async def run_research_case(
     case: Case,
     settings: Settings,
@@ -549,6 +642,7 @@ async def run_case(
     amendments: list[str] | None = None,
     review=None,
     garden=None,
+    suggester=None,
 ) -> Outcome:
     """Run one case against a fresh, seeded scenario.
 
@@ -573,6 +667,11 @@ async def run_case(
     L4's `lens_query` and `lens_distill` cases run on `review`, the
     safety provider (`run_research_case`), on the same terms again, and
     so does L5's `lens_reflect` (`run_reflect_case`).
+
+    `suggester` is the topic suggestions' own provider, for an
+    `interest_suggest` case (`run_suggest_case`), on the same terms as
+    `garden`: a dry run builds its messages through `scenario.build`, and
+    eval/trial.py passes none.
     """
     if case.input["kind"] == LENS_REVIEW and not dry_run:
         return await run_lens_case(
@@ -581,6 +680,10 @@ async def run_case(
     if case.input["kind"] == LENS_GARDEN and not dry_run:
         return await run_garden_case(
             sessionmaker, case, settings, clock, garden, judge, amendments=amendments
+        )
+    if case.input["kind"] == INTEREST_SUGGEST and not dry_run:
+        return await run_suggest_case(
+            sessionmaker, case, settings, clock, suggester, judge, amendments=amendments
         )
     if case.input["kind"] in RESEARCH_KINDS and not dry_run:
         return await run_research_case(case, settings, review, judge)
@@ -631,7 +734,7 @@ def render_report(
         f"- Модель: `{settings.LLM_MODEL}`",
         f"- Судья: `{judge_model}`",
         *(
-            [f"- Модель разбора и сада (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
+            [f"- Модель разбора, сада и тем (кейсы линзы): `{settings.LLM_MODEL_SAFETY}`"]
             if any(o.case.input["kind"] in SAFETY_MODEL_KINDS for o in outcomes)
             else []
         ),
@@ -702,12 +805,13 @@ async def main_async(args) -> int:
     # A dry run builds no provider: it exists precisely so the prompt
     # path can be exercised on a machine with no key and no budget.
     if args.dry_run:
-        main = judge = review = garden = client = None
+        main = judge = review = garden = suggester = client = None
         judge_model = judge_model_for(settings)
     else:
         main, judge, judge_model, client = _providers(settings)
         review = _review_provider(settings, client)
         garden = lens_garden.build_garden_provider(settings, client)
+        suggester = suggest.build_suggest_provider(settings, client)
 
     outcomes: list[Outcome] = []
     try:
@@ -715,7 +819,7 @@ async def main_async(args) -> int:
             for case in cases:
                 outcome = await run_case(
                     sessionmaker, case, settings, clock, main, judge, args.dry_run,
-                    review=review, garden=garden,
+                    review=review, garden=garden, suggester=suggester,
                 )
                 outcomes.append(outcome)
                 if args.dry_run:
