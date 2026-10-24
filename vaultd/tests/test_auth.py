@@ -22,7 +22,12 @@ BAD_HEADERS = [
     {"Authorization": "Bearer wrong-token-" + "y" * 32},
     {"Authorization": TOKEN},
     {"Authorization": "bearer " + TOKEN},
-    {"Authorization": "Bearer " + TOKEN + " "},
+    # Not `TOKEN + " "`: since aiohttp 3.14.4 the server's parser strips
+    # whitespace around a field value (RFC 9110 section 5.5 -- it is not
+    # part of the value), so a trailing space reaches the handler as
+    # exactly the right header. Whitespace *inside* the value is kept,
+    # and compare_digest must still refuse it.
+    {"Authorization": "Bearer  " + TOKEN},
     {"Authorization": "Basic " + TOKEN},
 ]
 
