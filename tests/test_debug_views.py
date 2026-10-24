@@ -110,6 +110,13 @@ async def test_the_card_view_shows_the_cross_check_verdict_but_not_its_quote(ses
     assert "corroboration_quote" not in columns
 
 
+async def test_the_job_view_shows_the_manual_flag_but_not_the_topic(sessionmaker):
+    async with sessionmaker() as session:
+        columns = (await _debug_columns(session))["study_job"]
+    assert "manual" in columns
+    assert not {"packet", "query"} & columns
+
+
 async def test_every_debug_view_source_is_classified(sessionmaker):
     # A view may only exist over a table whose free-text columns are
     # listed above, so the leak check never silently skips one. Tables

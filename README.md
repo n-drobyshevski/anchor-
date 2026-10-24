@@ -24,7 +24,7 @@ no model call, no outbound).
 | Personality: mood, voice/nicknames, notebook, standing orders, weekly review, amendments, callbacks, debt queue, attention (phase 5) | on | — |
 | Idle work: backfill, consolidate, reflect, prebrief, critique, canary (phase 6) | on | `IDLE_ENABLED` |
 | Nightly encrypted backup (phase 6) | on, but records `not_configured` until set up | `BACKUP_ENABLED` + `BACKUP_AGE_RECIPIENT` + `BACKUP_S3_*`; needs `pg_dump` 18 in the image |
-| Research loop: `/study`, `/read`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED` |
+| Research loop: `/study`, `/read`, `/interests run`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED`; `RESEARCH_JOBS_PER_DAY` (1) is the shared `/study` slot, `RESEARCH_MANUAL_PER_DAY` (3) is `/interests run`'s own |
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Welfare shadow: Jev (TypeSafe's typed-decision model, via OpenRouter) is asked the welfare question beside the classifier, recorded in `welfare_shadow`, never acted on. Compare offline with `python -m eval.welfare` | **off** | `WELFARE_SHADOW_MODEL` (e.g. `typesafe/jev-1.14`); `WELFARE_SHADOW_TIMEOUT_SECONDS` (3) |
@@ -63,7 +63,7 @@ OpenRouter's Decisions API. Why things are the way they are is in
 | `/review` | Weekly review | — |
 | `/amendments` | Adopted persona amendments | — |
 | `/digest`, `/digest 7d` | What idle work did in the last day / week; undo | idle work itself: `IDLE_ENABLED` |
-| `/interests` | Topics for background research | the research itself: `RESEARCH_ENABLED` |
+| `/interests` | Topics for background research: bare lists them (each topic has a [✖] button to remove it), `add`, and `run [номер]`, which searches one saved topic now instead of waiting for an idle slot (bare takes the topic idle research would take next; a number, or `#3`, takes that one from the list). Queues the same job as `/study`, so the worker sends «Готово: N карточек. /notes» when it ends (dropped, not deferred, in quiet hours, under a pause or `/quiet`; the cards are in `/notes` either way). Takes its own daily quota, `RESEARCH_MANUAL_PER_DAY`, so it never spends the `/study` slot; the money caps (`RESEARCH_JOB_USD_CAP`, `DAILY_USD_CAP`) still apply. A topic whose packet has no domains configured (`guides` until `PACKET_GUIDES` is set) is refused, and a bare run skips it | the research itself: `RESEARCH_ENABLED` |
 | `/privacy` | What is stored and for how long | — |
 | `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |

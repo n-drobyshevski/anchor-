@@ -3346,6 +3346,62 @@ on demand, the way `/lens garden now` runs the garden: its own gate,
   with `manual: true` in its job payload, and the result message keeps
   its holds in app/tg/garden.py.
 
+## `/interests run`
+
+The saved `/interests` topics were researched only by the idle
+`research` kind, which waits `IDLE_AFTER_H` of silence (every message
+the user sends resets the wait) and shares the single daily `/study`
+slot. `/interests run [номер]` researches one saved topic on demand.
+
+- **One path, not a new one.** It queues the same `study_job` a `/study`
+  does (`kind='study'`, the topic's packet, the topic's text as the
+  query) and the worker's existing RESEARCH branch runs it, so the
+  cards, the caps, the clips and the «Готово: N карточек. /notes» line
+  are all the code that already exists. Nothing about `/study`, the
+  idle `research` kind or the lens tap changed.
+- **A quota of its own.** `study_job.manual` marks the rows, and
+  `RESEARCH_MANUAL_PER_DAY` (default 3) counts only them; every `/study`
+  count (`used_today`, `study_quota_used`, `enqueue_study`,
+  `enqueue_lens_study`) now leaves them out, so a manual search never
+  takes the slot `/study`, the idle run or a lens tap share, and those
+  never take its. `ck_study_job_manual` allows the flag only on a
+  `kind='study'` row: simpler than listing packets, and it does not need
+  touching when `PACKETS` grows.
+- **Dropped**: the shared quota, the idle rows (the wait, the window,
+  preemption), and the pause and the welfare cooldown, the same as
+  `/study`: the user typed the command, so it is no outbound.
+- **Kept**: the `RESEARCH_ENABLED` switch and the money caps, as for
+  `/study`: the daily cap is checked before the job is written, and the
+  per-job cap by the worker while it runs.
+- **Which topic.** An explicit number (`3` or `#3`, the numbers
+  `/interests` shows) must be an active topic, else «Нет такой темы.».
+  A bare run takes the topic the idle run would take next: oldest
+  `last_run_at`, never-run first, then the lowest id. The query is
+  inlined in app/research/jobs.py because app/core/idle/research.py
+  imports from there. A topic whose packet has no domains configured is
+  refused (explicit) or skipped (bare), and a list with no usable topic
+  answers with the same «пакет не настроен» text `/study` gives.
+- **The rotation moves.** An accepted run sets the topic's
+  `last_run_at`, so the idle run goes to a different topic next, and
+  two bare runs in a row pick two different ones.
+- **Quiet hours.** The «Готово» line is `/study`'s: it is dropped, not
+  deferred, in quiet hours, under a pause or `/quiet`; the cards are in
+  `/notes` either way.
+- **Replay-safe once answered.** The router gates the update with
+  `_once` (`turn.already_handled`: has this update already got its
+  stored reply?), and `_reply_once` stores the reply right after the
+  enqueue, so a redelivery after that point is dropped. The queue row's
+  dedup key is the fresh job id, so it does not guard against a replay
+  by itself. A crash between the enqueue's commit and the stored reply
+  (the same window `/study` has) can queue a second job, stamp a second
+  topic and spend a second manual-quota slot; accepted, as for `/study`.
+- **Logs.** One line, with the job id only: never the topic's text or
+  its id (app/log.py).
+- **Not done**: buttons under the list (a press would need its own
+  replay protection, and the command is two words), and an "already
+  running" check: the quota bounds the jobs, and two at once cost what
+  two in a row would.
+
 ## W2 may edit lens notes
 
 Lens notes were read-only to W2 (the "W2 cannot write lens notes"

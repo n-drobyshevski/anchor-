@@ -1527,6 +1527,16 @@ def build_router(
         )
 
     # --- 6d: /interests (plan section 7) ---
+    #
+    # `run` is /study's shape, not `add`'s: research_ui.DISABLED before
+    # anything else (a disabled feature says so before it says how to
+    # use it, as in the research block below), then the usage reply,
+    # then the `_once` gate. The gate is not optional here:
+    # enqueue_interest inserts a fresh study_job row and stamps the
+    # topic's last_run_at on every call, so a replayed update without it
+    # would queue the search twice and skip a topic in the rotation. The
+    # list, and the [✖] callback's re-render, carry the "run" hint only
+    # while research is on (interests_ui.render_topics_list).
 
     @router.message(Command("interests"))
     async def interests_command(
@@ -1546,9 +1556,38 @@ def build_router(
             await _reply_once(message, event_update.update_id, reply)
             return
 
+        if parts and parts[0].lower() == "run":
+            if not settings.RESEARCH_ENABLED:
+                await _reply_once(message, event_update.update_id, research_ui.DISABLED)
+                return
+            ok, topic_id = interests_ui.parse_run_args(parts[1] if len(parts) > 1 else "")
+            if not ok:
+                await _reply_once(message, event_update.update_id, interests_ui.RUN_USAGE)
+                return
+            if not await _once(event_update.update_id):
+                return
+            async with sessionmaker() as session:
+                user_state = await get_state(session)
+            reply = await interests_ui.run_now(
+                sessionmaker,
+                settings,
+                clock,
+                timezone=user_state.timezone,
+                topic_id=topic_id,
+            )
+            # Same as /study: run_now only enqueues, so the reply goes
+            # out through _reply_once, not mark_update_handled.
+            await _reply_once(message, event_update.update_id, reply)
+            return
+
         if not await _once(event_update.update_id):
             return
-        await interests_ui.run_list(sessionmaker, message.bot, chat_id=message.chat.id)
+        await interests_ui.run_list(
+            sessionmaker,
+            message.bot,
+            chat_id=message.chat.id,
+            research_on=settings.RESEARCH_ENABLED,
+        )
         await turn.mark_update_handled(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/interests]"
         )
@@ -2565,6 +2604,7 @@ def build_router(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
             data=callback.data,
+            research_on=settings.RESEARCH_ENABLED,
         )
 
     @router.callback_query(F.data.startswith("idle:u:"))

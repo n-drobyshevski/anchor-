@@ -511,6 +511,10 @@ class Settings(BaseSettings):
     # single distill on a page the user already chose.
     RESEARCH_JOBS_PER_DAY: int = 1
     RESEARCH_READS_PER_DAY: int = 3
+    # `/interests run` researches one saved topic on demand. It has its
+    # own daily quota so the shared /study slot above (/study, idle
+    # research, lens taps) is not spent by it; the money caps still apply.
+    RESEARCH_MANUAL_PER_DAY: int = 3
     # Per /study job. A search that finds nothing gets one reformulation
     # (plan section 6), so the floor for a useful job is 2.
     RESEARCH_MAX_SEARCHES: int = 4

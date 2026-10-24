@@ -327,6 +327,11 @@ times and counts:
   for never checked) and the id of the clip that settled it
   (`corroboration_clip_id`, migration d4f8a2c6e1b3), never that clip's
   quote (`corroboration_quote` is web text, like `quote`);
+- `debug.study_job` also has `manual` (migration c2e7a9f4b1d6): true for
+  a job `/interests run` queued, which counts against
+  `RESEARCH_MANUAL_PER_DAY` and not against `/study`'s slot. It is a
+  flag, so it tells you a topic was researched on request, never which
+  topic or what was found; `packet` and `query` stay out of the view;
 - `lens.gaps(n)` and `debug.lens_gap` show a researched gap as
   `closed`, like a resolved one. A research that is spent or declined
   sends the gap back to `open`, which a resolved gap never does, so a

@@ -29,6 +29,7 @@ from app.core import clock as clock_module
 from app.core.clock import FrozenClock
 from app.core import safety_events
 from app.db.models import (
+    InterestTopic,
     Job,
     SafetyEvent,
     SpendLedger,
@@ -698,6 +699,224 @@ async def test_study_and_read_quotas_are_separate(sessionmaker, clock):
             session, settings, clock, timezone=TIMEZONE, url=URL
         )
     assert refusal == jobs.QUOTA
+
+
+# --- /interests run: enqueue_interest ---------------------------------
+#
+# `PACKET_GUIDES` is empty in `_study_settings`, so a `guides` topic is the
+# one whose packet "has no domains" and a run of it can only be refused.
+
+RUN_NOW = datetime.datetime(2026, 10, 24, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+def _interest_settings(**kw) -> Settings:
+    return _study_settings(**{"RESEARCH_MANUAL_PER_DAY": 3, **kw})
+
+
+async def _add_topic(
+    sessionmaker, text="бессонница", packet="forums", *, active=True, last_run_at=None
+) -> int:
+    async with sessionmaker() as session:
+        topic = InterestTopic(text=text, packet=packet, active=active, last_run_at=last_run_at)
+        session.add(topic)
+        await session.commit()
+        return topic.id
+
+
+async def _enqueue_interest(sessionmaker, clock, settings, topic_id=None) -> jobs.InterestRun:
+    async with sessionmaker() as session:
+        return await jobs.enqueue_interest(
+            session, settings, clock, timezone=TIMEZONE, topic_id=topic_id
+        )
+
+
+async def _last_run_at(sessionmaker, topic_id: int):
+    async with sessionmaker() as session:
+        return (await session.get(InterestTopic, topic_id)).last_run_at
+
+
+async def test_interest_run_refuses_when_disabled(sessionmaker, clock):
+    await _add_topic(sessionmaker)
+    settings = _interest_settings(RESEARCH_ENABLED=False)
+    result = await _enqueue_interest(sessionmaker, clock, settings)
+    assert result == jobs.InterestRun(refusal=jobs.DISABLED)
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_interest_run_without_a_topic_says_there_is_none(sessionmaker, clock):
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert result == jobs.InterestRun(refusal=jobs.NO_TOPIC)
+    await _add_topic(sessionmaker, active=False)
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert result.refusal == jobs.NO_TOPIC, "a retired topic is not a topic"
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_interest_run_refuses_an_unknown_and_a_retired_topic_id(sessionmaker, clock):
+    retired = await _add_topic(sessionmaker, active=False)
+    for topic_id in (retired, retired + 1000):
+        result = await _enqueue_interest(
+            sessionmaker, clock, _interest_settings(), topic_id=topic_id
+        )
+        assert result == jobs.InterestRun(refusal=jobs.TOPIC_GONE)
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_interest_run_names_the_packet_with_no_domains(sessionmaker, clock):
+    """An explicit number is never quietly swapped for another topic: a
+    `guides` topic is refused as EMPTY_PACKET even with a good one beside it."""
+    await _add_topic(sessionmaker, "хорошая тема", "forums")
+    guides = await _add_topic(sessionmaker, "тема с гидами", "guides")
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings(), topic_id=guides)
+    assert result == jobs.InterestRun(refusal=jobs.EMPTY_PACKET, packet="guides")
+    await _assert_nothing_queued(sessionmaker)
+    assert await _last_run_at(sessionmaker, guides) is None
+
+
+async def test_interest_run_with_only_empty_packets_names_the_first_ones(sessionmaker, clock):
+    await _add_topic(sessionmaker, "первая", "guides")
+    await _add_topic(sessionmaker, "вторая", "guides")
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert result == jobs.InterestRun(refusal=jobs.EMPTY_PACKET, packet="guides")
+    await _assert_nothing_queued(sessionmaker)
+
+
+async def test_interest_run_without_a_number_follows_the_idle_rotation(sessionmaker, clock):
+    """Never-run first, then the oldest `last_run_at`, then the lowest id:
+    the order app/core/idle/research.py's `pick_topic` uses."""
+    old = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+    newer = datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc)
+    await _add_topic(sessionmaker, "недавняя", last_run_at=newer)
+    await _add_topic(sessionmaker, "давняя", last_run_at=old)
+    never_b = await _add_topic(sessionmaker, "ни разу, вторая")
+    never_a = await _add_topic(sessionmaker, "ни разу, третья")
+    settings = _interest_settings(RESEARCH_MANUAL_PER_DAY=10)
+
+    order = []
+    for _ in range(4):
+        order.append((await _enqueue_interest(sessionmaker, clock, settings)).text)
+    assert order == ["ни разу, вторая", "ни разу, третья", "давняя", "недавняя"]
+    assert never_b < never_a
+
+
+async def test_interest_run_without_a_number_skips_a_topic_it_could_only_refuse(sessionmaker, clock):
+    await _add_topic(sessionmaker, "только гиды", "guides")
+    await _add_topic(sessionmaker, "рабочая", "ref")
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert (result.refusal, result.text, result.packet) == (None, "рабочая", "ref")
+
+
+async def test_an_accepted_interest_run_is_a_manual_study_job_with_a_queue_row(sessionmaker):
+    clock = FrozenClock(RUN_NOW)
+    topic_id = await _add_topic(sessionmaker, "как высыпаться", "forums")
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings(), topic_id=topic_id)
+
+    assert result.refusal is None and result.job_id is not None
+    assert (result.packet, result.text) == ("forums", "как высыпаться")
+    async with sessionmaker() as session:
+        row = await session.get(StudyJob, result.job_id)
+        assert (row.kind, row.status, row.packet, row.query, row.manual) == (
+            "study", "queued", "forums", "как высыпаться", True
+        )
+        assert row.local_date == clock_module.local_date(clock, TIMEZONE)
+        queue = (await session.execute(select(Job).where(Job.kind == jobs.RESEARCH))).scalar_one()
+        assert queue.payload == {"job_id": result.job_id}
+    assert await _last_run_at(sessionmaker, topic_id) == RUN_NOW
+
+
+async def test_two_interest_runs_pick_two_different_topics(sessionmaker):
+    clock = FrozenClock(RUN_NOW)
+    await _add_topic(sessionmaker, "первая")
+    await _add_topic(sessionmaker, "вторая")
+    first = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    second = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert (first.text, second.text) == ("первая", "вторая")
+    assert first.job_id != second.job_id
+    assert await _research_queue_count(sessionmaker) == 2
+
+
+async def test_an_interest_run_over_its_quota_writes_nothing_and_keeps_last_run_at(sessionmaker):
+    clock = FrozenClock(RUN_NOW)
+    topic_id = await _add_topic(sessionmaker)
+    settings = _interest_settings(RESEARCH_MANUAL_PER_DAY=1)
+    assert (await _enqueue_interest(sessionmaker, clock, settings)).refusal is None
+    stamp = await _last_run_at(sessionmaker, topic_id)
+
+    later = FrozenClock(RUN_NOW + datetime.timedelta(minutes=5))
+    result = await _enqueue_interest(sessionmaker, later, settings)
+    assert result == jobs.InterestRun(refusal=jobs.QUOTA)
+    assert await _study_job_count(sessionmaker) == 1
+    assert await _research_queue_count(sessionmaker) == 1
+    assert await _last_run_at(sessionmaker, topic_id) == stamp
+
+
+async def test_an_interest_run_at_the_cap_is_refused(sessionmaker, clock):
+    topic_id = await _add_topic(sessionmaker)
+    settings = _interest_settings(DAILY_USD_CAP=0.0)
+    result = await _enqueue_interest(sessionmaker, clock, settings)
+    assert result == jobs.InterestRun(refusal=jobs.CAP)
+    await _assert_nothing_queued(sessionmaker)
+    assert await _last_run_at(sessionmaker, topic_id) is None
+
+
+async def test_manual_runs_and_the_study_slot_are_independent_both_ways(sessionmaker, clock):
+    await _add_topic(sessionmaker, "первая")
+    await _add_topic(sessionmaker, "вторая")
+    settings = _interest_settings(RESEARCH_JOBS_PER_DAY=1, RESEARCH_MANUAL_PER_DAY=1)
+
+    # A manual run leaves /study's slot, as idle research reads it, free.
+    assert (await _enqueue_interest(sessionmaker, clock, settings)).refusal is None
+    async with sessionmaker() as session:
+        assert not await jobs.study_quota_used(session, settings, clock, TIMEZONE)
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] is None
+
+    # /study having spent its slot does not touch the manual one...
+    async with sessionmaker() as session:
+        assert await jobs.study_quota_used(session, settings, clock, TIMEZONE)
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] == jobs.QUOTA
+    # ...which is spent only by manual runs.
+    assert (await _enqueue_interest(sessionmaker, clock, settings)).refusal == jobs.QUOTA
+
+
+async def test_a_study_job_does_not_spend_the_manual_quota(sessionmaker, clock):
+    await _add_topic(sessionmaker)
+    settings = _interest_settings(RESEARCH_JOBS_PER_DAY=1, RESEARCH_MANUAL_PER_DAY=1)
+    assert (await _enqueue_study(sessionmaker, clock, settings))[1] is None
+    assert (await _enqueue_interest(sessionmaker, clock, settings)).refusal is None
+
+
+async def test_used_today_splits_study_from_manual(sessionmaker, clock):
+    await _add_topic(sessionmaker)
+    settings = _interest_settings(RESEARCH_MANUAL_PER_DAY=5)
+    today = clock_module.local_date(clock, TIMEZONE)
+    async with sessionmaker() as session:
+        assert await jobs.used_today(session, today) == {
+            jobs.STUDY: 0, jobs.MANUAL: 0, jobs.READ: 0
+        }
+    await _enqueue_study(sessionmaker, clock, settings)
+    await _enqueue_interest(sessionmaker, clock, settings)
+    await _enqueue_interest(sessionmaker, clock, settings)
+    async with sessionmaker() as session:
+        session.add(StudyJob(kind=jobs.READ, status="done", local_date=today))
+        await session.commit()
+    async with sessionmaker() as session:
+        assert await jobs.used_today(session, today) == {
+            jobs.STUDY: 1, jobs.MANUAL: 2, jobs.READ: 1
+        }
+
+
+async def test_an_interest_run_logs_the_job_id_and_nothing_the_user_wrote(
+    sessionmaker, clock, caplog, monkeypatch
+):
+    await _add_topic(sessionmaker, "секретная тема")
+    # Alembic's fileConfig disables loggers that exist before it runs.
+    monkeypatch.setattr(logging.getLogger("app.research.jobs"), "disabled", False)
+    caplog.set_level(logging.INFO, logger="app.research.jobs")
+    result = await _enqueue_interest(sessionmaker, clock, _interest_settings())
+    assert result.refusal is None
+    mine = [r for r in caplog.records if r.getMessage() == "interest job queued"]
+    assert [r.job_id for r in mine] == [result.job_id]
+    assert "секретная" not in caplog.text
 
 
 # --- /study: the run (plan sections 6, 12) ----------------------------

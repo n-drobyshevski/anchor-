@@ -1056,6 +1056,15 @@ class StudyJob(Base):
     what the pipeline keys on), and unique while set: one research per
     gap. `offered_at` is when its result message went to Telegram --
     the cards' expiry counts from it.
+
+    **`/interests run`**: `manual` marks a `kind='study'` job a manual
+    run of one saved interest topic made (the topic's text is the
+    `query`, its packet the `packet`). It rides the /study queue path
+    but counts against its own daily quota, `RESEARCH_MANUAL_PER_DAY`,
+    so the shared /study slot (`RESEARCH_JOBS_PER_DAY`: /study, idle
+    research, lens taps) stays untouched; the quota helpers in
+    app/research/jobs.py filter on this flag both ways. Only a study job
+    can be manual (`ck_study_job_manual`), never a /read.
     """
 
     __tablename__ = "study_job"
@@ -1086,9 +1095,13 @@ class StudyJob(Base):
         Integer, ForeignKey("lens_gap.id", ondelete="SET NULL")
     )
     offered_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    manual: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         CheckConstraint("kind in ('study', 'read')", name="ck_study_job_kind"),
+        CheckConstraint("not manual or kind = 'study'", name="ck_study_job_manual"),
         CheckConstraint(
             "lens_gap_id is null or (kind = 'study' and packet = 'lens')",
             name="ck_study_job_lens",

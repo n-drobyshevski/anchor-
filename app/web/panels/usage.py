@@ -3,10 +3,12 @@
 - GET /api/usage: today's spend against DAILY_USD_CAP and IDLE_USD_CAP,
   the last 14 local days of spend (per category, and per model over the
   whole window), the daily quotas (unsolicited messages, idle jobs,
-  /study and /read, planner writes, web sends) and Claude's hourly and
-  daily write caps. Only numbers, dates, ledger categories and model
-  names: never message text. A quota whose feature is switched off for
-  this deploy is left out, the same way /menu hides it.
+  /study, /interests run and /read, planner writes, web sends) and
+  Claude's hourly and daily write caps. Only numbers, dates, ledger
+  categories and model names: never message text. A quota whose
+  feature is switched off for this deploy is left out, the same way
+  /menu hides it. /interests run's row is its own allowance
+  (RESEARCH_MANUAL_PER_DAY), counted apart from /study's.
 - GET /api/usage/openrouter: the OpenRouter key's own limit and usage
   (GET /api/v1/key) and, where the key may read it, the account's
   credit balance (GET /api/v1/credits). Asked server-side with the
@@ -83,6 +85,15 @@ async def _quotas(session, settings, clock, timezone: str, limiter: WebRateLimit
     if settings.RESEARCH_ENABLED:
         used = await research_jobs.used_today(session, today)
         quotas.append(_quota("study", "Исследований /study", used[research_jobs.STUDY], settings.RESEARCH_JOBS_PER_DAY, "day"))
+        quotas.append(
+            _quota(
+                "interests_run",
+                "Поисков /interests run",
+                used[research_jobs.MANUAL],
+                settings.RESEARCH_MANUAL_PER_DAY,
+                "day",
+            )
+        )
         quotas.append(_quota("read", "Чтений /read", used[research_jobs.READ], settings.RESEARCH_READS_PER_DAY, "day"))
     if settings.PLANNER_ENABLED:
         quotas.append(
