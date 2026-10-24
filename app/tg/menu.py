@@ -64,9 +64,10 @@ value next to a button that no longer means anything.
 Callback data, prefix `mn:` (distinct from every other prefix already in
 this router's callback_query table -- `m:k:`/`m:p:` (memory), `c:`
 (check-in), `d:` (delete), `so:`/`ob:`/`am:`/`p:`/`pa:`/`pl:`/`r:`/`g:`/
-`cl:`/`it:`/`idle:`/`w:`/`nb:x:`/`st:`/`lr:`/`lg:` (the lens: L2's
-[почему эти заметки?], L3's garden buttons, `lg:` refused from the web
-chat by app/web/ingress.py's BLOCKED_CALLBACK_PREFIX): aiogram matches with
+`cl:`/`it:`/`is:`/`idle:`/`w:`/`nb:x:`/`st:`/`lr:`/`lg:` (the lens: L2's
+[почему эти заметки?], L3's garden buttons; `is:` a suggested interest
+topic's buttons; `lg:` and `is:` refused from the web chat by
+app/web/ingress.py's BLOCKED_CALLBACK_PREFIX): aiogram matches with
 `F.data.startswith`, and none of those is a prefix of `mn:` or vice
 versa, so registration order between this module's handlers and theirs
 never matters):
@@ -144,7 +145,8 @@ def reply_keyboard() -> ReplyKeyboardMarkup:
 # Every key here is a leaf button the hub can show, dispatched by the
 # router to the existing slash-command handler of the same name, or to
 # one with a fixed argument (`quiet_*` -> /quiet, `focus_*` -> /focus,
-# `int_<n>` -> /intensity <n>, `digest_7d` -> /digest 7d, `notes_*` ->
+# `int_<n>` -> /intensity <n>, `digest_7d` -> /digest 7d,
+# `interests_suggest` -> /interests suggest, `notes_*` ->
 # /vault notes, `lib_read_*`/`lib_write_*` -> /claude library [write],
 # `planner_*` -> /planner on|off). Deliberately never here, and so
 # always refused by `action_available` below even if a forged
@@ -212,6 +214,7 @@ ACTIONS: dict[str, str] = {
     "amendments": "Поправки к стилю",
     "notes": "Карточки исследований",
     "interests": "Темы для поиска",
+    "interests_suggest": "Предложить темы",
     "digest": "🌙 Фон за сутки",
     "digest_7d": "🌙 За неделю",
     # deals
@@ -318,6 +321,13 @@ def action_available(action: str, settings: Settings, *, web: bool) -> bool:
         return settings.PLANNER_ENABLED
     if action == "notes":
         return settings.RESEARCH_ENABLED
+    if action == "interests_suggest":
+        # `/interests suggest` (anchor-interest-suggestions-plan.md
+        # section 2): no argument, so a button can be the whole command.
+        # Telegram only, like the command itself (its is_web_sink
+        # guard): its message can carry lens text and its buttons start
+        # paid searches.
+        return settings.RESEARCH_ENABLED and not web
     if action in _VAULT_ACTIONS:
         return _vault_section_visible(settings)
     if action in _CLAUDE_ACTIONS:
@@ -623,6 +633,8 @@ def _render_mem(settings: Settings, *, web: bool, view: MenuView) -> Section:
         rows.append([_action_btn("notes"), _action_btn("interests")])
     else:
         rows.append([_action_btn("interests")])
+    if action_available("interests_suggest", settings, web=web):
+        rows.append([_action_btn("interests_suggest")])
     rows.append([_action_btn("digest"), _action_btn("digest_7d")])
     rows.append(_nav_row())
     return Section(title=MEM_TITLE, hint=None, table_rows=None, rows=rows)

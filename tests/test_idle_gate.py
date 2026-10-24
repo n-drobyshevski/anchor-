@@ -414,5 +414,6 @@ def test_row10_per_kind_daily_limit():
     )
     assert KIND_DAILY_MAX == {
         "backfill": 3, "consolidate": 1, "reflect": 1, "prebrief": 1,
-        "critique": 1, "lens_garden": 1, "lens_research": 1, "research": 1, "canary": 1,
+        "critique": 1, "lens_garden": 1, "lens_research": 1, "interest_suggest": 1,
+        "research": 1, "canary": 1,
     }

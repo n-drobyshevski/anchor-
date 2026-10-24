@@ -33,6 +33,7 @@ from app.core.idle import (
     CANARY,
     CONSOLIDATE,
     CRITIQUE,
+    INTEREST_SUGGEST,
     LENS_GARDEN,
     LENS_RESEARCH,
     PREBRIEF,
@@ -84,6 +85,14 @@ UNCHANGED = KIND_RULE_PREFIX + "unchanged"
 LENS_RESEARCH_OFF = KIND_RULE_PREFIX + "lens_research_off"
 EMPTY_LENS_PACKET = KIND_RULE_PREFIX + "empty_lens_packet"
 NO_LENS_JOB = KIND_RULE_PREFIX + "no_lens_job"
+# anchor-interest-suggestions-plan.md section 5a, in the order
+# `_interest_suggest_rule` checks them (after RESEARCH_DISABLED, which
+# it shares with `_research_rule`).
+SUGGEST_WEEKLY_OFF = KIND_RULE_PREFIX + "suggest_weekly_off"
+NOTHING_TO_SUGGEST = KIND_RULE_PREFIX + "nothing_to_suggest"
+NO_SUGGEST_PACKET = KIND_RULE_PREFIX + "no_suggest_packet"
+SUGGESTED_RECENTLY = KIND_RULE_PREFIX + "suggested_recently"
+UNDECIDED = KIND_RULE_PREFIX + "undecided"
 
 # L3: the garden needs a lens with some shape to it -- under three notes
 # there is no structure to garden -- and runs at most once in 168 hours
@@ -91,6 +100,16 @@ NO_LENS_JOB = KIND_RULE_PREFIX + "no_lens_job"
 # key; the hours cover a DST week, whose local week is 167 or 169 h).
 GARDEN_MIN_NOTES = 3
 GARDEN_INTERVAL = datetime.timedelta(hours=168)
+
+# Section 5a: the weekly batch waits 6 days after any batch, manual or
+# weekly -- not 7, so a batch made on a Sunday evening does not slide to
+# Monday the next week -- and makes no new batch while the latest one's
+# suggestions are still open and under 14 days old: unanswered
+# suggestions are not met with more. (An unsent batch's suggestions
+# expire after 48 hours, app/research/suggest.py's `UNSENT_TTL`, so a
+# batch the user never saw does not hold the next one for long.)
+SUGGEST_INTERVAL = datetime.timedelta(days=6)
+UNDECIDED_FOR = datetime.timedelta(days=14)
 
 # 6c: prebrief may only write tonight's note after this local hour (plan
 # section 6.4's "after 19:00 local") -- a fixed hour, unlike IDLE_WINDOW
@@ -110,6 +129,7 @@ KIND_DAILY_MAX: dict[str, int] = {
     CRITIQUE: 1,
     LENS_GARDEN: 1,
     LENS_RESEARCH: 1,
+    INTEREST_SUGGEST: 1,
     RESEARCH: 1,
     CANARY: 1,
 }
@@ -193,6 +213,12 @@ class IdleConfig:
     # has a domain to search.
     lens_research_enabled: bool = False
     lens_packet: bool = False
+    # Section 5a: `INTEREST_SUGGEST_WEEKLY` (the weekly batch also needs
+    # `research_enabled` above and `enabled`, row 1), and whether any
+    # packet has sites -- app/research/suggest.py's `offered_packets`,
+    # which this pure module may not import; a test pins the two equal.
+    suggest_weekly: bool = False
+    suggest_packets: bool = False
 
 
 def config_from_settings(settings) -> IdleConfig:
@@ -224,6 +250,8 @@ def config_from_settings(settings) -> IdleConfig:
             settings.RESEARCH_ENABLED and settings.LENS_ENABLED and settings.LENS_GARDEN_ENABLED
         ),
         lens_packet=bool(settings.PACKET_LENS),
+        suggest_weekly=settings.INTEREST_SUGGEST_WEEKLY,
+        suggest_packets=bool(settings.PACKET_FORUMS or settings.PACKET_GUIDES or settings.PACKET_REF),
     )
 
 
@@ -298,6 +326,19 @@ class IdleFacts:
     # gate and the job can never disagree). Left False while lens
     # research is switched off, when facts.py does not query it.
     lens_job_queued: bool = False
+    # Section 5a: app/core/idle/interest_suggest.py's `gate_facts`, shared
+    # with the weekly body the way the garden's facts are. Whether there
+    # is anything to suggest from (an active topic or an active lens:
+    # app/research/suggest.py's `has_source`, which the command asks
+    # too); when the newest batch that counts was made (done, or queued
+    # and not yet stale -- a failed one never ran to the user, so it does
+    # not push the week back); and when the newest done batch was made,
+    # if it still has open suggestions. Times only, no text. Left at
+    # these defaults while the weekly batch is switched off, when facts.py
+    # does not query them at all.
+    suggest_has_source: bool = False
+    suggest_last_batch_at: datetime.datetime | None = None
+    suggest_open_batch_at: datetime.datetime | None = None
 
 
 def _backfill_rule(facts: IdleFacts) -> GateResult:
@@ -414,6 +455,39 @@ def _lens_research_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
     return GateResult(True, OK)
 
 
+def _interest_suggest_rule(facts: IdleFacts, config: IdleConfig) -> GateResult:
+    """anchor-interest-suggestions-plan.md section 5a, in order:
+
+    1. `research_disabled`: `RESEARCH_ENABLED` off -- the feature lives
+       under it, as `/interests suggest` does;
+    2. `suggest_weekly_off`: `INTEREST_SUGGEST_WEEKLY` off;
+    3. `nothing_to_suggest`: no active topic and no active lens;
+    4. `no_suggest_packet`: no packet has sites, so every suggestion
+       would be dropped (app/research/suggest.py's `NO_PACKET`, which
+       would otherwise fail the batch unpaid every day);
+    5. `suggested_recently`: a batch of either origin in the last 6
+       days -- a manual `/interests suggest` pushes the weekly one back;
+    6. `undecided`: the newest done batch still has open suggestions
+       and is under 14 days old.
+
+    `KIND_DAILY_MAX` (1) binds before this, at row 10."""
+    if not config.research_enabled:
+        return GateResult(False, RESEARCH_DISABLED)
+    if not config.suggest_weekly:
+        return GateResult(False, SUGGEST_WEEKLY_OFF)
+    if not facts.suggest_has_source:
+        return GateResult(False, NOTHING_TO_SUGGEST)
+    if not config.suggest_packets:
+        return GateResult(False, NO_SUGGEST_PACKET)
+    last = facts.suggest_last_batch_at
+    if last is not None and facts.local_now - last < SUGGEST_INTERVAL:
+        return GateResult(False, SUGGESTED_RECENTLY)
+    pending = facts.suggest_open_batch_at
+    if pending is not None and facts.local_now - pending < UNDECIDED_FOR:
+        return GateResult(False, UNDECIDED)
+    return GateResult(True, OK)
+
+
 # One pure predicate per kind (plan §5: "KIND_RULES is a dict of pure
 # per-kind predicates"), each taking (facts, config) -- most only need
 # facts, but prebrief/critique/canary/research also need settings-derived
@@ -428,6 +502,7 @@ KIND_RULES: dict[str, Callable[[IdleFacts, IdleConfig], GateResult]] = {
     CANARY: _canary_rule,
     LENS_GARDEN: _lens_garden_rule,
     LENS_RESEARCH: _lens_research_rule,
+    INTEREST_SUGGEST: _interest_suggest_rule,
 }
 
 
@@ -585,12 +660,19 @@ __all__ = [
     "NO_NEW_REPLIES",
     "NOT_CANARY_DOW",
     "NOT_DUE",
+    "NOTHING_TO_SUGGEST",
     "NO_LENS_JOB",
+    "NO_SUGGEST_PACKET",
     "PREBRIEF_AFTER_HOUR",
     "OK",
     "PAUSED",
     "RESERVE",
+    "SUGGESTED_RECENTLY",
+    "SUGGEST_INTERVAL",
+    "SUGGEST_WEEKLY_OFF",
     "UNCHANGED",
+    "UNDECIDED",
+    "UNDECIDED_FOR",
     "USER_ACTIVE",
     "WELFARE_COOLDOWN",
     "WELFARE_COOLDOWN_HOURS",

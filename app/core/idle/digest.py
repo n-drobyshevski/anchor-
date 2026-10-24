@@ -26,6 +26,7 @@ from app.core.idle import (
     CANARY,
     CONSOLIDATE,
     CRITIQUE,
+    INTEREST_SUGGEST,
     LENS_GARDEN,
     LENS_RESEARCH,
     PREBRIEF,
@@ -70,6 +71,10 @@ LENS_GARDEN_LINE = "• Сад линзы: новых {new}, решено {resol
 # took a job -- counts only. The gap and the cards are in the result
 # message the garden hook sends, never here.
 LENS_RESEARCH_LINE = "• Исследование линзы: {cards} {noun}, скрыто {hidden}"
+# anchor-interest-suggestions-plan.md section 5a: one line per done
+# weekly suggestion batch, as a count only. The topics themselves are in
+# the batch's own Telegram message, never here.
+INTEREST_SUGGEST_LINE = "• Темы для поиска: предложено {n}"
 SKIPS_LINE = "Пропуски: {items}"
 
 _CARD_FORMS = ("карточка", "карточки", "карточек")
@@ -264,6 +269,18 @@ async def build_digest(
             )
         )
 
+    # Section 5a: one line per done weekly batch, newest first, like the
+    # garden's -- weekly, so a 7d window rarely holds two. A batch with
+    # nothing left after validation still shows: 0 is the news, as the
+    # batch's own message says «Новых тем не нашлось.».
+    suggest_runs = sorted(
+        (r for r in done if r.kind == INTEREST_SUGGEST), key=lambda r: r.id, reverse=True
+    )
+    for run in suggest_runs:
+        lines.append(
+            INTEREST_SUGGEST_LINE.format(n=int((run.summary or {}).get("suggestions", 0) or 0))
+        )
+
     undoable = tuple(
         r.id
         for r in sorted(done, key=lambda r: r.id, reverse=True)
@@ -292,6 +309,7 @@ __all__ = [
     "RESEARCH_LINE",
     "LENS_GARDEN_LINE",
     "LENS_RESEARCH_LINE",
+    "INTEREST_SUGGEST_LINE",
     "Digest",
     "build_digest",
 ]

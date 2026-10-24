@@ -18,7 +18,11 @@ garden (app/core/idle/lens_garden.py); migration b3e9f5a1c7d2 adds it to
 `ck_idle_run_kind`, which still equals `KINDS`. L4 (section 9) adds
 `LENS_RESEARCH`, the research a garden tap asked for
 (app/core/idle/lens_research.py); migration e9a4c2f7b1d8 adds it to the
-constraint.
+constraint. `INTEREST_SUGGEST` is the weekly batch of suggested interest
+topics (app/core/idle/interest_suggest.py,
+anchor-interest-suggestions-plan.md section 5a); migration a5d1c8e3f702
+adds it. The same word is app/research/suggest.py's job kind for a
+`/interests suggest`, in the `job.kind` namespace, not this one.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ PREBRIEF = "prebrief"
 CRITIQUE = "critique"
 LENS_GARDEN = "lens_garden"
 LENS_RESEARCH = "lens_research"
+INTEREST_SUGGEST = "interest_suggest"
 RESEARCH = "research"
 CANARY = "canary"
 
@@ -41,6 +46,7 @@ KINDS = (
     CRITIQUE,
     LENS_GARDEN,
     LENS_RESEARCH,
+    INTEREST_SUGGEST,
     RESEARCH,
     CANARY,
 )
@@ -58,6 +64,7 @@ __all__ = [
     "CRITIQUE",
     "LENS_GARDEN",
     "LENS_RESEARCH",
+    "INTEREST_SUGGEST",
     "RESEARCH",
     "CANARY",
     "KINDS",

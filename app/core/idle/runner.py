@@ -44,6 +44,7 @@ from app.core.idle import (
     CANARY,
     CONSOLIDATE,
     CRITIQUE,
+    INTEREST_SUGGEST,
     LENS_GARDEN,
     LENS_RESEARCH,
     PREBRIEF,
@@ -280,6 +281,11 @@ async def run_idle(
         await _finish(session_factory, clock, run_id, status="skipped", skip_reason="preempted")
         return
 
+    # A kind body that reports a failure as a code rather than raising
+    # (the weekly suggestion batch) sets this: the run is then
+    # failed/skipped with that code, its spend still recorded.
+    failed_code: str | None = None
+    skip_code: str | None = None
     try:
         if kind == BACKFILL:
             from app.core.idle.backfill import run_backfill
@@ -431,6 +437,25 @@ async def run_idle(
             preempted_and_empty = result.preempted and not result.acted
             summary = result.summary()
             reversible = False
+        elif kind == INTEREST_SUGGEST:
+            from app.core.idle.interest_suggest import SKIP_CODES, run_interest_suggest
+
+            result = await run_interest_suggest(
+                session_factory, settings, clock,
+                run_id=run_id, started_at=started_at, timezone=timezone,
+            )
+            # Single call, checked for preemption before it and never
+            # after the batch is stored (app/core/idle/interest_suggest.py):
+            # a preempted run made no call and stored no suggestion. Not
+            # reversible: it proposes, and the user decides every topic.
+            preempted_and_empty = result.preempted
+            if result.error_code is not None and not result.preempted:
+                if result.error_code in SKIP_CODES:
+                    skip_code = result.error_code
+                else:
+                    failed_code = result.error_code
+            summary = result.summary()
+            reversible = False
         else:
             raise ValueError(f"idle kind not implemented: {kind}")
     except Exception as exc:  # noqa: BLE001 - never retried, see module docstring
@@ -446,7 +471,7 @@ async def run_idle(
         return
 
     usd_cost = await spend_since(session_factory, started_at)
-    if kind in (RESEARCH, LENS_RESEARCH):
+    if kind in (RESEARCH, LENS_RESEARCH, INTEREST_SUGGEST):
         # research's spend is ledgered under "research" (distill.
         # RESEARCH_CATEGORY), unchanged, never "idle:research" -- see
         # app/core/idle/research.py's own docstring on why -- so
@@ -454,8 +479,27 @@ async def run_idle(
         # Folded in explicitly here so idle_run.usd_cost still reflects
         # what this run actually spent. L4's lens research ledgers the
         # same way, its query call included (app/core/idle/
-        # lens_research.py), and returns only what this run added.
+        # lens_research.py), and returns only what this run added. The
+        # weekly suggestion batch ledgers under "interest_suggest"
+        # (app/research/suggest.py's SUGGEST_CATEGORY), shared with the
+        # command, and returns its batch's cost.
         usd_cost += result.usd_cost
+
+    if failed_code is not None or skip_code is not None:
+        # A batch that failed (a provider error, a reply that did not
+        # parse) fails the run with the batch's code; one the world
+        # refused between the gate and the call (a switch, the sources,
+        # the cap) is a skip with it. Either way the cost stays on the run.
+        await _finish(
+            session_factory, clock, run_id,
+            status="failed" if failed_code is not None else "skipped",
+            skip_reason=failed_code or skip_code, summary=summary, usd_cost=usd_cost,
+        )
+        logger.warning(
+            "idle run failed" if failed_code is not None else "idle run skipped",
+            extra={"run_id": run_id, "event": kind, "error_code": failed_code or skip_code},
+        )
+        return
 
     if preempted_and_empty:
         await _finish(

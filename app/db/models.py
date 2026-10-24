@@ -2020,8 +2020,11 @@ class IdleRun(Base):
             # L3 (anchor-lens-plan.md section 8; migration b3e9f5a1c7d2):
             # the weekly lens garden. L4 (section 9): `lens_research`,
             # which runs the research a garden tap asked for.
+            # anchor-interest-suggestions-plan.md section 5a (migration
+            # a5d1c8e3f702): `interest_suggest`, the weekly batch of
+            # suggested topics.
             "kind in ('backfill', 'consolidate', 'reflect', 'prebrief', 'critique', "
-            "'lens_garden', 'lens_research', 'research', 'canary')",
+            "'lens_garden', 'lens_research', 'interest_suggest', 'research', 'canary')",
             name="ck_idle_run_kind",
         ),
         CheckConstraint(
@@ -2105,8 +2108,11 @@ class InterestTopic(Base):
 
     Topics come only from the user, never chosen by the model (plan
     section 1's "Out of scope": "Autonomous topic choice for research").
-    `active=false` is how `/interests`' [✖] retires one without losing
-    its history.
+    One amendment, the owner's: the model may *suggest* topics
+    (`InterestSuggestion`, `/interests suggest`), but a row exists here
+    only after the user taps a suggestion's button -- the topic is still
+    created by a tap, never by the model. `active=false` is how
+    `/interests`' [✖] retires one without losing its history.
 
     **The `text` column shadows sqlalchemy's `text()`** for the rest of
     this class body, exactly the trap `Memory`'s own docstring warns
@@ -2132,6 +2138,145 @@ class InterestTopic(Base):
         CheckConstraint(
             "packet in ('forums', 'guides', 'ref')", name="ck_interest_topic_packet"
         ),
+    )
+
+
+class InterestSuggestBatch(Base):
+    """One run of the topic-suggestion call (anchor-interest-suggestions-plan.md
+    sections 4 and 5a): `/interests suggest`, or the weekly idle kind
+    `interest_suggest`.
+
+    This is the owner's amendment to `InterestTopic`'s "topics come only
+    from the user": the model may *propose* topics here, and a topic
+    exists only after a tap on a suggestion's button (an
+    `interest_topic` row, made by app/core/interests.add_topic).
+
+    `origin` is `manual` or `weekly`. The daily suggestion quota
+    (`INTEREST_SUGGEST_PER_DAY`) counts manual batches by `local_date`
+    (stamped by the caller from the user's timezone, like
+    `StudyJob.local_date`); a weekly batch is not counted against it, but
+    a batch of either kind pushes the next weekly one back. `status` is
+    `queued` -> `done` | `failed`, and `error_code` is a code from
+    app/research/errors.py, never a message. `usd_cost` is what the call
+    cost; the same amount is in `spend_ledger` under `interest_suggest`.
+
+    `epoch` is six random base32 characters (app/vault/epoch.py's
+    alphabet), the lens garden's trick: it is in every button's callback
+    data (`is:<a|r|x>:<suggestion id>:<epoch>`), and a tap only counts
+    while its suggestion's batch still has that epoch and the suggestion
+    is `open`. A Python default rather than a server one, as
+    `UserState.vault_epoch`.
+
+    `message_id` and `sent_at` are the batch's one Telegram message. A
+    `done` batch with `sent_at` null has not gone out: quiet hours, a
+    pause or `/quiet` held it (app/core/report.py `may_report_now`), and
+    the send hook delivers it later, or the next `/interests suggest`
+    re-sends it instead of paying for a new one. A message id without a
+    `sent_at` is refused (`ck_interest_suggest_batch_sent`).
+    """
+
+    __tablename__ = "interest_suggest_batch"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origin: Mapped[str] = mapped_column(
+        String, nullable=False, default="manual", server_default=text("'manual'")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="queued", server_default=text("'queued'")
+    )
+    error_code: Mapped[str | None] = mapped_column(String)
+    local_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    usd_cost: Mapped[decimal.Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=decimal.Decimal("0"), server_default=text("0")
+    )
+    epoch: Mapped[str] = mapped_column(String, nullable=False, default=new_epoch)
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("origin in ('manual', 'weekly')", name="ck_interest_suggest_batch_origin"),
+        CheckConstraint(
+            "status in ('queued', 'done', 'failed')", name="ck_interest_suggest_batch_status"
+        ),
+        CheckConstraint("epoch ~ '^[a-z2-7]{6}$'", name="ck_interest_suggest_batch_epoch"),
+        CheckConstraint(
+            "message_id is null or sent_at is not null", name="ck_interest_suggest_batch_sent"
+        ),
+        Index("ix_interest_suggest_batch_local_date_origin", "local_date", "origin"),
+        Index(
+            "ix_interest_suggest_batch_unsent",
+            "created_at",
+            postgresql_where=sa.text("status = 'done' and sent_at is null"),
+        ),
+    )
+
+
+class InterestSuggestion(Base):
+    """One topic the model proposed in a batch (plan section 4).
+
+    `text`, `packet` and `why` are model output, validated in code before
+    they are stored (app/research/suggest.py): the text is 3 to 100
+    characters with no URL and no risky wording, the packet is one that
+    has sites, and `why` is one line of at most 160. They are never in a
+    debug view -- what the model guessed the user cares about is content.
+
+    `position` is the number the message shows, unique within the batch.
+    `status` is `open` until a tap: `added` (a button added it as a
+    topic, and `topic_id` points at it), `dismissed` (the model is told
+    not to offer it again), or `expired` (a newer batch was made, or the
+    batch sat unsent too long). Expiring on the next batch is what makes
+    an old button stale, so no sweep is needed. A tap is a conditional
+    `UPDATE ... WHERE status = 'open'`, so a replayed tap changes
+    nothing.
+
+    **The `text` column shadows sqlalchemy's `text()`** in this class
+    body, as it does in `InterestTopic`; `sa.text(...)` is used below.
+    """
+
+    __tablename__ = "interest_suggestion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("interest_suggest_batch.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    packet: Mapped[str] = mapped_column(String, nullable=False)
+    why: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="open", server_default=sa.text("'open'")
+    )
+    topic_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("interest_topic.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "position", name="uq_interest_suggestion_position"),
+        CheckConstraint("position >= 0", name="ck_interest_suggestion_position"),
+        CheckConstraint('char_length("text") <= 100', name="ck_interest_suggestion_text_length"),
+        CheckConstraint("char_length(why) <= 160", name="ck_interest_suggestion_why_length"),
+        CheckConstraint(
+            "packet in ('forums', 'guides', 'ref')", name="ck_interest_suggestion_packet"
+        ),
+        CheckConstraint(
+            "status in ('open', 'added', 'dismissed', 'expired')",
+            name="ck_interest_suggestion_status",
+        ),
+        CheckConstraint(
+            "status <> 'open' or decided_at is null", name="ck_interest_suggestion_decided"
+        ),
+        CheckConstraint(
+            "topic_id is null or status = 'added'", name="ck_interest_suggestion_topic"
+        ),
+        Index("ix_interest_suggestion_status_batch_id", "status", "batch_id"),
     )
 
 

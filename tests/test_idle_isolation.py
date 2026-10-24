@@ -27,6 +27,7 @@ from app.core.idle import (
     CONSOLIDATE,
     CRITIQUE,
     IDLE_RUN,
+    INTEREST_SUGGEST,
     LENS_GARDEN,
     LENS_RESEARCH,
     PREBRIEF,
@@ -328,7 +329,10 @@ def test_docstring_stripping_does_not_flag_prose_about_the_rule(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
-    [BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY, RESEARCH, LENS_GARDEN, LENS_RESEARCH],
+    [
+        BACKFILL, CONSOLIDATE, REFLECT, PREBRIEF, CRITIQUE, CANARY, RESEARCH, LENS_GARDEN,
+        LENS_RESEARCH, INTEREST_SUGGEST,
+    ],
 )
 async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     """Every implemented idle kind, run through the worker's own dispatch
@@ -352,7 +356,10 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
     5): pass 1, the selector and the grounding call, a `reflect` round
     recorded and an open thread grounded -- and still nothing sent: a
     grounded entry reaches chat only through the persona prompt, on the
-    user's own next turn."""
+    user's own next turn. The weekly suggestion batch
+    (anchor-interest-suggestions-plan.md section 5a) makes and stores its
+    batch and sends nothing: its message is the worker's send hook's,
+    after the job, never the run's."""
     from aiogram import Bot
 
     from app.worker import _run_job
@@ -408,7 +415,7 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             merge_ids = (m1.id, m2.id)
         if kind == CANARY:
             session.add(PersonaAmendment(text="меньше вопросов", status="active", persona_sha="x"))
-        if kind == RESEARCH:
+        if kind in (RESEARCH, INTEREST_SUGGEST):
             session.add(InterestTopic(text="бессонница", packet="forums", active=True))
         garden_ids: list[int] = []
         if kind in (LENS_GARDEN, REFLECT):
@@ -538,6 +545,23 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             "app.core.idle.lens_garden.build_garden_provider", lambda settings, client: garden_fake
         )
 
+    if kind == INTEREST_SUGGEST:
+        # The batch builds its own provider (app/research/suggest.py's
+        # `build_suggest_provider`, the garden's shape); patched so this
+        # test never reaches the network.
+        suggest_fake = FakeLLMProvider(
+            text='{"suggestions": [{"text": "гигиена сна", "packet": "ref", "why": "Рядом."}]}'
+        )
+
+        class _SuggestClient:
+            async def close(self):
+                pass
+
+        monkeypatch.setattr("app.llm.openrouter.build_client", lambda api_key: _SuggestClient())
+        monkeypatch.setattr(
+            "app.research.suggest.build_suggest_provider", lambda settings, client: suggest_fake
+        )
+
     if kind == CRITIQUE:
         # run_critique builds its own judge provider (LLM_MODEL_JUDGE)
         # lazily -- see app/core/idle/critique.py's own docstring on why
@@ -603,7 +627,7 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         monkeypatch.setattr("app.research.jobs.default_fetch", _fake_fetch)
         monkeypatch.setattr("app.research.search.find_urls", _fake_find_urls)
 
-    settings = Settings(RESEARCH_ENABLED=True) if kind == RESEARCH else Settings()
+    settings = Settings(RESEARCH_ENABLED=True) if kind in (RESEARCH, INTEREST_SUGGEST) else Settings()
     if kind == REFLECT:
         settings = Settings(LENS_ENABLED=True, LENS_REFLECT_ENABLED=True)
     if kind == LENS_RESEARCH:
@@ -659,6 +683,17 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
             assert run.summary.get("new") == 1
             (gap,) = await lens.known_gaps(session)
             assert gap.kind == "link"
+        elif kind == INTEREST_SUGGEST:
+            from sqlalchemy import select
+
+            from app.db.models import InterestSuggestBatch, InterestSuggestion
+
+            run = await session.get(IdleRun, run_id)
+            assert run.summary.get("suggestions") == 1
+            [batch] = (await session.execute(select(InterestSuggestBatch))).scalars().all()
+            assert (batch.origin, batch.status, batch.sent_at) == ("weekly", "done", None)
+            [row] = (await session.execute(select(InterestSuggestion))).scalars().all()
+            assert row.text == "гигиена сна"
         elif kind == LENS_RESEARCH:
             from sqlalchemy import select
 

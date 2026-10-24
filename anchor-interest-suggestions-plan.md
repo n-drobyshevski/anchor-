@@ -1,6 +1,6 @@
 # Echo: suggested interest topics (`/interests suggest`)
 
-Status: plan, not built. Follows `/interests run` (docs/decisions.md → `/interests run`).
+Status: built (migration a5d1c8e3f702). Follows `/interests run` (docs/decisions.md → `/interests run`).
 
 ## 1. Why
 

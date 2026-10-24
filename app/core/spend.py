@@ -83,7 +83,11 @@ async def today_idle_usd(
     so those rows cannot match `idle:%`. Their cost is taken from
     `idle_run.usd_cost` instead (app/core/idle/research.py reads it back
     from study_job), which keeps IDLE_USD_CAP honest without touching
-    the pipeline and without counting anything twice.
+    the pipeline and without counting anything twice. L4's idle
+    `lens_research` does the same, and so does the weekly
+    `interest_suggest` batch (anchor-interest-suggestions-plan.md
+    section 5a), whose call ledgers under `interest_suggest`, the
+    category it shares with `/interests suggest`.
     """
     local_today = clock_module.local_date(clock, timezone)
     result = await session.execute(
@@ -95,8 +99,9 @@ async def today_idle_usd(
         select(func.coalesce(func.sum(IdleRun.usd_cost), 0))
         .where(IdleRun.local_date == local_today)
         # L4: idle `lens_research` ledgers the same way (app/core/idle/
-        # lens_research.py), its query call included.
-        .where(IdleRun.kind.in_(("research", "lens_research")))
+        # lens_research.py), its query call included; and the weekly
+        # suggestion batch (app/core/idle/interest_suggest.py).
+        .where(IdleRun.kind.in_(("research", "lens_research", "interest_suggest")))
     )
     return decimal.Decimal(result.scalar_one()) + decimal.Decimal(research.scalar_one())
 

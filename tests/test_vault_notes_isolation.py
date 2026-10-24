@@ -109,6 +109,14 @@ ALLOWED_IMPORTERS = {
         # its round. It is reflect's one door to the lens: reflect.py,
         # critique.py and notebook.py never import this module.
         "app/core/idle/reflect_lens.py",
+        # Suggested interest topics (anchor-interest-suggestions-plan.md
+        # section 3, the owner's decision 1): while the lens is active,
+        # the suggestion call sees lens note titles and catalog summaries
+        # -- `lens_active` and `catalog`, nothing else -- the same
+        # material the garden and the lens query already send to the
+        # same provider. Never a body past the catalog's fallback start,
+        # never a knowledge note, never the round or gap tables.
+        "app/research/suggest.py",
     ),
 }
 
@@ -124,12 +132,19 @@ ALLOWED_IMPORTERS = {
 #
 # L5: the idle reflect's lens round (the L5 spec section 5) is the third,
 # alone: reflect.py itself and the rest of app/core/idle/ stay banned.
+#
+# Suggested interest topics: app/research/suggest.py is the one research
+# module that may, for the lens catalog alone (the ALLOWED_IMPORTERS
+# comment above). The rest of app/research/ stays banned -- lens_query.py
+# above all, whose input is a seed lens.py builds -- and suggest.py still
+# reaches no chunk module.
 FORBIDDEN_EXCEPTIONS = {
     "app.vault.notes_knowledge": ("app/web/mcp_core.py",),
     "app.vault.lens": (
         "app/core/idle/lens_garden.py",
         "app/core/idle/lens_research.py",
         "app/core/idle/reflect_lens.py",
+        "app/research/suggest.py",
     ),
 }
 
@@ -539,6 +554,23 @@ def test_lens_research_and_echos_writer_may_reach_the_lens_module(tmp_path):
     path.write_text("from app.vault import notes_knowledge\n")
     for rel in ("app/core/idle/lens_research.py", "app/core/echo_write.py"):
         assert _import_violations(path, rel), rel
+
+
+def test_the_suggestion_call_is_the_one_research_module_that_may_reach_the_lens(tmp_path):
+    """Suggested interest topics (anchor-interest-suggestions-plan.md
+    section 3): app/research/suggest.py may import the lens module, and
+    does; every other research module still may not, and the exception
+    lifts no chunk module."""
+    tree = ast.parse((ROOT / "app/research/suggest.py").read_text(encoding="utf-8"))
+    assert _reaches(_imported_modules(tree) | _attribute_uses(tree), "app.vault.lens")
+    path = tmp_path / "sample.py"
+    path.write_text("from app.vault import lens\n")
+    assert _import_violations(path, "app/research/suggest.py") == []
+    for rel in ("app/research/jobs.py", "app/research/lens_query.py", "app/research/search.py"):
+        assert _import_violations(path, rel), rel
+    for module in ("notes_knowledge", "notes_personal"):
+        path.write_text(f"from app.vault import {module}\n")
+        assert _import_violations(path, "app/research/suggest.py"), module
 
 
 # --- L5: the idle reflect ---

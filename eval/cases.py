@@ -48,10 +48,18 @@ LENS_DISTILL = "lens_distill"
 # first-pass draft of notebook changes the case supplies (`input.plan`).
 # Not a persona prompt either; see eval/scenario.py.
 LENS_REFLECT = "lens_reflect"
+# Suggested interest topics (anchor-interest-suggestions-plan.md sections
+# 3 and 8): the suggestion call over the lens notes' titles and summaries
+# (and the saved topics) the case seeds, then the real `validate`. Not a
+# persona prompt either; see eval/scenario.py.
+INTEREST_SUGGEST = "interest_suggest"
 INPUT_KINDS = (
     CHAT, CHECKIN, NEUTRAL, OUTBOUND, LENS_REVIEW, LENS_GARDEN, LENS_QUERY, LENS_DISTILL,
-    LENS_REFLECT,
+    LENS_REFLECT, INTEREST_SUGGEST,
 )
+# The packets a saved topic may sit in (app/research/jobs.py's PACKETS;
+# tests/test_eval_suggest.py pins the two equal).
+SUGGEST_PACKETS = ("forums", "guides", "ref")
 # The gap kinds a lens research may be asked for (app/vault/lens.py's
 # RESEARCHABLE_KINDS; tests/test_eval_checks.py pins the two equal).
 RESEARCH_GAP_KINDS = ("missing_note", "tension", "bridge")
@@ -111,6 +119,8 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
         _check_lens_distill(raw, input_block, path)
     elif kind == LENS_REFLECT:
         _check_lens_reflect(raw, input_block, path)
+    elif kind == INTEREST_SUGGEST:
+        _check_interest_suggest(raw, path)
     elif kind == OUTBOUND:
         _require(
             input_block.get("outbound_kind") in OUTBOUND_KINDS,
@@ -350,6 +360,39 @@ def _check_lens_reflect(raw: dict, input_block: dict, path: pathlib.Path) -> Non
         path,
         "checks.min_grounded must be a non-negative integer",
     )
+
+
+def _check_interest_suggest(raw: dict, path: pathlib.Path) -> None:
+    """A suggestion case's own shape: seeded lens notes, each with the
+    summary the call sees (the call never sees a body), optionally the
+    topics the user already saved (`setup.interests`, each a text and a
+    packet), and the two count checks."""
+    _check_seeded_notes(raw, path, INTEREST_SUGGEST)
+    setup = raw["setup"]
+    for note in setup["lens"]:
+        _require(
+            isinstance(note.get("summary"), str) and note["summary"].strip(),
+            path,
+            "interest_suggest cases need a summary on every setup.lens note (what the call sees)",
+        )
+    for topic in setup.get("interests", []):
+        _require(
+            isinstance(topic, dict)
+            and isinstance(topic.get("text"), str)
+            and topic["text"].strip()
+            and topic.get("packet") in SUGGEST_PACKETS
+            and isinstance(topic.get("active", True), bool),
+            path,
+            f"setup.interests entries need a text and a packet from {SUGGEST_PACKETS}",
+        )
+    checks = raw.get("checks") or {}
+    for key in ("min_suggestions", "max_suggestions"):
+        value = checks.get(key)
+        _require(
+            value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0),
+            path,
+            f"checks.{key} must be a non-negative integer",
+        )
 
 
 def _check_seeded_notes(raw: dict, path: pathlib.Path, kind: str) -> set[str]:

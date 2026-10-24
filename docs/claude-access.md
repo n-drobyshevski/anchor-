@@ -352,6 +352,46 @@ they stay with the user. When debugging research, use Railway logs
 (ids, counts and outcome codes only), the `debug.study_*` views and the
 tests' synthetic cards.
 
+### Suggested interest topics (`/interests suggest`): two views, no text
+
+`/interests suggest` and the weekly `interest_suggest` idle kind
+(migration `a5d1c8e3f702`) keep what the model proposed in
+`interest_suggestion` and each run of the call in `interest_suggest_batch`.
+**No text of it is readable by Claude Code**, and none should be: a
+proposed topic is a guess at what the user cares about, drawn from their
+own topics and, while the lens is on, from lens summaries. Two content-free
+views:
+
+- `debug.interest_suggest_batch`: `id, origin, status, error_code,
+  local_date, usd_cost, created_at, finished_at, sent_at`. `origin` is
+  `manual` or `weekly`; `status` is `queued`, `done` or `failed` and
+  `error_code` a fixed code (`provider_error`, `parse_fail`, `cap`,
+  `preempted`, ...); `sent_at` null on a `done` batch means it is being
+  held (quiet hours, a pause) or expired unsent. Not the epoch (the
+  token in every button's callback data) and not the Telegram message id.
+- `debug.interest_suggestion`: `id, batch_id, position, status,
+  created_at, decided_at`. `status` is `open`, `added`, `dismissed` or
+  `expired`. No `text`, `packet`, `why` or `topic_id`: a suggestion's words
+  and which topic a tap made stay with the user. Which suggestions were
+  added or dismissed is visible, and accepted: it is the count of taps,
+  never what they were about.
+
+```sh
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select id, origin, status, error_code, local_date, usd_cost, sent_at from debug.interest_suggest_batch order by id desc limit 10"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select batch_id, status, count(*) from debug.interest_suggestion group by 1, 2 order by 1 desc limit 20"
+```
+
+The weekly batch is also an `idle_run` of kind `interest_suggest`, which
+has no debug view (its summary, a count, shows only in the user's
+`/digest`); its call is in `debug.spend_ledger` under category
+`interest_suggest`, manual and weekly alike. Railway logs carry
+`suggest_batch_id`, counts and codes only (app/log.py), never a topic, a
+reason or a lens title. The proposals' text is in the user's Telegram
+chat and in `/export`; when debugging, use these views, the logs and the
+tests' synthetic batches. A lens summary a proposal was drawn from is a
+lens note's text: read through `lens.notes()` like any, a logged read,
+and it stays in the session.
+
 ### Lens text stays in the session
 
 The CLAUDE.md rule: lens text never leaves the session. Not in commits,

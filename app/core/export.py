@@ -47,6 +47,8 @@ from app.db.models import (
     EchoChangeset,
     IdleChange,
     IdleRun,
+    InterestSuggestBatch,
+    InterestSuggestion,
     InterestTopic,
     Journal,
     NotebookEntry,
@@ -148,6 +150,14 @@ EXPORTED_MODELS = (
     IdleChange,
     BriefNote,
     InterestTopic,
+    # `/interests suggest` (anchor-interest-suggestions-plan.md section 4):
+    # the topics the model proposed, with what the user did with each,
+    # and the batches they came in. User data by the same reasoning as
+    # interest_topic: the text is what the user was shown, and a tap on
+    # it is a decision of theirs. The batch's epoch is a callback token,
+    # not a secret (it only makes an old button stale).
+    InterestSuggestBatch,
+    InterestSuggestion,
     # P2: the cached agenda and (from P3) pending planner writes are user
     # data by the same reasoning as `outbound` and `safety_event` just
     # above. `planner_credential` is deliberately **not** here -- it

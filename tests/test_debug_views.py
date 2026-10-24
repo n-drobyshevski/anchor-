@@ -39,6 +39,11 @@ CONTENT_COLUMNS = {
     "checkin": {"note"},
     "outbound": {"tick_note"},
     "study_job": {"packet", "query"},
+    # `/interests suggest`: the model's proposed topics are what it
+    # guessed the user cares about. The batch's epoch is a callback
+    # token, kept out like the Telegram message id.
+    "interest_suggest_batch": {"epoch", "message_id"},
+    "interest_suggestion": {"text", "packet", "why", "topic_id"},
     "study_clip": {"text", "url", "title", "text_sha256"},
     # Cross-checking: the other page's verbatim quote is web text too;
     # the verdict and the page's id are not.
@@ -115,6 +120,17 @@ async def test_the_job_view_shows_the_manual_flag_but_not_the_topic(sessionmaker
         columns = (await _debug_columns(session))["study_job"]
     assert "manual" in columns
     assert not {"packet", "query"} & columns
+
+
+async def test_the_suggestion_views_show_counts_and_states_but_not_what_was_proposed(
+    sessionmaker,
+):
+    async with sessionmaker() as session:
+        columns = await _debug_columns(session)
+    assert {"origin", "status", "error_code", "local_date", "usd_cost"} <= columns[
+        "interest_suggest_batch"
+    ]
+    assert {"batch_id", "position", "status", "decided_at"} <= columns["interest_suggestion"]
 
 
 async def test_every_debug_view_source_is_classified(sessionmaker):

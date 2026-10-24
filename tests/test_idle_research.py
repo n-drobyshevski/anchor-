@@ -410,7 +410,10 @@ async def test_planner_picks_research_when_nothing_else_is_eligible(sessionmaker
     clock = _clock()
     await _seed_state(sessionmaker)
     await _add_topic(sessionmaker)
-    settings = _settings(CANARY_DOW=5)  # 2026-09-23 is a Wednesday (3)
+    # 2026-09-23 is a Wednesday (3). The weekly suggestion batch
+    # (anchor-interest-suggestions-plan.md section 5a) outranks research
+    # with a topic and a packet in place, so it is switched off here.
+    settings = _settings(CANARY_DOW=5, INTEREST_SUGGEST_WEEKLY=False)
     _patch_pipeline(monkeypatch)
 
     async with sessionmaker() as session:

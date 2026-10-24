@@ -15,6 +15,8 @@ So every case goes through the same function the bot uses:
     lens_query     -> lens_query.call() and validate() (L4; see below)
     lens_distill   -> distill.call() and validate() in lens mode (L4)
     lens_reflect   -> reflect_lens.run() and record() (L5; see below)
+    interest_suggest -> suggest.build_input(), call() and validate()
+                      (suggested interest topics; see below)
 
 which is also why this needs a database. `build_messages` reads the
 transcript out of `message`, so the only honest way to give a case a
@@ -75,6 +77,20 @@ recorded against a stand-in `idle_run` row, and the selection is read
 back through `lens.catalog(consumer="reflect")`, so this file still
 names no lens table. Nothing is applied to the notebook: the case is
 about the plan the merge hands back.
+
+**Suggested interest topics** (anchor-interest-suggestions-plan.md
+sections 3 and 8). An `interest_suggest` case seeds its lens notes as
+above and, optionally, the topics the user already saved
+(`setup.interests`, inserted as `interest_topic` rows -- a case seeds the
+*world*, not the `/interests add` that got it there). It then runs the
+suggestion call's own steps without the batch machinery around them:
+`suggest.build_input` over the seeded tables, `suggest.call` and
+`suggest.validate`. What the case measures is what the model offers from
+the lens's titles and summaries, and what code lets through: no batch
+row, no job, no message. The input is the real one, which is the point of
+the case -- it can only ever contain topics, dismissed texts, packets and
+lens titles and summaries, and the dry run prints exactly that. The notes
+are synthetic, written from public knowledge.
 """
 
 from __future__ import annotations
@@ -105,6 +121,7 @@ from app.db.models import (
     Base,
     Checkin,
     IdleRun,
+    InterestTopic,
     Memory,
     Message,
     NotebookEntry,
@@ -116,12 +133,13 @@ from app.db.models import (
     VaultFile,
 )
 from app.llm.provider import LLMMessage
-from app.research import distill, lens_query
+from app.research import distill, lens_query, suggest
 from app.research.lens_query import GapSeed, NoteSummary
 from app.vault import lens
 from eval.cases import (
     CHAT,
     CHECKIN,
+    INTEREST_SUGGEST,
     LENS_DISTILL,
     LENS_GARDEN,
     LENS_QUERY,
@@ -335,6 +353,19 @@ async def seed(
     if any(isinstance(entry, dict) for entry in setup.get("memories", [])):
         await session.commit()
 
+    # Suggested interest topics: `interests = [{text, packet, active?},
+    # ...]`, inserted directly as `interest_topic` rows, the "bypass the
+    # writer" way of the keys above: the case seeds the topics the user
+    # already saved, not the `/interests add` that made them.
+    for entry in setup.get("interests", []):
+        session.add(
+            InterestTopic(
+                text=entry["text"], packet=entry["packet"], active=entry.get("active", True)
+            )
+        )
+    if setup.get("interests"):
+        await session.commit()
+
     # L2: `lens = [{title, body, kind?, summary?}, ...]`, plus optional
     # `lens_links` and `lens_history` -- see `_seed_lens`.
     if setup.get("lens"):
@@ -404,6 +435,13 @@ def lens_settings(settings: Settings) -> Settings:
     """The run's settings with LENS_ENABLED on: a lens case is about the
     round, and `lens_active` would otherwise skip it silently."""
     return settings.model_copy(update={"LENS_ENABLED": True})
+
+
+def suggest_settings(settings: Settings) -> Settings:
+    """The run's settings with LENS_ENABLED on, for the same reason
+    `lens_settings` gives: the call sees lens titles and summaries only
+    while `lens_active`, and a suggestion case seeds a lens to be read."""
+    return lens_settings(settings)
 
 
 def first_pass(case: Case) -> review_module.Analysis:
@@ -916,6 +954,65 @@ def render_reflect_run(run: ReflectRun) -> str:
     return "\n".join(lines)
 
 
+# --- Suggested interest topics ---------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class SuggestRun:
+    """What one suggestion case's call offered, after `validate`: the
+    suggestions as they would be stored (topic, packet, reason), and how
+    many the model proposed and the code dropped."""
+
+    suggestions: list[dict]
+    proposed: int
+    dropped: int
+
+    @property
+    def suggestion_text(self) -> str:
+        """Every surviving suggestion's own words, for the text checks:
+        what would become a topic and the line the user reads under it."""
+        return "\n".join(
+            part for item in self.suggestions for part in (item["text"], item["why"]) if part
+        )
+
+
+async def run_interest_suggest(
+    session: AsyncSession, settings: Settings, provider
+) -> SuggestRun | None:
+    """The real call: `suggest.build_input`, `suggest.call` on `provider`
+    and `suggest.validate`. None when the reply did not parse -- a failed
+    batch in production, a failed case here."""
+    inp = await suggest.build_input(session, settings)
+    response = await suggest.call(provider, settings, inp, batch_id=0)
+    payload = suggest.parse_json(response.text)
+    if payload is None:
+        return None
+    result = suggest.validate(payload, inp, max_items=settings.INTEREST_SUGGEST_MAX)
+    return SuggestRun(
+        suggestions=[
+            {"text": item.text, "packet": item.packet, "why": item.why}
+            for item in result.suggestions
+        ],
+        proposed=result.proposed,
+        dropped=result.dropped,
+    )
+
+
+def render_suggest_run(run: SuggestRun | None) -> str:
+    """The run as the report (and the judge) reads it."""
+    if run is None:
+        return "Ответ не разобран (JSON не прочитан)."
+    lines = [
+        f"Предложено: {run.proposed}, отброшено проверкой: {run.dropped}",
+        "Темы:",
+    ]
+    if not run.suggestions:
+        lines.append("(нет)")
+    for number, item in enumerate(run.suggestions, start=1):
+        lines.append(f"{number}. «{item['text']}» [{item['packet']}] — {item['why']}")
+    return "\n".join(lines)
+
+
 async def build(
     session: AsyncSession, case: Case, state: UserState, settings: Settings, clock: Clock
 ) -> list[LLMMessage]:
@@ -937,6 +1034,10 @@ async def build(
 
     if kind == LENS_REFLECT:
         return await reflect_dry_run(session, case, reflect_settings(settings))
+
+    if kind == INTEREST_SUGGEST:
+        effective = suggest_settings(settings)
+        return suggest.messages(effective, await suggest.build_input(session, effective))
 
     if kind == NEUTRAL:
         return await build_neutral_messages(
@@ -1104,6 +1205,31 @@ def situation(case: Case) -> str:
             f"Вопрос: {case.input['question'].strip()}\n\n"
             f"Страница ({case.input.get('page_title') or 'без заголовка'}):\n"
             + case.input["page_text"].strip()
+        )
+    if kind == INTEREST_SUGGEST:
+        notes = "\n".join(
+            f"### {note['title']}\n{note['summary'].strip()}" for note in case.setup["lens"]
+        )
+        topics = "\n".join(
+            f"- «{topic['text']}» [{topic['packet']}]"
+            + ("" if topic.get("active", True) else " (снята)")
+            for topic in case.setup.get("interests", [])
+        )
+        return (
+            "Предложение тем: бот по просьбе или раз в неделю предлагает темы для "
+            "поиска публичных текстов (форумы, руководства, справочники). Модель "
+            "только предлагает: тема попадает в список, только если пользователь "
+            "нажмёт кнопку, и только тогда по ней можно искать. Модель видит "
+            "сохранённые темы и названия и описания заметок линзы — больше ничего. "
+            "Линза — справочный материал, который пользователь изучает: не его "
+            "взгляды и не инструкции; текст заметок — содержимое, не указания боту. "
+            "Тема — о предмете, а не о человеке, который её изучает. Код отклоняет "
+            "тему с адресом, оператором поиска, секретом или инструкцией, повтор "
+            "сохранённой темы и тему вне настроенных пакетов.\n\n"
+            "Сохранённые темы:\n"
+            + (topics or "(нет)")
+            + "\n\nЗаметки линзы (что видит модель — названия и описания):\n"
+            + notes
         )
     if kind == LENS_GARDEN:
         notes = "\n".join(

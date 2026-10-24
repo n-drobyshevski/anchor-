@@ -632,3 +632,46 @@ def test_claude_access_on_with_webhook_and_https_starts():
             PUBLIC_URL="https://anchor.example",
         )
     )
+
+
+def test_interest_suggest_defaults_and_the_weekly_flag_tolerates_whitespace():
+    from app.config import check_vault_settings
+
+    settings = Settings(_env_file=None, INTEREST_SUGGEST_WEEKLY="true ", INTEREST_SUGGEST_MODEL=" m ")
+    assert settings.INTEREST_SUGGEST_WEEKLY is True
+    assert settings.INTEREST_SUGGEST_MODEL == "m"
+    defaults = Settings(_env_file=None)
+    assert (
+        defaults.INTEREST_SUGGEST_PER_DAY,
+        defaults.INTEREST_SUGGEST_MAX,
+        defaults.INTEREST_SUGGEST_MAX_CHARS,
+        defaults.INTEREST_SUGGEST_MODEL,
+        defaults.INTEREST_SUGGEST_MAX_TOKENS,
+    ) == (2, 5, 6000, "", 1200)
+    check_vault_settings(defaults)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "ok"),
+    [
+        ("INTEREST_SUGGEST_MAX", 0, False),
+        ("INTEREST_SUGGEST_MAX", 1, True),
+        ("INTEREST_SUGGEST_MAX", 8, True),
+        ("INTEREST_SUGGEST_MAX", 9, False),
+        ("INTEREST_SUGGEST_PER_DAY", -1, False),
+        ("INTEREST_SUGGEST_PER_DAY", 0, True),
+        ("INTEREST_SUGGEST_MAX_CHARS", 1999, False),
+        ("INTEREST_SUGGEST_MAX_CHARS", 20000, True),
+        ("INTEREST_SUGGEST_MAX_TOKENS", 499, False),
+        ("INTEREST_SUGGEST_MAX_TOKENS", 4001, False),
+    ],
+)
+def test_interest_suggest_settings_are_bounded(name, value, ok):
+    from app.config import check_vault_settings
+
+    settings = Settings(_env_file=None, **{name: value})
+    if ok:
+        check_vault_settings(settings)
+    else:
+        with pytest.raises(SystemExit, match=f"{name} must be between"):
+            check_vault_settings(settings)

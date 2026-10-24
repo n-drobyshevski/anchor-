@@ -38,6 +38,8 @@ from app.db.models import (
     CheckinOrderResult,
     IdleChange,
     IdleRun,
+    InterestSuggestBatch,
+    InterestSuggestion,
     InterestTopic,
     Job,
     Journal,
@@ -345,7 +347,23 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
             )
         )
         session.add(BriefNote(local_date=today, notes=["сон", "вода"]))
-        session.add(InterestTopic(text="сон", packet="ref"))
+        topic = InterestTopic(text="сон", packet="ref")
+        session.add(topic)
+        await session.flush()
+        batch = InterestSuggestBatch(local_date=today, status="done")
+        session.add(batch)
+        await session.flush()
+        session.add(
+            InterestSuggestion(
+                batch_id=batch.id,
+                position=1,
+                text="бессонница",
+                packet="forums",
+                why="рядом с темой про сон",
+                status="added",
+                topic_id=topic.id,
+            )
+        )
         session.add(
             BackupLog(started_at=now, finished_at=now, object_key="anchor/x", bytes=10, status="ok")
         )

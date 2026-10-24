@@ -75,9 +75,12 @@ async def test_priority_picks_backfill_first(sessionmaker):
 async def test_priority_order_matches_the_plan():
     # L3 (the L3 spec section 1): the weekly lens garden after critique.
     # L4 (the L4 spec section 2): lens research right after the garden.
+    # anchor-interest-suggestions-plan.md section 5a: the weekly
+    # suggestion batch after the garden (and lens research), before
+    # idle research.
     assert PRIORITY == (
         "backfill", "consolidate", "prebrief", "reflect", "critique", "lens_garden",
-        "lens_research", "research", "canary",
+        "lens_research", "interest_suggest", "research", "canary",
     )
 
 

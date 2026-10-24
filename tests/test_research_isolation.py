@@ -188,11 +188,15 @@ def test_every_error_constant_is_in_the_closed_set():
 # expired or blanked, which plan section 12 permits explicitly
 # ("IDs, domains, error codes, counts and cost").
 #
+# Suggested interest topics: suggest.py, for jobs.py's reason -- it
+# writes the suggestion batches and can say "batch 4 done, 3 kept, 2
+# dropped" with nothing about a topic, a reason or the model's reply.
+#
 # Every other module stays silent. The fetcher, the search, the
 # distiller and the risk rules all run on data the caller must not
 # describe, and none of them has anything to say that is not about
 # that data.
-LOGGING_ALLOWED = {"jobs.py", "sweeps.py"}
+LOGGING_ALLOWED = {"jobs.py", "sweeps.py", "suggest.py"}
 
 
 @pytest.mark.parametrize(
@@ -397,3 +401,125 @@ def test_the_lens_query_module_is_pure_at_runtime():
     for value in vars(lens_query).values():
         module = getattr(value, "__module__", "") or ""
         assert not module.startswith(("sqlalchemy", "app.config", "app.db", "logging")), value
+
+
+# --- Suggested interest topics (anchor-interest-suggestions-plan.md section 3) ----
+
+SUGGEST = RESEARCH / "suggest.py"
+# What app/research/suggest.py may import beyond the standard library and
+# sqlalchemy, each for one reason: Settings and the clock; the topic
+# checks and the shared screen (app.core.interests, app.core.screen) and
+# the two secret screens; the spend cap and the ledger's pricing; the job
+# queue and the ORM models (pinned by name below); the provider interface
+# and, lazily, the OpenRouter provider it builds; the injection list; the
+# packet vocabulary (app.research.jobs); and the lens module, for its
+# catalog alone (pinned below; tests/test_vault_notes_isolation.py names
+# it as an importer). No dialog, memory, journal, notebook, summary,
+# check-in or note module: the call's input has no way to them.
+SUGGEST_ALLOWED = frozenset(
+    {
+        "app.config",
+        "app.core.clock",
+        "app.core.interests",
+        "app.core.redact",
+        "app.core.screen",
+        "app.core.spend",
+        "app.db.jobs",
+        "app.db.models",
+        "app.llm.openrouter",
+        "app.llm.provider",
+        "app.research.injection",
+        "app.research.jobs",
+        "app.vault.lens",
+        "app.vault.secrets",
+    }
+)
+# The ORM models it may name: its own two tables, the topics it reads and
+# writes, and the ledger. Message, Memory, the journal, the notebook,
+# scenes, check-ins and study cards are all in app.db.models too, which is
+# why the import alone is not enough.
+SUGGEST_MODELS = frozenset(
+    {"InterestSuggestBatch", "InterestSuggestion", "InterestTopic", "SpendLedger"}
+)
+# All it reads from the lens module: whether the lens is in use, and the
+# catalog's titles and summaries.
+SUGGEST_LENS_NAMES = frozenset({"lens_active", "catalog"})
+
+
+def _suggest_violations(source: str) -> list[str]:
+    import sys
+
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                found.append("a relative import")
+                continue
+            module = node.module or ""
+            if module == "app.db.models":
+                found.extend(
+                    f"app.db.models.{alias.name}"
+                    for alias in node.names
+                    if alias.name not in SUGGEST_MODELS
+                )
+                continue
+            if module in SUGGEST_ALLOWED:
+                continue
+            if module.split(".")[0] in stdlib | {"sqlalchemy"}:
+                modules = [module]
+            else:
+                modules = [f"{module}.{alias.name}" for alias in node.names]
+        else:
+            continue
+        for name in modules:
+            if name in SUGGEST_ALLOWED or name.split(".")[0] in stdlib | {"sqlalchemy"}:
+                continue
+            found.append(name)
+    return found
+
+
+def test_suggest_imports_only_its_allowlist():
+    """The suggestion call's input is built from topics, dismissed
+    suggestions and lens titles and summaries, and nothing else (plan
+    section 3): every import is on the list above, every model it names
+    is one of its four, and from the lens module it reads only
+    `lens_active` and `catalog`."""
+    source = SUGGEST.read_text(encoding="utf-8")
+    assert _suggest_violations(source) == []
+    tree = ast.parse(source)
+    lens_names = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and getattr(node.value, "id", None) == "lens"
+    }
+    assert lens_names and lens_names <= SUGGEST_LENS_NAMES, sorted(lens_names - SUGGEST_LENS_NAMES)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from app.db.models import Message\n",
+        "from app.db.models import InterestTopic, Memory\n",
+        "from app.core import memory\n",
+        "from app.core.notebook import entries\n",
+        "from app.core import journal\n",
+        "from app.core.scene import summary\n",
+        "from app.vault import notes_knowledge\n",
+        "import app.core.checkin\n",
+        "from . import jobs\n",
+    ],
+)
+def test_the_suggest_allowlist_catches_a_violation(source):
+    assert _suggest_violations(source)
+
+
+def test_the_suggestion_call_never_asks_for_a_web_search():
+    """One call under a strict schema, no tools: app/research/search.py's
+    `find_urls` stays the only call site that asks for a search (plan
+    section 3, tests/test_web_search_isolation.py)."""
+    code = _code_without_docstrings(SUGGEST)
+    for name in ("web_search", "WebSearch", "find_urls", "app.research.search"):
+        assert not re.search(rf"\b{name}\b", code), name

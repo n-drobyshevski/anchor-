@@ -12,6 +12,7 @@ note_chunk_personal / note_chunk_knowledge / lens_note / note_link ->
 vault_file -> memory, lens_round -> weekly_review / lens_version / idle_run,
 review_proposal -> lens_round, notebook_entry -> lens_round,
 lens_gap -> lens_garden_run -> idle_run / lens_version,
+interest_suggestion -> interest_suggest_batch / interest_topic,
 study_job -> lens_gap, study_card -> echo_changeset -> lens_gap / study_job,
 vault_file -> vault_hold) or belongs
 to a table that is itself listed. So one TRUNCATE over the whole list succeeds. Leaving CASCADE
@@ -191,6 +192,14 @@ PURGED_TABLES = (
     "idle_run",
     "brief_note",
     "interest_topic",
+    # `/interests suggest` (anchor-interest-suggestions-plan.md section
+    # 4): the model's proposed topics and the batches they came in,
+    # child-first (interest_suggestion's FKs point at the batch, CASCADE,
+    # and at interest_topic, SET NULL). The text is what this user was
+    # shown, and a tap on it is their decision, so both go with
+    # interest_topic in the same statement.
+    "interest_suggestion",
+    "interest_suggest_batch",
     "backup_log",
     # P2: the planner link. planner_credential holds live OAuth tokens --
     # "delete all my data" purging them is the same call plan section
