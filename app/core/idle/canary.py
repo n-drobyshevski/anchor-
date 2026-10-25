@@ -46,6 +46,7 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import PersonaAmendment, SpendLedger
+from app.llm import models as llm_models
 from app.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,11 @@ async def run_canary(
     async with session_factory() as session:
         amendments = await _active_amendment_texts(session)
 
+    # The ledger row's label, read before the trial: the judge the
+    # trial's providers resolve to (eval/trial.py binds them to the
+    # `judge` and `persona` roles), not env's LLM_MODEL_JUDGE.
+    judge_model = llm_models.effective_model(settings, "judge")
+
     async def _on_case_done() -> None:
         if job_id is not None:
             async with session_factory() as session:
@@ -118,7 +124,7 @@ async def run_canary(
             SpendLedger(
                 local_date=clock_module.local_date(clock, timezone),
                 category=f"idle:{ctx.kind}",
-                model=settings.LLM_MODEL_JUDGE,
+                model=judge_model,
                 tokens_in=0,
                 tokens_cached=0,
                 tokens_out=0,

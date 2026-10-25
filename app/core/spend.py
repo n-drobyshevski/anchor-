@@ -13,6 +13,12 @@ the local calendar day for the whole application and a frozen clock can
 drive the budget across a simulated midnight. The DST property it
 carried -- that the cap rolls over on the user's calendar day, not
 UTC's -- is unchanged and still tested here and in tests/test_clock.py.
+
+Runtime model choice (docs/decisions.md) adds one rule to the price
+lookup: a model the owner picked in ⚙️ Настройки › 🧠 Модели bills at
+the prices stored on its override row (OpenRouter's catalog, when it
+was picked) -- see `price_triple_for`. The vendor-reported cost still
+wins over both, exactly as before.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import IdleRun, SpendLedger
+from app.llm import models as llm_models
 from app.llm.provider import LLMUsage
 
 _CENTS_EXPONENT = decimal.Decimal("0.000001")  # Numeric(10, 6): quantize to 6dp
@@ -182,7 +189,23 @@ def price_triple_for(model: str | None, settings: Settings) -> tuple[
     price is converted via Decimal(str(price)) -- Decimal(float) would
     drag in that float's binary representation error (Decimal(0.1) is
     not 0.1), which would show up from the sixth decimal place onward.
+
+    Runtime model choice: an overridden model whose row carries prices
+    (app/llm/models.py's `override_prices`, through the resolver
+    app/main.py installed) is priced at those first, ahead of the env
+    triples. Those are the catalog's own figures for that exact model,
+    taken when it was picked, while the env triples are only right for
+    the model each env setting names -- a role switched to a model env
+    has never heard of would otherwise bill at the main model's prices.
+    An overridden model without prices (picked while OpenRouter was
+    unreachable) falls through to the rules below unchanged, and with no
+    resolver installed (every test that does not install one, and the
+    offline eval) nothing here changes at all. Stored prices are already
+    Decimals, so no float conversion applies to them.
     """
+    stored = llm_models.override_prices(model)
+    if stored is not None:
+        return stored
     if model is not None and model != settings.LLM_MODEL:
         if model == settings.LLM_MODEL_CHEAP:
             return (

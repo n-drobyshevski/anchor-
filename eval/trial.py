@@ -85,6 +85,14 @@ async def run_blocking_subset(
     `run_trial`) has already refused to reach this function at all when
     the judge is not independent.
 
+    In the bot (the amendment trial and the idle canary are its only
+    callers) both are bound to their roles, `persona` and `judge`, on
+    the resolver app/main.py installed (app/llm/models.py's
+    `resolver_kwargs`), so the trial grades the persona model the chat
+    really runs on, with the judge the menu chose; the independence
+    check its callers make is on those same effective models. With no
+    resolver installed the pair is pinned to env, as before.
+
     `persona_provider`/`judge_provider` let a test inject
     `FakeLLMProvider`s and exercise the real throwaway-database path (the
     property that actually matters) with no network call and no
@@ -95,6 +103,7 @@ async def run_blocking_subset(
 
     client = None
     if persona_provider is None or judge_provider is None:
+        from app.llm import models as llm_models
         from app.llm.openrouter import OpenRouterProvider, build_client
 
         client = build_client(settings.OPENROUTER_API_KEY)
@@ -106,6 +115,7 @@ async def run_blocking_subset(
                 temperature=settings.LLM_TEMPERATURE,
                 data_collection=settings.LLM_DATA_COLLECTION,
                 client=client,
+                **llm_models.resolver_kwargs("persona"),
             )
         if judge_provider is None:
             judge_provider = OpenRouterProvider(
@@ -116,6 +126,7 @@ async def run_blocking_subset(
                 data_collection=settings.LLM_DATA_COLLECTION,
                 client=client,
                 structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+                **llm_models.resolver_kwargs("judge"),
             )
 
     results: dict[str, bool] = {}

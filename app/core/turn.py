@@ -1124,7 +1124,9 @@ async def run(
             # The welfare shadow (app/core/welfare_shadow.py): a decision
             # model asked the same question beside the classifier, whose
             # result comes back untouched. Only ever compared, never obeyed.
-            if welfare_decider is not None:
+            # `active` also skips a decider switched off from the menu
+            # (🫀 Welfare-тень «выкл»): no call, no row.
+            if welfare_shadow.active(welfare_decider):
                 welfare_call = welfare_shadow.beside(
                     welfare_call,
                     welfare_decider,

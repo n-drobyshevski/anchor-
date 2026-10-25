@@ -115,6 +115,27 @@ psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select shadow_outcome, count(*), percentil
 psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select width_bucket(shadow_p_real, 0, 1, 10) as bucket, primary_level, count(*) from debug.welfare_shadow where shadow_outcome = 'ok' and primary_outcome = 'ok' group by 1, 2 order by 1, 2"
 ```
 
+`debug.llm_model_override` (migration `d8a3f6c1b925`) shows which model
+each LLM role was switched to in ⚙️ Настройки › 🧠 Модели (runtime model
+choice, docs/decisions.md): `role, model, updated_at`, one row per
+overridden role. A role with no row runs on its env model (the garden
+and the topic suggester, on the safety model's switch). The model is an
+OpenRouter catalog id, which the user did not write and the model did not
+say, so it is content-free; the prices stored with it are left out of the
+view, since debugging a bad switch does not need them. When a switch
+happened is in the `state_change` rows with `field` like `model:<role>`
+(`debug.state_change` shows `id, field, source, created_at` and never the
+old and new values, here as for every field), and which model answered
+each call is in `debug.spend_ledger`, whose `model` column names the model
+that really answered. To see what a role is on and when it
+changed:
+
+```sh
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select role, model, updated_at from debug.llm_model_override order by role"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select field, source, created_at from debug.state_change where field like 'model:%' order by created_at desc limit 20"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select local_date, category, model, count(*), sum(usd_cost) from debug.spend_ledger group by 1, 2, 3 order by 1 desc limit 30"
+```
+
 ## Lens notes (L1)
 
 `anchor-lens-plan.md` §11. The one exception to "the vault is off

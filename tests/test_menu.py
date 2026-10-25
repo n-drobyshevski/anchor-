@@ -37,6 +37,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.db.models import Message, OauthConnection, PlannerCredential, TelegramUpdate, UserState
 from app.planner import auth as planner_auth
+from app.llm import models as llm_models
 from app.tg import menu
 from app.tg import planner as planner_ui
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
@@ -64,6 +65,9 @@ PARENT = {
     "lens": "knowledge",
     "planner": "links",
     "claude": "links",
+    # Runtime model choice: ⚙️ Настройки › 🧠 Модели › one card per role.
+    "models": "settings",
+    **{f"model_{role}": "models" for role in llm_models.ROLES},
 }
 # The back button's word for each parent.
 BACK_LABEL = {
@@ -74,6 +78,7 @@ BACK_LABEL = {
     "knowledge": "Знания",
     "links": "Подключения",
     "settings": "Настройки",
+    "models": "Модели",
 }
 TITLE = {
     "main": menu.MAIN_TITLE,
@@ -93,8 +98,12 @@ TITLE = {
     "settings": menu.SETTINGS_TITLE,
     "quiet": menu.QUIET_TITLE,
     "data": menu.DATA_TITLE,
+    "models": menu.MODELS_TITLE,
+    **{f"model_{role}": menu.MODEL_TITLES[role] for role in llm_models.ROLES},
 }
 ALL_SECTIONS = tuple(PARENT) + (menu.MAIN_SECTION,)
+# The sections the web sink never shows: every button in them is Telegram only.
+TELEGRAM_ONLY_SECTIONS = ("lens", "claude", "models", *(f"model_{role}" for role in llm_models.ROLES))
 
 
 def _settings(
@@ -176,6 +185,11 @@ def _view_samples() -> tuple[menu.MenuView, ...]:
             planner_status="active", planner_enabled=True, lens_code=True, lens_size=9,
             lens_today_reads=2, research_used=(1, 2, 3), grok_grants=1, web_sessions=2,
             knowledge_notes=5, personal_notes=3,
+            # Every role overridden, so ↩️ «По умолчанию» and the
+            # shadow's «выкл» are drawn too.
+            models=tuple(
+                menu.ModelState(role, "openai/gpt-4.1-nano", True) for role in llm_models.ROLES
+            ),
         ),
         menu.MenuView(
             intensity=5, library_read=False, planner_status="revoked", planner_enabled=False,
@@ -225,7 +239,8 @@ def _offered(section: str, settings: Settings = FULL, **kwargs) -> list[str]:
 
 def test_the_section_set():
     assert set(menu.SECTIONS) == set(ALL_SECTIONS)
-    assert len(menu.SECTIONS) == 17
+    # 17 before runtime model choice, plus 🧠 Модели and its 7 role cards.
+    assert len(menu.SECTIONS) == 25
     assert "mode" not in menu.SECTIONS and "vault" not in menu.SECTIONS
 
 
@@ -254,7 +269,7 @@ def test_every_section_renders_both_ways():
     for section in ALL_SECTIONS:
         for web in (False, True):
             if not menu.section_exists(section, FULL, web=web):
-                assert section in ("lens", "claude") and web
+                assert section in TELEGRAM_ONLY_SECTIONS and web
                 continue
             text, markup = menu.render(section, FULL, web=web)
             assert text
@@ -1143,6 +1158,7 @@ def test_settings_layout_and_status_line():
         ["mn:a:int_2", "mn:a:int_4"],
         ["mn:a:out"],
         ["mn:s:quiet:settings", "mn:i:tz"],
+        ["mn:s:models"],
         ["mn:a:hide_kb"],
         ["mn:s:main", "mn:x"],
     ]
@@ -1200,7 +1216,8 @@ def test_data_layout_and_the_sensitive_acts_are_telegram_only():
 
 
 def test_action_count_and_kinds():
-    assert len(menu.ACTIONS) == 91
+    # 91 before runtime model choice, plus a pick, ✏️ and ↩️ per role.
+    assert len(menu.ACTIONS) == 91 + 3 * len(llm_models.ROLES)
     assert menu.KINDS == (menu.RUN, menu.PROMPT, menu.CONFIRM)
     for key, action in menu.ACTIONS.items():
         assert action.kind in menu.KINDS, key
@@ -1742,10 +1759,11 @@ async def test_the_web_menu_never_offers_a_telegram_only_button(sessionmaker):
             shown.append(fake.edits[-1].reply_markup)
     keys = {key for markup in shown if markup for key in _keys(markup)}
     assert keys and not keys & menu.TELEGRAM_ONLY
-    # lens and claude do not exist on the web: a forged press is stale.
+    # lens, claude and the model cards do not exist on the web: a
+    # forged press is stale.
     assert len(fake.edits) == len(on_web)
     assert len(fake.answered) == len(ALL_SECTIONS) - 1
-    assert sum(1 for a in fake.answered if a.text == "Устарело.") == 2
+    assert sum(1 for a in fake.answered if a.text == "Устарело.") == len(TELEGRAM_ONLY_SECTIONS)
 
 
 class _RichMessageFailsSession(FakeSession):

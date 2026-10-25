@@ -290,6 +290,11 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
             )
         )
         session.add(models.ClaudeWriteLimit(name="creates_per_day", value=5, updated_at=now))
+        session.add(
+            models.LlmModelOverride(
+                role="persona", model="openai/gpt-4.1-nano", price_in=0.1, price_out=0.4
+            )
+        )
         await session.commit()
 
     # L4: one of Echo's inbox writes (its gap and job are SET NULL, so

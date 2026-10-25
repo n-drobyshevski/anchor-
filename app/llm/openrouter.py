@@ -27,6 +27,16 @@ turns out to reject `response_format`, one env var turns it off
 without a code change, and app/core/extract.py still parses and
 validates the reply exactly as it did before. Strict schema is a
 reliability feature here, never a correctness one.
+
+Runtime model choice (docs/decisions.md) adds `resolver=` and `role=`
+to both providers: given them, the model is asked of
+app/llm/models.py's `ModelResolver` on every request instead of being
+the one the constructor was handed, so a switch made in ⚙️ Настройки ›
+🧠 Модели reaches the very next call. Without them nothing changes --
+the constructor's `model` is used as before, and it stays in `_model`
+either way, the role's env default, which is what the tests and the
+offline eval (eval/run.py, eval/welfare.py, scripts/smoke.py, which
+stay on env) read.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ from __future__ import annotations
 import logging
 import re
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import openai
 from openai import AsyncOpenAI
@@ -51,6 +62,9 @@ from app.llm.provider import (
     LLMUsage,
     WebSearch,
 )
+
+if TYPE_CHECKING:
+    from app.llm.models import ModelResolver
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +105,26 @@ def build_client(api_key: str) -> AsyncOpenAI:
         max_retries=0,
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
+
+
+def _check_resolver(resolver, role: str | None) -> None:
+    """`resolver` and `role` come as a pair: a resolver with no role has
+    nothing to resolve, and a role with no resolver would silently run
+    on the constructor's model while looking switchable."""
+    if (resolver is None) != (role is None):
+        raise ValueError("resolver= and role= must be given together")
+    if resolver is not None:
+        from app.llm.models import ROLES
+
+        if role not in ROLES:
+            raise ValueError(f"unknown model role {role!r}")
+
+
+def _resolved(resolver, role: str | None, model: str) -> str:
+    """The resolver's effective model for `role`, else the fixed one."""
+    if resolver is None:
+        return model
+    return resolver.effective(role)
 
 
 def _extract_text(response) -> str:
@@ -265,6 +299,14 @@ class OpenRouterProvider:
     instance does not own it, and close() is a no-op -- whoever built
     the client closes it (app/main.py). `api_key` is then unused and may
     be empty.
+
+    `resolver` and `role` (runtime model choice) come together or not at
+    all: with them, every `complete()` sends `resolver.effective(role)`
+    and reports it as `LLMResponse.model`, so the ledger row is priced
+    and labelled by the model that actually answered; `model` is then
+    only the env default the provider was built from. Only the model is
+    resolved -- max_tokens, temperature and structured outputs are the
+    role's own, whichever model serves it.
     """
 
     def __init__(
@@ -276,7 +318,11 @@ class OpenRouterProvider:
         data_collection: str,
         client: AsyncOpenAI | None = None,
         structured_outputs: bool = True,
+        *,
+        resolver: ModelResolver | None = None,
+        role: str | None = None,
     ) -> None:
+        _check_resolver(resolver, role)
         self._owns_client = client is None
         self._client = build_client(api_key) if client is None else client
         self._model = model
@@ -284,6 +330,13 @@ class OpenRouterProvider:
         self._temperature = temperature
         self._data_collection = data_collection
         self._structured_outputs = structured_outputs
+        self._resolver = resolver
+        self._role = role
+
+    @property
+    def model(self) -> str:
+        """The model the next request will be sent to."""
+        return _resolved(self._resolver, self._role, self._model)
 
     async def complete(
         self,
@@ -297,6 +350,16 @@ class OpenRouterProvider:
         # here: OpenRouter has no prompt-cache-key field, and Cydonia
         # reports supports_implicit_caching: false, so there is nothing
         # to key a cache on -- cached_tokens will always come back 0.
+        #
+        # Resolved once, here: the request and the LLMResponse must name
+        # the same model even if a switch lands while the call is out.
+        model = self.model
+        if not model and self._resolver is not None:
+            # Only welfare_shadow may resolve to "" (off), and it never
+            # runs on a chat provider; refuse rather than send model="".
+            # Without a resolver the constructor's model goes out as it
+            # always did.
+            raise LLMError("no model for this role")
         extra_body = {"provider": {"data_collection": self._data_collection}}
         request: dict = {}
         if json_schema is not None and self._structured_outputs:
@@ -345,7 +408,7 @@ class OpenRouterProvider:
 
         try:
             response = await self._client.chat.completions.create(
-                model=self._model,
+                model=model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
@@ -386,7 +449,7 @@ class OpenRouterProvider:
         return LLMResponse(
             text=text,
             usage=usage,
-            model=self._model,
+            model=model,
             citations=_extract_citations(response),
             finish_reason=_extract_finish_reason(response),
             native_finish_reason=_extract_native_finish_reason(response),
@@ -395,7 +458,11 @@ class OpenRouterProvider:
     def with_max_tokens(self, max_tokens: int) -> OpenRouterProvider:
         """The same model, temperature and client with another output cap
         (app/llm/provider.py's `with_max_tokens`). The sibling never owns
-        the client, so closing it is a no-op and this one keeps it."""
+        the client, so closing it is a no-op and this one keeps it.
+
+        It keeps the resolver and the role too, so a distill's wider cap
+        still follows the safety role's switch rather than freezing the
+        model it happened to resolve to when it was built."""
         return OpenRouterProvider(
             api_key="",
             model=self._model,
@@ -404,6 +471,8 @@ class OpenRouterProvider:
             data_collection=self._data_collection,
             client=self._client,
             structured_outputs=self._structured_outputs,
+            resolver=self._resolver,
+            role=self._role,
         )
 
     async def close(self) -> None:
@@ -433,16 +502,45 @@ class OpenRouterDecisionProvider:
     OpenRouter refuses the request rather than routing it anywhere
     else, which is the direction this should fail in -- the only caller
     sends the welfare classifier's input.
+
+    `resolver` and `role` work as on `OpenRouterProvider` (role
+    `welfare_shadow`). That role alone may resolve to "" -- switched off
+    from the menu -- so `enabled` says whether there is anything to ask,
+    and app/core/welfare_shadow.py checks it before every turn; `decide`
+    refuses rather than send an empty model if a caller does not.
     """
 
-    def __init__(self, model: str, data_collection: str, client: AsyncOpenAI) -> None:
+    def __init__(
+        self,
+        model: str,
+        data_collection: str,
+        client: AsyncOpenAI,
+        *,
+        resolver: ModelResolver | None = None,
+        role: str | None = None,
+    ) -> None:
+        _check_resolver(resolver, role)
         self._model = model
         self._data_collection = data_collection
         self._client = client
+        self._resolver = resolver
+        self._role = role
+
+    @property
+    def model(self) -> str:
+        """The model the next decision will be asked of; "" when off."""
+        return _resolved(self._resolver, self._role, self._model)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.model)
 
     async def decide(self, state: str, questions: dict[str, Choice]) -> DecisionResponse:
+        model = self.model
+        if not model and self._resolver is not None:
+            raise LLMError("decision model is off")
         body = {
-            "model": self._model,
+            "model": model,
             "state": state,
             "questions": {
                 name: {
@@ -481,7 +579,7 @@ class OpenRouterDecisionProvider:
                 for name, question in questions.items()
             },
             usage=_decision_usage(payload.get("usage")),
-            model=self._model,
+            model=model,
         )
 
 

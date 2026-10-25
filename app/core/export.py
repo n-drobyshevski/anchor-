@@ -2,8 +2,9 @@
 
 Section 11 named nine tables: state, messages, memories, scenes,
 check-ins, proposals, journal, state_change, spend_ledger. Later
-milestones added `outbound`, `safety_event`, 4a's three study tables
-and 8a's `vault_file` and `vault_hold`, and they are here too -- see the comment on EXPORTED_MODELS.
+milestones added `outbound`, `safety_event`, 4a's three study tables,
+8a's `vault_file` and `vault_hold` and the runtime model choice's
+`llm_model_override`, and they are here too -- see the comment on EXPORTED_MODELS.
 
 What stays out is transport and queue plumbing -- telegram_update, job,
 pending_memory -- whose only real content is message text that
@@ -51,6 +52,7 @@ from app.db.models import (
     InterestSuggestion,
     InterestTopic,
     Journal,
+    LlmModelOverride,
     NotebookEntry,
     Obligation,
     Outbound,
@@ -184,6 +186,12 @@ EXPORTED_MODELS = (
     # The user's own overrides of Claude's write caps: a name and a
     # number each.
     ClaudeWriteLimit,
+    # Runtime model choice: the model the user picked for each LLM role
+    # in ⚙️ Настройки › 🧠 Модели -- a role, an OpenRouter id, the
+    # prices stored with it and a time. A setting of theirs, the same
+    # reasoning as `claude_write_limit` just above, so "give me all my
+    # data" includes it as "delete all my data" removes it.
+    LlmModelOverride,
     # L4 (the L4 spec section 7): Echo's inbox writes, the same answer
     # to "what did Echo write into my vault" -- ids and times only, no
     # path, no name, no text. The lens gaps it points at stay out, as
