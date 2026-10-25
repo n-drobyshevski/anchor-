@@ -19,8 +19,10 @@ or touches the app's own `session` for anything but reading/writing its
 own rows (the amendment itself, and the ledger).
 
 **The judge must be independent, checked first, before anything else
-runs.** If `settings.LLM_MODEL_JUDGE` is empty or equals
-`settings.LLM_MODEL`, the trial fails immediately with reason
+runs.** If the effective judge model is empty or equals the effective
+persona model (app/llm/models.py's `independent_judge`: env's
+`LLM_MODEL_JUDGE` and `LLM_MODEL` unless ⚙️ Настройки › 🧠 Модели
+switched either), the trial fails immediately with reason
 `no_independent_judge` -- no throwaway database is created and no API
 call is made at all. There is no fallback to `LLM_MODEL_CHEAP`: eval.run.py
 already refuses a same-model blocking run for the same reason (H5), and
@@ -50,6 +52,7 @@ from app.core.scene import Deferred
 from app.core import clock as clock_module
 from app.core.spend import check_cap
 from app.db.models import PersonaAmendment, SpendLedger
+from app.llm import models as llm_models
 
 logger = logging.getLogger(__name__)
 
@@ -225,8 +228,13 @@ async def run_trial(
 
     # Step 1: the judge check, strictly, before anything else -- no
     # throwaway database, no API call. See the module docstring.
-    judge_model = settings.LLM_MODEL_JUDGE
-    if not judge_model or judge_model == settings.LLM_MODEL:
+    #
+    # On the *effective* models (app/llm/models.py's `independent_judge`):
+    # eval/trial.py's providers resolve per request, so a judge or a
+    # persona switched in ⚙️ Настройки › 🧠 Модели is what the trial
+    # would really run, and what this must compare.
+    judge_model = llm_models.effective_model(settings, "judge")
+    if not llm_models.independent_judge(settings):
         row.status = FAILED
         row.eval_report = {"cases": {}, "reason": NO_INDEPENDENT_JUDGE}
         await session.commit()
@@ -299,7 +307,7 @@ async def run_trial(
         SpendLedger(
             local_date=clock_module.local_date(clock, timezone),
             category=AMENDMENT_TRIAL_CATEGORY,
-            model=settings.LLM_MODEL_JUDGE,
+            model=judge_model,
             tokens_in=0,
             tokens_cached=0,
             tokens_out=0,

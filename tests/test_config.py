@@ -675,3 +675,55 @@ def test_interest_suggest_settings_are_bounded(name, value, ok):
     else:
         with pytest.raises(SystemExit, match=f"{name} must be between"):
             check_vault_settings(settings)
+
+
+# --- runtime model choice: MODEL_CHOICES and MODEL_CATALOG_TTL_H ---
+
+
+def test_model_choices_default_is_the_four_env_models():
+    from app.config import model_choices
+
+    choices = model_choices(_settings())
+    assert [(c.id, c.caps) for c in choices] == [
+        ("thedrummer/cydonia-24b-v4.1", ("prose",)),
+        ("google/gemini-2.5-flash-lite", ("json",)),
+        ("openai/gpt-4.1-nano", ("json",)),
+        ("typesafe/jev-1.14", ("decisions",)),
+    ]
+    settings = _settings()
+    assert {settings.LLM_MODEL, settings.LLM_MODEL_SAFETY, settings.LLM_MODEL_JUDGE} <= {
+        c.id for c in choices
+    }
+    assert _settings().MODEL_CATALOG_TTL_H == 24
+
+
+def test_model_choices_parse_from_the_environment_and_normalize():
+    from app.config import model_choices
+
+    settings = _settings(MODEL_CHOICES=" a/b | A B | json+prose ;\n c/d:free|C|decisions ")
+    assert settings.MODEL_CHOICES == ("a/b|A B|prose,json", "c/d:free|C|decisions")
+    assert [c.label for c in model_choices(settings)] == ["A B", "C"]
+    assert _settings(MODEL_CHOICES="").MODEL_CHOICES == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "no-slash|Label|prose",
+        "a/b|Label",
+        "a/b|Label|prose|extra",
+        "a/b||prose",
+        "a/b|Label|",
+        "a/b|Label|vision",
+        "a/b|" + "x" * 41 + "|prose",
+        "a/b|One|prose;a/b|Two|json",
+    ],
+)
+def test_model_choices_refuse_junk_at_boot(raw):
+    with pytest.raises(ValidationError):
+        _settings(MODEL_CHOICES=raw)
+
+
+def test_model_catalog_ttl_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(MODEL_CATALOG_TTL_H=0)

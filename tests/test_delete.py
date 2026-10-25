@@ -26,6 +26,7 @@ from app.db.models import (
     AccessGrant,
     ClaudeChangeset,
     ClaudeWriteLimit,
+    LlmModelOverride,
     EchoChangeset,
     OauthConnection,
     OauthRequest,
@@ -435,6 +436,8 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 ),
                 # A user-set override of one of Claude's write caps.
                 ClaudeWriteLimit(name="creates_per_day", value=5, updated_at=now),
+                # A model chosen for one LLM role from the menu.
+                LlmModelOverride(role="persona", model="openai/gpt-4.1-nano"),
             ]
         )
         # Phase 5: an open debt.
@@ -723,6 +726,59 @@ async def test_confirming_wipes_everything(sessionmaker):
     assert after["message"] == 0
     assert fake.edits[-1].text == data_ui.DELETED_TEXT
     assert fake.edits[-1].reply_markup is None
+
+
+async def test_confirming_puts_every_model_back_on_env_in_the_resolver_too(sessionmaker):
+    """The truncate takes the `llm_model_override` rows; the resolver's
+    in-process cache must go with them, or the old picks would keep
+    answering -- and pricing -- until the next restart."""
+    from app.llm import models as llm_models
+    from app.llm.models import ModelPrices, ModelResolver
+
+    settings = Settings()
+    await _seed_everything(sessionmaker, 2, 3)
+    resolver = await ModelResolver.create(settings, sessionmaker)
+    llm_models.install(resolver)
+    try:
+        await resolver.set(
+            "cheap", "vendor/picked", ModelPrices(decimal.Decimal(1), None, decimal.Decimal(2))
+        )
+        assert resolver.effective("cheap") == "vendor/picked"
+        assert llm_models.override_prices("vendor/picked") is not None
+        dp, bot, fake = _build_dp(sessionmaker)
+
+        await dp.feed_update(
+            bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+        )
+        await dp.feed_update(
+            bot,
+            Update.model_validate(_callback_update(3, f"d:yes:{int(time.time())}"), context={"bot": bot}),
+        )
+
+        assert fake.edits[-1].text == data_ui.DELETED_TEXT
+        assert resolver.effective("cheap") == settings.LLM_MODEL_CHEAP
+        assert not any(resolver.overridden(role) for role in llm_models.ROLES)
+        assert llm_models.override_prices("vendor/picked") is None
+        async with sessionmaker() as session:
+            assert (await session.execute(select(func.count()).select_from(LlmModelOverride))).scalar_one() == 0
+    finally:
+        llm_models.install(None)
+
+
+async def test_confirming_with_no_resolver_installed_still_deletes(sessionmaker):
+    from app.llm import models as llm_models
+
+    assert llm_models.installed() is None
+    await _seed_everything(sessionmaker, 2, 3)
+    dp, bot, fake = _build_dp(sessionmaker)
+    await dp.feed_update(
+        bot, Update.model_validate(_command_update(2, "/delete"), context={"bot": bot})
+    )
+    await dp.feed_update(
+        bot,
+        Update.model_validate(_callback_update(3, f"d:yes:{int(time.time())}"), context={"bot": bot}),
+    )
+    assert fake.edits[-1].text == data_ui.DELETED_TEXT
 
 
 async def test_confirming_also_closes_the_web_hub(sessionmaker):

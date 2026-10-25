@@ -73,8 +73,13 @@ off at deploy level is not drawn and not reachable):
         claude      (CLAUDE_ACCESS_ENABLED, Telegram only) status and the
                     window picker, connect by code ✏️⚠️, the library
                     switches, write limits, undo ⚠️, disconnect ⚠️
-      settings      intensity, pause, quiet ›, time zone ✏️, hide the
-                    menu button
+      settings      intensity, pause, quiet ›, time zone ✏️, models ›,
+                    hide the menu button
+        models      (Telegram only) the effective model of every role,
+                    and one card per role below it
+          model_<role>  the curated picks (MODEL_CHOICES) ⚠️, a custom id
+                    ✏️⚠️, «выкл» for the welfare shadow ⚠️, and ↩️ back
+                    to the default ⚠️ only while the role is overridden
       quiet         presets, and "off" only while quiet is on --
                     reachable from main *and* from settings
       data          privacy, export ⚠️, delete ⚠️, close all access
@@ -141,17 +146,32 @@ module's handlers and theirs never matters):
                              text, no keyboard)
 
 Every one of these stays inside Telegram's 64-byte callback_data limit:
-the longest fixed one, "mn:a:quiet_off:settings", is 23 bytes, and the
-two carrying typed input bound it first (`forget_confirm_data` takes a
+the longest fixed one, "mn:i:mdl_custom_welfare_shadow", is 30 bytes, and
+the two carrying typed input bound it first (`forget_confirm_data` takes a
 parsed integer id, `claude_connect_code` a short code-shaped token, both
 checked by `fits_callback`).
+
+**Models** (⚙️ Настройки › 🧠 Модели, docs/decisions.md "Runtime model
+choice"). Three keys per role (`MODEL_PICKS`, `MODEL_CUSTOM`,
+`MODEL_RESETS`), every one Telegram only. A pick is `mn:a:mdl_<role>:<n>`
+-- `<n>` the entry's index in `choices_for(role)`, or `off` for the
+welfare shadow -- never a model id: an id is free-form text of no fixed
+length, and what a card is about to apply is held by the router, keyed
+on the card's own message id, not carried by its «Да» (`mn:y:mdl_<role>`).
+A pick and ↩️ «По умолчанию» are `confirm` keys whose card the router
+builds itself (prices, the role's own warning), ✏️ «Своя модель» a
+prompt whose reply is checked against OpenRouter (app/llm/catalog.py's
+`validate_choice`) before the same card -- the owner's rule that every
+switch asks first.
 """
 
 from __future__ import annotations
 
 import datetime
+import decimal
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from aiogram.types import (
@@ -171,6 +191,9 @@ from aiogram.types import (
 
 from app.config import Settings
 from app.core import orders as orders_core
+from app.llm import models as llm_models
+from app.llm.catalog import choices_for
+from app.llm.models import ModelPrices
 from app.vault.kinds import SYNC_MODES
 from app.web import oauth_store
 from app.web.ingress import BLOCKED_COMMANDS
@@ -375,6 +398,40 @@ def _confirm(label, *commands, args=None, gate=_always, style=None) -> Action:
 
 _WEEKDAY_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
+# Runtime model choice: the menu's name for each role (app/llm/models.py's
+# ROLES, in that order), shown on its card, its confirmations and /state
+# (app/tg/router.py hands these to app/tg/state_view.py).
+MODEL_ROLE_LABELS: dict[str, str] = {
+    "persona": "Чат",
+    "cheap": "Сводки",
+    "safety": "Проверки",
+    "judge": "Судья",
+    "garden": "Сад",
+    "suggest": "Темы",
+    "welfare_shadow": "Welfare-тень",
+}
+_MODEL_ROLE_ICONS = {
+    "persona": "💬",
+    "cheap": "📝",
+    "safety": "🛡",
+    "judge": "⚖️",
+    "garden": "🌱",
+    "suggest": "💡",
+    "welfare_shadow": "🫀",
+}
+assert tuple(MODEL_ROLE_LABELS) == llm_models.ROLES == tuple(_MODEL_ROLE_ICONS)
+
+# The three keys of each role, and the role each one names. The section
+# of a role is `model_<role>` (`MODEL_SECTIONS`).
+MODEL_PICKS: dict[str, str] = {f"mdl_{role}": role for role in llm_models.ROLES}
+MODEL_CUSTOM: dict[str, str] = {f"mdl_custom_{role}": role for role in llm_models.ROLES}
+MODEL_RESETS: dict[str, str] = {f"mdl_reset_{role}": role for role in llm_models.ROLES}
+MODEL_KEYS = frozenset(MODEL_PICKS) | frozenset(MODEL_CUSTOM) | frozenset(MODEL_RESETS)
+MODELS_SECTION = "models"
+MODEL_SECTIONS: dict[str, str] = {f"model_{role}": role for role in llm_models.ROLES}
+# A pick's argument for "switch the welfare shadow off" (its override "").
+MODEL_OFF_ARG = "off"
+
 # Bot API 9.4's `style` field, used sparingly (the spec's own word): a
 # check-in is the one affirmative, everyday action worth a green accent,
 # closing access and wiping everything are destructive and worth a red
@@ -538,6 +595,12 @@ ACTIONS: dict[str, Action] = {
     # web sink, which never had one (app/web/sink.py only ever renders
     # InlineKeyboardMarkup).
     "hide_kb": _run("Убрать кнопку меню"),
+    # models: no command behind any of them (the router's own handlers
+    # call app/llm/models.py's resolver), and every one Telegram only.
+    # The pick's label is the curated entry's, drawn per button.
+    **{key: _confirm("Сменить модель") for key in MODEL_PICKS},
+    **{key: _prompt("✏️ Своя модель (id)") for key in MODEL_CUSTOM},
+    **{key: _confirm("↩️ По умолчанию") for key in MODEL_RESETS},
     # quiet
     "quiet_30m": _run("30 мин", "quiet", args="30m", refresh="quiet"),
     "quiet_2h": _run("2 ч", "quiet", args="2h", refresh="quiet"),
@@ -568,9 +631,13 @@ CONFIRM_AFTER_INPUT = frozenset({"forget", "claude_connect"})
 # itself), `hide_kb` (the web never had a reply keyboard) -- and, named
 # again though BLOCKED_COMMANDS already covers them, `export`, `delete`,
 # `grok_open`, `planner_link`, `lens_code_on` and `claude_connect`, so
-# this list does not quietly change if that set ever does.
+# this list does not quietly change if that set ever does. And every
+# model key (`MODEL_KEYS`): switching a model changes what every later
+# call costs and how the welfare check reads the user, which the plan
+# keeps in Telegram's hands alone.
 TELEGRAM_ONLY = frozenset(
     {key for key, action in ACTIONS.items() if set(action.commands) & BLOCKED_COMMANDS}
+    | MODEL_KEYS
     | {
         "export",
         "delete",
@@ -644,6 +711,11 @@ _PROMPTS = {
     "card": "Какую карточку показать? Напиши её номер.",
     "claude_connect": "Пришли код со страницы подключения на claude.ai.",
     "tz": "Какой часовой пояс? Например: Europe/Paris.",
+    **{
+        key: f"Какую модель поставить для «{MODEL_ROLE_LABELS[role]}»? "
+        "Пришли её id с openrouter.ai, вида vendor/model — я сначала её проверю."
+        for key, role in MODEL_CUSTOM.items()
+    },
 }
 
 _ORDER_CADENCE_TEXT = {"daily": "каждый день", "weekdays": "по будням", "once": "один раз"}
@@ -689,6 +761,17 @@ _CONFIRMS = {
         "Да, отключить",
     ),
     "export": ("Выгрузить все данные одним файлом?", "Да, выгрузить"),
+    # The model keys' cards are built by the router with the model and
+    # its prices (`model_confirm_text`, `model_reset_text`); these are
+    # only their generic form, and their «Да» labels.
+    **{
+        key: (f"Сменить модель «{MODEL_ROLE_LABELS[role]}»?", "Да, сменить")
+        for key, role in MODEL_PICKS.items()
+    },
+    **{
+        key: (f"Вернуть «{MODEL_ROLE_LABELS[role]}» на модель по умолчанию?", "Да, вернуть")
+        for key, role in MODEL_RESETS.items()
+    },
 }
 
 FORGET_CONFIRM = "Забыть #{id} «{text}»?"
@@ -713,6 +796,118 @@ def forget_confirm_text(memory_id: int, text: str) -> str:
 
 def claude_connect_confirm_text(code: str) -> str:
     return CLAUDE_CONNECT_CONFIRM.format(code=code)
+
+
+# --- the model cards -------------------------------------------------------
+
+MODEL_OFF_LABEL = "⏹ Выключить"
+MODEL_OFF_YES = "Да, выключить"
+MODEL_CONFIRM = "Сменить модель «{role}» на {model}? {price} {effect}"
+MODEL_PRICE = "Вход ${price_in}, выход ${price_out} за 1M."
+MODEL_PRICE_UNKNOWN = "Цена пока неизвестна."
+# What a switch changes, per role: the chat's own model is its voice.
+_MODEL_EFFECT = {"persona": "Влияет на тон и цену."}
+_MODEL_EFFECT_DEFAULT = "Влияет на качество и цену."
+MODEL_SAFETY_WARNING = (
+    "Проверки управляют welfare, памятью и разбором команд — плохая модель сломает их разом."
+)
+MODEL_OFF_CONFIRM = "Выключить Welfare-тень? Сравнение с основной проверкой остановится."
+MODEL_RESET_CONFIRM = "Вернуть «{role}» на модель по умолчанию — {model}?"
+MODEL_APPLIED = "Готово: «{role}» теперь на {model}."
+MODEL_OFF_APPLIED = "Готово: Welfare-тень выключена."
+MODEL_RESET_APPLIED = "Готово: «{role}» снова по умолчанию — {model}."
+MODEL_RESET_NOOP = "«{role}» и так на модели по умолчанию."
+MODEL_SAME = "«{role}» уже на этой модели."
+MODELS_UNAVAILABLE = "Смена моделей сейчас недоступна."
+# A card whose pending pick is gone (a restart since it was sent).
+MODEL_CARD_GONE = "Устарело. Открой /menu заново."
+OFF_VALUE = "выкл"
+
+
+def model_value(model: str) -> str:
+    """A role's model as the cards say it: the id, or «выкл» for ""."""
+    return model or OFF_VALUE
+
+
+_CENTS = decimal.Decimal("0.01")
+
+
+def _usd(value: decimal.Decimal) -> str:
+    """$ per 1M as the cards show it: two places when that is exact
+    ("0.30"), else every place the price has ("0.075"), so a cheap
+    model never reads as "0.00"."""
+    rounded = value.quantize(_CENTS)
+    if rounded == value:
+        return f"{rounded:.2f}"
+    return format(value.normalize(), "f")
+
+
+def price_pair(prices: ModelPrices | None) -> str | None:
+    """"$0.30 / $0.50" (input / output per 1M), or None when unknown."""
+    if prices is None or not prices.usable():
+        return None
+    return f"${_usd(prices.price_in)} / ${_usd(prices.price_out)}"
+
+
+def model_confirm_text(role: str, model: str, prices: ModelPrices | None) -> str:
+    """The pick's «Точно?» card: the plan's wording, the safety role's own
+    warning after it. "" is the welfare shadow switched off."""
+    if not model:
+        return MODEL_OFF_CONFIRM
+    if prices is not None and prices.usable():
+        price = MODEL_PRICE.format(price_in=_usd(prices.price_in), price_out=_usd(prices.price_out))
+    else:
+        price = MODEL_PRICE_UNKNOWN
+    text = MODEL_CONFIRM.format(
+        role=MODEL_ROLE_LABELS[role],
+        model=model,
+        price=price,
+        effect=_MODEL_EFFECT.get(role, _MODEL_EFFECT_DEFAULT),
+    )
+    if role == "safety":
+        text += " " + MODEL_SAFETY_WARNING
+    return text
+
+
+def model_confirm_markup(role: str, model: str) -> InlineKeyboardMarkup:
+    """[Да, сменить][Нет] -- «Да» is `mn:y:mdl_<role>`, with no model in it."""
+    key = f"mdl_{role}"
+    return confirm_markup(key, yes_label=None if model else MODEL_OFF_YES)
+
+
+def model_reset_text(role: str, default: str) -> str:
+    return MODEL_RESET_CONFIRM.format(role=MODEL_ROLE_LABELS[role], model=model_value(default))
+
+
+def model_applied_text(role: str, model: str) -> str:
+    if not model:
+        return MODEL_OFF_APPLIED
+    return MODEL_APPLIED.format(role=MODEL_ROLE_LABELS[role], model=model)
+
+
+def model_reset_applied_text(role: str, model: str) -> str:
+    return MODEL_RESET_APPLIED.format(role=MODEL_ROLE_LABELS[role], model=model_value(model))
+
+
+def model_role_text(template: str, role: str) -> str:
+    """`MODEL_RESET_NOOP`/`MODEL_SAME` for `role`."""
+    return template.format(role=MODEL_ROLE_LABELS[role])
+
+
+def model_pick_target(role: str, arg: str | None, settings: Settings) -> str | None:
+    """The model a pick press names: the `arg`-th entry of `choices_for`,
+    "" for the welfare shadow's `off`, or None when `arg` names nothing
+    (stale -- MODEL_CHOICES changed since the card was drawn -- or
+    forged). Index digits only: no sign, no spaces."""
+    if arg is None:
+        return None
+    if arg == MODEL_OFF_ARG:
+        return "" if role == llm_models.OFF_ROLE else None
+    if not arg.isdigit() or not arg.isascii() or len(arg) > 3:
+        return None
+    choices = choices_for(role, settings)
+    index = int(arg)
+    return choices[index].id if index < len(choices) else None
 
 
 def fits_callback(data: str) -> bool:
@@ -763,6 +958,29 @@ def confirm_markup(action: str, *, arg: str | None = None, yes_label: str | None
 # --- the live state a section may show -----------------------------------
 
 
+class ModelState(NamedTuple):
+    """One role's model as the 🧠 Модели cards show it (app/llm/models.py's
+    `ModelResolver`): `model` is `effective(role)` ("" = the welfare
+    shadow off), `overridden` whether the role has its own row (↩️ «По
+    умолчанию» is drawn only then), `follows_safety` whether it resolves
+    through the safety role (shown as «= проверки»)."""
+
+    role: str
+    model: str
+    overridden: bool = False
+    follows_safety: bool = False
+
+
+def env_model_state(settings: Settings, role: str) -> ModelState:
+    """What a role shows with no resolver to ask: env alone, nothing
+    overridden -- a fresh install, and every `MenuView` built without
+    `models`."""
+    follows = role in llm_models.SAFETY_FOLLOWERS and not getattr(
+        settings, llm_models.ROLE_SETTINGS[role]
+    )
+    return ModelState(role, llm_models.env_model(settings, role), False, follows)
+
+
 @dataclass(frozen=True)
 class MenuView:
     """Everything a section shows that is not a `Settings` value --
@@ -795,6 +1013,13 @@ class MenuView:
     (`lens.code_access`: None when the role is missing) and today's lens
     reads, the open Grok grants and the live web sessions. Counts and
     switches only -- never a title, a note or a token.
+
+    Runtime model choice: `models` is every role's `ModelState`, read
+    for the 🧠 Модели cards only (empty means "not read": each role then
+    shows its env model, `env_model_state`); `model_prices` the prices
+    OpenRouter's catalog gives for the models one role's card names --
+    its current one and its curated picks -- as (model id, prices)
+    pairs, empty when not fetched or unknown. Model ids and numbers only.
     """
 
     now: datetime.datetime | None = None
@@ -819,6 +1044,15 @@ class MenuView:
     lens_today_reads: int | None = None
     grok_grants: int | None = None
     web_sessions: int | None = None
+    models: tuple[ModelState, ...] = ()
+    model_prices: tuple[tuple[str, ModelPrices], ...] = ()
+
+
+def model_state(settings: Settings, view: MenuView, role: str) -> ModelState:
+    for state in view.models:
+        if state.role == role:
+            return state
+    return env_model_state(settings, role)
 
 
 def _tz(view: MenuView) -> ZoneInfo:
@@ -953,6 +1187,8 @@ _PARENT = {
     "lens": "knowledge",
     "planner": "links",
     "claude": "links",
+    MODELS_SECTION: "settings",
+    **{section: MODELS_SECTION for section in MODEL_SECTIONS},
 }
 
 # The back button's word for each parent. A label that sometimes lies is
@@ -965,6 +1201,7 @@ _BACK_LABELS = {
     "links": "Подключения",
     "settings": "Настройки",
     "order_cadence": "Как часто",
+    MODELS_SECTION: "Модели",
 }
 
 QUIET_ORIGINS = frozenset({MAIN_SECTION, "settings"})
@@ -1014,6 +1251,19 @@ CLAUDE_TITLE = "🤖 Claude"
 SETTINGS_TITLE = "⚙️ Настройки"
 QUIET_TITLE = "🔕 Тишина"
 DATA_TITLE = "🔒 Данные"
+MODELS_TITLE = "🧠 Модели"
+MODEL_TITLES = {
+    "persona": "💬 Модель чата",
+    "cheap": "📝 Модель сводок",
+    "safety": "🛡 Модель проверок",
+    "judge": "⚖️ Модель судьи",
+    "garden": "🌱 Модель сада",
+    "suggest": "💡 Модель тем",
+    "welfare_shadow": "🫀 Модель Welfare-тени",
+}
+# The models card's legend for its "✎" mark, shown only while a role has one.
+MODELS_LEGEND = "✎ — выбрана в меню"
+MODEL_FOLLOWS_SAFETY = "= проверки"
 
 QUIET_HINT = "Тишина отменяет запланированные сообщения и не даёт планировать новые."
 PACKET_INTEREST_HINT = "Новая тема для фонового поиска."
@@ -1363,6 +1613,8 @@ def _render_settings(settings: Settings, *, web: bool, view: MenuView, origin: s
     _add(rows, _intensity_row(view))
     _add(rows, _row(settings, web, "out" if view.persona_active else "in"))
     rows.append([_section_btn("quiet", "🔕 Тишина ›", origin="settings"), _action_btn("tz")])
+    if section_exists(MODELS_SECTION, settings, web=web):
+        rows.append([_section_btn(MODELS_SECTION, "🧠 Модели ›")])
     _add(rows, _row(settings, web, "hide_kb"))
     rows.append(_nav_row("settings"))
     return Section(title=SETTINGS_TITLE, hint=hint, table_rows=None, rows=rows)
@@ -1394,6 +1646,81 @@ def _render_data(settings: Settings, *, web: bool, view: MenuView, origin: str |
     return Section(title=DATA_TITLE, hint=None, table_rows=None, rows=rows)
 
 
+def _short_model(model: str) -> str:
+    """The id without its vendor, for the one-line summary
+    ("thedrummer/cydonia-24b-v4.1" -> "cydonia-24b-v4.1")."""
+    if not model:
+        return OFF_VALUE
+    return model.split("/", 1)[-1]
+
+
+def _render_models(settings: Settings, *, web: bool, view: MenuView, origin: str | None) -> Section:
+    """Every role's effective model on two lines, as the plan's mockup
+    draws it, then one button per role's card."""
+    parts = []
+    marked = False
+    for role in llm_models.ROLES:
+        state = model_state(settings, view, role)
+        value = MODEL_FOLLOWS_SAFETY if state.follows_safety else _short_model(state.model)
+        if state.overridden:
+            value += " ✎"
+            marked = True
+        parts.append(f"{MODEL_ROLE_LABELS[role]}: {value}")
+    hint = _lines(_joined(parts[:3]), _joined(parts[3:]), MODELS_LEGEND if marked else None)
+    buttons = [
+        _section_btn(section, f"{_MODEL_ROLE_ICONS[role]} {MODEL_ROLE_LABELS[role]} ›")
+        for section, role in MODEL_SECTIONS.items()
+    ]
+    rows = _pairs(buttons)
+    rows.append(_nav_row(MODELS_SECTION))
+    return Section(title=MODELS_TITLE, hint=hint, table_rows=None, rows=rows)
+
+
+def _pick_btn(role: str, arg: str, label: str) -> Btn:
+    """A pick: `mn:a:mdl_<role>:<n>` (module docstring) -- the index into
+    `choices_for(role)`, or `off`, never the model id."""
+    return Btn(label=label, callback_data=f"{ACTION_PREFIX}mdl_{role}:{arg}")
+
+
+def _render_model(role: str):
+    def build(settings: Settings, *, web: bool, view: MenuView, origin: str | None) -> Section:
+        """One role's card: what it runs on now, the curated picks that
+        fit it (the current one ticked), «выкл» for the welfare shadow
+        while it is on, ✏️ a custom id, and ↩️ «По умолчанию» only
+        while the role has its own row."""
+        state = model_state(settings, view, role)
+        prices = dict(view.model_prices)
+        if state.overridden:
+            how = "выбрана в меню"
+        elif state.follows_safety:
+            how = MODEL_FOLLOWS_SAFETY
+        else:
+            how = "по умолчанию"
+        current = f"Сейчас: {model_value(state.model)} ({how})"
+        current_price = price_pair(prices.get(state.model)) if state.model else None
+        if current_price:
+            current += f" · {current_price} за 1M"
+
+        rows: list[list[Btn]] = []
+        pick = f"mdl_{role}"
+        if action_available(pick, settings, web=web):
+            for index, choice in enumerate(choices_for(role, settings)):
+                label = ("✓ " if choice.id == state.model else "") + choice.label
+                choice_price = price_pair(prices.get(choice.id))
+                if choice_price:
+                    label += f" · {choice_price}"
+                rows.append([_pick_btn(role, str(index), label)])
+            if role == llm_models.OFF_ROLE and state.model:
+                rows.append([_pick_btn(role, MODEL_OFF_ARG, MODEL_OFF_LABEL)])
+        _add(rows, _row(settings, web, f"mdl_custom_{role}"))
+        if state.overridden:
+            _add(rows, _row(settings, web, f"mdl_reset_{role}"))
+        rows.append(_nav_row(f"model_{role}"))
+        return Section(title=MODEL_TITLES[role], hint=current, table_rows=None, rows=rows)
+
+    return build
+
+
 _SECTION_BUILDERS = {
     MAIN_SECTION: _render_main,
     "today": _render_today,
@@ -1412,12 +1739,14 @@ _SECTION_BUILDERS = {
     "settings": _render_settings,
     "quiet": _render_quiet,
     "data": _render_data,
+    MODELS_SECTION: _render_models,
+    **{section: _render_model(role) for section, role in MODEL_SECTIONS.items()},
 }
 
 SECTIONS = frozenset(_SECTION_BUILDERS)
 
 # A section the web sink never shows: everything in it is Telegram only.
-_TELEGRAM_ONLY_SECTIONS = frozenset({"lens", "claude"})
+_TELEGRAM_ONLY_SECTIONS = frozenset({"lens", "claude", MODELS_SECTION, *MODEL_SECTIONS})
 
 _SECTION_GATES: dict[str, Callable[[Settings], bool]] = {
     "research": _research,

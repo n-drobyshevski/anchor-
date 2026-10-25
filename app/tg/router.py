@@ -45,7 +45,10 @@ pool) is shared across every turn.
 
 from __future__ import annotations
 
+import asyncio
+import collections
 import logging
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -74,9 +77,16 @@ from app.core.quiet import OFF as QUIET_OFF
 from app.core.quiet import clamp as clamp_quiet
 from app.core.quiet import parse as parse_quiet
 from app.core.idle.facts import idle_jobs_today, latest_canary_status
+from app.core import spend as spend_core
+from app.core import welfare_shadow
 from app.core.spend import today_by_category, today_idle_usd, today_usd
 from app.core.state import get_state
-from app.llm.provider import DecisionProvider, LLMProvider
+from app.db.models import SpendLedger
+from app.llm import catalog as model_catalog_module
+from app.llm import models as llm_models
+from app.llm.catalog import ModelCatalog, validate_choice
+from app.llm.models import NO_PRICES, ModelPrices, ModelResolver
+from app.llm.provider import DecisionProvider, LLMProvider, LLMUsage
 from app.ops.backup import latest_backup_status
 from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
@@ -312,6 +322,44 @@ HIDE_KB_REPLY = "Кнопка меню убрана. Вернуть — /start."
 WEB_UI_OFF_REPLY = "Веб-чат выключен."
 
 
+# Runtime model choice: how many model confirmation cards the router
+# remembers at once (`_PendingModel`). One owner taps a handful; the
+# bound only keeps cards nobody answers from piling up.
+MODEL_PENDING_MAX = 32
+
+
+class _PendingModel(NamedTuple):
+    """What a model confirmation card is about to apply, keyed on the
+    card's own message id: the model (checked already, "" for the shadow
+    off) and the prices the card showed, or -- `reset` -- ↩️ «По
+    умолчанию». `menu_message_id` is the role card the press came from,
+    re-rendered after «Да»; None for a custom id typed into a prompt,
+    whose role card is then sent fresh."""
+
+    role: str
+    model: str
+    prices: ModelPrices
+    menu_message_id: int | None
+    reset: bool = False
+
+
+class _NoCatalog:
+    """The catalog a router built without one uses (tests, and any
+    caller predating runtime model choice): OpenRouter "could not be
+    asked", so a curated pick still goes through with its prices empty
+    and a custom id is refused -- exactly app/llm/catalog.py's outage
+    rules, without a request."""
+
+    async def fetch_model(self, model_id: str):
+        raise model_catalog_module.CatalogUnreachable("no catalog")
+
+    async def probe_decisions(self, model_id: str):
+        raise model_catalog_module.CatalogUnreachable("no catalog")
+
+    async def prices(self, model_id: str, *, deny: bool | None = None) -> ModelPrices:
+        return NO_PRICES
+
+
 async def register_commands(bot, *, web_ui_enabled: bool = False) -> None:
     """set_my_commands on startup (plan section 12).
 
@@ -371,8 +419,15 @@ def _format_state(
     debts=None,
     persona_version=None,
     vault_line=None,
+    models=None,
 ) -> str:
     """Plan section 11's /state: Phase 1's fields plus 2c/2d's.
+
+    Runtime model choice: `models` is one `(label, model, changed)` per
+    role (`_model_rows` in build_router), shown one line each and marked
+    where the role no longer runs on its env model
+    (state_view.model_value). None -- a caller predating it -- keeps the
+    single "Модель: LLM_MODEL" line.
 
     Phase 5 (spec 2026-09-25): `debts` is `(open, overdue)`. The debt
     line appears only when a debt is open, and the attention line only
@@ -475,7 +530,7 @@ def _format_state(
         "Помню: {memories} записей\n"
         "Локальное время: {time} ({tz})\n"
         "Потрачено сегодня: {spend:.2f} / {cap:.2f} USD{breakdown}\n"
-        "Модель: {model}"
+        "{models}"
     ).format(
         persona=("вкл" if user_state.persona_active else "выкл")
         + (f" · v{persona_version}" if persona_version else ""),
@@ -505,7 +560,9 @@ def _format_state(
         spend=spend,
         cap=settings.DAILY_USD_CAP,
         breakdown=breakdown,
-        model=settings.LLM_MODEL,
+        models="\n".join(
+            f"{label}: {value}" for label, value in state_view.model_rows(settings, models)
+        ),
     )
 
 
@@ -519,6 +576,8 @@ def build_router(
     code_store: web_auth.CodeStore | None = None,
     claude_pending: oauth_store.PendingStore | None = None,
     welfare_decider: DecisionProvider | None = None,
+    model_catalog: ModelCatalog | None = None,
+    model_resolver: ModelResolver | None = None,
 ) -> Router:
     """Build a fresh Router with 1b's commands and 1c's persona turn.
 
@@ -555,9 +614,21 @@ def build_router(
     the wrong model.
 
     `welfare_decider` is the welfare shadow's decision model (app/core/
-    welfare_shadow.py), None unless WELFARE_SHADOW_MODEL is set. Only
+    welfare_shadow.py), None when there is none to ask (app/main.py's
+    `build_welfare_decider`); a decider switched off from 🧠 Модели is
+    skipped per turn by `welfare_shadow.active`. Only
     the chat turn below takes it: the shadow is a comparison, and the
     ordinary turn is where the classifier runs most.
+
+    Runtime model choice (⚙️ Настройки › 🧠 Модели): `model_resolver` is
+    the resolver the 🧠 Модели cards read and switch, defaulting to the
+    one app/main.py installs (app/llm/models.py's `installed()`, asked at
+    each press, so a test that installs one later still reaches it); with
+    neither, the cards show env and a switch answers
+    menu.MODELS_UNAVAILABLE. `model_catalog` is app/llm/catalog.py's
+    OpenRouter lookup, built in app/main.py on the shared client; without
+    one (`_NoCatalog`) curated picks go through with no prices and a
+    custom id is refused as unreachable -- no request is ever made.
     """
     # 3a: one clock for every handler in this router. Defaulted
     # rather than required, matching safety_provider above -- the
@@ -566,6 +637,55 @@ def build_router(
     clock = clock or SystemClock()
 
     router = Router(name="anchor")
+
+    # Runtime model choice: what each open model confirmation card will
+    # apply on «Да», keyed on the card's message id (`_PendingModel`) --
+    # held here, in the one process, rather than in the card's callback
+    # data, which never carries a model id (app/tg/menu.py's docstring).
+    # A restart forgets them, and their «Да» then answers MODEL_CARD_GONE.
+    model_pending: collections.OrderedDict[int, _PendingModel] = collections.OrderedDict()
+    catalog = model_catalog or _NoCatalog()
+
+    def _resolver() -> ModelResolver | None:
+        return model_resolver or llm_models.installed()
+
+    def _model_states() -> tuple[menu.ModelState, ...]:
+        """Every role's `ModelState` for the 🧠 Модели cards; () with no
+        resolver, which the cards read as env (menu.env_model_state)."""
+        resolver = _resolver()
+        if resolver is None:
+            return ()
+        return tuple(
+            menu.ModelState(
+                role,
+                resolver.effective(role),
+                resolver.overridden(role),
+                resolver.follows_safety(role),
+            )
+            for role in llm_models.ROLES
+        )
+
+    async def _model_prices(role: str, models) -> tuple[tuple[str, ModelPrices], ...]:
+        """The catalog's prices for what one role's card names: its
+        current model and its curated picks. Best effort -- `prices`
+        never raises, and an outage is one short timeout followed by
+        app/llm/catalog.py's back-off, not one wait per button."""
+        state = menu.model_state(settings, menu.MenuView(models=models), role)
+        ids = [state.model, *(choice.id for choice in model_catalog_module.choices_for(role, settings))]
+        ids = list(dict.fromkeys(model for model in ids if model))
+        found = await asyncio.gather(*(catalog.prices(model) for model in ids))
+        return tuple((model, prices) for model, prices in zip(ids, found) if prices.usable())
+
+    def _model_rows() -> tuple[tuple[str, str, bool], ...]:
+        """/state's model lines (state_view.model_rows): per role its
+        label, effective model and whether that differs from env."""
+        resolver = _resolver()
+        rows = []
+        for role in llm_models.ROLES:
+            env = llm_models.env_model(settings, role)
+            effective = resolver.effective(role) if resolver is not None else env
+            rows.append((menu.MODEL_ROLE_LABELS[role], effective, effective != env))
+        return tuple(rows)
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
@@ -591,7 +711,10 @@ def build_router(
           open Grok grants and the live web sessions, each only while
           its feature is on -- and, on the web sink, only the planner,
           whose status is the one the web card shows;
-        - planner: the planner credential; claude: the connection.
+        - planner: the planner credential; claude: the connection;
+        - models and each role's card: every role's effective model from
+          the resolver (no query: its cache), and -- a role's card only,
+          with a catalog -- OpenRouter's prices for the models it names.
 
         Counts and switches only: nothing here reads a note, a title or
         a token.
@@ -631,6 +754,12 @@ def build_router(
                     web_sessions = await web_auth.count_live(session, clock, settings)
         if section == "lens" and not web:
             lens_counts = await lens_ui.menu_counts(sessionmaker, clock)
+        models: tuple[menu.ModelState, ...] = ()
+        model_prices: tuple[tuple[str, ModelPrices], ...] = ()
+        if section == menu.MODELS_SECTION or section in menu.MODEL_SECTIONS:
+            models = _model_states()
+        if section in menu.MODEL_SECTIONS and model_catalog is not None:
+            model_prices = await _model_prices(menu.MODEL_SECTIONS[section], models)
         return menu.MenuView(
             now=clock.now_utc(),
             timezone=user_state.timezone,
@@ -654,6 +783,8 @@ def build_router(
             lens_today_reads=lens_counts[2] if lens_counts else None,
             grok_grants=grok_grants,
             web_sessions=web_sessions,
+            models=models,
+            model_prices=model_prices,
         )
 
     async def _edit_menu(
@@ -896,6 +1027,8 @@ def build_router(
             vault_line=vault_ui.format_state_line(
                 vault_health, clock, user_state.timezone, purge_pending=vault_purge_pending
             ),
+            # Runtime model choice: one line per role (plan section 8).
+            models=_model_rows(),
         )
 
     @router.message(Command("state"))
@@ -2159,6 +2292,206 @@ def build_router(
             return
         await weblogout(message, event_update)
 
+    # --- runtime model choice (⚙️ Настройки › 🧠 Модели) -------------------
+    #
+    # No slash command behind these: a pick, ↩️ «По умолчанию» and ✏️
+    # «Своя модель» call the resolver directly (app/llm/models.py), after
+    # app/llm/catalog.py's checks. Every one is Telegram only
+    # (menu.TELEGRAM_ONLY), so action_available has already refused a web
+    # press before any of them runs. Each switch asks first: the pick or
+    # the typed id leads to a card, and only its «Да» writes -- once,
+    # through the same card claim every other confirmation uses.
+
+    def _remember_model_card(card_id: int, pending: _PendingModel) -> None:
+        model_pending[card_id] = pending
+        model_pending.move_to_end(card_id)
+        while len(model_pending) > MODEL_PENDING_MAX:
+            model_pending.popitem(last=False)
+
+    async def _ledger_model_probe(model: str, usage: LLMUsage) -> None:
+        """The Decisions probe a custom welfare-shadow id costs
+        (app/llm/catalog.py's `probe_decisions`): billed, so ledgered,
+        under the shadow's own category -- a model id and token counts."""
+        cost = spend_core.priced(usage, settings, model=model)
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            session.add(
+                SpendLedger(
+                    local_date=clock_module.local_date(clock, user_state.timezone),
+                    category=welfare_shadow.LEDGER_CATEGORY,
+                    model=model,
+                    tokens_in=usage.input_tokens,
+                    tokens_cached=usage.cached_tokens,
+                    tokens_out=usage.output_tokens,
+                    usd_cost=cost.usd,
+                    cost_source=cost.source,
+                )
+            )
+            await session.commit()
+
+    def _same_model(resolver: ModelResolver, role: str, model: str) -> bool:
+        """The pick would change nothing: the role already runs on
+        `model`, by its own row or by default -- except a role that only
+        follows the safety model, which may still pin it as its own so
+        the next safety switch leaves it be."""
+        if model != resolver.effective(role):
+            return False
+        return resolver.overridden(role) or not resolver.follows_safety(role)
+
+    async def _offer_model(
+        message: Message, update_id: int, role: str, model: str, menu_message_id: int | None
+    ) -> None:
+        """Check `model` for `role` (app/llm/catalog.py's `validate_choice`)
+        and send its «Точно?» card -- or say, in one short line, why not.
+        The caller has already passed `_once`; the card or the refusal
+        records the update as handled."""
+        resolver = _resolver()
+        if resolver is None:
+            await _reply_once(message, update_id, menu.MODELS_UNAVAILABLE)
+            return
+        if _same_model(resolver, role, model):
+            await _reply_once(message, update_id, menu.model_role_text(menu.MODEL_SAME, role))
+            return
+        verdict = await validate_choice(role, model, resolver, settings, catalog)
+        if verdict.probe_usage is not None:
+            await _ledger_model_probe(verdict.model, verdict.probe_usage)
+        if not verdict.ok:
+            logger.info(
+                "model choice refused",
+                extra={"event": "model_choice_refused", "kind": role, "error_code": verdict.code},
+            )
+            await _reply_once(message, update_id, verdict.message)
+            return
+        card_id = await send_keyboard(
+            message.bot,
+            message.chat.id,
+            menu.model_confirm_text(role, verdict.model, verdict.prices),
+            menu.model_confirm_markup(role, verdict.model),
+        )
+        _remember_model_card(card_id, _PendingModel(role, verdict.model, verdict.prices, menu_message_id))
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=update_id, text=f"[menu:mdl_{role}]"
+        )
+
+    async def _model_pick(message: Message, event_update: Update, role: str, arg: str | None) -> None:
+        """A curated pick (or the shadow's «выкл») from a role's card;
+        `arg` was already checked by menu_callback (menu.model_pick_target)."""
+        model = menu.model_pick_target(role, arg, settings)
+        await _offer_model(message, event_update.update_id, role, model, message.message_id)
+
+    async def _model_reset_card(message: Message, event_update: Update, role: str) -> None:
+        """↩️ «По умолчанию»: the card names the model the role goes back
+        to. Refused like a pick when that would put the judge on the
+        persona's model."""
+        update_id = event_update.update_id
+        resolver = _resolver()
+        if resolver is None:
+            await _reply_once(message, update_id, menu.MODELS_UNAVAILABLE)
+            return
+        if not resolver.overridden(role):
+            await _reply_once(message, update_id, menu.model_role_text(menu.MODEL_RESET_NOOP, role))
+            return
+        default = resolver.default(role)
+        if not model_catalog_module._independence(role, default, resolver):
+            await _reply_once(message, update_id, model_catalog_module.REFUSALS["judge_equals_persona"])
+            return
+        card_id = await send_keyboard(
+            message.bot,
+            message.chat.id,
+            menu.model_reset_text(role, default),
+            menu.confirm_markup(f"mdl_reset_{role}"),
+        )
+        _remember_model_card(
+            card_id, _PendingModel(role, default, NO_PRICES, message.message_id, reset=True)
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=update_id, text=f"[menu:mdl_reset_{role}]"
+        )
+
+    # A custom id longer than this is no OpenRouter id; refused before
+    # it reaches a request path or a card.
+    model_id_max = 128
+
+    def _model_custom(role: str):
+        async def run(message: Message, event_update: Update, text: str) -> None:
+            """✏️ «Своя модель»'s reply: the typed id, checked against
+            OpenRouter, then the same card a pick sends. Gated on `_once`
+            first: the check may cost a Decisions probe."""
+            update_id = event_update.update_id
+            if not await _once(update_id):
+                return
+            model = text.strip()
+            if not model or len(model) > model_id_max or any(ch.isspace() for ch in model):
+                await _reply_once(message, update_id, model_catalog_module.REFUSALS["missing"])
+                return
+            await _offer_model(message, update_id, role, model, None)
+
+        return run
+
+    def _model_apply(role: str, *, reset: bool):
+        key = f"mdl_reset_{role}" if reset else f"mdl_{role}"
+
+        async def run(message: Message, event_update: Update, arg: str | None) -> None:
+            """«Да» on a model card (already claimed by menu_callback):
+            set or reset the role through the resolver -- which writes
+            the row and its `model:<role>` audit together -- then edit
+            the card to the result and show the role's card as it now
+            stands. The judge rule is checked again: the other role may
+            have moved since the card was sent. A ↩️ card whose default
+            has moved since is stale, so «Да» only ever applies the model
+            its card named."""
+            del arg  # the card's own message id names what it applies
+            bot = message.bot
+            chat_id = message.chat.id
+            card_id = message.message_id
+            update_id = event_update.update_id
+            if not await _once(update_id):
+                return
+            resolver = _resolver()
+            pending = model_pending.pop(card_id, None)
+            if pending is not None and (pending.role != role or pending.reset != reset):
+                pending = None
+            if resolver is None or pending is None:
+                gone = menu.MODEL_CARD_GONE if resolver is not None else menu.MODELS_UNAVAILABLE
+                await _retire_menu_message(bot, chat_id, card_id, gone)
+                await turn.mark_update_handled(
+                    sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+                )
+                return
+            if reset and resolver.default(role) != pending.model:
+                # The default the card named has moved since (garden and
+                # suggest follow a safety switch): «Да» would apply a model
+                # the card never showed. Stale; ↩️ again names the new one.
+                await _retire_menu_message(bot, chat_id, card_id, menu.MODEL_CARD_GONE)
+                await turn.mark_update_handled(
+                    sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+                )
+                return
+            target = pending.model
+            if not model_catalog_module._independence(role, target, resolver):
+                await _retire_menu_message(
+                    bot, chat_id, card_id, model_catalog_module.REFUSALS["judge_equals_persona"]
+                )
+                await turn.mark_update_handled(
+                    sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+                )
+                return
+            if reset:
+                if await resolver.reset(role):
+                    result = menu.model_reset_applied_text(role, resolver.effective(role))
+                else:
+                    result = menu.model_role_text(menu.MODEL_RESET_NOOP, role)
+            else:
+                await resolver.set(role, pending.model, pending.prices)
+                result = menu.model_applied_text(role, pending.model)
+            await _retire_menu_message(bot, chat_id, card_id, result)
+            await turn.mark_update_handled(
+                sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+            )
+            await _show_menu(bot, chat_id, f"model_{role}", message_id=pending.menu_message_id)
+
+        return run
+
     RUN_ACTIONS = {
         "checkin": checkin_command,
         "state": _menu_state,
@@ -2253,6 +2586,9 @@ def build_router(
         # menu.CONFIRM_AFTER_INPUT: prompts whose reply leads to a card.
         "forget": _menu_forget_yes,
         "claude_connect": _menu_claude_connect_yes,
+        # Runtime model choice: a pick's (or a custom id's) «Да», and ↩️'s.
+        **{key: _model_apply(role, reset=False) for key, role in menu.MODEL_PICKS.items()},
+        **{key: _model_apply(role, reset=True) for key, role in menu.MODEL_RESETS.items()},
     }
 
     _BIGINT_MAX = 2**63 - 1
@@ -2355,6 +2691,7 @@ def build_router(
         "card": _typed_id(card_command, "card", research_ui.CARD_MISSING),
         "claude_connect": _menu_claude_connect_input,
         "tz": _typed(timezone_command, "tz"),
+        **{key: _model_custom(role) for key, role in menu.MODEL_CUSTOM.items()},
     }
 
     # The three tables above and app/tg/menu.ACTIONS must name exactly
@@ -2402,7 +2739,8 @@ def build_router(
         5. Otherwise: the action's INPUT_ACTIONS entry, with the text,
            through the command's own handler -- its `_once` gate, its
            audit rows, its is_web_sink guard. The update is then marked
-           handled with a "[/<command>]" placeholder (a no-op when the
+           handled with a "[/<command>]" placeholder ("[menu:<key>]" for
+           a model's ✏️, which has no command; a no-op when the
            handler already stored its reply), so the text is never
            stored as a chat message and never reaches the model, and
            only then is the step cleared and the prompt edited to
@@ -2460,12 +2798,14 @@ def build_router(
             "menu prompt answered", extra={"event": "menu_prompt", "route": key}
         )
         await INPUT_ACTIONS[key](message, event_update, text)
-        command = menu.ACTIONS[key].commands[0]
+        # A model's ✏️ has no command behind it: its placeholder names
+        # the menu key instead, as a tap's does.
+        commands = menu.ACTIONS[key].commands
         await turn.mark_update_handled(
             sessionmaker,
             clock=clock,
             update_id=update_id,
-            text=f"[/{command}]",
+            text=f"[/{commands[0]}]" if commands else f"[menu:{key}]",
             scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
         )
         async with sessionmaker() as session:
@@ -2563,6 +2903,14 @@ def build_router(
         # mn:y: runs only what a confirmation card could have offered.
         if press.kind == "action":
             valid = kind in (menu.RUN, menu.CONFIRM)
+            # A model pick's argument is its entry's index (or `off`),
+            # which must still name one; ↩️ carries none.
+            if key in menu.MODEL_PICKS:
+                valid = valid and menu.model_pick_target(
+                    menu.MODEL_PICKS[key], press.arg, settings
+                ) is not None
+            elif key in menu.MODEL_RESETS:
+                valid = valid and press.arg is None
         elif press.kind == "input":
             valid = kind == menu.PROMPT and press.arg is None
         else:  # "yes"
@@ -2602,9 +2950,20 @@ def build_router(
         if press.kind == "yes":
             # Retire the card first, so its «Да» cannot be pressed again
             # from the web chat (the hub's allowlist follows the edit),
-            # then run the command with its own gates.
-            await _retire_menu_message(bot, chat_id, message_id, menu.DONE_TEXT)
+            # then run the command with its own gates. A model card is
+            # Telegram only and is edited to its own result instead
+            # (`_model_apply`).
+            if key not in menu.MODEL_PICKS and key not in menu.MODEL_RESETS:
+                await _retire_menu_message(bot, chat_id, message_id, menu.DONE_TEXT)
             await CONFIRM_ACTIONS[key](callback.message, event_update, press.arg)
+            return
+
+        if key in menu.MODEL_PICKS:
+            # Replays already stopped at the `_once` gate above.
+            await _model_pick(callback.message, event_update, menu.MODEL_PICKS[key], press.arg)
+            return
+        if key in menu.MODEL_RESETS:
+            await _model_reset_card(callback.message, event_update, menu.MODEL_RESETS[key])
             return
 
         if kind == menu.CONFIRM:

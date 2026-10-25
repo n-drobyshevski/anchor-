@@ -83,6 +83,9 @@ CONTENT_COLUMNS = {
     # The welfare shadow: outcomes, levels, confidences and timings, the
     # same things welfare.py already logs. No text column exists.
     "welfare_shadow": set(),
+    # Runtime model choice: a role, an OpenRouter model id and a time.
+    # The prices are left out of the view, but are not content either.
+    "llm_model_override": set(),
 }
 
 

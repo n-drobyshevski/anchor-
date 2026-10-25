@@ -31,6 +31,19 @@ max_tokens and temperature differ and because compute_cost is
 model-aware. Both share one AsyncOpenAI client, built here and closed
 here: neither provider owns it (see app/llm/openrouter.py), so shutdown
 closes the client directly rather than through either one.
+
+Runtime model choice (docs/decisions.md) builds the one
+`ModelResolver` (app/llm/models.py) here too, in main(), and installs
+it before `build_providers` runs; it is loaded from
+`llm_model_override` at startup (`_on_startup`, `_run_polling_mode`),
+before the first update or job is handled. Every provider built from
+then on -- the three below, the welfare shadow's decider, and the ones
+the judge, the garden, the suggester and the in-bot trial build for
+themselves -- resolves its model through it per request, so a switch in
+⚙️ Настройки › 🧠 Модели reaches the next call with no rebuild.
+Installed rather than passed because `build_providers(settings)` and
+the builders under app/core/ keep their signatures (tests pin the
+first; eval/run.py shares the others and must stay on env).
 """
 
 from __future__ import annotations
@@ -58,6 +71,8 @@ from aiohttp import web
 from app.config import Settings, check_runtime_settings, get_settings
 from app.core.clock import Clock, SystemClock
 from app.db.session import create_engine_and_sessionmaker, dispose_engine
+from app.llm import models as llm_models
+from app.llm.catalog import ModelCatalog
 from app.llm.openrouter import OpenRouterDecisionProvider, OpenRouterProvider, build_client
 from app.llm.provider import DecisionProvider, LLMProvider
 from app.log import setup_logging
@@ -95,6 +110,12 @@ def build_providers(settings: Settings):
     safety provider produces strict JSON verdicts that decide whether
     the persona speaks at all, and it is the only one whose model was
     chosen for schema compliance instead of voice.
+
+    Each is bound to its role (`persona`, `cheap`, `safety`) on the
+    resolver main() installed, so its model is resolved per request;
+    `model=` stays the env setting, the default the resolver falls back
+    to. With no resolver installed (a test calling this directly) the
+    bindings are empty and the providers are pinned to env, as before.
     """
     client = build_client(settings.OPENROUTER_API_KEY)
     provider = OpenRouterProvider(
@@ -104,6 +125,7 @@ def build_providers(settings: Settings):
         temperature=settings.LLM_TEMPERATURE,
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
+        **llm_models.resolver_kwargs("persona"),
         # No structured_outputs here on purpose: no main-model call ever
         # passes a json_schema, so the constructor default is unreachable
         # rather than merely unset. Said out loud because H2 exists
@@ -117,6 +139,7 @@ def build_providers(settings: Settings):
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+        **llm_models.resolver_kwargs("cheap"),
     )
     safety_provider = OpenRouterProvider(
         api_key=settings.OPENROUTER_API_KEY,
@@ -126,19 +149,33 @@ def build_providers(settings: Settings):
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+        **llm_models.resolver_kwargs("safety"),
     )
     return provider, cheap_provider, safety_provider, client
 
 
 def build_welfare_decider(settings: Settings, client) -> OpenRouterDecisionProvider | None:
-    """The welfare shadow's decision model, on the shared client; None
-    (no call, no row) unless WELFARE_SHADOW_MODEL is set."""
-    if not settings.WELFARE_SHADOW_MODEL:
+    """The welfare shadow's decision model, on the shared client.
+
+    With a resolver installed (production: main() installs one first)
+    it is always built, bound to the `welfare_shadow` role, even when
+    WELFARE_SHADOW_MODEL is empty: 🫀 Welfare-тень can turn the shadow
+    on from the menu, and «выкл» can turn it off, at any time, so
+    whether it runs is decided per turn -- app/core/welfare_shadow.py's
+    `active()` reads the decider's `enabled`, and an off shadow makes no
+    call and writes no row, exactly as an absent one.
+
+    With none installed nothing could ever turn it on, so it stays None
+    (no call, no row) unless WELFARE_SHADOW_MODEL is set, as before.
+    """
+    binding = llm_models.resolver_kwargs("welfare_shadow")
+    if not binding and not settings.WELFARE_SHADOW_MODEL:
         return None
     return OpenRouterDecisionProvider(
         model=settings.WELFARE_SHADOW_MODEL,
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
+        **binding,
     )
 
 
@@ -152,12 +189,17 @@ def build_dispatcher(
     code_store: web_auth.CodeStore | None = None,
     claude_pending: oauth_store.PendingStore | None = None,
     welfare_decider: DecisionProvider | None = None,
+    model_catalog: ModelCatalog | None = None,
 ) -> Dispatcher:
     """`hub` and `code_store` (web-chat plan track 2) default to None so
     every caller and test predating the web UI keeps its shorter call;
     both are only passed when WEB_UI_ENABLED, and both thread through to
     build_router()'s `/weblogout` handler -- the one command that needs
     to reach them from inside the ordinary Telegram-side dispatcher.
+
+    `model_catalog` (runtime model choice) is what ⚙️ Настройки › 🧠
+    Модели checks a model against; None, as for every caller predating
+    it, means no OpenRouter lookup at all (build_router's docstring).
     """
     dp = Dispatcher()
     dp.include_router(
@@ -171,6 +213,7 @@ def build_dispatcher(
             code_store,
             claude_pending,
             welfare_decider,
+            model_catalog,
         )
     )
     return dp
@@ -226,6 +269,19 @@ async def handle_planner_oauth_callback(request: web.Request) -> web.Response:
     return web.Response(status=200, text=LINKED_OK)
 
 
+async def _load_model_overrides() -> None:
+    """Fill the installed resolver's cache from `llm_model_override`
+    (app/llm/models.py), after migrations and before the worker or the
+    webhook can handle anything. Until it runs every role resolves to
+    env, which is also what an empty table means; with no resolver
+    installed (a test driving startup directly) there is nothing to load.
+    """
+    resolver = llm_models.installed()
+    if resolver is not None:
+        logger.info("startup step", extra={"event": "load_model_overrides"})
+        await resolver.load()
+
+
 async def _on_startup(app: web.Application) -> None:
     settings: Settings = app["settings"]
     bot: Bot = app["bot"]
@@ -238,6 +294,7 @@ async def _on_startup(app: web.Application) -> None:
     logger.info("startup step", extra={"event": "startup_tasks"})
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
+    await _load_model_overrides()
 
     # build_planner() must run inside a running event loop: aiohttp
     # 3.14's ClientSession() calls asyncio.get_running_loop() in its
@@ -408,6 +465,7 @@ async def _run_polling_mode(
 ) -> None:
     async with sessionmaker() as session:
         await run_startup_tasks(session, settings)
+    await _load_model_overrides()
 
     # See _on_startup: built here, inside the running loop, not in
     # main() before asyncio.run() starts it.
@@ -453,6 +511,10 @@ def main() -> None:
 
     engine, sessionmaker = create_engine_and_sessionmaker(settings.DATABASE_URL)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+    # Runtime model choice: installed before any provider is built, so
+    # each one binds to it; loaded once the event loop runs
+    # (_load_model_overrides). Constructing it touches no database.
+    llm_models.install(llm_models.ModelResolver(settings, sessionmaker))
     provider, cheap_provider, safety_provider, llm_client = build_providers(settings)
     clock = SystemClock()
     # Web-chat plan track 2: one WebHub per process, built here (never
@@ -473,6 +535,8 @@ def main() -> None:
         sessionmaker, settings, provider, safety_provider, clock, hub, code_store,
         claude_pending=claude_pending,
         welfare_decider=build_welfare_decider(settings, llm_client),
+        # On the chat providers' own client: same key, same pool.
+        model_catalog=ModelCatalog(llm_client, settings),
     )
     # planner_client/planner_http are NOT built here: see _on_startup
     # and _run_polling_mode, which build them once the event loop is

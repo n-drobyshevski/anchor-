@@ -162,6 +162,14 @@ PURGED_TABLES = (
     # setting back to its default; vaultd's own copy is reset by the
     # same POST /v1/purge that wipes its undo store.
     "claude_write_limit",
+    # Runtime model choice (docs/decisions.md): the model picked for each
+    # LLM role. A setting, not content -- a role, a model id and prices
+    # -- and "delete all my data" puts every setting back to its default,
+    # so every role goes back to its env model. No FK in or out. The
+    # resolver's in-process cache (app/llm/models.py) is dropped by the
+    # /delete handler (app/tg/data.py) after the commit, or the old
+    # choice would keep answering until the next restart.
+    "llm_model_override",
     # Web-chat plan track 1 (app/db/models.py's WebSession). A live
     # session cookie is a credential, and "delete all my data" has to
     # revoke every way back in along with the data itself -- leaving a

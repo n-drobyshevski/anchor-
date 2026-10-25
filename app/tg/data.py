@@ -36,6 +36,7 @@ from app.core import export, purge
 from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core.outbound import cancel_outbound
+from app.llm import models as llm_models
 from app.ops import backup
 from app.tg.send import DOCUMENT_LIMIT, answer_callback, edit_keyboard, send_document
 from app.web.hub import WebHub
@@ -230,6 +231,13 @@ async def handle_delete_callback(
     # /delete must not open a fresh web session after it.
     if code_store is not None:
         code_store.clear()
+    # And the model resolver's cache (app/llm/models.py): the truncate
+    # took every llm_model_override row, so each role is back on its env
+    # model -- the cache must say so too, or the old picks would keep
+    # answering (and pricing) until the next restart.
+    resolver = llm_models.installed()
+    if resolver is not None:
+        resolver.clear()
 
     # Never claim the backups are gone when the bucket said otherwise.
     final = DELETED_BACKUPS_FAILED_TEXT if purged.failed else DELETED_TEXT

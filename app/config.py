@@ -17,7 +17,7 @@ import datetime
 import re
 import urllib.parse
 
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -72,6 +72,65 @@ _STRIPPED_FIELDS = (
     "VAULT_URL",
     "VAULT_API_TOKEN",
 )
+
+
+# Runtime model choice: what a MODEL_CHOICES entry may say a model can do.
+# The order is the canonical spelling's order. `prose` is free-form text
+# (chat, summaries); `json` is strict structured output with a
+# temperature (the safety, judge, garden and suggest roles); `decisions`
+# is OpenRouter's Decisions API (the welfare shadow).
+MODEL_CAPS = ("prose", "json", "decisions")
+# The most entries MODEL_CHOICES may hold. A role's screen shows one
+# button per entry plus two, so more than this is a scroll, not a menu.
+MODEL_CHOICES_MAX = 20
+# A button's text budget: the label is shown on the button with a price.
+MODEL_LABEL_MAX = 40
+# OpenRouter ids are "vendor/name", optionally with a ":variant" suffix.
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$")
+
+
+class ModelChoice(NamedTuple):
+    """One MODEL_CHOICES entry, parsed."""
+
+    id: str
+    label: str
+    caps: tuple[str, ...]
+
+    def canonical(self) -> str:
+        """The spelling the setting stores: `id|label|cap,cap`, caps in
+        MODEL_CAPS order."""
+        return f"{self.id}|{self.label}|{','.join(self.caps)}"
+
+
+def parse_model_choice(entry: str) -> ModelChoice:
+    """Parse and validate one `id|label|caps` entry.
+
+    Raises ValueError naming the entry (an id and a label, never a
+    credential) and the rule it broke. `caps` may be separated by commas
+    or `+`, and is stored in MODEL_CAPS order, deduplicated.
+    """
+    fields = [field.strip() for field in entry.split("|")]
+    if len(fields) != 3:
+        raise ValueError(
+            f"MODEL_CHOICES entries are id|label|caps, got {entry!r}"
+        )
+    model_id, label, raw_caps = fields
+    if not _MODEL_ID_RE.match(model_id):
+        raise ValueError(
+            f"MODEL_CHOICES id must look like vendor/name, got {model_id!r}"
+        )
+    if not label or len(label) > MODEL_LABEL_MAX:
+        raise ValueError(
+            f"MODEL_CHOICES label for {model_id!r} must be 1-{MODEL_LABEL_MAX} characters"
+        )
+    named = {cap.strip().lower() for cap in re.split(r"[,+]", raw_caps) if cap.strip()}
+    unknown = named - set(MODEL_CAPS)
+    if unknown or not named:
+        raise ValueError(
+            f"MODEL_CHOICES caps for {model_id!r} must be a non-empty subset of "
+            f"{', '.join(MODEL_CAPS)}, got {raw_caps!r}"
+        )
+    return ModelChoice(model_id, label, tuple(cap for cap in MODEL_CAPS if cap in named))
 
 
 class Settings(BaseSettings):
@@ -213,6 +272,75 @@ class Settings(BaseSettings):
     # anyway, so setting it back to "" does not silently restore the old
     # behaviour -- it stops the run with exit code 3.
     LLM_MODEL_JUDGE: str = "openai/gpt-4.1-nano"
+
+    # Runtime model choice (docs/decisions.md, "Runtime model choice"):
+    # the curated list ⚙️ Настройки › 🧠 Модели offers for every role,
+    # as "id|label|caps" entries. `label` is the button text; `caps` is
+    # a comma-separated subset of MODEL_CAPS (prose, json, decisions)
+    # saying which roles the model may be picked for -- prose for the
+    # chat and summary roles, json for the roles that need strict
+    # structured output with a temperature, decisions for the welfare
+    # shadow's Decisions API. Nothing here is verified against
+    # OpenRouter: it is the owner's own list, so a stale entry costs a
+    # failed call, not a wrong answer. From the environment, entries are
+    # separated by ";" or a newline; the field is kept as the canonical
+    # strings (parse_model_choice normalizes them) and model_choices()
+    # turns them into ModelChoice tuples. The default is exactly the
+    # four models the env settings above name, so a fresh deploy offers
+    # what it already runs; other models arrive through «Своя модель»
+    # (checked against OpenRouter first) or by editing this list.
+    MODEL_CHOICES: Annotated[tuple[str, ...], NoDecode] = (
+        "thedrummer/cydonia-24b-v4.1|Cydonia 24B|prose",
+        "google/gemini-2.5-flash-lite|Gemini 2.5 Flash Lite|json",
+        "openai/gpt-4.1-nano|GPT-4.1 nano|json",
+        "typesafe/jev-1.14|Jev 1.14|decisions",
+    )
+    # How long app/llm/catalog.py keeps an OpenRouter model lookup
+    # (existence, prices, supported parameters, ZDR endpoints) before
+    # asking again. A day is plenty: prices change rarely, and a stale
+    # price only mis-states the estimate on a confirm card -- the cost
+    # OpenRouter reports for a call still wins in the ledger.
+    MODEL_CATALOG_TTL_H: int = 24
+
+    @field_validator("MODEL_CHOICES", mode="before")
+    @classmethod
+    def _parse_model_choices(cls, value):
+        """Accept "id|label|caps;id|label|caps" from the environment, and
+        refuse junk loudly.
+
+        Same NoDecode problem as TICK_HOURS and the packets. Every entry
+        goes through parse_model_choice, which names the offending entry
+        in its error; what is stored is the canonical spelling, so two
+        spellings of one list compare equal. Refused rather than
+        skipped: a dropped entry would silently remove a model from the
+        menu, and a duplicate id would make two buttons mean one thing.
+        """
+        if isinstance(value, str):
+            parts = [part.strip() for part in re.split(r"[;\n]", value) if part.strip()]
+        elif isinstance(value, (list, tuple)):
+            parts = [str(part).strip() for part in value if str(part).strip()]
+        else:
+            return value
+        if len(parts) > MODEL_CHOICES_MAX:
+            raise ValueError(
+                f"MODEL_CHOICES takes at most {MODEL_CHOICES_MAX} entries, got {len(parts)}"
+            )
+        choices: list[ModelChoice] = []
+        for part in parts:
+            choice = parse_model_choice(part)
+            if any(choice.id == other.id for other in choices):
+                raise ValueError(f"MODEL_CHOICES lists {choice.id!r} twice")
+            choices.append(choice)
+        return tuple(choice.canonical() for choice in choices)
+
+    @field_validator("MODEL_CATALOG_TTL_H")
+    @classmethod
+    def _model_catalog_ttl_at_least_one(cls, value: int, info) -> int:
+        # 0 would mean "never cache": every menu render would ask
+        # OpenRouter.
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
 
     # --- 5a: voice, mood and nicknames (phase-5 plan section 2) ---
     # Paths are resolved against the repo root (app/core/prompt.py's
@@ -1130,6 +1258,16 @@ class Settings(BaseSettings):
         if isinstance(value, str) and cls.model_fields[info.field_name].annotation is bool:
             return value.strip()
         return value
+
+
+def model_choices(settings: Settings) -> tuple[ModelChoice, ...]:
+    """The curated model list as ModelChoice tuples, in menu order.
+
+    MODEL_CHOICES was already validated at boot, so this only splits the
+    canonical strings; a hand-built Settings that bypassed the validator
+    (model_construct) still gets the same checks here.
+    """
+    return tuple(parse_model_choice(entry) for entry in settings.MODEL_CHOICES)
 
 
 def get_settings() -> Settings:

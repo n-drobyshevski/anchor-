@@ -33,6 +33,7 @@ from app.core import menu_prompt
 from app.core import orders as orders_core
 from app.core import turn
 from app.core.clock import FrozenClock
+from app.llm.catalog import REFUSALS
 from app.db.models import (
     InterestTopic,
     Job,
@@ -67,6 +68,10 @@ from test_menu import (
 
 NOW = datetime.datetime(2026, 10, 25, 10, 0, tzinfo=datetime.timezone.utc)
 MENU_MESSAGE = 1  # FakeSession mints message id 1 for the /menu message
+
+# The catalog's refusals the model flows below expect (app/llm/catalog.py).
+REFUSALS_UNREACHABLE = REFUSALS["unreachable"]
+REFUSALS_JUDGE = REFUSALS["judge_equals_persona"]
 
 
 # --- helpers ----------------------------------------------------------------
@@ -1382,3 +1387,254 @@ async def test_lens_status_button_runs_bare_lens_even_with_the_lens_off(sessionm
 
     assert "Устарело." not in [a.text for a in fake.answered]
     assert lens_ui.OFF_LINE in fake.sent[-1].text
+
+
+# --- runtime model choice: the prompt and the card ------------------------------------
+#
+# The pure sections and the pick/confirm/reset flows against a real catalog
+# are in tests/test_menu_models.py; what follows pins how ⚙️ Настройки ›
+# 🧠 Модели rides on this file's machinery -- the one-step prompt for
+# ✏️ «Своя модель» and the one-shot confirmation card -- with no catalog
+# at all (a custom id is then "unreachable", a curated pick goes through).
+
+
+@pytest.fixture()
+async def model_resolver(sessionmaker):
+    """A loaded resolver, installed as app/main.py installs it; the router
+    finds it at each press. Uninstalled after the test."""
+    from app.llm import models as llm_models
+    from app.llm.models import ModelResolver
+
+    resolver = await ModelResolver.create(_settings(), sessionmaker)
+    llm_models.install(resolver)
+    yield resolver
+    llm_models.install(None)
+
+
+async def _changes(sessionmaker, role: str) -> list:
+    from app.db.models import StateChange
+
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(StateChange).where(StateChange.field == f"model:{role}").order_by(StateChange.id)
+        )
+        return list(rows.scalars())
+
+
+async def _open_model_card(dp, bot, fake, update_id: int, role: str, arg: str) -> int:
+    """Open the menu, press a curated pick; returns the confirm card's id."""
+    await _say(dp, bot, update_id, "/menu")
+    await _tap(dp, bot, update_id + 1, f"mn:a:mdl_{role}:{arg}")
+    assert fake.sent[-1].text.startswith("Сменить модель")
+    return _last_id(fake)
+
+
+async def test_custom_model_prompt_opens_a_step_keyed_on_the_role(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build(sessionmaker)
+
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_safety")
+
+    state = await _state(sessionmaker)
+    # A key, never a model id or any text: the debug view shows this column.
+    assert state.awaiting == "menu:mdl_custom_safety"
+    assert (state.awaiting_ref, state.awaiting_at is not None) == (prompt_id, True)
+    assert [(b.text, b.callback_data) for row in fake.sent[-1].reply_markup.inline_keyboard for b in row] == [
+        ("✕ Отмена", "mn:c")
+    ]
+
+
+async def test_cancelling_the_custom_model_prompt_makes_the_next_text_chat(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, llm=llm)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_cheap")
+
+    await _tap(dp, bot, 3, "mn:c", message_id=prompt_id)
+    await _say(dp, bot, 4, "vendor/some-model")
+
+    assert _edits_of(fake, prompt_id)[-1].text == menu.CANCELLED_TEXT
+    assert llm.calls == 1
+    assert [m.content for m in await _users(sessionmaker)] == ["vendor/some-model"]
+    assert not model_resolver.overridden("cheap")
+
+
+async def test_an_expired_custom_model_prompt_is_chat_and_checks_nothing(sessionmaker, model_resolver):
+    clock = FrozenClock(NOW)
+    await _seed(sessionmaker, 1, 2, 3)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, settings=_settings(MENU_PROMPT_TTL_MIN=5), llm=llm, clock=clock)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_cheap")
+
+    clock.advance(datetime.timedelta(minutes=5))
+    sent = len(fake.sent)
+    await _say(dp, bot, 3, "vendor/some-model")
+
+    assert llm.calls == 1
+    assert _edits_of(fake, prompt_id)[-1].text == menu.CANCELLED_TEXT
+    # Nothing was looked up or offered: only the chat reply went out.
+    assert not any(t.startswith("Сменить модель") for t in _texts(fake)[sent:])
+    assert not model_resolver.overridden("cheap")
+
+
+@pytest.mark.parametrize("ender", ["/focus on", "tap"])
+async def test_a_command_or_a_menu_tap_ends_the_custom_model_prompt(sessionmaker, model_resolver, ender):
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, llm=llm)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_cheap")
+
+    if ender == "tap":
+        await _tap(dp, bot, 3, "mn:s:quiet")
+    else:
+        await _say(dp, bot, 3, ender)
+    await _say(dp, bot, 4, "vendor/some-model")
+
+    assert _edits_of(fake, prompt_id)[-1].text == menu.CANCELLED_TEXT
+    assert (await _state(sessionmaker)).awaiting is None
+    assert llm.calls == 1
+    assert not model_resolver.overridden("cheap")
+
+
+async def test_a_custom_model_reply_is_never_chat_and_never_stored_as_text(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2, 3)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, llm=llm)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_cheap")
+
+    await _say(dp, bot, 3, "vendor/some-model")
+
+    # No catalog was wired: a custom id cannot be checked, so it is refused.
+    assert fake.sent[-1].text == REFUSALS_UNREACHABLE
+    assert llm.calls == 0
+    assert await _users(sessionmaker) == []
+    assert _edits_of(fake, prompt_id)[-1].text == menu.PROMPT_ANSWERED_TEXT
+    assert (await _state(sessionmaker)).awaiting is None
+    async with sessionmaker() as session:
+        rows = list((await session.execute(select(Message).where(Message.update_id == 3))).scalars())
+    assert rows and all(row.role == "assistant" for row in rows)
+    # The typed id is nowhere in what was stored about the exchange.
+    assert all("some-model" not in (row.content or "") for row in rows)
+
+
+async def test_a_replayed_custom_model_reply_answers_once(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker)
+    await _open_prompt(dp, bot, fake, 1, "mdl_custom_cheap")
+
+    await _say(dp, bot, 3, "vendor/some-model")
+    sent = len(fake.sent)
+    await _say(dp, bot, 3, "vendor/some-model")
+
+    assert len(fake.sent) == sent
+    assert _texts(fake).count(REFUSALS_UNREACHABLE) == 1
+
+
+async def test_a_custom_model_reply_over_the_web_runs_nothing_and_keeps_the_prompt(
+    sessionmaker, model_resolver
+):
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    llm = FakeLLMProvider()
+    tg_dp, tg_bot, tg_fake = _build(sessionmaker, llm=llm)
+    await _open_prompt(tg_dp, tg_bot, tg_fake, 1, "mdl_custom_cheap")
+    web_bot, web_fake = make_bot()
+    web_bot.is_web_sink = True
+    web_dp, web_bot, web_fake = _build(sessionmaker, bot=web_bot, fake=web_fake, llm=llm)
+
+    await _say(web_dp, web_bot, 3, "vendor/some-model")
+
+    assert web_fake.sent[-1].text == WEB_ONLY_REPLY
+    assert (await _state(sessionmaker)).awaiting == "menu:mdl_custom_cheap"
+    assert await _users(sessionmaker) == []
+    assert llm.calls == 0
+    assert not model_resolver.overridden("cheap")
+
+
+async def test_concurrent_yes_presses_on_a_model_card_switch_once(sessionmaker, model_resolver):
+    await _seed(sessionmaker, *range(1, 8))
+    dp, bot, fake = _build(sessionmaker)
+    safety = menu.model_pick_target("safety", "1", _settings())
+    assert safety != model_resolver.effective("safety")
+    card = await _open_model_card(dp, bot, fake, 1, "safety", "1")
+
+    await asyncio.gather(
+        _tap(dp, bot, 3, "mn:y:mdl_safety", message_id=card),
+        _tap(dp, bot, 4, "mn:y:mdl_safety", message_id=card),
+        _tap(dp, bot, 5, "mn:y:mdl_safety", message_id=card),
+    )
+
+    assert model_resolver.effective("safety") == safety
+    assert len(await _changes(sessionmaker, "safety")) == 1
+    assert [a.text for a in fake.answered].count("Устарело.") == 2
+    assert _edits_of(fake, card)[-1].text == menu.model_applied_text("safety", safety)
+
+
+async def test_a_replayed_yes_on_a_model_card_is_the_same_press(sessionmaker, model_resolver):
+    """The queue re-runs an update after a crash: the same update id is
+    the same press, so it neither answers «Устарело.» nor writes twice."""
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker)
+    card = await _open_model_card(dp, bot, fake, 1, "safety", "1")
+
+    await _tap(dp, bot, 3, "mn:y:mdl_safety", message_id=card)
+    await _tap(dp, bot, 3, "mn:y:mdl_safety", message_id=card)
+
+    assert len(await _changes(sessionmaker, "safety")) == 1
+    assert "Устарело." not in [a.text for a in fake.answered]
+
+
+async def test_a_replayed_pick_sends_one_card(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2)
+    dp, bot, fake = _build(sessionmaker)
+    await _say(dp, bot, 1, "/menu")
+
+    await _tap(dp, bot, 2, "mn:a:mdl_safety:1")
+    await _tap(dp, bot, 2, "mn:a:mdl_safety:1")
+
+    assert sum(t.startswith("Сменить модель") for t in _texts(fake)) == 1
+
+
+async def test_a_judge_card_is_checked_again_on_yes(sessionmaker, model_resolver):
+    """The persona may have moved onto the judge's new model between the
+    card and «Да»: the rule is checked at the write too."""
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker)
+    judge_pick = menu.model_pick_target("judge", "0", _settings())
+    assert judge_pick != model_resolver.effective("judge")
+    card = await _open_model_card(dp, bot, fake, 1, "judge", "0")
+
+    await model_resolver.set("persona", judge_pick)
+    await _tap(dp, bot, 3, "mn:y:mdl_judge", message_id=card)
+
+    assert not model_resolver.overridden("judge")
+    assert await _changes(sessionmaker, "judge") == []
+    assert _edits_of(fake, card)[-1].text == REFUSALS_JUDGE
+
+
+async def test_a_model_yes_after_a_restart_changes_nothing(sessionmaker, model_resolver):
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker)
+    card = await _open_model_card(dp, bot, fake, 1, "safety", "1")
+
+    # A new router is a new process: it does not remember the card.
+    dp2, _, _ = _build(sessionmaker, bot=bot, fake=fake)
+    await _tap(dp2, bot, 3, "mn:y:mdl_safety", message_id=card)
+
+    assert not model_resolver.overridden("safety")
+    assert _edits_of(fake, card)[-1].text == menu.MODEL_CARD_GONE
+
+
+async def test_a_model_pick_ends_a_pending_prompt(sessionmaker, model_resolver):
+    """A menu tap ends the prompt as every other tap does; a custom-id
+    prompt left open must not swallow the next line of chat."""
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, llm=llm)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "mdl_custom_safety")
+
+    await _tap(dp, bot, 3, "mn:a:mdl_safety:1")
+    await _say(dp, bot, 4, "привет")
+
+    assert _edits_of(fake, prompt_id)[-1].text == menu.CANCELLED_TEXT
+    assert (await _state(sessionmaker)).awaiting is None
+    assert llm.calls == 1

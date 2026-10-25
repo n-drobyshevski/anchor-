@@ -176,6 +176,34 @@ def spend_breakdown_text(by_category) -> str:
 # --- rich layout -------------------------------------------------------
 
 
+# Runtime model choice: the mark on a role whose model is not the one env
+# names -- switched in ⚙️ Настройки › 🧠 Модели, or (garden, suggest)
+# following a switched safety model.
+MODEL_CHANGED = "изменена"
+MODEL_OFF = "выкл"
+
+
+def model_value(model: str, changed: bool) -> str:
+    """One role's model as /state says it: the id ("" = «выкл», the
+    welfare shadow off), marked when it differs from env."""
+    value = model or MODEL_OFF
+    return f"{value} · {MODEL_CHANGED}" if changed else value
+
+
+def model_rows(settings: Settings, models) -> list[tuple[str, str]]:
+    """/state's model lines as (label, value), one per role.
+
+    `models` is `(role label, effective model, differs from env)` per
+    role, in app/llm/models.py's ROLES order, gathered by the router
+    (build_router's `_model_rows`). None -- a caller predating runtime
+    model choice -- is the one line /state always had, the chat model
+    from env.
+    """
+    if models is None:
+        return [("Модель", settings.LLM_MODEL)]
+    return [(f"Модель «{label}»", model_value(model, changed)) for label, model, changed in models]
+
+
 def _cell(text, *, header: bool = False, colspan: int | None = None) -> RichBlockTableCell:
     return RichBlockTableCell(
         align="left", valign="middle", text=text, is_header=header or None, colspan=colspan
@@ -224,6 +252,7 @@ def render(
     debts=None,
     persona_version=None,
     vault_line=None,
+    models=None,
 ) -> InputRichMessage:
     """The same facts _format_state shows, as blocks rather than lines.
 
@@ -305,7 +334,7 @@ def render(
     # message meant to be refreshed rather than re-sent, and the footer
     # already carries a live "Обновлено" timestamp -- see docs/decisions.md.
     system_rows.append(_row("Часовой пояс", user_state.timezone))
-    system_rows.append(_row("Модель", settings.LLM_MODEL))
+    system_rows.extend(_row(label, value) for label, value in model_rows(settings, models))
     blocks.append(InputRichBlockDetails(summary="Система", is_open=False, blocks=[_table(system_rows)]))
 
     now_utc = clock.now_utc()

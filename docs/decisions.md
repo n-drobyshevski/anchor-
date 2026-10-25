@@ -3902,3 +3902,207 @@ untouched.
   forget and connect cards are recorded as the update's reply the moment
   they are sent, so a crash replay cannot send a second one; a replayed
   prompt or card tap stops at `_once` before it ends or clears any step.
+
+## Runtime model choice
+
+Every model the bot calls came from env (`LLM_MODEL`, `LLM_MODEL_CHEAP`,
+`LLM_MODEL_SAFETY`, `LLM_MODEL_JUDGE`, `GARDEN_MODEL`,
+`INTEREST_SUGGEST_MODEL`, `WELFARE_SHADOW_MODEL`) and was fixed into each
+`OpenRouterProvider` when the process started, so changing one meant
+editing env and redeploying. ⚙️ Настройки › 🧠 Модели now switches the
+model of every role from Telegram (`app/llm/models.py`, `app/llm/catalog.py`,
+`app/tg/menu.py`, the router's model handlers; migration `d8a3f6c1b925`;
+tests/test_model_resolver.py, test_model_catalog.py, test_model_wiring.py,
+test_menu_models.py, test_llm_model_override_migration.py).
+
+**The owner's choices, 2026-10-25.** Four, and the rest follows from them:
+
+- **Every role can be switched**, the seven in `ROLES`: `persona`
+  «Чат» (`LLM_MODEL`), `cheap` «Сводки», `safety` «Проверки», `judge`
+  «Судья», `garden` «Сад», `suggest` «Темы» and `welfare_shadow`
+  «Welfare-тень», which may also be switched «выкл».
+- **A model is picked from a curated list, or typed by id.** The list is
+  `MODEL_CHOICES`; ✏️ «Своя модель» takes any OpenRouter id and checks it
+  with OpenRouter before anything is offered.
+- **Switching works in Telegram only.** The web chat never shows the
+  section and refuses a forged press.
+- **Every switch asks first**, ↩️ «По умолчанию» included.
+
+The owner did not choose between naming the models and starting from
+what env already runs. The default is the second: `MODEL_CHOICES` holds
+exactly the four models env names today (Cydonia 24B, Gemini 2.5 Flash
+Lite, GPT-4.1 nano, Jev 1.14). Nothing was added on the bot's own
+opinion of which model is better; other models arrive through «Своя
+модель», or by editing the setting.
+
+- **Why the model is resolved per request.** A provider built with
+  `resolver=` and `role=` asks `ModelResolver.effective(role)` inside every
+  `complete()` (and `decide()`, for the Decisions API), so the very next
+  call after a «Да» is already on the new model, with nothing rebuilt and
+  no restart. The alternatives were worse. Rebuilding providers on a
+  switch means finding every holder of one: the router, the worker, the
+  idle jobs, the judge, the garden, the suggester and the in-bot trial
+  each keep their own, and one missed holder would run the old model
+  while `/state` showed the new one. Restarting the process on a switch
+  drops the update in flight and every other job with it. A per-request read is a dict lookup. The request and the
+  `LLMResponse` name the model resolved once at the top of the call, so a
+  switch landing while the call is out cannot send one model and bill
+  another. Only the model is resolved: `max_tokens`, temperature,
+  structured outputs, `require_parameters`, `data_collection` and the web
+  search plugin stay the role's own, whichever model serves it.
+  `with_max_tokens` carries the resolver and the role over, so a distill's
+  wider cap follows a safety switch too. The constructor's `model=` stays
+  the env default and is still what `_model` holds, which the tests and
+  the offline eval read.
+- **One process, so an in-process cache is consistent.** The choice
+  lives in `llm_model_override` (one row per overridden role: `role`,
+  `model`, three nullable prices, `updated_at`; no row means "the
+  default"). The resolver loads it at startup, before the first update or
+  job, and `set` and `reset` write the row and its audit in one
+  transaction and update the dict only after the commit, under a lock, so
+  a failed write never leaves the cache claiming a model the database
+  does not hold. Only the welfare shadow's `model` may be `''` (a CHECK):
+  it means switched off from the menu even though env names a model, and
+  the decider is therefore always built when the resolver is installed
+  and `welfare_shadow.active()` decides per turn whether to ask; an off
+  shadow makes no call and writes no row. Every change is also a
+  `state_change` row, `field='model:<role>'`, `source='button'`, old and
+  new value the role's effective model before and after: model ids, never
+  content. The row survives a restart; `/export` includes the table and
+  `/delete` truncates it and clears the resolver's cache after the commit
+  (a setting of the user's, the same answer as `claude_write_limit`, so
+  "delete all my data" puts every role back on its env model).
+- **The fallback chains.** A role's own row wins; with none, it falls
+  back to env. `garden` and `suggest` follow the safety row before their
+  own env setting: `override(garden) → override(safety) → GARDEN_MODEL →
+  LLM_MODEL_SAFETY`, and the same for `suggest` with
+  `INTEREST_SUGGEST_MODEL`. They run on the safety model by default, so
+  switching «Проверки» moves them along (the menu shows «= проверки»).
+  The price is that a `GARDEN_MODEL` set on purpose in env yields to a
+  safety switch made in the menu; the garden's own row (🌱 Сад) is how to
+  pin it apart again, and picking the model a follower already runs on is
+  allowed for exactly that.
+- **Why Telegram only.** For the same reason as the sensitive acts in
+  «Menu redesign»: the web chat is a second door onto the same
+  conversation (a cookie, a code, a login), and a model choice decides who
+  reads every later message, what it costs and whether welfare and memory
+  work at all. All eight sections and 21 action keys are in
+  `menu.TELEGRAM_ONLY`, so the web sink never draws them and
+  `action_available` refuses them however the press arrives; a forged
+  `mn:y:mdl_persona` from a tampered web client answers «Устарело.» and
+  changes nothing. The prompt is Telegram-only too: a reply to ✏️ «Своя
+  модель» sent from the web is refused and consumed (text meant for a
+  model id is not handed to the chat model), and the prompt stays open.
+- **A callback never carries a model id.** `mn:a:mdl_<role>:<n|off>` is an
+  index into the role's own list, `mn:y:mdl_<role>` is «Да», `mn:i:mdl_
+  custom_<role>` is the prompt and `mn:a:mdl_reset_<role>` is the reset;
+  the longest is 29 bytes, under the 64 Telegram allows with room to
+  spare, and there is no id to forge or truncate. The keys are per role
+  (`mdl_<role>`, not `mdl:<role>`), so `awaiting` is
+  `menu:mdl_custom_<role>` and the existing prompt, TTL, web-refusal and
+  drift machinery applies unchanged. The id being confirmed has to live
+  somewhere, so the router keeps `message id → (role, model, prices)` in
+  memory, at most 32 cards: a restart between the card and «Да» makes «Да»
+  answer «Устарело. Открой /menu заново.» and change nothing, which is the
+  safe direction. The «Да» is one-shot through `claim_card` as every
+  confirmation is, is gated on `_once`, and re-checks the judge rule
+  because the other role may have moved since the card was sent.
+- **Capability gates.** A model that cannot do a role's job would break
+  it silently, so `validate_choice` decides before the card is shown.
+  Each refusal is a code with fixed wording that names no model:
+  - `missing`: OpenRouter has no such model (or it is not an id; an id
+    over 128 characters or with a space is refused before any lookup);
+  - `no_structured`: a JSON role (`safety`, `judge`, `garden`, `suggest`)
+    needs `structured_outputs` **and** `temperature` on one endpoint,
+    because those calls send `require_parameters` with a schema;
+  - `no_deny`: no endpoint complies with `data_collection=deny`. The
+    public endpoint listing has no data-policy field, so the only
+    published list of endpoints that certainly comply is `/endpoints/zdr`,
+    and compliance is read as zero retention: conservative (a model whose
+    providers comply without being ZDR is refused, never the reverse; put
+    it in `MODEL_CHOICES`), and a usability check rather than the privacy
+    guarantee, which stays the `data_collection` field every request
+    carries;
+  - `judge_equals_persona`: checked both ways, so switching the chat onto
+    the judge's model is refused as well, and so is ↩️ «По умолчанию» when
+    the default would put the judge on the persona's model;
+  - `not_decisions`: the welfare shadow runs on the Decisions API, which
+    no listing describes. A curated entry with `decisions` among its caps
+    passes; a custom id is probed with one synthetic decision (no user
+    text) and refused if it fails. The probe is billed, so it is written
+    to `spend_ledger` under the shadow's own category;
+  - `not_prose`: a curated entry whose caps lack `prose`, picked for the
+    chat or summaries;
+  - `unreachable`: OpenRouter could not be asked. A **curated** pick still
+    goes through with its prices left empty (the entries are the owner's
+    own list, so a stale one costs failed calls, not a wrong answer, and
+    the Decisions models may not appear in the chat listing at all); a
+    **custom** id is refused («Не удалось проверить модель, попробуй
+    позже.»), because nothing about it could be checked. Failures are not
+    cached as answers, only as a 60-second back-off, so a menu render during
+    an outage does not wait on OpenRouter once per button.
+  Lookups are cached for `MODEL_CATALOG_TTL_H` hours (24). Curated
+  entries are checked only against their caps and the judge rule; the
+  catalog supplies their prices.
+- **The independence rule runs on the effective models.** The judge must
+  differ from the persona (`gate.config_from_settings`, `amendments.
+  run_trial`, `eval/trial.py`), and `llm_models.independent_judge` now
+  compares what the two roles resolve to now, not the two env settings. A
+  switch the catalog refused cannot happen from the menu, but a persona
+  switch and a judge switch made apart could otherwise meet, so the run
+  time check stays: `critique` and `canary` are gated off and a trial
+  fails `no_independent_judge` with no throwaway database and no call. The
+  ledger rows for the judge name the judge that graded (read once per
+  run), not `LLM_MODEL_JUDGE`.
+- **The pricing rule.** `spend.price_triple_for` has one new first step:
+  a model with an override row **and** usable stored prices (input and
+  output both present) bills at those, ahead of the env triples. They are
+  the catalog's own figures for that exact model at pick time; the env
+  triples are right only for the model each setting names, so a role
+  switched to a model env never heard of would otherwise bill at the main
+  model's prices. A missing cached price bills cached tokens at the input
+  price, which can only over-count. Two roles on one model use the
+  freshest usable quote, and a newer pick with no quote does not hide an
+  older one. An overridden model without prices (a curated pick made
+  while OpenRouter was unreachable) falls through to the old rules, and
+  with no resolver installed nothing changes. **The cost OpenRouter
+  reports for a call still wins** over all of it. Across the endpoints a
+  model could be routed to, the catalog keeps the highest of each price
+  so that the estimate on a confirm card is never the cheapest case; the
+  card says «Цена пока неизвестна.» when it has none. Prices are stored
+  per 1M tokens, six places.
+- **The eval stays on env.** `eval/run.py`, `eval/welfare.py` and
+  `scripts/smoke.py` build their providers with no resolver and keep
+  reading `settings.*_MODEL`. The eval is a regression gate: the same
+  command must grade the same model whatever was tapped in Telegram the
+  day before, and a run on the owner's last menu choice would mean the
+  baseline moves without a commit. Only `main()` installs a resolver, so
+  the offline tools, and every test that does not install one, get an
+  env-pinned provider exactly as before (`resolver_kwargs` returns `{}`).
+  The in-bot trial and canary (`eval/trial.py`) are the exception on
+  purpose: they exist to decide whether the model the chat **really** runs
+  on passes, so they resolve `persona` and `judge`.
+- **Confirmations.** A pick shows «Сменить модель «Чат» на X? Вход $…,
+  выход $… за 1M. Влияет на тон и цену.» The last sentence is «…на
+  качество и цену.» for every role but the chat. The safety role adds
+  «Проверки управляют welfare, памятью и разбором команд — плохая модель
+  сломает их разом.» Picking the model a role already runs on answers
+  «… уже на этой модели.» (a follower of safety may still pin it). The
+  shadow's «⏹ Выключить» asks too.
+- **`/state`** shows one line per role, «Модель «Чат»: …», marked
+  «· изменена» when the effective model differs from env (so a
+  `garden` following a switched safety model is marked too, and a reset
+  clears the mark; the mark follows "differs from env", not the
+  existence of a row). A caller that passes no models keeps the single
+  «Модель:» line.
+- **Debug view.** `debug.llm_model_override` shows `role, model,
+  updated_at`: an OpenRouter catalog name is nothing the user or the model
+  wrote. The prices are left out because debugging a bad switch does not
+  need them. docs/claude-access.md has the query.
+- **Not done**: a model's own `max_tokens` or temperature (the role
+  decides those), a per-model price override typed by hand, a schedule
+  (a model for the night's jobs), switching from the web chat, and a
+  pick for the offline eval. Known and harmless: pressing «Да» on two
+  separate cards for the same role and model writes a second audit row
+  whose old and new value are equal; and the pick being confirmed is
+  in memory only, as above.

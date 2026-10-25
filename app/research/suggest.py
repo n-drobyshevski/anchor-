@@ -415,7 +415,13 @@ def build_suggest_provider(settings: Settings, client) -> LLMProvider:
     """`INTEREST_SUGGEST_MODEL` (default `LLM_MODEL_SAFETY`) at
     temperature 0.3 with `INTEREST_SUGGEST_MAX_TOKENS` -- built like
     app/core/idle/lens_garden.py's `build_garden_provider`, since the
-    shared safety provider's cap would truncate the JSON."""
+    shared safety provider's cap would truncate the JSON.
+
+    Bound to the `suggest` role on the resolver app/main.py installed
+    (app/llm/models.py's `resolver_kwargs`): 💡 Темы' own pick, else a
+    switched safety model, else the env above, per request. eval/run.py
+    installs no resolver, so the offline eval stays on env."""
+    from app.llm import models as llm_models
     from app.llm.openrouter import OpenRouterProvider
 
     return OpenRouterProvider(
@@ -428,6 +434,7 @@ def build_suggest_provider(settings: Settings, client) -> LLMProvider:
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+        **llm_models.resolver_kwargs("suggest"),
     )
 
 

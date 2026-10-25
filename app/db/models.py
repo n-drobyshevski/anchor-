@@ -1476,6 +1476,52 @@ class ClaudeWriteLimit(Base):
     __table_args__ = (CheckConstraint("value >= 0", name="ck_claude_write_limit_value"),)
 
 
+class LlmModelOverride(Base):
+    """The model the user chose for one LLM role from ⚙️ Настройки ›
+    🧠 Модели (docs/decisions.md, "Runtime model choice"). One row per
+    overridden role; no row means the env default (app/config.py's
+    `LLM_MODEL` and friends), and ↩️ «По умолчанию» deletes the row.
+
+    `role` is one of app/llm/models.py's `ROLES`
+    (`ck_llm_model_override_role`). `model` is an OpenRouter id, empty
+    only for `welfare_shadow` ("switched off", `ck_llm_model_override_
+    model`). The three prices are USD per million tokens as OpenRouter's
+    catalog gave them when the model was picked, nullable (a curated pick
+    made while OpenRouter was unreachable has none); app/core/spend.py
+    bills at them for an overridden model. Each change is audited as a
+    `state_change` row, `model:<role>`. A model id, three numbers and a
+    time -- no content -- so `debug.llm_model_override` shows role, model
+    and updated_at. `/export` includes it and `/delete` truncates it.
+    """
+
+    __tablename__ = "llm_model_override"
+
+    role: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    price_in: Mapped[decimal.Decimal | None] = mapped_column(Numeric(12, 6))
+    price_cached: Mapped[decimal.Decimal | None] = mapped_column(Numeric(12, 6))
+    price_out: Mapped[decimal.Decimal | None] = mapped_column(Numeric(12, 6))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "role in ('persona', 'cheap', 'safety', 'judge', 'garden', 'suggest', "
+            "'welfare_shadow')",
+            name="ck_llm_model_override_role",
+        ),
+        CheckConstraint(
+            "model <> '' or role = 'welfare_shadow'", name="ck_llm_model_override_model"
+        ),
+        CheckConstraint(
+            "(price_in is null or price_in >= 0) and (price_cached is null or price_cached >= 0)"
+            " and (price_out is null or price_out >= 0)",
+            name="ck_llm_model_override_price",
+        ),
+    )
+
+
 class ClaudeChangeset(Base):
     """One row per changeset of Claude's writes to the vault (W2b,
     anchor-claude-write-plan.md sections 6.3 and 7).

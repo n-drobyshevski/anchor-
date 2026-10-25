@@ -1,6 +1,6 @@
 """The welfare shadow: a decision model asked the welfare question, and never obeyed.
 
-When WELFARE_SHADOW_MODEL is set, every turn the welfare classifier
+When the shadow has a model, every turn the welfare classifier
 runs on (app/core/welfare.py) also goes to a typed-decision model --
 TypeSafe's Jev, through OpenRouter's Decisions API -- as one `choice`
 question over the same three levels and the same transcript. Both
@@ -28,6 +28,16 @@ from.
 exception: the shadow cannot fail a turn, slow one past
 WELFARE_SHADOW_TIMEOUT_SECONDS, or change a verdict. The row write is
 best-effort like app/core/safety_events.py's, for the same reason.
+
+**Which model.** Env's WELFARE_SHADOW_MODEL by default, switchable
+from ⚙️ Настройки › 🧠 Модели › 🫀 Welfare-тень (app/llm/models.py's
+`welfare_shadow` role), «выкл» included. So app/main.py builds the
+decider whenever a resolver is installed, and `active()` decides per
+turn whether there is anyone to ask; a switched-off shadow makes no call
+and writes no row. Each row's `shadow_model` is the model that was
+actually asked (the response's, else the decider's resolved model at
+the call), never the env setting, so rows from before and after a
+switch stay apart.
 
 **Privacy.** The decision model sees the classifier's input and nothing
 more, under `zdr` (app/llm/openrouter.py's OpenRouterDecisionProvider).
@@ -88,7 +98,11 @@ T = TypeVar("T")
 
 
 class Shadow(NamedTuple):
-    """What the decision model answered, or how it failed to."""
+    """What the decision model answered, or how it failed to.
+
+    `model` is the model the call was sent to (None from a decider that
+    does not say, such as a test fake; `record` then falls back to env).
+    """
 
     outcome: str
     level: str | None
@@ -96,6 +110,19 @@ class Shadow(NamedTuple):
     p_real: float | None
     ms: int
     response: DecisionResponse | None
+    model: str | None = None
+
+
+def active(decider: DecisionProvider | None) -> bool:
+    """Whether the shadow should run this turn: a decider exists and its
+    model is not switched off. app/core/turn.py checks it before every
+    turn. A decider without `enabled` (the protocol needs only
+    `decide`, and test fakes have no more) counts as on."""
+    return decider is not None and bool(getattr(decider, "enabled", True))
+
+
+def _model_of(decider: DecisionProvider) -> str | None:
+    return getattr(decider, "model", None) or None
 
 
 def _elapsed_ms(started: float) -> int:
@@ -117,6 +144,9 @@ async def classify(
     user_text: str,
 ) -> Shadow:
     """Ask the decision model. Never raises."""
+    # Resolved before the call, so a timeout or an error row still names
+    # the model that was asked; a reply's own model wins below.
+    model = _model_of(decider)
     started = time.monotonic()
     try:
         response = await asyncio.wait_for(
@@ -125,10 +155,10 @@ async def classify(
         )
     except asyncio.TimeoutError:
         logger.warning("welfare shadow timed out", extra={"event": "TimeoutError"})
-        return Shadow(welfare.TIMEOUT, None, None, None, _elapsed_ms(started), None)
+        return Shadow(welfare.TIMEOUT, None, None, None, _elapsed_ms(started), None, model)
     except Exception as exc:  # noqa: BLE001 - the shadow fails silent, by design
         logger.warning("welfare shadow failed", extra={"event": type(exc).__name__})
-        return Shadow(welfare.ERROR, None, None, None, _elapsed_ms(started), None)
+        return Shadow(welfare.ERROR, None, None, None, _elapsed_ms(started), None, model)
 
     ms = _elapsed_ms(started)
     answer = response.answers[QUESTION]
@@ -142,6 +172,7 @@ async def classify(
         answer.probabilities.get(welfare.REAL, 0.0),
         ms,
         response,
+        response.model or model,
     )
 
 
@@ -177,6 +208,16 @@ async def beside(
         shadow=shadow,
     )
     return primary
+
+
+def _recorded_model(shadow: Shadow, settings: Settings) -> str:
+    """The row's `shadow_model`: what the call actually went to. Env's
+    setting only when nothing better is known (a decider that does not
+    report its model), as every row was labelled before runtime model
+    choice."""
+    if shadow.response is not None and shadow.response.model:
+        return shadow.response.model
+    return shadow.model or settings.WELFARE_SHADOW_MODEL
 
 
 async def record(
@@ -216,7 +257,7 @@ async def record(
                     primary_level=primary.verdict.level if answered else None,
                     primary_confidence=primary.verdict.confidence if answered else None,
                     primary_ms=primary_ms,
-                    shadow_model=settings.WELFARE_SHADOW_MODEL,
+                    shadow_model=_recorded_model(shadow, settings),
                     shadow_outcome=shadow.outcome,
                     shadow_level=shadow.level,
                     shadow_confidence=shadow.confidence,

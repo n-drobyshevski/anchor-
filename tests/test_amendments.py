@@ -249,6 +249,102 @@ async def test_run_trial_fails_when_judge_equals_the_persona_model(
         assert row.eval_report["reason"] == amendments.NO_INDEPENDENT_JUDGE
 
 
+@pytest.fixture()
+def resolver_installed(sessionmaker):
+    """A loaded `ModelResolver`, installed the way app/main.py installs
+    it, and uninstalled after the test."""
+    from app.llm import models as llm_models
+    from app.llm.models import ModelResolver
+
+    async def _install(settings: Settings) -> ModelResolver:
+        resolver = await ModelResolver.create(settings, sessionmaker)
+        llm_models.install(resolver)
+        return resolver
+
+    yield _install
+    llm_models.install(None)
+
+
+async def _trial_amendment(sessionmaker) -> int:
+    async with sessionmaker() as session:
+        row = PersonaAmendment(text="x", status=amendments.TRIAL, persona_sha="x")
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return row.id
+
+
+async def test_run_trial_refuses_a_judge_switched_onto_the_persona_model(
+    sessionmaker, frozen_clock, monkeypatch, resolver_installed
+):
+    """Env says the judge is independent, but the menu has since put it
+    on the persona's model: the trial compares the *effective* models,
+    so it fails first, with no runner and no ledger row."""
+    clock = _clock(frozen_clock)
+    settings = _settings()
+    resolver = await resolver_installed(settings)
+    await resolver.set("judge", settings.LLM_MODEL)
+    await _seed_state(sessionmaker)
+    monkeypatch.setattr(
+        "eval.trial.run_blocking_subset",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+    amendment_id = await _trial_amendment(sessionmaker)
+
+    async with sessionmaker() as session:
+        outcome = await amendments.run_trial(session, settings, clock=clock, amendment_id=amendment_id)
+        assert outcome.status == amendments.FAILED
+    async with sessionmaker() as session:
+        row = await session.get(PersonaAmendment, amendment_id)
+        assert row.eval_report["reason"] == amendments.NO_INDEPENDENT_JUDGE
+        assert (await session.execute(select(SpendLedger))).scalars().all() == []
+
+
+async def test_run_trial_refuses_a_persona_switched_onto_the_judge_model(
+    sessionmaker, frozen_clock, monkeypatch, resolver_installed
+):
+    clock = _clock(frozen_clock)
+    settings = _settings()
+    resolver = await resolver_installed(settings)
+    await resolver.set("persona", settings.LLM_MODEL_JUDGE)
+    await _seed_state(sessionmaker)
+    monkeypatch.setattr(
+        "eval.trial.run_blocking_subset",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+    amendment_id = await _trial_amendment(sessionmaker)
+
+    async with sessionmaker() as session:
+        outcome = await amendments.run_trial(session, settings, clock=clock, amendment_id=amendment_id)
+        assert outcome.status == amendments.FAILED
+
+
+async def test_run_trial_runs_when_the_menu_made_an_env_clash_independent(
+    sessionmaker, frozen_clock, monkeypatch, resolver_installed
+):
+    """The other direction: env alone would refuse (judge == persona),
+    a judge picked in the menu makes the trial legitimate, and the ledger
+    row names the judge that was actually used."""
+    clock = _clock(frozen_clock)
+    settings = _settings(LLM_MODEL_JUDGE="thedrummer/cydonia-24b-v4.1")
+    resolver = await resolver_installed(settings)
+    await resolver.set("judge", "vendor/judge-picked")
+    await _seed_state(sessionmaker)
+
+    async def _fake_run_blocking_subset(*args, **kwargs):
+        return TrialResult(cases={"04": True}, passed=True, usd_cost=0.01)
+
+    monkeypatch.setattr("eval.trial.run_blocking_subset", _fake_run_blocking_subset)
+    amendment_id = await _trial_amendment(sessionmaker)
+
+    async with sessionmaker() as session:
+        outcome = await amendments.run_trial(session, settings, clock=clock, amendment_id=amendment_id)
+        assert outcome.status == amendments.ACTIVE
+    async with sessionmaker() as session:
+        (ledger,) = (await session.execute(select(SpendLedger))).scalars().all()
+        assert ledger.model == "vendor/judge-picked"
+
+
 # --- run_trial: pass / fail / env failure, with a fake runner ---------------
 
 

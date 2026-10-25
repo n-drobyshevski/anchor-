@@ -22,8 +22,10 @@ empty prompt_text -- the judge is still asked the same five voice/
 boundary/pressure questions, which are properties of the reply itself.
 
 **The judge must be independent.** Same rule as `app/core/amendments.py`'s
-`run_trial`: `settings.LLM_MODEL_JUDGE` must be set and differ from
-`settings.LLM_MODEL`. The gate's kind rule (`app/core/idle/gate.py`'s
+`run_trial`: the effective judge model must be set and differ from the
+effective persona model (app/llm/models.py's `independent_judge`: env's
+`LLM_MODEL_JUDGE` and `LLM_MODEL` unless ⚙️ Настройки › 🧠 Модели
+switched either). The gate's kind rule (`app/core/idle/gate.py`'s
 `_critique_rule`, via `IdleConfig.independent_judge`) refuses the run
 *before* this module is ever called, so by the time `run_critique`
 builds a judge provider the independence check has already passed --
@@ -281,7 +283,12 @@ def _build_judge_provider(settings: Settings, client) -> LLMProvider:
     construction as eval/trial.py's own `judge_provider`, built lazily
     here rather than threaded through app/main.py/app/worker.py's
     provider wiring, since critique is the only idle kind that needs a
-    fourth model."""
+    fourth model.
+
+    Bound to the `judge` role on the resolver app/main.py installed
+    (app/llm/models.py's `resolver_kwargs`), so a judge switched in the
+    menu grades the next sample; with none installed it stays on env."""
+    from app.llm import models as llm_models
     from app.llm.openrouter import OpenRouterProvider
 
     return OpenRouterProvider(
@@ -292,6 +299,7 @@ def _build_judge_provider(settings: Settings, client) -> LLMProvider:
         data_collection=settings.LLM_DATA_COLLECTION,
         client=client,
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
+        **llm_models.resolver_kwargs("judge"),
     )
 
 
@@ -313,7 +321,14 @@ async def run_critique(
     production leaves it None and a real judge-model provider is built.
     """
     from app.core.idle.runner import RunContext, is_preempted
+    from app.llm import models as llm_models
     from eval.judge import judge
+
+    # The ledger row's label: the judge model this run resolves to, read
+    # once up front (a switch landing mid-sample would otherwise split
+    # one row's cost across two names). The cost itself is priced per
+    # call inside eval/judge.py by the model that answered.
+    judge_model = llm_models.effective_model(settings, "judge")
 
     async with session_factory() as session:
         sample = await _sample(session, settings.CRITIQUE_SAMPLE)
@@ -386,7 +401,7 @@ async def run_critique(
             SpendLedger(
                 local_date=clock_module.local_date(clock, timezone),
                 category=f"idle:{ctx.kind}",
-                model=settings.LLM_MODEL_JUDGE,
+                model=judge_model,
                 tokens_in=0,
                 tokens_cached=0,
                 tokens_out=0,

@@ -411,7 +411,9 @@ SUGGEST = RESEARCH / "suggest.py"
 # checks and the shared screen (app.core.interests, app.core.screen) and
 # the two secret screens; the spend cap and the ledger's pricing; the job
 # queue and the ORM models (pinned by name below); the provider interface
-# and, lazily, the OpenRouter provider it builds; the injection list; the
+# and, lazily, the OpenRouter provider it builds and the model resolver
+# it binds that provider to (app.llm.models: the `suggest` role's model
+# id, from llm_model_override, which holds no content); the injection list; the
 # packet vocabulary (app.research.jobs); and the lens module, for its
 # catalog alone (pinned below; tests/test_vault_notes_isolation.py names
 # it as an importer). No dialog, memory, journal, notebook, summary,
@@ -426,6 +428,7 @@ SUGGEST_ALLOWED = frozenset(
         "app.core.spend",
         "app.db.jobs",
         "app.db.models",
+        "app.llm.models",
         "app.llm.openrouter",
         "app.llm.provider",
         "app.research.injection",

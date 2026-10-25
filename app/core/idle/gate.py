@@ -188,8 +188,9 @@ class IdleConfig:
     # disabled" reduces to the one switch that turns every proactive
     # send off.
     morning_enabled: bool = True
-    # 6c: true iff `LLM_MODEL_JUDGE` is set and differs from `LLM_MODEL`
-    # -- the same independence check app/core/amendments.py's run_trial
+    # 6c: true iff the judge model is set and differs from the persona's
+    # -- the *effective* ones since runtime model choice
+    # (app/llm/models.py's `independent_judge`) -- the same independence check app/core/amendments.py's run_trial
     # makes before its own throwaway trial, reused here so critique and
     # canary can never grade (or bless) a model against itself.
     independent_judge: bool = True
@@ -222,9 +223,17 @@ class IdleConfig:
 
 
 def config_from_settings(settings) -> IdleConfig:
-    """Build an `IdleConfig` from `app.config.Settings`."""
+    """Build an `IdleConfig` from `app.config.Settings`.
+
+    `independent_judge` is the one field read from beyond Settings: the
+    effective judge and persona models, which ⚙️ Настройки › 🧠 Модели
+    can switch at run time (app/llm/models.py). A dict read, no I/O --
+    and imported here rather than at the top so the gate module itself
+    stays as light as its "pure function" contract.
+    """
+    from app.llm import models as llm_models
+
     start, end = parse_window(settings.IDLE_WINDOW)
-    judge_model = settings.LLM_MODEL_JUDGE
     return IdleConfig(
         enabled=settings.IDLE_ENABLED,
         after_h=settings.IDLE_AFTER_H,
@@ -236,7 +245,7 @@ def config_from_settings(settings) -> IdleConfig:
         window_end=end,
         undo_days=settings.IDLE_UNDO_DAYS,
         morning_enabled=settings.OUTBOUND_ENABLED,
-        independent_judge=bool(judge_model) and judge_model != settings.LLM_MODEL,
+        independent_judge=llm_models.independent_judge(settings),
         canary_dow=settings.CANARY_DOW,
         research_enabled=settings.RESEARCH_ENABLED,
         garden_enabled=(
