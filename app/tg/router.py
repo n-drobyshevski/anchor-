@@ -1403,11 +1403,12 @@ def build_router(
             row, close every live SSE stream/callback allowlist, and
             invalidate every pending login code.
 
-            Telegram-only in practice already -- a stolen web session
-            cannot reach this handler at all, since it can only ever
-            produce a synthetic Update fed to WebSinkSession's Bot, not
-            a real Telegram message -- so this needs no is_web_sink
-            guard of its own the way export_command/delete_command do.
+            Telegram only: a web session's typed `/weblogout` would
+            reach this handler as a synthetic Update like any other web
+            text, so app/web/ingress.py's BLOCKED_COMMANDS refuses to
+            queue it, and the menu button is TELEGRAM_ONLY
+            (app/tg/menu.py). The kill switch for a stolen web session
+            must not be in that session's hands.
             Only registered at all when `hub is not None` (the WEB_UI_
             ENABLED signal): see build_router's docstring for why the
             web-UI-disabled case is no longer "register it anyway and
@@ -2183,6 +2184,7 @@ def build_router(
         "notes_off": _menu_vault("notes off"),
         "vault": _menu_vault(None),
         "graph": _fixed(graph_command, "graph"),
+        "lens": _fixed(lens_command, "lens"),
         "lens_garden": _fixed(lens_command, "lens", "garden now"),
         "lens_research": _fixed(lens_command, "lens", "research now"),
         "lens_code_off": _fixed(lens_command, "lens", "code off"),
@@ -2289,29 +2291,44 @@ def build_router(
             return
         if not await _once(event_update.update_id):
             return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
             message.bot,
             message.chat.id,
             menu.forget_confirm_text(memory_id, row.text),
             menu.confirm_markup("forget", arg=str(memory_id), yes_label=menu.FORGET_YES),
         )
+        # Recorded at once, not only by _menu_prompt_reply's own mark
+        # afterwards: a crash between the two would replay into a second card.
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/forget]", scene_id=scene_id
+        )
 
     async def _menu_claude_connect_input(message: Message, event_update: Update, text: str) -> None:
-        """«✏️ Подключить по коду»'s reply: the code, shown back on a
-        «Точно?» card before it approves anything. Text that is not
-        shaped like a code at all goes straight to `/claude connect`,
-        whose own answer is the right one (menu.claude_connect_data)."""
-        if menu.claude_connect_data(text) is None:
-            await claude_command(message, event_update, _command("claude", f"connect {text}"))
+        """«✏️ Подключить по коду»'s reply: the code, normalised as the
+        pending store will read it (Cyrillic look-alikes as Latin), shown
+        back on a «Точно?» card before it approves anything. Text that
+        is not shaped like a code at all gets `/claude connect`'s own
+        answer (usage for several words, unknown code otherwise), sent
+        from here: nothing reaches the pending store without a card
+        (menu.claude_connect_code)."""
+        code = menu.claude_connect_code(text)
+        if code is None:
+            reply = claude_ui.USAGE if len(text.split()) > 1 else claude_ui.CODE_UNKNOWN
+            await _reply_once(message, event_update.update_id, reply)
             return
         if not await _once(event_update.update_id):
             return
-        code = text.strip()
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
         await send_keyboard(
             message.bot,
             message.chat.id,
             menu.claude_connect_confirm_text(code),
             menu.confirm_markup("claude_connect", arg=code, yes_label=menu.CLAUDE_CONNECT_YES),
+        )
+        # As in _menu_forget_input: recorded the moment the card is out.
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/claude]", scene_id=scene_id
         )
 
     INPUT_ACTIONS = {
@@ -2374,12 +2391,14 @@ def build_router(
            and handles the word exactly as it always does.
         3. Expired (MENU_PROMPT_TTL_MIN): the prompt is ended and the
            text is ordinary chat -- False.
-        4. Not available any more (a flag switched off since the tap, or
-           a Telegram-only prompt answered from the web chat -- the step
+        4. A Telegram-only prompt answered from the web chat (the step
            is one global row, and a web message must never feed a
-           Telegram-only command): ended, answered, and consumed, so
-           text meant for, say, an approval code is not handed to the
-           model either.
+           Telegram-only command): refused and consumed, so text meant
+           for, say, an approval code is not handed to the model either
+           -- but the prompt stays open, since its message is still on
+           the Telegram screen and the next Telegram line answers it.
+           Not available any more (a flag switched off since the tap):
+           ended, answered and consumed alike.
         5. Otherwise: the action's INPUT_ACTIONS entry, with the text,
            through the command's own handler -- its `_once` gate, its
            audit rows, its is_web_sink guard. The update is then marked
@@ -2387,11 +2406,12 @@ def build_router(
            handler already stored its reply), so the text is never
            stored as a chat message and never reaches the model, and
            only then is the step cleared and the prompt edited to
-           «Готово.». That order is the replay story: a crash before the
-           clear re-runs this branch on the replay, where the handler's
-           own gate makes it a no-op; a replay after it finds no prompt
-           and is stopped by `turn.answered_without_turn` in
-           handle_text below.
+           «Ответ принят.» (neutral: the command may still have refused
+           the text, and its own reply says so). That order is the
+           replay story: a crash before the clear re-runs this branch
+           on the replay, where the handler's own gate makes it a
+           no-op; a replay after it finds no prompt and is stopped by
+           `turn.answered_without_turn` in handle_text below.
         """
         async with sessionmaker() as session:
             prompt = await menu_prompt.current(session)
@@ -2406,7 +2426,13 @@ def build_router(
             await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
             return False
 
-        if not prompt.live(clock.now_utc(), settings.MENU_PROMPT_TTL_MIN) or not text:
+        # The TTL is measured when the user sent the reply (Telegram's
+        # `date`), not when a backlogged worker reached it; a web update
+        # carries date 0, so it falls back to now.
+        sent_at = message.date
+        if sent_at is None or sent_at.timestamp() <= 0:
+            sent_at = clock.now_utc()
+        if not prompt.live(sent_at, settings.MENU_PROMPT_TTL_MIN) or not text:
             async with sessionmaker() as session:
                 await menu_prompt.close_prompt(session, prompt.key)
             await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
@@ -2415,6 +2441,14 @@ def build_router(
         web = getattr(bot, "is_web_sink", False)
         key = prompt.key
         if key not in INPUT_ACTIONS or not menu.action_available(key, settings, web=web):
+            if (
+                web
+                and key in menu.TELEGRAM_ONLY
+                and key in INPUT_ACTIONS
+                and menu.action_available(key, settings, web=False)
+            ):
+                await _reply_once(message, update_id, WEB_ONLY_REPLY)
+                return True
             async with sessionmaker() as session:
                 await menu_prompt.close_prompt(session, key)
             await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
@@ -2436,7 +2470,7 @@ def build_router(
         )
         async with sessionmaker() as session:
             await menu_prompt.close_prompt(session, key)
-        await _retire_menu_message(bot, chat_id, prompt.message_id, menu.DONE_TEXT)
+        await _retire_menu_message(bot, chat_id, prompt.message_id, menu.PROMPT_ANSWERED_TEXT)
         return True
 
     @router.callback_query(F.data.startswith("mn:"))
@@ -2473,6 +2507,16 @@ def build_router(
             await answer_callback(bot, callback.id, memory_ui.STALE)
             return
 
+        # A tap that opens a prompt or sends a card is one message per
+        # update: its replay must stop here, before ending or clearing
+        # anything -- the step it would end is the very prompt the first
+        # run opened.
+        opens = press.kind == "input" or (
+            press.kind == "action" and menu.action_kind(press.value) == menu.CONFIRM
+        )
+        if opens and not await _once(update_id):
+            return
+
         await _end_menu_prompt(bot, chat_id)
 
         if press.kind == "close":
@@ -2489,7 +2533,7 @@ def build_router(
             # «Нет» claims the card like «Да» does, so a «Да» that was
             # already on its way cannot still run after the user said no.
             async with sessionmaker() as session:
-                claimed = await menu_prompt.claim_card(session, chat_id, message_id, update_id)
+                claimed = await menu_prompt.claim_card(session, message_id, update_id)
             if not claimed:
                 await answer_callback(bot, callback.id, memory_ui.STALE)
                 return
@@ -2536,7 +2580,7 @@ def build_router(
             # files; a second `/claude connect` counted as a wrong
             # code). Every press after the first is stale.
             async with sessionmaker() as session:
-                claimed = await menu_prompt.claim_card(session, chat_id, message_id, update_id)
+                claimed = await menu_prompt.claim_card(session, message_id, update_id)
             if not claimed:
                 await answer_callback(bot, callback.id, memory_ui.STALE)
                 return
@@ -2546,9 +2590,7 @@ def build_router(
 
         if press.kind == "input":
             # One prompt message per tap: a replayed tap must not ask
-            # twice, so this is gated like any keyboard-sending command.
-            if not await _once(update_id):
-                return
+            # twice -- gated on `_once` above, before the prompt ended.
             prompt_id = await send_keyboard(bot, chat_id, menu.prompt_text(key), menu.prompt_markup())
             async with sessionmaker() as session:
                 await menu_prompt.open_prompt(session, clock, key, prompt_id)
@@ -2566,8 +2608,7 @@ def build_router(
             return
 
         if kind == menu.CONFIRM:
-            if not await _once(update_id):
-                return
+            # Replays already stopped at the `_once` gate above.
             await send_keyboard(bot, chat_id, menu.confirm_text(key), menu.confirm_markup(key))
             await turn.mark_update_handled(
                 sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"

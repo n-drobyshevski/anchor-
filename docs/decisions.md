@@ -3771,7 +3771,9 @@ untouched.
   code. The first «Да» now claims the card, atomically, in
   `app/core/menu_prompt.py`'s `claim_card`: one row in the `job` table
   (kind `menu_card`, already `done` so the worker never takes it),
-  `dedup_key = menu_card:<chat>:<message>`, `ON CONFLICT DO NOTHING`, the
+  `dedup_key = menu_card:<message>` (the card's message id alone: one chat,
+  a web card's id is negative, and `debug.job` shows the key, so no chat
+  id), `ON CONFLICT DO NOTHING`, the
   mechanism `enqueue_job` and `scene:<id>` already use, so no new table
   or migration. The row stores the claiming update id: the same press
   replayed after a crash wins again (the command behind it is `_once`
@@ -3798,7 +3800,10 @@ untouched.
   never reaches the model, and a replay of it finds its reply row with
   no user row (`turn.answered_without_turn`) and stops instead of
   becoming a chat turn now that the step is cleared. The prompt message
-  is edited to «Готово.» or «Отменено.», so it never lingers.
+  is edited to «Ответ принят.» (neutral: the command may still refuse
+  the text, and its own reply says so) or «Отменено.», so it never
+  lingers. The TTL below is measured at the reply's Telegram `date`, not
+  when the worker reaches it (a web update, dated 0, uses now).
 - **A prompt expires.** After `MENU_PROMPT_TTL_MIN` (10 minutes) the
   next message is ordinary chat again. A prompt the user walked away
   from must not swallow tomorrow's first line as `/remember` text, or as
@@ -3808,10 +3813,13 @@ untouched.
   button, a pause word (which still wins, as over every step, and is
   handled by the turn exactly as always) and ✕ Отмена. A reply that
   arrives where the action is no longer available (a flag switched off
-  since the tap, or a Telegram-only prompt answered from the web chat,
-  since the step is one global row) ends the step, is answered and is
-  consumed, so text meant for an approval code is not handed to the
-  model either. On the web, prompts work for any command not in
+  since the tap) ends the step, is answered and is consumed. A
+  Telegram-only prompt answered from the web chat (the step is one
+  global row) is refused and consumed too, so text meant for an approval
+  code is not handed to the model, but the prompt stays open: its
+  message is still on the Telegram screen, and the next Telegram line
+  answers it. The orders sweep clears `awaiting` only under the counter
+  step, since `awaiting_ref` is a message id under a menu prompt. On the web, prompts work for any command not in
   `BLOCKED_COMMANDS`.
 - **Why bare `/due` became a confirmed «Снять главное».** A bare `/due`
   does not show the current main action, it clears it, and closes the
@@ -3845,8 +3853,10 @@ untouched.
     [Принять][Отклонить], the `r:a:`/`r:r:` buttons a `/notes` card has).
   - `knowledge` (`VAULT_MODE` not `off`): notes consent, vault status,
     link pruning and its undo ⚠️ (Telegram only), and `lens`
-    (Telegram only): garden now, research now, undo ⚠️, Claude Code's
-    door on ⚠️ / off.
+    (Telegram only, `VAULT_MODE` alone, since bare `/lens`, `/lens undo`
+    and `/lens code` need no `LENS_ENABLED`): the `/lens` status, garden
+    now and research now (with `LENS_ENABLED` and their own switches),
+    undo ⚠️, Claude Code's door on ⚠️ / off.
   - `links`: `planner` (status, plan, sync on/off, link ⚠️) and `claude`
     (Telegram only: status and the window picker, connect by code ✏️⚠️,
     the library read and write switches, write limits, undo ⚠️ ×2,
@@ -3884,5 +3894,11 @@ untouched.
   its text, and `mn:y:` runs only what a confirmation card could have
   offered. `forget`'s and `claude_connect`'s typed id or code is
   validated before it rides in a callback (an id beyond the BIGINT range
-  is a missing record, a code that is not code-shaped goes straight to
-  `/claude connect` for its own answer).
+  is a missing record). A code is normalised as the pending store reads
+  it (Cyrillic look-alikes as Latin, upper case), so any single short
+  token gets its «Точно?» card showing the code that will be looked up;
+  other text gets `/claude connect`'s own usage or unknown-code reply,
+  sent by the menu, and never reaches the store without a card. The
+  forget and connect cards are recorded as the update's reply the moment
+  they are sent, so a crash replay cannot send a second one; a replayed
+  prompt or card tap stops at `_once` before it ends or clears any step.

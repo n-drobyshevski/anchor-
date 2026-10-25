@@ -82,6 +82,15 @@ _LOOKALIKES = str.maketrans(
 TOKEN_BYTES = 32
 
 
+def normalize_code(code: str) -> str:
+    """A typed code as `PendingStore.match` compares it: trimmed, its
+    Cyrillic look-alikes mapped to their Latin twins, upper case. Shared
+    with the /menu prompt (app/tg/menu.py's `claude_connect_code`), so
+    the code its «Точно?» card shows is the one `/claude connect` will
+    look up."""
+    return code.strip().translate(_LOOKALIKES).upper()
+
+
 def sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -209,7 +218,7 @@ class PendingStore:
         """The unapproved entry whose code this is. Every live code is
         compared in constant time, so timing says nothing about which."""
         self._prune()
-        typed = code.strip().translate(_LOOKALIKES).upper()
+        typed = normalize_code(code)
         if len(typed) != CODE_LENGTH or any(ch not in CODE_ALPHABET for ch in typed):
             return None
         found = None

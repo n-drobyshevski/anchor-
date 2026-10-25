@@ -63,9 +63,9 @@ off at deploy level is not drawn and not reachable):
                     packets that have sites
       knowledge     (VAULT_MODE != off) notes consent, vault status,
                     footer-link pruning and its undo ⚠️
-        lens        (LENS_ENABLED, Telegram only) the lens status table,
-                    garden now, research now, undo ⚠️, Claude Code's
-                    door on ⚠️ / off
+        lens        (Telegram only) the lens status table, /lens status,
+                    garden now and research now (LENS_ENABLED and their
+                    own switches), undo ⚠️, Claude Code's door on ⚠️ / off
       links         planner ›, Claude ›, Grok ⚠️, close web sessions ⚠️,
                     close all access
         planner     (PLANNER_ENABLED) link status, plan, status, sync
@@ -143,7 +143,7 @@ module's handlers and theirs never matters):
 Every one of these stays inside Telegram's 64-byte callback_data limit:
 the longest fixed one, "mn:a:quiet_off:settings", is 23 bytes, and the
 two carrying typed input bound it first (`forget_confirm_data` takes a
-parsed integer id, `claude_connect_data` a short code-shaped token, both
+parsed integer id, `claude_connect_code` a short code-shaped token, both
 checked by `fits_callback`).
 """
 
@@ -172,6 +172,7 @@ from aiogram.types import (
 from app.config import Settings
 from app.core import orders as orders_core
 from app.vault.kinds import SYNC_MODES
+from app.web import oauth_store
 from app.web.ingress import BLOCKED_COMMANDS
 
 MENU_BUTTON_TEXT = "☰ Меню"
@@ -192,7 +193,11 @@ CLOSED_TEXT = "Меню закрыто. Открыть снова — /menu."
 
 # What a prompt or a confirmation card is edited to once it is over, so
 # neither lingers on screen with buttons that no longer mean anything.
+# A prompt's reply is edited to the neutral PROMPT_ANSWERED_TEXT, not
+# «Готово.»: the command it ran may still have refused it (a bad time
+# zone, an unknown number), and its own reply says which.
 DONE_TEXT = "Готово."
+PROMPT_ANSWERED_TEXT = "Ответ принят."
 CANCELLED_TEXT = "Отменено."
 
 # Shown after the main section's own buttons, in the plain view as a
@@ -253,6 +258,14 @@ def _vault(settings: Settings) -> bool:
 
 def _lens(settings: Settings) -> bool:
     return _vault(settings) and settings.LENS_ENABLED
+
+
+def _lens_card(settings: Settings) -> bool:
+    """The lens card and the buttons that need no LENS_ENABLED (README):
+    bare `/lens` (it reports the lens off), `/lens undo` (only the vault
+    service) and `/lens code on|off` (only the role). Reached from the
+    knowledge section, so it follows that section's own gate."""
+    return _vault(settings)
 
 
 def _lens_garden(settings: Settings) -> bool:
@@ -459,12 +472,13 @@ ACTIONS: dict[str, Action] = {
     "graph": _run("🧹 Чистка ссылок", "graph", gate=_graph),
     "graph_undo": _confirm("⚠️ Отменить чистку", "graph", args="undo", gate=_graph),
     # lens
+    "lens": _run("ℹ️ Статус линзы", "lens", gate=_lens_card),
     "lens_garden": _run("🌱 Сад сейчас", "lens", args="garden now", gate=_lens_garden),
     "lens_research": _run("🔬 Исследовать сейчас", "lens", args="research now", gate=_lens_research),
-    "lens_undo": _confirm("⚠️ Отменить последнее", "lens", args="undo", gate=_lens),
-    "lens_code_on": _confirm("⚠️ Доступ Claude Code: вкл", "lens", args="code on", gate=_lens),
+    "lens_undo": _confirm("⚠️ Отменить последнее", "lens", args="undo", gate=_lens_card),
+    "lens_code_on": _confirm("⚠️ Доступ Claude Code: вкл", "lens", args="code on", gate=_lens_card),
     "lens_code_off": _run(
-        "Доступ Claude Code: выкл", "lens", args="code off", gate=_lens, refresh="lens"
+        "Доступ Claude Code: выкл", "lens", args="code off", gate=_lens_card, refresh="lens"
     ),
     # links
     # Opens read access to everything the bot holds; its own scope
@@ -709,18 +723,21 @@ def yes_data(action: str, arg: str | None = None) -> str:
     return f"{YES_PREFIX}{action}" + (f":{arg}" if arg is not None else "")
 
 
-def claude_connect_data(text: str) -> str | None:
-    """The «Да» callback for a typed code, or None when the text cannot
-    be one -- more than one word, a character outside letters, digits
-    and "-", or too long to ride in callback data. The router then hands
-    the text straight to `/claude connect`, whose own answer (unknown
-    code, usage) is the right one: a confirmation card for something
-    that is not even shaped like a code would only add a tap."""
-    code = text.strip()
-    if not code or len(code) > 16 or not all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in code):
+def claude_connect_code(text: str) -> str | None:
+    """The code a typed reply names, normalised exactly as
+    `/claude connect` will compare it (oauth_store.normalize_code:
+    Cyrillic look-alikes read as Latin, upper case), so the «Точно?»
+    card shows -- and its «Да» carries -- the code that will be looked
+    up. Every single short token gets that card, whatever its script:
+    a code typed on a Russian layout is still a code. None when the text
+    cannot be one -- more than one word, a character outside letters,
+    digits and "-", or too long to ride in callback data; the router
+    then answers `/claude connect`'s own usage / unknown-code reply
+    itself, and nothing reaches the pending store without a card."""
+    code = oauth_store.normalize_code(text)
+    if not code or len(code) > 16 or not all(ch.isalnum() or ch == "-" for ch in code):
         return None
-    data = yes_data("claude_connect", code)
-    return data if fits_callback(data) else None
+    return code if fits_callback(yes_data("claude_connect", code)) else None
 
 
 def prompt_markup() -> InlineKeyboardMarkup:
@@ -1235,6 +1252,7 @@ def _render_lens(settings: Settings, *, web: bool, view: MenuView, origin: str |
     if view.lens_today_reads is not None:
         table_rows.append(("Чтений сегодня", str(view.lens_today_reads)))
     rows: list[list[Btn]] = []
+    _add(rows, _row(settings, web, "lens"))
     _add(rows, _row(settings, web, "lens_garden", "lens_research"))
     _add(rows, _row(settings, web, "lens_undo"))
     _add(rows, _row(settings, web, "lens_code_off" if view.lens_code else "lens_code_on"))
@@ -1406,7 +1424,7 @@ _SECTION_GATES: dict[str, Callable[[Settings], bool]] = {
     "packet_interest": _any_packet,
     "packet_study": _any_packet,
     "knowledge": _vault,
-    "lens": _lens,
+    "lens": _lens_card,
     "planner": _planner,
     "claude": _claude,
 }

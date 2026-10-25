@@ -83,7 +83,7 @@ OpenRouter's Decisions API. Why things are the way they are is in
 | `/lens garden now` | Run this week's lens garden now instead of waiting for an idle slot: skips only the inactivity wait, the idle window and the garden's own 168-hour/unchanged rules; keeps the pause, the welfare cooldown, every budget row and once per ISO week. The garden message follows under its usual holds; Telegram only | `LENS_GARDEN_ENABLED` |
 | `/lens research now` | Run the lens research a tap on «исследовать» queued, instead of waiting for an idle slot: skips only the inactivity wait, the idle window and the kind's once-a-day limit, and is never preempted; keeps the pause, the welfare cooldown, `busy` and every budget row. Takes no quota of its own (the /study quota went at the tap). The result message follows under its usual holds; Telegram only | `RESEARCH_ENABLED`, `LENS_GARDEN_ENABLED`, `PACKET_LENS` |
 | `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review or reflection round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
-| `/weblogout` | End every web session | `WEB_UI_ENABLED` |
+| `/weblogout` | End every web session; Telegram only (typed in the web chat it is refused) | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
 followed by setup, tests and deploy.

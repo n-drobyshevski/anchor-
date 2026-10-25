@@ -40,6 +40,8 @@ from app.planner import auth as planner_auth
 from app.tg import menu
 from app.tg import planner as planner_ui
 from app.tg.router import BOT_COMMANDS, HIDE_KB_REPLY, START_TEXT, build_router
+from app.web import ingress
+from app.web import oauth_store
 from app.web.ingress import BLOCKED_COMMANDS
 from conftest import FakeLLMProvider, FakeSession, flatten_rich_message, make_bot, rich_callback_data
 from vault_stub import start_stub
@@ -290,10 +292,11 @@ def test_section_exists_follows_the_feature_flags():
     assert menu.section_exists("knowledge", _settings(vault_mode="status")) is True
     assert menu.section_exists("planner", _settings(planner=True)) is True
     assert menu.section_exists("claude", _settings(claude=True)) is True
-    # The lens needs the vault *and* its own flag.
+    # The lens needs the vault; not its own flag, since its status,
+    # /lens undo and /lens code work with LENS_ENABLED off (README).
     assert menu.section_exists("lens", _settings(lens=True, vault_mode="status")) is True
     assert menu.section_exists("lens", _settings(lens=True, vault_mode="off")) is False
-    assert menu.section_exists("lens", _settings(lens=False, vault_mode="sync")) is False
+    assert menu.section_exists("lens", _settings(lens=False, vault_mode="sync")) is True
 
 
 def test_telegram_only_sections_are_not_shown_on_the_web():
@@ -785,9 +788,9 @@ def test_knowledge_graph_rows_follow_their_own_flag():
     assert not {"graph", "graph_undo"} & set(_offered("knowledge", _settings(graph=False)))
 
 
-def test_knowledge_lens_entry_follows_the_lens_flag():
+def test_knowledge_lens_entry_follows_the_vault_not_the_lens_flag():
     assert "mn:s:lens" in _data(_markup("knowledge", _settings(lens=True)))
-    assert "mn:s:lens" not in _data(_markup("knowledge", _settings(lens=False)))
+    assert "mn:s:lens" in _data(_markup("knowledge", _settings(lens=False)))
 
 
 def test_knowledge_status_table_shows_mode_counts_and_flags():
@@ -892,11 +895,31 @@ def test_lens_rows():
     _, markup = _render("lens", view=menu.MenuView(lens_code=False))
     rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
     assert rows == [
+        ["mn:a:lens"],
         ["mn:a:lens_garden", "mn:a:lens_research"],
         ["mn:a:lens_undo"],
         ["mn:a:lens_code_on"],
         ["mn:s:knowledge", "mn:x"],
     ]
+
+
+def test_lens_status_button_is_bare_lens_and_telegram_only():
+    spec = menu.ACTIONS["lens"]
+    assert (spec.kind, spec.commands, spec.args) == (menu.RUN, ("lens",), None)
+    assert "lens" in menu.TELEGRAM_ONLY
+    assert menu.action_available("lens", FULL, web=True) is False
+
+
+def test_lens_off_keeps_status_undo_and_code_but_not_garden_or_research():
+    """README: /lens undo needs the vault service and /lens code the
+    role, neither LENS_ENABLED; bare /lens reports the lens off."""
+    off = _settings(lens=False)
+    keys = _offered("lens", off, view=menu.MenuView(lens_code=False))
+    assert {"lens", "lens_undo", "lens_code_on"} <= set(keys)
+    assert "lens_garden" not in keys and "lens_research" not in keys
+    for key in ("lens", "lens_undo", "lens_code_on", "lens_code_off"):
+        assert menu.action_available(key, off, web=False) is True, key
+        assert menu.action_available(key, _settings(lens=False, vault_mode="off"), web=False) is False
 
 
 def test_lens_garden_and_research_follow_their_switches():
@@ -1177,7 +1200,7 @@ def test_data_layout_and_the_sensitive_acts_are_telegram_only():
 
 
 def test_action_count_and_kinds():
-    assert len(menu.ACTIONS) == 90
+    assert len(menu.ACTIONS) == 91
     assert menu.KINDS == (menu.RUN, menu.PROMPT, menu.CONFIRM)
     for key, action in menu.ACTIONS.items():
         assert action.kind in menu.KINDS, key
@@ -1227,11 +1250,18 @@ def test_forget_card_quotes_the_record_and_bounds_it():
     assert menu.forget_confirm_text(4, "две\nстроки") == "Забыть #4 «две строки»?"
 
 
-def test_claude_connect_data_accepts_only_code_shaped_text():
-    assert menu.claude_connect_data("ABCD-1234") == "mn:y:claude_connect:ABCD-1234"
-    assert menu.claude_connect_data("  abc123  ") == "mn:y:claude_connect:abc123"
-    for bad in ("", "   ", "two words", "a" * 17, "кириллица", "code;drop", "a:b"):
-        assert menu.claude_connect_data(bad) is None, bad
+def test_claude_connect_code_normalises_like_the_pending_store():
+    assert menu.claude_connect_code("ABCD-1234") == "ABCD-1234"
+    assert menu.claude_connect_code("  abc123  ") == "ABC123"
+    # Typed on a Russian layout: the Cyrillic twins become Latin, exactly
+    # as PendingStore.match will read them -- so such a code still gets
+    # its card, showing the code that will be looked up.
+    assert menu.claude_connect_code("АВС234") == "ABC234"
+    assert menu.claude_connect_code("авс234") == oauth_store.normalize_code("авс234") == "ABC234"
+    # Any other single short token still asks first.
+    assert menu.claude_connect_code("кириллица") == oauth_store.normalize_code("кириллица")
+    for bad in ("", "   ", "two words", "a" * 17, "code;drop", "a:b"):
+        assert menu.claude_connect_code(bad) is None, bad
     assert menu.claude_connect_confirm_text("ABCD-1234") == "Подключить Claude по коду ABCD-1234?"
 
 
@@ -1403,6 +1433,14 @@ def test_closed_rich_carries_the_closed_text_and_no_buttons():
 def test_status_texts_the_flows_edit_prompts_to():
     assert menu.DONE_TEXT == "Готово."
     assert menu.CANCELLED_TEXT == "Отменено."
+    # A prompt's reply may be refused by its command: neutral, not «Готово.».
+    assert menu.PROMPT_ANSWERED_TEXT == "Ответ принят."
+
+
+def test_weblogout_is_blocked_at_web_ingress():
+    for text in ("/weblogout", "/WebLogout", "/weblogout@EchoBot now"):
+        assert ingress.is_blocked_command(text) is True, text
+    assert "weblogout" in BLOCKED_COMMANDS
 
 
 # --- router-level ---------------------------------------------------------

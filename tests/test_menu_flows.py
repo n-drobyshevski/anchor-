@@ -9,7 +9,7 @@ database, and reuses that file's fixtures. Each test names the rule it
 pins:
 
 - a prompt's reply runs the command and is never chat: no user `message`
-  row, no model call, the prompt edited to «Готово.»;
+  row, no model call, the prompt edited to «Ответ принят.»;
 - a prompt ends on ✕ Отмена, on expiry (MENU_PROMPT_TTL_MIN), on a slash
   command, on a menu tap and on a pause word, after which text is chat;
 - a replayed reply runs once;
@@ -30,6 +30,8 @@ from sqlalchemy import select, text
 
 from app.config import Settings
 from app.core import menu_prompt
+from app.core import orders as orders_core
+from app.core import turn
 from app.core.clock import FrozenClock
 from app.db.models import (
     InterestTopic,
@@ -42,6 +44,7 @@ from app.db.models import (
     StudyClip,
     StudyJob,
 )
+from app.tg import claude as claude_ui
 from app.tg import data as data_ui
 from app.tg import interests as interests_ui
 from app.tg import lens as lens_ui
@@ -145,9 +148,9 @@ async def test_prompt_reply_runs_the_command_with_no_user_row_and_no_model_call(
     assert fake.sent[-1].text.startswith("Часовой пояс: Europe/Berlin.")
     assert llm.calls == 0
     assert await _users(sessionmaker) == []
-    # The prompt is edited to «Готово.» with no buttons, and the step is over.
+    # The prompt is edited to «Ответ принят.» with no buttons, and the step is over.
     last = _edits_of(fake, prompt_id)[-1]
-    assert last.text == menu.DONE_TEXT
+    assert last.text == menu.PROMPT_ANSWERED_TEXT
     assert last.reply_markup is None
     assert (state.awaiting, state.awaiting_ref, state.awaiting_at) == (None, None, None)
 
@@ -547,26 +550,30 @@ async def test_a_different_card_is_a_different_claim(sessionmaker):
 
 
 async def test_claim_card_is_atomic_and_keyed_on_the_card(sessionmaker):
-    async def claim(chat_id, message_id, update_id):
+    async def claim(message_id, update_id):
         async with sessionmaker() as session:
-            return await menu_prompt.claim_card(session, chat_id, message_id, update_id)
+            return await menu_prompt.claim_card(session, message_id, update_id)
 
-    assert await claim(CHAT_ID, 7, 100) is True
-    assert await claim(CHAT_ID, 7, 101) is False  # another press on the card
-    assert await claim(CHAT_ID, 7, 100) is True  # the same press, replayed
-    assert await claim(CHAT_ID, 8, 101) is True  # another card
-    assert await claim(CHAT_ID + 1, 7, 102) is True  # another chat
+    assert await claim(7, 100) is True
+    assert await claim(7, 101) is False  # another press on the card
+    assert await claim(7, 100) is True  # the same press, replayed
+    assert await claim(8, 101) is True  # another card
+    assert await claim(-7, 102) is True  # a web card (negative id) is another card
 
-    results = await asyncio.gather(*(claim(CHAT_ID, 9, 200 + i) for i in range(8)))
+    results = await asyncio.gather(*(claim(9, 200 + i) for i in range(8)))
     assert results.count(True) == 1
 
-    # Content-free: a kind, a key made of ids, and an update id.
+    # Content-free: a kind, a key made of the card's message id only (no
+    # chat id: debug.job shows dedup_key), and an update id.
     async with sessionmaker() as session:
         rows = list(
             (await session.execute(select(Job).where(Job.kind == menu_prompt.CARD_CLAIM_KIND))).scalars()
         )
     assert rows and all(row.status == "done" for row in rows)
-    assert all(row.dedup_key.startswith("menu_card:") for row in rows)
+    assert sorted(row.dedup_key for row in rows) == sorted(
+        f"menu_card:{n}" for n in (7, 8, -7, 9)
+    )
+    assert all(str(CHAT_ID) not in row.dedup_key for row in rows)
     assert all(set(row.payload) == {"update_id"} for row in rows)
 
 
@@ -728,20 +735,31 @@ async def test_the_same_presses_work_on_telegram(sessionmaker, nologin_after):
 
 async def test_a_telegram_only_prompt_answered_from_the_web_runs_nothing(sessionmaker):
     """The step is one global row: a message arriving over the web chat
-    must never be handed to a Telegram-only command as its argument."""
-    await _seed(sessionmaker, 1, 2, 3)
+    must never be handed to a Telegram-only command as its argument. It
+    is refused and consumed, but the prompt -- still on the Telegram
+    screen -- stays open, so the next Telegram line is its answer and
+    not chat."""
+    await _seed(sessionmaker, 1, 2, 3, 4)
     settings = _settings(CLAUDE_ACCESS_ENABLED=True, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32)
-    tg_dp, tg_bot, tg_fake = _build(sessionmaker, settings=settings)
-    await _open_prompt(tg_dp, tg_bot, tg_fake, 1, "claude_connect")
+    llm = FakeLLMProvider()
+    tg_dp, tg_bot, tg_fake = _build(sessionmaker, settings=settings, llm=llm)
+    prompt_id = await _open_prompt(tg_dp, tg_bot, tg_fake, 1, "claude_connect")
     web_bot, web_fake = make_bot()
     web_bot.is_web_sink = True
-    web_dp, web_bot, web_fake = _build(sessionmaker, settings=settings, bot=web_bot, fake=web_fake)
+    web_dp, web_bot, web_fake = _build(sessionmaker, settings=settings, bot=web_bot, fake=web_fake, llm=llm)
 
     await _say(web_dp, web_bot, 3, "ABCD-1234")
 
     assert web_fake.sent[-1].text == WEB_ONLY_REPLY
     assert tg_fake.sent[-1].text == menu.prompt_text("claude_connect")  # no card was sent
-    assert (await _state(sessionmaker)).awaiting is None
+    assert _edits_of(tg_fake, prompt_id) == []
+    assert (await _state(sessionmaker)).awaiting == "menu:claude_connect"
+    assert await _users(sessionmaker) == []
+
+    await _say(tg_dp, tg_bot, 4, "ABCD-1234")
+
+    assert tg_fake.sent[-1].text == menu.claude_connect_confirm_text("ABCD-1234")
+    assert llm.calls == 0
 
 
 async def test_prompts_work_on_the_web_for_commands_the_web_may_run(sessionmaker):
@@ -789,7 +807,7 @@ async def test_forget_shows_the_record_then_deletes_on_yes(sessionmaker):
         "mn:c",
     ]
     assert await _memory_ids(sessionmaker) == [memory_id]  # nothing deleted yet
-    assert _edits_of(fake, prompt_id)[-1].text == menu.DONE_TEXT
+    assert _edits_of(fake, prompt_id)[-1].text == menu.PROMPT_ANSWERED_TEXT
 
     await _tap(dp, bot, 4, f"mn:y:forget:{memory_id}", message_id=card)
 
@@ -864,6 +882,41 @@ async def test_pin_and_unpin_prompts_run_the_commands(sessionmaker):
 
 
 # --- /claude connect: the code is shown back before it approves anything -----------------
+
+
+def _claude_settings() -> Settings:
+    return _settings(CLAUDE_ACCESS_ENABLED=True, VAULT_MODE="status", VAULT_API_TOKEN="x" * 32)
+
+
+async def test_claude_connect_a_cyrillic_typed_code_still_asks_first(sessionmaker):
+    """PendingStore.match reads Cyrillic look-alikes as Latin, so a code
+    typed on a Russian layout is a real code: it must get the «Точно?»
+    card too, showing the code as it will be looked up."""
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker, settings=_claude_settings())
+    await _open_prompt(dp, bot, fake, 1, "claude_connect")
+
+    await _say(dp, bot, 3, "АВС234")  # Cyrillic А, В, С
+
+    assert fake.sent[-1].text == menu.claude_connect_confirm_text("ABC234")
+    yes = fake.sent[-1].reply_markup.inline_keyboard[0][0]
+    assert yes.callback_data == "mn:y:claude_connect:ABC234"
+
+
+@pytest.mark.parametrize(
+    ("line", "reply"),
+    [("two words", claude_ui.USAGE), ("a" * 40, claude_ui.CODE_UNKNOWN), ("code;drop", claude_ui.CODE_UNKNOWN)],
+)
+async def test_claude_connect_text_that_is_no_code_is_answered_without_a_card(sessionmaker, line, reply):
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker, settings=_claude_settings())
+    await _open_prompt(dp, bot, fake, 1, "claude_connect")
+
+    await _say(dp, bot, 3, line)
+
+    assert fake.sent[-1].text == reply
+    assert fake.sent[-1].reply_markup is None
+    assert (await _state(sessionmaker)).awaiting is None
 
 
 async def test_claude_connect_shows_the_code_on_a_card_and_yes_runs_it_once(sessionmaker):
@@ -1177,3 +1230,155 @@ async def test_a_prompt_whose_feature_went_off_is_ended_and_answered(sessionmake
     assert off_fake.sent[-1].text == menu.PROMPT_UNAVAILABLE
     assert (await _state(sessionmaker)).awaiting is None
     assert await _users(sessionmaker) == []
+
+
+# --- review fixes (2026-10-25) ----------------------------------------------------
+
+
+def _dated_update(update_id: int, line: str, when: datetime.datetime) -> dict:
+    payload = _command_update(update_id, line)
+    payload["message"]["date"] = int(when.timestamp())
+    return payload
+
+
+async def test_the_prompt_ttl_is_measured_at_the_messages_own_date(sessionmaker):
+    """A reply sent inside the TTL but processed after it (a queue
+    backlog, a redeploy) still answers the prompt: the clock is the
+    Telegram message's `date`, not the moment the worker got to it."""
+    clock = FrozenClock(NOW)
+    await _seed(sessionmaker, 1, 2, 3)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, settings=_settings(MENU_PROMPT_TTL_MIN=10), llm=llm, clock=clock)
+    await _open_prompt(dp, bot, fake, 1, "tz")
+
+    clock.advance(datetime.timedelta(minutes=15))
+    await _feed(dp, bot, _dated_update(3, "Europe/Berlin", NOW + datetime.timedelta(minutes=5)))
+
+    assert (await _state(sessionmaker)).timezone == "Europe/Berlin"
+    assert llm.calls == 0
+
+
+async def test_a_message_dated_after_the_ttl_is_chat_even_if_processed_at_once(sessionmaker):
+    clock = FrozenClock(NOW)
+    await _seed(sessionmaker, 1, 2, 3)
+    llm = FakeLLMProvider()
+    dp, bot, fake = _build(sessionmaker, settings=_settings(MENU_PROMPT_TTL_MIN=10), llm=llm, clock=clock)
+    await _open_prompt(dp, bot, fake, 1, "tz")
+
+    await _feed(dp, bot, _dated_update(3, "Europe/Berlin", NOW + datetime.timedelta(minutes=11)))
+
+    assert (await _state(sessionmaker)).timezone == TIMEZONE
+    assert llm.calls == 1
+
+
+async def test_a_replayed_prompt_tap_leaves_its_own_prompt_open(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker)
+    prompt_id = await _open_prompt(dp, bot, fake, 1, "tz")
+
+    await _tap(dp, bot, 2, "mn:i:tz")  # the queue re-runs the tap
+
+    assert (await _state(sessionmaker)).awaiting == "menu:tz"
+    assert _edits_of(fake, prompt_id) == []
+    await _say(dp, bot, 3, "Europe/Berlin")
+    assert (await _state(sessionmaker)).timezone == "Europe/Berlin"
+
+
+async def test_a_replayed_confirm_tap_clears_no_step(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3, 4)
+    dp, bot, fake = _build(sessionmaker)
+    await _open_card(dp, bot, fake, 1, "export")
+    prompt_id = await _open_prompt(dp, bot, fake, 3, "tz")
+    cards = _texts(fake).count(menu.confirm_text("export"))
+
+    await _tap(dp, bot, 2, "mn:a:export")  # a replay of the card's own tap
+
+    assert _texts(fake).count(menu.confirm_text("export")) == cards
+    assert (await _state(sessionmaker)).awaiting == "menu:tz"
+    assert _edits_of(fake, prompt_id) == []
+
+
+class _Crash(RuntimeError):
+    pass
+
+
+def _crash_once_in_ensure_scene(monkeypatch):
+    """The worker dies once, at the first `turn.ensure_scene` call."""
+    real = turn.ensure_scene
+    calls = {"n": 0}
+
+    async def ensure_scene(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Crash()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(turn, "ensure_scene", ensure_scene)
+
+
+async def test_forget_card_is_recorded_as_sent_so_a_crash_replay_sends_no_second(sessionmaker, monkeypatch):
+    await _seed(sessionmaker, 1, 2, 3)
+    memory_id = await _memory(sessionmaker)
+    dp, bot, fake = _build(sessionmaker)
+    await _open_prompt(dp, bot, fake, 1, "forget")
+    _crash_once_in_ensure_scene(monkeypatch)
+
+    with pytest.raises(_Crash):
+        await _say(dp, bot, 3, str(memory_id))
+    await _say(dp, bot, 3, str(memory_id))  # the replay
+
+    card = menu.forget_confirm_text(memory_id, "не пью кофе после 16")
+    assert _texts(fake).count(card) == 1
+    assert (await _state(sessionmaker)).awaiting is None
+
+
+async def test_claude_connect_card_is_recorded_as_sent_so_a_crash_replay_sends_no_second(
+    sessionmaker, monkeypatch
+):
+    await _seed(sessionmaker, 1, 2, 3)
+    dp, bot, fake = _build(sessionmaker, settings=_claude_settings())
+    await _open_prompt(dp, bot, fake, 1, "claude_connect")
+    _crash_once_in_ensure_scene(monkeypatch)
+
+    with pytest.raises(_Crash):
+        await _say(dp, bot, 3, "ABC234")
+    await _say(dp, bot, 3, "ABC234")
+
+    assert _texts(fake).count(menu.claude_connect_confirm_text("ABC234")) == 1
+
+
+async def test_the_orders_sweep_leaves_a_menu_prompt_alone(sessionmaker):
+    """`awaiting_ref` is the prompt's message id under a menu prompt, not
+    an order id: an expiring order that happens to share the number must
+    not end the prompt."""
+    await _seed(sessionmaker, 1, 2)
+    async with sessionmaker() as session:
+        order = await orders_core.propose(session, "плавать", orders_core.DAILY, None, source="anchor")
+        row = await session.get(StandingOrder, order.id)
+        row.created_at = NOW - datetime.timedelta(days=30)
+        await session.commit()
+    dp, bot, fake = _build(sessionmaker, clock=FrozenClock(NOW))
+    await _open_prompt(dp, bot, fake, 1, "tz")
+    async with sessionmaker() as session:
+        await session.execute(text("update user_state set awaiting_ref = :id"), {"id": order.id})
+        await session.commit()
+
+    async with sessionmaker() as session:
+        assert await orders_core.expire_stale(session, clock=FrozenClock(NOW)) == 1
+
+    state = await _state(sessionmaker)
+    assert (state.awaiting, state.awaiting_ref) == ("menu:tz", order.id)
+
+
+async def test_lens_status_button_runs_bare_lens_even_with_the_lens_off(sessionmaker):
+    await _seed(sessionmaker, 1, 2, 3)
+    settings = _settings(VAULT_MODE="status", VAULT_API_TOKEN="x" * 32, LENS_ENABLED=False)
+    dp, bot, fake = _build(sessionmaker, settings=settings)
+    await _say(dp, bot, 1, "/menu")
+    await _tap(dp, bot, 2, "mn:s:lens")
+    assert "mn:a:lens" in rich_callback_data(fake.edits[-1].rich_message)
+
+    await _tap(dp, bot, 3, "mn:a:lens")
+
+    assert "Устарело." not in [a.text for a in fake.answered]
+    assert lens_ui.OFF_LINE in fake.sent[-1].text

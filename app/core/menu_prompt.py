@@ -12,7 +12,7 @@ every rule that ends such a step already applies to them:
   of kind "prompt". The key, never any text, so the audit row and the
   debug view (`debug.user_state.awaiting`) stay content-free.
 - `awaiting_ref` = the prompt message's own message id, so whatever
-  ends the prompt can edit it to «Готово.» / «Отменено.» instead of
+  ends the prompt can edit it to «Ответ принят.» / «Отменено.» instead of
   leaving a dead "Напиши..." on screen.
 - `awaiting_at` = when the prompt was opened (the only reader of that
   column): a prompt older than MENU_PROMPT_TTL_MIN is not live, and the
@@ -128,20 +128,23 @@ async def close_prompt(session: AsyncSession, key: str | None = None) -> bool:
 CARD_CLAIM_KIND = "menu_card"
 
 
-def card_claim_key(chat_id: int, message_id: int) -> str:
-    return f"menu_card:{chat_id}:{message_id}"
+def card_claim_key(message_id: int) -> str:
+    """Keyed on the card's message id alone: the bot has one chat, and a
+    web-issued id is negative, so the sign already tells a web card from
+    a Telegram one. No chat id, because `dedup_key` is visible in the
+    content-free `debug.job` view."""
+    return f"menu_card:{message_id}"
 
 
-async def claim_card(
-    session: AsyncSession, chat_id: int, message_id: int, update_id: int
-) -> bool:
+async def claim_card(session: AsyncSession, message_id: int, update_id: int) -> bool:
     """Atomically claim a confirmation card for the press `update_id`.
 
     The `job` table already is the codebase's "insert once, keyed on a
     unique string" ledger (`dedup_key`, ON CONFLICT DO NOTHING -- the
     same mechanism `enqueue_job` and `scene:<id>` rely on), so the claim
     is one such row, written already `done` so the worker never claims
-    it. It holds two integers and a constant: no text, no token.
+    it. It holds two integers and a constant: no text, no token, no
+    chat id.
 
     Returns True for the press that wins -- and for a *replay of that
     same press* (the queue re-runs an update after a crash, and the
@@ -153,7 +156,7 @@ async def claim_card(
     retention.py). A card is edited to «Готово.» or «Отменено.» as soon
     as it is claimed, so nothing is left to press by then.
     """
-    key = card_claim_key(chat_id, message_id)
+    key = card_claim_key(message_id)
     stmt = (
         pg_insert(Job)
         .values(
