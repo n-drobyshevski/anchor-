@@ -498,6 +498,20 @@ class Settings(BaseSettings):
     # The ceiling on a single /quiet, so a fat-fingered "/quiet 30d"
     # cannot mute the bot for a month.
     QUIET_MAX_DAYS: int = 7
+    # How long a /menu text prompt («✏️ Запомнить», «✏️ Часовой пояс»,
+    # ...) waits for its one reply (app/core/menu_prompt.py). Past this,
+    # the next message is ordinary chat again: a prompt the user walked
+    # away from must not swallow tomorrow's first line as a command.
+    MENU_PROMPT_TTL_MIN: int = 10
+
+    @field_validator("MENU_PROMPT_TTL_MIN")
+    @classmethod
+    def _menu_prompt_ttl_at_least_one(cls, value: int, info) -> int:
+        # 0 would mean "every prompt is already expired": the button
+        # would ask for text and then treat the answer as chat.
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
 
     # --- 4a: the research loop (phase-4 plan section 3) ---
     #

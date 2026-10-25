@@ -105,6 +105,7 @@ STATE_CHANGE_FIELD_TOPIC: dict[str, str] = {
     "last_checkin_at": "checkin",
     "awaiting": "checkin",
     "awaiting_ref": "checkin",
+    "awaiting_at": "checkin",
     # 2b/2c: memory writes and hard-deletes (app/tg/memory.py's
     # /forget, app/core/extract.py's autowrite).
     "memory": "memory",

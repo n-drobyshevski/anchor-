@@ -158,7 +158,7 @@ def test_section_exists_gates_vault_and_planner():
         ("quiet", menu.QUIET_TITLE),
         ("mem", menu.MEM_TITLE),
         ("deals", menu.DEALS_TITLE),
-        ("vault", menu.VAULT_TITLE),
+        ("knowledge", menu.KNOWLEDGE_TITLE),
         ("planner", menu.PLANNER_TITLE),
         ("data", menu.DATA_TITLE),
     ],

@@ -276,6 +276,22 @@ async def status(sessionmaker, settings: Settings, clock: Clock) -> str:
     return "\n".join(lines)
 
 
+async def menu_counts(sessionmaker, clock: Clock) -> tuple[int, bool | None, int]:
+    """What /menu's «🔭 Линза» card shows (menu redesign): the notes in
+    the lens, whether Claude Code may log in (None: the role is
+    missing), and today's lens reads -- the first three numbers of
+    `status` above, from the same calls. Counts only, like the rest of
+    this module."""
+    async with sessionmaker() as session:
+        timezone = (await get_state(session)).timezone
+        per_kind = await lens.counts(session)
+        can_login = await lens.code_access(session)
+        start, end = _day_bounds(clock_module.local_date(clock, timezone), timezone)
+        reads = await lens.reads_between(session, start, end)
+    notes = per_kind.get("person", 0) + per_kind.get("concept", 0)
+    return notes, can_login, reads
+
+
 async def code(sessionmaker, on: bool) -> str:
     async with sessionmaker() as session:
         outcome = await lens.set_code_access(session, on)

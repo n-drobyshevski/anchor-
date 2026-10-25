@@ -585,6 +585,33 @@ async def already_handled(
         return await _get_assistant_row(session, update_id) is not None
 
 
+async def answered_without_turn(
+    sessionmaker: async_sessionmaker[AsyncSession], update_id: int
+) -> bool:
+    """True iff this update already has its reply row but no user row.
+
+    A chat turn always stores the user row first (step 1) and its reply
+    after, so "a reply and no user row" can only mean the update was
+    answered as something other than a turn: a /menu prompt's reply
+    (app/tg/router.py's plain-text handler, menu redesign) or 5c's
+    counter text above. Both keep the user's text out of the
+    transcript on purpose -- and both clear their `awaiting` step once
+    done, so a queue replay of that same update would otherwise fall
+    through into run() and store the very text they kept out. The
+    router asks this before handing plain text to run(); a replay of a
+    real chat turn has its user row and is unaffected.
+    """
+    async with sessionmaker() as session:
+        if await _get_assistant_row(session, update_id) is None:
+            return False
+        existing = await session.execute(
+            select(Message.id)
+            .where(Message.update_id == update_id, Message.role == "user")
+            .limit(1)
+        )
+        return existing.first() is None
+
+
 async def send_command_reply(
     sessionmaker: async_sessionmaker[AsyncSession],
     bot: Bot,

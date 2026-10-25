@@ -297,6 +297,7 @@ def reset_values(settings: Settings, clock: Clock) -> dict:
         "last_checkin_at": None,
         "awaiting": None,
         "awaiting_ref": None,
+        "awaiting_at": None,
         # 3a: the outbound counters (phase-3 plan section 4). A
         # /delete that left ignored_in_row at 3 would leave the bot
         # silent after a wipe that is meant to return it to factory

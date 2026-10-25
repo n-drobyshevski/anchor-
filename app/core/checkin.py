@@ -363,10 +363,18 @@ async def clear_awaiting(session: AsyncSession) -> None:
     """
     result = await session.execute(select(UserState).where(UserState.id == STATE_ID))
     state = result.scalar_one_or_none()
-    if state is None or (state.awaiting is None and state.awaiting_ref is None):
+    if state is None or (
+        state.awaiting is None and state.awaiting_ref is None and state.awaiting_at is None
+    ):
         return
     await update_state(session, "awaiting", None, "command")
     await update_state(session, "awaiting_ref", None, "command")
+    # The menu redesign's prompt clock (app/core/menu_prompt.py): every
+    # caller of this function -- a slash command, a menu tap, a pause
+    # word, a web panel write -- ends a menu prompt too, and a stale
+    # timestamp left behind would only confuse the next reader.
+    if state.awaiting_at is not None:
+        await update_state(session, "awaiting_at", None, "command")
 
 
 async def pending_note_checkin(
