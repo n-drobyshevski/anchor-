@@ -624,10 +624,13 @@ async def link_review_proposal(
 
 async def expire_stale(session: AsyncSession, *, clock: Clock) -> int:
     """Daily sweep: `proposed`/`awaiting_counter`/`countered` rows older
-    than `PROPOSAL_TTL_DAYS` become `expired` (plan section 7). If
-    `awaiting_ref` points at a row this sweep just expired, `awaiting`
-    is cleared too, so a stale «Изменить» can never strand the next
-    plain-text message as a phantom counter.
+    than `PROPOSAL_TTL_DAYS` become `expired` (plan section 7). If the
+    pending step is the counter step and its `awaiting_ref` points at a
+    row this sweep just expired, `awaiting` is cleared too, so a stale
+    «Изменить» can never strand the next plain-text message as a phantom
+    counter. Any other step is left alone: under a /menu prompt
+    `awaiting_ref` is the prompt's message id (app/core/menu_prompt.py),
+    and a number that happens to match an order id means nothing.
     """
     cutoff = clock.now_utc() - datetime.timedelta(days=PROPOSAL_TTL_DAYS)
     now = clock.now_utc()
@@ -647,7 +650,11 @@ async def expire_stale(session: AsyncSession, *, clock: Clock) -> int:
     )
 
     state = (await session.execute(select(UserState).where(UserState.id == 1))).scalar_one_or_none()
-    if state is not None and state.awaiting_ref in expired_ids:
+    if (
+        state is not None
+        and state.awaiting == AWAITING_SO_COUNTER
+        and state.awaiting_ref in expired_ids
+    ):
         await _set_awaiting(session, None, None)
 
     await session.commit()

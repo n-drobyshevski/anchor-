@@ -401,9 +401,41 @@ async def run_notes(sessionmaker, bot: Bot, *, chat_id: int) -> None:
 
 
 async def run_card(sessionmaker, *, card_id: int) -> str:
+    text, _markup = await run_card_view(sessionmaker, card_id=card_id)
+    return text
+
+
+def card_keyboard(card: StudyCard) -> InlineKeyboardMarkup | None:
+    """/card <id>'s own [Принять][Отклонить] (menu redesign), or None
+    once the card is decided -- a button that could only answer "already
+    done" is not drawn. The same `r:a:<id>` / `r:r:<id>` a /notes card
+    row carries, handled by the same `handle_decision_callback`, so the
+    press keeps that handler's exact semantics: the outcome as a toast,
+    then this message re-rendered as page 0 of the pending list (the
+    module docstring says why a decision always lands there)."""
+    if card.status != "pending":
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=ACCEPT, callback_data=f"r:a:{card.id}"),
+                InlineKeyboardButton(text=REJECT_LABEL, callback_data=f"r:r:{card.id}"),
+            ]
+        ]
+    )
+
+
+async def run_card_view(
+    sessionmaker, *, card_id: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """/card <id>: the detail text and, for a pending card, its decision
+    buttons. A hidden card reads as a missing one (CARD_MISSING), here
+    as everywhere, and carries no buttons either."""
     async with sessionmaker() as session:
         card = await cards.get_card(session, card_id)
-    return render_card_detail(card) if card is not None else CARD_MISSING
+    if card is None:
+        return CARD_MISSING, None
+    return render_card_detail(card), card_keyboard(card)
 
 
 async def run_adopt(sessionmaker, clock: Clock, *, card_id: int) -> str:

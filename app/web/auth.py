@@ -53,7 +53,7 @@ import hmac
 import logging
 import secrets
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -353,6 +353,22 @@ async def revoke_session(db: AsyncSession, token: str | None) -> None:
         return
     await db.execute(delete(WebSession).where(WebSession.token_hash == _hash_token(token)))
     await db.commit()
+
+
+async def count_live(db: AsyncSession, clock: Clock, settings: Settings) -> int:
+    """How many sessions `validate_session` would still accept right now
+    -- the same two time checks, counted rather than looked up. Read by
+    /menu's «Подключения» card (menu redesign), which shows the number
+    next to its «Закрыть веб-сессии» button; never a token, never a
+    hash."""
+    now = clock.now_utc()
+    idle_cutoff = now - datetime.timedelta(hours=settings.WEB_SESSION_IDLE_HOURS)
+    result = await db.execute(
+        select(func.count())
+        .select_from(WebSession)
+        .where(WebSession.expires_at > now, WebSession.last_seen_at > idle_cutoff)
+    )
+    return result.scalar_one()
 
 
 async def revoke_all(db: AsyncSession, hub: WebHub, code_store: CodeStore | None = None) -> None:

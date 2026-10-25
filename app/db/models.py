@@ -349,8 +349,10 @@ class UserState(Base):
     due_set_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     # 2d (phase-2 plan section 4). `awaiting` names a pending
-    # conversational step -- only 'checkin_note' exists today -- and
-    # `awaiting_ref` is the row it refers to (a checkin.id). Both are
+    # conversational step -- 'checkin_note', 5c's 'so_counter', and the
+    # menu's 'menu:<key>' prompts -- and `awaiting_ref` is the row it
+    # refers to (a checkin.id, a standing_order.id, or the prompt's own
+    # Telegram message id). Both are
     # cleared by a pause word or any slash command (plan section 9), so
     # they can never strand the plain-text path.
     streak: Mapped[int] = mapped_column(
@@ -359,6 +361,13 @@ class UserState(Base):
     last_checkin_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     awaiting: Mapped[str | None] = mapped_column(String)
     awaiting_ref: Mapped[int | None] = mapped_column(BigInteger)
+    # The menu redesign: when the pending step was opened. Only a /menu
+    # text prompt (`awaiting = 'menu:<key>'`, app/core/menu_prompt.py)
+    # reads it, to expire after MENU_PROMPT_TTL_MIN; the check-in note
+    # step expires on the local-date boundary instead and ignores it.
+    # Cleared together with the other two (app/core/checkin.py's
+    # clear_awaiting).
+    awaiting_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     # 3a (phase-3 plan section 4). The counters the outbound gate
     # reads. None of them are written by a model -- `quiet_until` by

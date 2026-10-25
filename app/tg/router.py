@@ -60,9 +60,12 @@ from app.core import clock as clock_module
 from app.core.clock import Clock, SystemClock
 from app.core import checkin as checkin_core
 from app.core import commands as commands_core
+from app.core import grants as grants_core
 from app.core import memory as memory_core
+from app.core import menu_prompt
 from app.core import mood as mood_core
 from app.core import obligations as obligations_core
+from app.core import pause
 from app.core import safety_events
 from app.core.prompt import load_persona, persona_path_for
 from app.core import proposal as proposal_core
@@ -79,6 +82,7 @@ from app.planner import actions as planner_actions
 from app.planner import auth as planner_auth
 from app.planner import parse as planner_parse
 from app.planner import snapshot as planner_snapshot
+from app.research import jobs as research_jobs
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
 from app.tg import amendments as amendments_ui
 from app.tg import checkin as checkin_ui
@@ -301,6 +305,11 @@ WEBLOGOUT_REPLY = "Все веб-сессии закрыты."
 # the one action with no existing slash-command handler behind it, since
 # no command ever needed to remove the persistent reply keyboard before.
 HIDE_KB_REPLY = "Кнопка меню убрана. Вернуть — /start."
+
+# The menu's «⚠️ Закрыть веб-сессии» on a router built without a web hub
+# (app/tg/menu.py gates the button on WEB_UI_ENABLED, which is what
+# builds the hub in app/main.py; a test can build one without).
+WEB_UI_OFF_REPLY = "Веб-чат выключен."
 
 
 async def register_commands(bot, *, web_ui_enabled: bool = False) -> None:
@@ -562,36 +571,66 @@ def build_router(
     async def start(message: Message) -> None:
         await message.answer(START_TEXT, reply_markup=menu.reply_keyboard())
 
-    async def _menu_view(section: str) -> menu.MenuView:
+    async def _menu_view(section: str, *, web: bool = False) -> menu.MenuView:
         """The live state menu.py's sections show beyond `settings`: the
-        user_state row for every section (main and settings both carry a
-        status table), plus the Claude connection only for the vault
-        section and the planner credential only for the planner section
-        -- neither query runs for a section that shows nothing of it.
+        user_state row for every section (main, today and settings all
+        show some of it), plus -- only for the section that shows it, so
+        no query runs for a card that draws nothing of it:
 
-        8f: `settings_state`/`knowledge_roots` need vaultd's manifest,
-        so they are fetched the same way /vault itself does (below) --
-        a status probe, then the manifest, and only for the vault
-        section, and only while notes consent is on. Consent off (or
-        any other section) leaves both at their "not fetched" default,
-        exactly like `format_notes_line`'s own `notes=None`.
+        - knowledge: 8f's `settings_state`/`knowledge_roots` and the
+          notes counts, from vaultd's manifest, fetched the same way
+          /vault itself does (a status probe, then the manifest) and
+          only while notes consent is on -- consent off leaves them at
+          their "not fetched" default, exactly like
+          `format_notes_line`'s own `notes=None`;
+        - research: today's quota use (app/research/jobs.py's
+          `used_today`);
+        - lens: the lens counts and Claude Code's door
+          (app/tg/lens.py's `menu_counts`);
+        - links: the planner credential, the Claude connection, the
+          open Grok grants and the live web sessions, each only while
+          its feature is on -- and, on the web sink, only the planner,
+          whose status is the one the web card shows;
+        - planner: the planner credential; claude: the connection.
+
+        Counts and switches only: nothing here reads a note, a title or
+        a token.
         """
         connection = None
         credential = None
-        settings_state = None
-        knowledge_roots: tuple[str, ...] = ()
+        overview = None
+        research_used = None
+        lens_counts = None
+        grok_grants = None
+        web_sessions = None
         async with sessionmaker() as session:
             user_state = await get_state(session)
-            if section == "vault" and settings.CLAUDE_ACCESS_ENABLED:
+            wants_connection = section == "claude" or (section == "links" and not web)
+            if wants_connection and settings.CLAUDE_ACCESS_ENABLED:
                 connection = await oauth_store.current_connection(session, clock)
-            if section == "vault" and user_state.notes_consent:
+            if section == "knowledge" and user_state.notes_consent:
                 health = await vault_status.probe(session, settings, clock)
                 overview = await vault_status.notes_overview(settings, health)
-                if overview is not None:
-                    settings_state = overview.settings
-                    knowledge_roots = overview.knowledge_roots
-            if section == "planner" and settings.PLANNER_ENABLED:
+            if section in ("planner", "links") and settings.PLANNER_ENABLED:
                 credential = await planner_auth.get_status(session)
+            if section == "research" and settings.RESEARCH_ENABLED:
+                used = await research_jobs.used_today(
+                    session, clock_module.local_date(clock, user_state.timezone)
+                )
+                research_used = (
+                    used[research_jobs.STUDY],
+                    used[research_jobs.MANUAL],
+                    used[research_jobs.READ],
+                )
+            if section == "links" and not web:
+                if settings.GROK_ACCESS_ENABLED:
+                    grok_grants = len(
+                        await grants_core.list_active(session, clock, client=grants_core.GROK)
+                    )
+                if settings.WEB_UI_ENABLED:
+                    web_sessions = await web_auth.count_live(session, clock, settings)
+        if section == "lens" and not web:
+            lens_counts = await lens_ui.menu_counts(sessionmaker, clock)
         return menu.MenuView(
             now=clock.now_utc(),
             timezone=user_state.timezone,
@@ -605,8 +644,16 @@ def build_router(
             library_write=bool(connection.library_write) if connection else False,
             planner_status=credential.status if credential else None,
             planner_enabled=bool(credential.enabled) if credential else False,
-            settings_state=settings_state,
-            knowledge_roots=knowledge_roots,
+            settings_state=overview.settings if overview is not None else None,
+            knowledge_roots=overview.knowledge_roots if overview is not None else (),
+            knowledge_notes=overview.knowledge if overview is not None else None,
+            personal_notes=overview.personal if overview is not None else None,
+            research_used=research_used,
+            lens_size=lens_counts[0] if lens_counts else None,
+            lens_code=lens_counts[1] if lens_counts else None,
+            lens_today_reads=lens_counts[2] if lens_counts else None,
+            grok_grants=grok_grants,
+            web_sessions=web_sessions,
         )
 
     async def _edit_menu(
@@ -635,11 +682,18 @@ def build_router(
             )
             await edit_keyboard(bot, chat_id, message_id, plain_text, plain_markup)
 
-    async def _show_menu(bot, chat_id: int, section: str, *, message_id: int | None = None) -> int | None:
+    async def _show_menu(
+        bot,
+        chat_id: int,
+        section: str,
+        *,
+        message_id: int | None = None,
+        origin: str | None = None,
+    ) -> int | None:
         """Send (`message_id=None`) or edit (`message_id` set) the
         `/menu` hub, showing `section`. Shared by `/menu`, the `☰ Меню`
         reply-keyboard button, every `mn:s:` section tap, and the
-        re-render after a switch (menu.REFRESH_SECTION). `mn:x` (closing
+        re-render after a switch (menu.ACTIONS' `refresh`). `mn:x` (closing
         the menu) is not a section and is rendered separately, in
         `menu_callback` below.
 
@@ -660,14 +714,17 @@ def build_router(
         and on *edit* falling back through `_edit_menu` above -- so a
         rich-message rejection, or a pre-upgrade plain menu message
         someone taps later, never leaves `/menu` silent.
+
+        `origin` is where a two-parent section (quiet) was opened from,
+        so its back button returns there (app/tg/menu.py's docstring).
         """
         web = getattr(bot, "is_web_sink", False)
-        if not menu.section_exists(section, settings):
+        if not menu.section_exists(section, settings, web=web):
             return None
-        view = await _menu_view(section)
+        view = await _menu_view(section, web=web)
 
         if web:
-            rendered = menu.render(section, settings, web=web, view=view)
+            rendered = menu.render(section, settings, web=web, view=view, origin=origin)
             if rendered is None:
                 return None
             text, markup = rendered
@@ -676,7 +733,7 @@ def build_router(
             await edit_keyboard(bot, chat_id, message_id, text, markup)
             return message_id
 
-        rich = menu.render_rich(section, settings, web=web, view=view)
+        rich = menu.render_rich(section, settings, web=web, view=view, origin=origin)
         if rich is None:
             return None
         if message_id is None:
@@ -689,11 +746,43 @@ def build_router(
                     type(exc).__name__,
                     extra={"event": "menu_rich_fallback"},
                 )
-                text, markup = menu.render(section, settings, web=web, view=view)
+                text, markup = menu.render(section, settings, web=web, view=view, origin=origin)
                 return await send_keyboard(bot, chat_id, text, markup)
-        text, markup = menu.render(section, settings, web=web, view=view)
+        text, markup = menu.render(section, settings, web=web, view=view, origin=origin)
         await _edit_menu(bot, chat_id, message_id, rich, text, markup)
         return message_id
+
+    async def _retire_menu_message(bot, chat_id: int, message_id: int | None, text: str) -> None:
+        """Edit a prompt or a confirmation card to `text` with no
+        buttons, so it never lingers asking for something nothing will
+        read. Best effort: a message the user deleted, or one too old to
+        edit, must not fail the update that is ending it -- the step it
+        belonged to is over either way. (A web-issued id edited from
+        Telegram is already a no-op in `edit_keyboard`.)"""
+        if message_id is None:
+            return
+        try:
+            await edit_keyboard(bot, chat_id, message_id, text, None)
+        except TelegramBadRequest as exc:
+            logger.warning(
+                "menu prompt edit rejected: %s",
+                type(exc).__name__,
+                extra={"event": "menu_prompt_retire"},
+            )
+
+    async def _end_menu_prompt(bot, chat_id: int, text: str = menu.CANCELLED_TEXT) -> None:
+        """End a pending /menu text prompt, if there is one, and edit its
+        message to `text` (app/core/menu_prompt.py). Called by everything
+        that ends a prompt besides its own reply: a slash command (the
+        outer middleware), the ☰ Меню button, any menu tap, ✕ Отмена.
+        Touches no other kind of `awaiting` step -- those keep their own
+        clearing rules, unchanged."""
+        async with sessionmaker() as session:
+            prompt = await menu_prompt.current(session)
+            if prompt is None:
+                return
+            await menu_prompt.close_prompt(session, prompt.key)
+        await _retire_menu_message(bot, chat_id, prompt.message_id, text)
 
     async def _send_menu(message: Message) -> None:
         """Shared by `/menu` and the `☰ Меню` reply-keyboard button below."""
@@ -718,10 +807,13 @@ def build_router(
 
         Also clears a pending check-in `awaiting` step, the same as the
         outer command middleware does for every slash command: pressing
-        the menu button is a command, not a check-in note.
+        the menu button is a command, not a check-in note -- and, by the
+        same rule, not the reply a /menu text prompt is waiting for
+        (`_end_menu_prompt`).
         """
         if not await _once(event_update.update_id):
             return
+        await _end_menu_prompt(message.bot, message.chat.id)
         async with sessionmaker() as session:
             await checkin_core.clear_awaiting(session)
         await _send_menu(message)
@@ -973,6 +1065,14 @@ def build_router(
         """
         text = getattr(event, "text", None) or ""
         if text.startswith("/"):
+            # The menu redesign's text prompt is one of these steps: a
+            # slash command ends it, and its message is edited to
+            # «Отменено.» rather than left asking for text nothing will
+            # read.
+            bot = getattr(event, "bot", None)
+            chat = getattr(event, "chat", None)
+            if bot is not None and chat is not None:
+                await _end_menu_prompt(bot, chat.id)
             async with sessionmaker() as session:
                 await checkin_core.clear_awaiting(session)
         return await handler(event, data)
@@ -1303,11 +1403,12 @@ def build_router(
             row, close every live SSE stream/callback allowlist, and
             invalidate every pending login code.
 
-            Telegram-only in practice already -- a stolen web session
-            cannot reach this handler at all, since it can only ever
-            produce a synthetic Update fed to WebSinkSession's Bot, not
-            a real Telegram message -- so this needs no is_web_sink
-            guard of its own the way export_command/delete_command do.
+            Telegram only: a web session's typed `/weblogout` would
+            reach this handler as a synthetic Update like any other web
+            text, so app/web/ingress.py's BLOCKED_COMMANDS refuses to
+            queue it, and the menu button is TELEGRAM_ONLY
+            (app/tg/menu.py). The kill switch for a stolen web session
+            must not be in that session's hands.
             Only registered at all when `hub is not None` (the WEB_UI_
             ENABLED signal): see build_router's docstring for why the
             web-UI-disabled case is no longer "register it anyway and
@@ -1738,8 +1839,20 @@ def build_router(
         if card_id is None:
             await _reply_once(message, event_update.update_id, research_ui.CARD_USAGE)
             return
-        reply = await research_ui.run_card(sessionmaker, card_id=card_id)
-        await _reply_once(message, event_update.update_id, reply)
+        reply, markup = await research_ui.run_card_view(sessionmaker, card_id=card_id)
+        if markup is None:
+            await _reply_once(message, event_update.update_id, reply)
+            return
+        # A pending card carries its own [Принять][Отклонить] (menu
+        # redesign; the `r:a:`/`r:r:` buttons a /notes row has), so it is
+        # a keyboard message: sent directly and gated on `_once`, the
+        # /notes shape, rather than a stored canned reply.
+        if not await _once(event_update.update_id):
+            return
+        await send_keyboard(message.bot, message.chat.id, reply, markup)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/card]"
+        )
 
     @router.message(Command("adopt"))
     async def adopt_command(
@@ -1990,196 +2103,380 @@ def build_router(
     # Built here, after every command handler above already exists, so
     # each entry just names the nested function it calls -- aiogram's
     # decorators return the function itself, so `checkin_command` etc.
-    # are plain, directly callable coroutines. A handful of actions need
-    # a `CommandObject` the way a real command line would produce one
-    # (read each handler above to see what it does with `command.args`);
-    # the rest already take exactly (message, event_update) and are
-    # listed as-is. Kept explicit and one-to-one on purpose -- no
-    # signature introspection, so any reader can trace an action to the
-    # exact call it makes.
+    # are plain, directly callable coroutines. Most actions need a
+    # `CommandObject` the way a real command line would produce one
+    # (read each handler above to see what it does with `command.args`):
+    # `_fixed` builds one with the action's fixed argument, `_typed` one
+    # with a prompt's prefix plus the text the user typed. The rest
+    # already take exactly (message, event_update) and are listed as-is.
+    # Kept explicit and one-to-one on purpose -- no signature
+    # introspection, and no reading the arguments back out of
+    # menu.ACTIONS, so any reader can trace an action to the exact call
+    # it makes (menu.ACTIONS' `args` field documents the same values).
+    #
+    # Three tables, one per kind of action (app/tg/menu.py's docstring):
+    # RUN_ACTIONS runs on the tap, CONFIRM_ACTIONS on «Да» (with the
+    # card's argument, the typed id or code), INPUT_ACTIONS on a prompt's
+    # reply (with its text).
+
+    def _command(name: str, args: str | None) -> CommandObject:
+        return CommandObject(prefix="/", command=name, args=args)
+
+    def _fixed(handler, name: str, args: str | None = None):
+        async def run(message: Message, event_update: Update) -> None:
+            await handler(message, event_update, _command(name, args))
+
+        return run
+
+    def _typed(handler, name: str, prefix: str | None = None):
+        async def run(message: Message, event_update: Update, text: str) -> None:
+            await handler(message, event_update, _command(name, f"{prefix} {text}" if prefix else text))
+
+        return run
 
     async def _menu_state(message: Message, event_update: Update) -> None:
         del event_update  # state() takes no update_id -- nothing to gate here.
         await state(message)
 
-    async def _menu_quiet(message: Message, event_update: Update, arg: str) -> None:
-        await quiet(message, event_update, CommandObject(prefix="/", command="quiet", args=arg))
-
-    async def _menu_quiet_30m(message: Message, event_update: Update) -> None:
-        await _menu_quiet(message, event_update, "30m")
-
-    async def _menu_quiet_2h(message: Message, event_update: Update) -> None:
-        await _menu_quiet(message, event_update, "2h")
-
-    async def _menu_quiet_8h(message: Message, event_update: Update) -> None:
-        await _menu_quiet(message, event_update, "8h")
-
-    async def _menu_quiet_1d(message: Message, event_update: Update) -> None:
-        await _menu_quiet(message, event_update, "1d")
-
-    async def _menu_quiet_off(message: Message, event_update: Update) -> None:
-        await _menu_quiet(message, event_update, "off")
-
-    async def _menu_focus_on(message: Message, event_update: Update) -> None:
-        await focus(message, event_update, CommandObject(prefix="/", command="focus", args="on"))
-
-    async def _menu_focus_off(message: Message, event_update: Update) -> None:
-        await focus(message, event_update, CommandObject(prefix="/", command="focus", args="off"))
-
-    async def _menu_vault(message: Message, event_update: Update) -> None:
-        del event_update  # vault() takes no event_update -- see its own signature above.
-        await vault(message, CommandObject(prefix="/", command="vault", args=None))
-
-    async def _menu_claude(message: Message, event_update: Update) -> None:
-        await claude_command(
-            message, event_update, CommandObject(prefix="/", command="claude", args=None)
-        )
-
-    async def _menu_notes(message: Message, event_update: Update, word: str) -> None:
-        del event_update  # vault() takes no event_update -- see its own signature above.
-        await vault(message, CommandObject(prefix="/", command="vault", args=f"notes {word}"))
-
-    async def _menu_notes_on(message: Message, event_update: Update) -> None:
-        await _menu_notes(message, event_update, "on")
-
-    async def _menu_notes_off(message: Message, event_update: Update) -> None:
-        await _menu_notes(message, event_update, "off")
-
-    async def _menu_library(message: Message, event_update: Update, args: str) -> None:
-        """`lib_read_*`/`lib_write_*`: `claude_command` keeps its own
-        is_web_sink guard and `_once` gate -- reached here only when
-        `action_available` already refused a web press, this is the same
-        defence in depth `_menu_claude` already relies on."""
-        await claude_command(
-            message, event_update, CommandObject(prefix="/", command="claude", args=args)
-        )
-
-    async def _menu_lib_read_on(message: Message, event_update: Update) -> None:
-        await _menu_library(message, event_update, "library on")
-
-    async def _menu_lib_read_off(message: Message, event_update: Update) -> None:
-        await _menu_library(message, event_update, "library off")
-
-    async def _menu_lib_write_on(message: Message, event_update: Update) -> None:
-        await _menu_library(message, event_update, "library write on")
-
-    async def _menu_lib_write_off(message: Message, event_update: Update) -> None:
-        await _menu_library(message, event_update, "library write off")
-
-    async def _menu_claude_limits(message: Message, event_update: Update) -> None:
-        await _menu_library(message, event_update, "limits")
-
-    def _menu_intensity(value: int):
+    def _menu_vault(args: str | None):
         async def run(message: Message, event_update: Update) -> None:
-            await intensity_command(
-                message, event_update, CommandObject(prefix="/", command="intensity", args=str(value))
-            )
+            del event_update  # vault() takes no event_update -- see its own signature above.
+            await vault(message, _command("vault", args))
 
         return run
-
-    async def _menu_planner(message: Message, event_update: Update, args: str | None) -> None:
-        await planner_command(
-            message, event_update, CommandObject(prefix="/", command="planner", args=args)
-        )
-
-    async def _menu_planner_status(message: Message, event_update: Update) -> None:
-        await _menu_planner(message, event_update, None)
-
-    async def _menu_planner_on(message: Message, event_update: Update) -> None:
-        await _menu_planner(message, event_update, "on")
-
-    async def _menu_planner_off(message: Message, event_update: Update) -> None:
-        await _menu_planner(message, event_update, "off")
-
-    async def _menu_mind(message: Message, event_update: Update) -> None:
-        # args=None takes the same "list, don't add" branch a bare
-        # "/mind" does (mind()'s own `(command.args or "").strip()`).
-        await mind(message, event_update, CommandObject(prefix="/", command="mind", args=None))
-
-    async def _menu_paid(message: Message, event_update: Update) -> None:
-        # args=None is the list branch, matching a bare "/paid".
-        await paid_command(message, event_update, CommandObject(prefix="/", command="paid", args=None))
-
-    async def _menu_interests(message: Message, event_update: Update) -> None:
-        # args=None is the list branch, matching a bare "/interests".
-        await interests_command(
-            message, event_update, CommandObject(prefix="/", command="interests", args=None)
-        )
-
-    async def _menu_interests_suggest(message: Message, event_update: Update) -> None:
-        # «Предложить темы»: `/interests suggest`, which takes no argument.
-        await interests_command(
-            message, event_update, CommandObject(prefix="/", command="interests", args="suggest")
-        )
-
-    async def _menu_digest(message: Message, event_update: Update) -> None:
-        # args=None is /digest's own default window (idle_ui.parse_digest_args(None)).
-        await digest_command(
-            message, event_update, CommandObject(prefix="/", command="digest", args=None)
-        )
-
-    async def _menu_digest_7d(message: Message, event_update: Update) -> None:
-        await digest_command(
-            message, event_update, CommandObject(prefix="/", command="digest", args="7d")
-        )
 
     async def _menu_hide_kb(message: Message, event_update: Update) -> None:
         del event_update  # a fixed reply, nothing to gate or store.
         await message.answer(HIDE_KB_REPLY, reply_markup=ReplyKeyboardRemove())
 
-    MENU_ACTIONS = {
+    async def _menu_weblogout(message: Message, event_update: Update) -> None:
+        """`/weblogout` exists only with a hub (build_router's
+        docstring). The button's gate is WEB_UI_ENABLED, which is what
+        builds that hub in production; a router built without one says
+        so rather than claiming sessions were closed."""
+        if hub is None:
+            await _reply_once(message, event_update.update_id, WEB_UI_OFF_REPLY)
+            return
+        await weblogout(message, event_update)
+
+    RUN_ACTIONS = {
         "checkin": checkin_command,
         "state": _menu_state,
         "plan": plan_command,
-        **{f"int_{n}": _menu_intensity(n) for n in range(1, 6)},
-        "focus_on": _menu_focus_on,
-        "focus_off": _menu_focus_off,
+        "focus_on": _fixed(focus, "focus", "on"),
+        "focus_off": _fixed(focus, "focus", "off"),
+        "done": done_command,
+        "orders": orders_command,
+        # args=None is the list branch of each, matching the bare command.
+        "paid": _fixed(paid_command, "paid"),
+        "review": review_command,
+        "memories": memories,
+        "mind": _fixed(mind, "mind"),
+        "amendments": amendments_command,
+        # args=None is /digest's own default window (idle_ui.parse_digest_args(None)).
+        "digest": _fixed(digest_command, "digest"),
+        "digest_7d": _fixed(digest_command, "digest", "7d"),
+        "interests": _fixed(interests_command, "interests"),
+        "interests_run": _fixed(interests_command, "interests", "run"),
+        "interests_suggest": _fixed(interests_command, "interests", "suggest"),
+        "notes": notes_command,
+        "notes_on": _menu_vault("notes on"),
+        "notes_off": _menu_vault("notes off"),
+        "vault": _menu_vault(None),
+        "graph": _fixed(graph_command, "graph"),
+        "lens": _fixed(lens_command, "lens"),
+        "lens_garden": _fixed(lens_command, "lens", "garden now"),
+        "lens_research": _fixed(lens_command, "lens", "research now"),
+        "lens_code_off": _fixed(lens_command, "lens", "code off"),
+        "grok_open": grok_command,
+        "revoke": revoke_command,
+        "planner": _fixed(planner_command, "planner"),
+        "planner_on": _fixed(planner_command, "planner", "on"),
+        "planner_off": _fixed(planner_command, "planner", "off"),
+        # `claude_command` keeps its own is_web_sink guard and `_once`
+        # gate -- reached here only when `action_available` already
+        # refused a web press, this is defence in depth.
+        "claude": _fixed(claude_command, "claude"),
+        "lib_read_on": _fixed(claude_command, "claude", "library on"),
+        "lib_read_off": _fixed(claude_command, "claude", "library off"),
+        "lib_write_on": _fixed(claude_command, "claude", "library write on"),
+        "lib_write_off": _fixed(claude_command, "claude", "library write off"),
+        "claude_limits": _fixed(claude_command, "claude", "limits"),
+        **{f"int_{n}": _fixed(intensity_command, "intensity", str(n)) for n in range(1, 6)},
         "out": out,
         "in": resume,
-        "quiet_30m": _menu_quiet_30m,
-        "quiet_2h": _menu_quiet_2h,
-        "quiet_8h": _menu_quiet_8h,
-        "quiet_1d": _menu_quiet_1d,
-        "quiet_off": _menu_quiet_off,
-        "memories": memories,
-        "mind": _menu_mind,
-        "amendments": amendments_command,
-        "notes": notes_command,
-        "interests": _menu_interests,
-        "interests_suggest": _menu_interests_suggest,
-        "digest": _menu_digest,
-        "digest_7d": _menu_digest_7d,
-        "orders": orders_command,
-        "paid": _menu_paid,
-        "review": review_command,
-        "vault": _menu_vault,
-        "notes_on": _menu_notes_on,
-        "notes_off": _menu_notes_off,
-        "lib_read_on": _menu_lib_read_on,
-        "lib_read_off": _menu_lib_read_off,
-        "lib_write_on": _menu_lib_write_on,
-        "lib_write_off": _menu_lib_write_off,
-        "claude_limits": _menu_claude_limits,
-        "planner": _menu_planner_status,
-        "planner_on": _menu_planner_on,
-        "planner_off": _menu_planner_off,
-        "privacy": privacy,
-        "claude": _menu_claude,
-        "revoke": revoke_command,
         "hide_kb": _menu_hide_kb,
+        "quiet_30m": _fixed(quiet, "quiet", "30m"),
+        "quiet_2h": _fixed(quiet, "quiet", "2h"),
+        "quiet_8h": _fixed(quiet, "quiet", "8h"),
+        "quiet_1d": _fixed(quiet, "quiet", "1d"),
+        "quiet_off": _fixed(quiet, "quiet", "off"),
+        "privacy": privacy,
+        # Its own two-step card (app/tg/data.py) is the confirmation.
+        "delete": delete_command,
     }
-    # The table above and app/tg/menu.ACTIONS must name exactly the same
-    # actions, or a button the hub renders could dispatch nowhere (or an
-    # entry here could sit dead, dispatched by nothing render() ever
-    # draws) -- see that module's own docstring for why the excluded
-    # commands (export, delete, grok, ...) are absent from both.
-    assert set(MENU_ACTIONS) == set(menu.ACTIONS), (
-        "app/tg/router.py's MENU_ACTIONS and app/tg/menu.ACTIONS have drifted apart"
+
+    def _confirmed(handler, name: str, args: str | None = None):
+        async def run(message: Message, event_update: Update, arg: str | None) -> None:
+            del arg  # a fixed confirmation carries no argument of its own
+            await handler(message, event_update, _command(name, args))
+
+        return run
+
+    def _confirmed_bare(handler):
+        async def run(message: Message, event_update: Update, arg: str | None) -> None:
+            del arg
+            await handler(message, event_update)
+
+        return run
+
+    async def _menu_forget_yes(message: Message, event_update: Update, arg: str | None) -> None:
+        # The id rode in the card's own callback data; /forget parses it
+        # again, exactly as it would a typed one.
+        await forget(message, event_update, _command("forget", arg))
+
+    async def _menu_claude_connect_yes(message: Message, event_update: Update, arg: str | None) -> None:
+        await claude_command(message, event_update, _command("claude", f"connect {arg}"))
+
+    CONFIRM_ACTIONS = {
+        # A bare /due clears the main action (menu.ACTIONS' own comment).
+        "due_clear": _confirmed(due, "due"),
+        "graph_undo": _confirmed(graph_command, "graph", "undo"),
+        "lens_undo": _confirmed(lens_command, "lens", "undo"),
+        "lens_code_on": _confirmed(lens_command, "lens", "code on"),
+        "weblogout": _confirmed_bare(_menu_weblogout),
+        "planner_link": _confirmed_bare(planner_link_command),
+        "claude_undo": _confirmed(claude_command, "claude", "undo"),
+        "claude_undo_all": _confirmed(claude_command, "claude", "undo all"),
+        "claude_disconnect": _confirmed(claude_command, "claude", "disconnect"),
+        "export": _confirmed_bare(export_command),
+        # menu.CONFIRM_AFTER_INPUT: prompts whose reply leads to a card.
+        "forget": _menu_forget_yes,
+        "claude_connect": _menu_claude_connect_yes,
+    }
+
+    _BIGINT_MAX = 2**63 - 1
+
+    def _typed_id(handler, name: str, missing: str):
+        """`_typed` for a command that takes one record number. A number
+        no row could have (zero, negative, past the BIGINT ids) gets the
+        command's own "no such record" reply instead of reaching the
+        database as an out-of-range parameter."""
+
+        async def run(message: Message, event_update: Update, text: str) -> None:
+            record_id = memory_ui.parse_id(text)
+            if record_id is not None and not 0 < record_id <= _BIGINT_MAX:
+                await _reply_once(message, event_update.update_id, missing)
+                return
+            await handler(message, event_update, _command(name, text))
+
+        return run
+
+    async def _menu_forget_input(message: Message, event_update: Update, text: str) -> None:
+        """«⚠️ Забыть запись №»'s reply: /forget deletes with no
+        confirmation of its own, so the menu shows the record first
+        («Забыть #12 «…»?» [Да, забыть][Нет]) and only «Да» runs
+        /forget (CONFIRM_ACTIONS). An id that names nothing gets
+        /forget's own answers, without a card."""
+        memory_id = memory_ui.parse_id(text)
+        if memory_id is None:
+            await _reply_once(message, event_update.update_id, memory_ui.FORGET_USAGE)
+            return
+        row = None
+        if 0 < memory_id <= _BIGINT_MAX:
+            async with sessionmaker() as session:
+                row = await memory_core.get_active(session, memory_id)
+        if row is None:
+            await _reply_once(message, event_update.update_id, memory_ui.FORGET_MISSING)
+            return
+        if not await _once(event_update.update_id):
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        await send_keyboard(
+            message.bot,
+            message.chat.id,
+            menu.forget_confirm_text(memory_id, row.text),
+            menu.confirm_markup("forget", arg=str(memory_id), yes_label=menu.FORGET_YES),
+        )
+        # Recorded at once, not only by _menu_prompt_reply's own mark
+        # afterwards: a crash between the two would replay into a second card.
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/forget]", scene_id=scene_id
+        )
+
+    async def _menu_claude_connect_input(message: Message, event_update: Update, text: str) -> None:
+        """«✏️ Подключить по коду»'s reply: the code, normalised as the
+        pending store will read it (Cyrillic look-alikes as Latin), shown
+        back on a «Точно?» card before it approves anything. Text that
+        is not shaped like a code at all gets `/claude connect`'s own
+        answer (usage for several words, unknown code otherwise), sent
+        from here: nothing reaches the pending store without a card
+        (menu.claude_connect_code)."""
+        code = menu.claude_connect_code(text)
+        if code is None:
+            reply = claude_ui.USAGE if len(text.split()) > 1 else claude_ui.CODE_UNKNOWN
+            await _reply_once(message, event_update.update_id, reply)
+            return
+        if not await _once(event_update.update_id):
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        await send_keyboard(
+            message.bot,
+            message.chat.id,
+            menu.claude_connect_confirm_text(code),
+            menu.confirm_markup("claude_connect", arg=code, yes_label=menu.CLAUDE_CONNECT_YES),
+        )
+        # As in _menu_forget_input: recorded the moment the card is out.
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/claude]", scene_id=scene_id
+        )
+
+    INPUT_ACTIONS = {
+        "due_set": _typed(due, "due"),
+        "task": _typed(task_command, "task"),
+        "event": _typed(event_command, "event"),
+        "order_daily": _typed(order_command, "order", "daily"),
+        "order_weekdays": _typed(order_command, "order", "weekdays"),
+        "order_once": _typed(order_command, "order", "once"),
+        **{f"order_w{n}": _typed(order_command, "order", f"weekly:{n}") for n in range(1, 8)},
+        "remember": _typed(remember, "remember"),
+        "pin": _typed_id(pin, "pin", memory_ui.PIN_MISSING),
+        "unpin": _typed_id(unpin, "unpin", memory_ui.PIN_MISSING),
+        "forget": _menu_forget_input,
+        "mind_add": _typed(mind, "mind", "add"),
+        "interests_add_forums": _typed(interests_command, "interests", "add forums"),
+        "interests_add_guides": _typed(interests_command, "interests", "add guides"),
+        "interests_add_ref": _typed(interests_command, "interests", "add ref"),
+        "interests_run_id": _typed(interests_command, "interests", "run"),
+        "study_forums": _typed(study_command, "study", "forums"),
+        "study_guides": _typed(study_command, "study", "guides"),
+        "study_ref": _typed(study_command, "study", "ref"),
+        "read": _typed(read_command, "read"),
+        "card": _typed_id(card_command, "card", research_ui.CARD_MISSING),
+        "claude_connect": _menu_claude_connect_input,
+        "tz": _typed(timezone_command, "tz"),
+    }
+
+    # The three tables above and app/tg/menu.ACTIONS must name exactly
+    # the same actions, each in the table of its own kind, or a button
+    # the hub renders could dispatch nowhere (or an entry here could sit
+    # dead, dispatched by nothing render() ever draws). Checked at
+    # import time -- every build_router() call -- so a drift fails the
+    # first test that builds a router, not the first user who taps.
+    _by_kind = {
+        kind: {key for key, action in menu.ACTIONS.items() if action.kind == kind}
+        for kind in menu.KINDS
+    }
+    assert set(RUN_ACTIONS) == _by_kind[menu.RUN], (
+        "app/tg/router.py's RUN_ACTIONS and app/tg/menu.ACTIONS have drifted apart"
     )
+    assert set(INPUT_ACTIONS) == _by_kind[menu.PROMPT], (
+        "app/tg/router.py's INPUT_ACTIONS and app/tg/menu.ACTIONS have drifted apart"
+    )
+    assert set(CONFIRM_ACTIONS) == _by_kind[menu.CONFIRM] | menu.CONFIRM_AFTER_INPUT, (
+        "app/tg/router.py's CONFIRM_ACTIONS and app/tg/menu.ACTIONS have drifted apart"
+    )
+
+    async def _menu_prompt_reply(message: Message, event_update: Update) -> bool:
+        """The plain-text half of a /menu prompt: True iff this message
+        was the reply a live prompt was waiting for, and was dispatched
+        as its command instead of a chat turn.
+
+        In order:
+
+        1. No menu prompt pending: False, and nothing else is read.
+        2. A pause word: it wins over the prompt, as it wins over every
+           `awaiting` step (plan section 13). Only the prompt's message
+           is retired here; turn.run's step 0c clears the step itself
+           and handles the word exactly as it always does.
+        3. Expired (MENU_PROMPT_TTL_MIN): the prompt is ended and the
+           text is ordinary chat -- False.
+        4. A Telegram-only prompt answered from the web chat (the step
+           is one global row, and a web message must never feed a
+           Telegram-only command): refused and consumed, so text meant
+           for, say, an approval code is not handed to the model either
+           -- but the prompt stays open, since its message is still on
+           the Telegram screen and the next Telegram line answers it.
+           Not available any more (a flag switched off since the tap):
+           ended, answered and consumed alike.
+        5. Otherwise: the action's INPUT_ACTIONS entry, with the text,
+           through the command's own handler -- its `_once` gate, its
+           audit rows, its is_web_sink guard. The update is then marked
+           handled with a "[/<command>]" placeholder (a no-op when the
+           handler already stored its reply), so the text is never
+           stored as a chat message and never reaches the model, and
+           only then is the step cleared and the prompt edited to
+           «Ответ принят.» (neutral: the command may still have refused
+           the text, and its own reply says so). That order is the
+           replay story: a crash before the clear re-runs this branch
+           on the replay, where the handler's own gate makes it a
+           no-op; a replay after it finds no prompt and is stopped by
+           `turn.answered_without_turn` in handle_text below.
+        """
+        async with sessionmaker() as session:
+            prompt = await menu_prompt.current(session)
+        if prompt is None:
+            return False
+        bot = message.bot
+        chat_id = message.chat.id
+        update_id = event_update.update_id
+        text = (message.text or "").strip()
+
+        if pause.match(text) is not None:
+            await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
+            return False
+
+        # The TTL is measured when the user sent the reply (Telegram's
+        # `date`), not when a backlogged worker reached it; a web update
+        # carries date 0, so it falls back to now.
+        sent_at = message.date
+        if sent_at is None or sent_at.timestamp() <= 0:
+            sent_at = clock.now_utc()
+        if not prompt.live(sent_at, settings.MENU_PROMPT_TTL_MIN) or not text:
+            async with sessionmaker() as session:
+                await menu_prompt.close_prompt(session, prompt.key)
+            await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
+            return False
+
+        web = getattr(bot, "is_web_sink", False)
+        key = prompt.key
+        if key not in INPUT_ACTIONS or not menu.action_available(key, settings, web=web):
+            if (
+                web
+                and key in menu.TELEGRAM_ONLY
+                and key in INPUT_ACTIONS
+                and menu.action_available(key, settings, web=False)
+            ):
+                await _reply_once(message, update_id, WEB_ONLY_REPLY)
+                return True
+            async with sessionmaker() as session:
+                await menu_prompt.close_prompt(session, key)
+            await _retire_menu_message(bot, chat_id, prompt.message_id, menu.CANCELLED_TEXT)
+            refusal = WEB_ONLY_REPLY if web and key in menu.TELEGRAM_ONLY else menu.PROMPT_UNAVAILABLE
+            await _reply_once(message, update_id, refusal)
+            return True
+
+        logger.info(
+            "menu prompt answered", extra={"event": "menu_prompt", "route": key}
+        )
+        await INPUT_ACTIONS[key](message, event_update, text)
+        command = menu.ACTIONS[key].commands[0]
+        await turn.mark_update_handled(
+            sessionmaker,
+            clock=clock,
+            update_id=update_id,
+            text=f"[/{command}]",
+            scene_id=await turn.ensure_scene(sessionmaker, settings, clock),
+        )
+        async with sessionmaker() as session:
+            await menu_prompt.close_prompt(session, key)
+        await _retire_menu_message(bot, chat_id, prompt.message_id, menu.PROMPT_ANSWERED_TEXT)
+        return True
 
     @router.callback_query(F.data.startswith("mn:"))
     async def menu_callback(callback: CallbackQuery, event_update: Update) -> None:
-        """`mn:s:<section>` / `mn:a:<action>` / `mn:x` -- the /menu hub.
+        """`mn:s:` / `mn:a:` / `mn:i:` / `mn:y:` / `mn:c` / `mn:x` -- the
+        /menu hub (app/tg/menu.py's docstring has the formats).
 
         Registered ahead of the catch-all `unknown_callback` below.
         Order against every *other* callback_query handler in this
@@ -2187,6 +2484,10 @@ def build_router(
         "mn:", or the reverse (app/tg/menu.py's own docstring lists
         them), so aiogram's first-match-wins routing can never confuse
         this with one of them.
+
+        Any tap here ends a pending menu prompt first (its message is
+        edited to «Отменено.»): the user moved on, and the next message
+        they type is chat again unless the tap was itself a new prompt.
         """
         if not isinstance(callback.message, Message):
             # InaccessibleMessage (or, in principle, None): Telegram
@@ -2195,54 +2496,143 @@ def build_router(
             await answer_callback(callback.bot, callback.id, "Меню устарело — /menu.")
             return
 
+        bot = callback.bot
         chat_id = callback.message.chat.id
         message_id = callback.message.message_id
-        web = getattr(callback.bot, "is_web_sink", False)
+        update_id = event_update.update_id
+        web = getattr(bot, "is_web_sink", False)
 
-        parsed = menu.parse_callback(callback.data)
-        if parsed is None:
-            await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+        press = menu.parse_callback(callback.data)
+        if press is None:
+            await answer_callback(bot, callback.id, memory_ui.STALE)
             return
-        kind, value = parsed
 
-        if kind == "close":
-            await answer_callback(callback.bot, callback.id)
+        # A tap that opens a prompt or sends a card is one message per
+        # update: its replay must stop here, before ending or clearing
+        # anything -- the step it would end is the very prompt the first
+        # run opened.
+        opens = press.kind == "input" or (
+            press.kind == "action" and menu.action_kind(press.value) == menu.CONFIRM
+        )
+        if opens and not await _once(update_id):
+            return
+
+        await _end_menu_prompt(bot, chat_id)
+
+        if press.kind == "close":
+            await answer_callback(bot, callback.id)
             if web:
-                await edit_keyboard(callback.bot, chat_id, message_id, menu.CLOSED_TEXT, None)
+                await edit_keyboard(bot, chat_id, message_id, menu.CLOSED_TEXT, None)
             else:
-                await _edit_menu(callback.bot, chat_id, message_id, menu.closed_rich(), menu.CLOSED_TEXT, None)
+                await _edit_menu(bot, chat_id, message_id, menu.closed_rich(), menu.CLOSED_TEXT, None)
             return
 
-        if kind == "section":
-            shown = await _show_menu(callback.bot, chat_id, value, message_id=message_id)
-            if shown is None:
-                await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+        if press.kind == "cancel":
+            # ✕ Отмена under a prompt (already ended just above), or «Нет»
+            # on a confirmation card: either way this message is over.
+            # «Нет» claims the card like «Да» does, so a «Да» that was
+            # already on its way cannot still run after the user said no.
+            async with sessionmaker() as session:
+                claimed = await menu_prompt.claim_card(session, message_id, update_id)
+            if not claimed:
+                await answer_callback(bot, callback.id, memory_ui.STALE)
                 return
-            await answer_callback(callback.bot, callback.id)
+            await answer_callback(bot, callback.id)
+            await _retire_menu_message(bot, chat_id, message_id, menu.CANCELLED_TEXT)
             return
 
-        # kind == "action". Re-checking action_available here (render()
-        # already only ever draws a button that passes it) is what makes
-        # a forged "mn:a:export"/"mn:a:delete"/"mn:a:grok" from a
-        # tampered web client harmless: it answers stale and dispatches
-        # nothing, exactly like a section this build has never heard of.
-        if not menu.action_available(value, settings, web=web):
-            await answer_callback(callback.bot, callback.id, memory_ui.STALE)
+        if press.kind == "section":
+            shown = await _show_menu(
+                bot, chat_id, press.value, message_id=message_id, origin=press.arg
+            )
+            if shown is None:
+                await answer_callback(bot, callback.id, memory_ui.STALE)
+                return
+            await answer_callback(bot, callback.id)
             return
-        await answer_callback(callback.bot, callback.id)
+
+        key = press.value
+        kind = menu.action_kind(key)
+        # Re-checking action_available here (render() already only ever
+        # draws a button that passes it) is what makes a forged
+        # "mn:y:export"/"mn:a:delete"/"mn:i:claude_connect" from a
+        # tampered web client harmless: each is Telegram only, so it
+        # answers stale and dispatches nothing, exactly like a key this
+        # build has never heard of. The kind has to match the prefix
+        # too: a prompt key under mn:a: never runs without its text, and
+        # mn:y: runs only what a confirmation card could have offered.
+        if press.kind == "action":
+            valid = kind in (menu.RUN, menu.CONFIRM)
+        elif press.kind == "input":
+            valid = kind == menu.PROMPT and press.arg is None
+        else:  # "yes"
+            needs_arg = key in menu.CONFIRM_AFTER_INPUT
+            valid = menu.confirmable(key) and (press.arg is not None) == needs_arg
+        if not valid or not menu.action_available(key, settings, web=web):
+            await answer_callback(bot, callback.id, memory_ui.STALE)
+            return
+        if press.kind == "yes":
+            # One-shot: the first «Да» claims the card, atomically, keyed
+            # on the card's own message id (menu_prompt.claim_card). A
+            # second tap sent before the first was processed is a second
+            # update with its own update_id, which `_once` cannot see as
+            # a repeat -- it would run the command again (two export
+            # files; a second `/claude connect` counted as a wrong
+            # code). Every press after the first is stale.
+            async with sessionmaker() as session:
+                claimed = await menu_prompt.claim_card(session, message_id, update_id)
+            if not claimed:
+                await answer_callback(bot, callback.id, memory_ui.STALE)
+                return
+        await answer_callback(bot, callback.id)
         async with sessionmaker() as session:
             await checkin_core.clear_awaiting(session)
-        await MENU_ACTIONS[value](callback.message, event_update)
+
+        if press.kind == "input":
+            # One prompt message per tap: a replayed tap must not ask
+            # twice -- gated on `_once` above, before the prompt ended.
+            prompt_id = await send_keyboard(bot, chat_id, menu.prompt_text(key), menu.prompt_markup())
+            async with sessionmaker() as session:
+                await menu_prompt.open_prompt(session, clock, key, prompt_id)
+            await turn.mark_update_handled(
+                sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+            )
+            return
+
+        if press.kind == "yes":
+            # Retire the card first, so its «Да» cannot be pressed again
+            # from the web chat (the hub's allowlist follows the edit),
+            # then run the command with its own gates.
+            await _retire_menu_message(bot, chat_id, message_id, menu.DONE_TEXT)
+            await CONFIRM_ACTIONS[key](callback.message, event_update, press.arg)
+            return
+
+        if kind == menu.CONFIRM:
+            # Replays already stopped at the `_once` gate above.
+            await send_keyboard(bot, chat_id, menu.confirm_text(key), menu.confirm_markup(key))
+            await turn.mark_update_handled(
+                sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"
+            )
+            return
+
+        await RUN_ACTIONS[key](callback.message, event_update)
         # A switch leaves its own section on screen showing the new
         # state -- the same way /state's [🔄 Обновить] shows fresh
         # numbers -- instead of the last-shown value sitting there next
         # to a button that no longer means anything.
-        refresh = menu.REFRESH_SECTION.get(value)
+        refresh = menu.ACTIONS[key].refresh
         if refresh is not None:
-            await _show_menu(callback.bot, chat_id, refresh, message_id=message_id)
+            await _show_menu(bot, chat_id, refresh, message_id=message_id, origin=press.arg)
 
     @router.message(F.text)
     async def handle_text(message: Message, event_update: Update) -> None:
+        if await _menu_prompt_reply(message, event_update):
+            return
+        # A replay of an update already answered as a prompt's reply
+        # (or 5c's counter text) must not become a chat turn now that
+        # its step is cleared -- see turn.answered_without_turn.
+        if await turn.answered_without_turn(sessionmaker, event_update.update_id):
+            return
         await turn.run(
             sessionmaker,
             message.bot,
