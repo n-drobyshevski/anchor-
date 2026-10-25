@@ -50,14 +50,14 @@ OpenRouter's Decisions API. Why things are the way they are is in
 | Command | What it does | Gate |
 |---|---|---|
 | `/start` | Start | — |
-| `/menu` | Rich card with in-body buttons (Bot API 10.1): a status line on top (pause, quiet, focus, intensity, main action) and sections for settings, quiet, memory, deals, vault & knowledge, planner, and data & access; every switch shows its current state and re-renders in place; `/start` also adds a persistent «☰ Меню» button | — |
+| `/menu` | A rich card with in-body buttons (Bot API 10.1) that reaches every command, grouped by task: a status table on top (pause, quiet, focus, intensity, main action), «Чек-ин» and «Состояние», and eight sections — «Сегодня» (main action, focus, planner task/event), «Договорённости» (orders with a cadence picker, debts, weekly review), «Память», «Исследования» (topics, study, read, cards; with `RESEARCH_ENABLED`), «Знания» (vault, notes consent, link pruning, the lens; with `VAULT_MODE`), «Подключения» (planner, Claude, Grok, web sessions), «Настройки» and «Данные»; «Тишина» is its own card, reachable from the menu and from «Настройки». A section whose feature is off is hidden. Every switch shows only the button that changes its current state and re-renders in place; every section ends with «‹ назад» and «✕ Закрыть». A button marked ✏️ **asks for text**: the next message you send runs that command (`✏️ Запомнить` → `/remember <ваш текст>`), is not treated as chat and never reaches the model; the prompt ends after `MENU_PROMPT_TTL_MIN` minutes (10), on «✕ Отмена», on any command, menu tap or pause word, and then text is ordinary chat again. A button marked ⚠️ **asks «Точно?»** first, and its «Да» works once (a double tap runs the command once). The sensitive acts — `/export`, `/delete`, `/grok`, `/planner_link`, `/lens code on`, `/claude connect`, `/weblogout`, the Claude undo and disconnect — are buttons in Telegram only; the web chat never shows them and refuses them if forged. Typing any command still works exactly as before. `/start` also adds a persistent «☰ Меню» button | — |
 | `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup; a rich message with a 🔄 Обновить refresh button | — |
 | `/out`, `/in` | Pause the persona / come back | — |
 | `/remember`, `/memories`, `/forget`, `/pin`, `/unpin` | Memory | — |
 | `/checkin` | The day's check-in | — |
-| `/due` | Main action (also the open focus debt) | — |
+| `/due` | Main action (also the open focus debt); a bare `/due` clears it, and `/menu` → Сегодня asks «Снять главное?» before doing that | — |
 | `/paid` | Debts: list, `/paid N` closes one | — |
-| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone; focus and quiet are also in `/menu` | — |
+| `/focus`, `/quiet`, `/tz` | Focus on/off, quiet for a while, time zone; focus is in `/menu` → Сегодня, quiet and the time zone in → Настройки | — |
 | `/intensity` | How hard the persona pushes, 1 (gentler) to 5 (stricter); bare shows the current value; also «Мягче»/«Строже» in `/menu` → Настройки | — |
 | `/mind` | Anchor's notebook | — |
 | `/order`, `/orders` | Standing orders: add, list | — |
@@ -69,13 +69,13 @@ OpenRouter's Decisions API. Why things are the way they are is in
 | `/export`, `/delete` | Export everything / delete everything, backups included | Telegram only |
 | `/grok`, `/revoke` | Open read-only access for grok.com / close it (and Claude's windows) | `/grok`: `GROK_ACCESS_ENABLED`; `/revoke` always works |
 | `/claude`, `/claude connect <code>`, `/claude disconnect` | Claude's connection status and a read window; approve a connection with the code from the claude.ai page; end it | `CLAUDE_ACCESS_ENABLED` |
-| `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default; also a toggle in `/menu`'s vault section | `CLAUDE_ACCESS_ENABLED` |
-| `/claude library write on`, `/claude library write off` | Let Claude edit, create and rename your knowledge notes (needs the library switch on); off by default; also a toggle in `/menu`'s vault section | `CLAUDE_ACCESS_ENABLED` |
+| `/claude library on`, `/claude library off` | Let Claude search your knowledge notes without a window, for as long as the connection lives; off by default; also a toggle in `/menu` → Подключения → Claude | `CLAUDE_ACCESS_ENABLED` |
+| `/claude library write on`, `/claude library write off` | Let Claude edit, create and rename your knowledge notes (needs the library switch on); off by default; also a toggle in `/menu` → Подключения → Claude | `CLAUDE_ACCESS_ENABLED` |
 | `/claude undo`, `/claude undo all` | Undo Claude's latest batch of note changes, or everything from the last 24 hours | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
-| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; status and sync on/off are also in `/menu` → Планер | `PLANNER_ENABLED` |
+| `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; all six are in `/menu` (Сегодня, Подключения → Планер), `/planner_link` after a «Точно?» | `PLANNER_ENABLED` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
-| `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu`'s vault section | — |
+| `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu` → Знания | — |
 | `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
 | `/lens undo` | Take back Echo's newest note in the inbox (L4), if under 14 days old and not edited since; Telegram only | the vault service |
 | `/graph` | Footer link pruning: a dry run of which `## Связи` footer links can go (footer-only pairs that keep a shared neighbour), sent as a Markdown report with «применить»; also ghost links, orphans, small components. Runs weekly by itself; Telegram only | the vault service; `GRAPH_PRUNE_ENABLED` |

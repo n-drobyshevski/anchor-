@@ -1881,6 +1881,8 @@ handler now clears it, next to Claude's pending requests
 
 ## Button menus dispatch to the existing handlers
 
+*Amended 2026-10-25: the sensitive acts below became confirmed, Telegram-only buttons; see «Menu redesign».*
+
 `/menu`'s buttons call the same nested handlers `/checkin`, `/quiet`,
 `/focus` and the rest already are, with a built `CommandObject` where
 one takes arguments. Every effect, audit row and `_once` replay gate
@@ -1926,6 +1928,8 @@ or refresh falls back to the plain text, so `/state` is never silent.
 
 ## `/menu` is a rich message with in-body buttons
 
+*Amended 2026-10-25: the sensitive acts below became confirmed, Telegram-only buttons; see «Menu redesign».*
+
 `/menu` gets the same Bot API 10.1 upgrade `/state` did, but with the
 buttons themselves inside the message body (`InputRichBlockButtons`/
 `RichMessageButton`) rather than a separate `reply_markup`, since 10.1
@@ -1968,6 +1972,8 @@ menu.py`'s own docstring on `ACTIONS` for why each one stays a typed,
 deliberate act instead of a button two taps deep.
 
 ## `/menu` becomes the settings hub
+
+*Amended 2026-10-25: the sensitive acts below became confirmed, Telegram-only buttons; see «Menu redesign».*
 
 An audit of what the bot stores against what `/menu` could reach found
 the controls were there but scattered: a "Режим" section held focus and
@@ -3708,3 +3714,175 @@ unasked. The plan is anchor-interest-suggestions-plan.md.
   switch (the feature lives under `RESEARCH_ENABLED` and the lens
   switches), a suggestion changing a topic's packet or text before
   adding it, and suggestions on the web chat.
+
+## Menu redesign
+
+`/menu` reached about half of the bot's commands. Everything that takes
+typed text (`/remember`, `/forget`, `/pin`, `/due`, `/tz`, `/order`,
+`/study`, `/read`, `/card`, `/task`, `/event`, `/interests add|run`), the
+lens and graph, `/done`, the Claude connect, disconnect and undo
+commands, `/weblogout` and the sensitive acts were reachable only by
+typing. The owner decided three things on 2026-10-25, and the menu was
+rebuilt around them (`app/tg/menu.py`, the router's `menu_callback`,
+`app/core/menu_prompt.py`; tests/test_menu.py, tests/test_menu_flows.py).
+Typing every command keeps working unchanged, and `BOT_COMMANDS` is
+untouched.
+
+- **Owner amendment: sensitive acts become confirmed, Telegram-only
+  buttons.** This reverses the typed-only rule recorded in
+  «Button menus dispatch to the existing handlers» ("`/export`,
+  `/delete`, `/grok` and `/planner_link` are not in the menu ... `/grok`
+  stays a typed act"), repeated in «`/menu` is a rich message with
+  in-body buttons» (`grok`, `export` and `delete` "are still excluded")
+  and in «`/menu` becomes the settings hub» ("`/planner_link` stays
+  typed for the same reason `/grok` does", "None of them become
+  buttons"). The reason those entries gave was real: the web ingress
+  blocks those commands by name, so a menu callback could have been a
+  way around that first layer. The amendment keeps the layer and moves
+  the line: the buttons exist **only in Telegram**. `TELEGRAM_ONLY` holds
+  every action whose command is in `app/web/ingress.py`'s
+  `BLOCKED_COMMANDS` (derived, so a command added to that set carries
+  its button along), plus `export`, `delete`, `grok_open`, `weblogout`,
+  `planner_link`, `lens_code_on`, `claude_connect`, `interests_suggest`
+  and `hide_kb`, named again so the list does not change quietly. Such a
+  key is never drawn on the web sink, and `action_available` refuses it
+  there however the press arrives: a forged `mn:y:export` from a
+  tampered web client answers «Устарело.» and does nothing, like a key
+  this build never heard of (tests/test_menu_flows.py runs a list of
+  forged presses against a deploy with every flag on). The handlers keep
+  their own `is_web_sink` guards beneath this, as before. The two
+  sections that are Telegram only in full, Линза and Claude, do not
+  exist on the web.
+- **Every act that is hard to take back asks first.** An action has one
+  of three kinds. `run` is the whole command, dispatched at once;
+  `prompt` needs text (below); `confirm` sends «Точно?» with
+  [Да, …] and [Нет], and only «Да», after `action_available` is checked
+  again, runs it. `/delete` and `/grok` are `run` actions on purpose:
+  the wipe card and the scope picker already are their confirmations,
+  and a third «Точно?» in front of them would only teach the user to tap
+  through confirmations. `forget` and `claude_connect` are prompts whose
+  reply leads to a card that shows what is about to happen (the record
+  with its text, or the code), carrying the typed id or code in the
+  «Да» callback.
+- **The confirmation is one-shot.** Two quick taps on «Да» arrive as two
+  updates with two update ids, so the replay gate every command has
+  (`_once`, keyed on the update) cannot see the second as a repeat: it
+  ran `/export` twice, and a second `/claude connect` counted as a wrong
+  code. The first «Да» now claims the card, atomically, in
+  `app/core/menu_prompt.py`'s `claim_card`: one row in the `job` table
+  (kind `menu_card`, already `done` so the worker never takes it),
+  `dedup_key = menu_card:<chat>:<message>`, `ON CONFLICT DO NOTHING`, the
+  mechanism `enqueue_job` and `scene:<id>` already use, so no new table
+  or migration. The row stores the claiming update id: the same press
+  replayed after a crash wins again (the command behind it is `_once`
+  gated and makes it a no-op, or finishes what the crash cut short),
+  and any other press on that card answers «Устарело.». «Нет» claims the
+  card too, so a «Да» already in flight cannot run after the user said
+  no. The row is two integers and a constant; finished jobs are swept
+  with the rest (`JOB_RETENTION_DAYS`), long after the card was edited
+  to «Готово.» and could be pressed at all.
+- **Typed input becomes a prompt.** A button that needs text (`✏️
+  Запомнить`, `✏️ Часовой пояс`, `Новая договорённость › Каждый день`)
+  cannot carry it in its callback data, so the bot asks («Что запомнить?
+  Напиши одним сообщением.» with [✕ Отмена]) and waits. The wait is
+  `user_state.awaiting = 'menu:<key>'`, the codebase's one «the next
+  plain text is not chat» switch, with `awaiting_ref` the prompt
+  message's id and a new `awaiting_at` (migration `b4e7d2a9c613`,
+  nullable, no default) the prompt's clock. The key, never any text, is
+  what is stored, so the audit rows and the debug view stay
+  content-free. The next plain message is dispatched to the same handler
+  the slash command uses, with the action's fixed prefix plus the text
+  (`order_w3` → `/order weekly:3 <text>`), so its `_once` gate, audit
+  rows and `is_web_sink` guard apply unchanged. The reply is marked
+  handled as `[/<command>]`: it is never stored as a chat message and
+  never reaches the model, and a replay of it finds its reply row with
+  no user row (`turn.answered_without_turn`) and stops instead of
+  becoming a chat turn now that the step is cleared. The prompt message
+  is edited to «Готово.» or «Отменено.», so it never lingers.
+- **A prompt expires.** After `MENU_PROMPT_TTL_MIN` (10 minutes) the
+  next message is ordinary chat again. A prompt the user walked away
+  from must not swallow tomorrow's first line as `/remember` text, or as
+  a time zone that fails. It also ends the moment anything else
+  happens, by the rules that already end the other `awaiting` steps:
+  any slash command (the outer middleware), a menu tap, the `☰ Меню`
+  button, a pause word (which still wins, as over every step, and is
+  handled by the turn exactly as always) and ✕ Отмена. A reply that
+  arrives where the action is no longer available (a flag switched off
+  since the tap, or a Telegram-only prompt answered from the web chat,
+  since the step is one global row) ends the step, is answered and is
+  consumed, so text meant for an approval code is not handed to the
+  model either. On the web, prompts work for any command not in
+  `BLOCKED_COMMANDS`.
+- **Why bare `/due` became a confirmed «Снять главное».** A bare `/due`
+  does not show the current main action, it clears it, and closes the
+  open focus debt with it (`commands_core.set_due`), with no warning. A
+  button that did that on one tap would be a trap, so «✏️ Задать главное»
+  is a prompt that sets one, and «⚠️ Снять главное», drawn only while one
+  is set, is a confirmation. The card says what it does.
+  `/forget` had the same shape (it deletes with no confirmation), so
+  «⚠️ Забыть запись №» asks for the number and then shows
+  «Забыть #12 «…»?» before deleting.
+- **The section map**, grouped by task. A section whose feature is off at
+  deploy level is not drawn and not reachable.
+  - `main`: the status table (bot, quiet, focus, intensity, the main
+    action) and `✅ Чек-ин`, `📊 Состояние`, then the eight sections
+    and `🔕 Тишина`.
+  - `today`: check-in, plan, the main action (set ✏️, clear ⚠️), focus
+    (moved here from settings, since it belongs with the main action),
+    planner task ✏️, event ✏️ and done.
+  - `deals`: orders, a new order ✏️ (through `order_cadence`: daily,
+    weekdays, once, or weekly › `order_weekday` Пн–Вс), debts, the weekly
+    review. Debts are closed from the list's own buttons, as `/paid`
+    does.
+  - `mem`: memories, remember ✏️, pin ✏️, unpin ✏️, forget ✏️⚠️, Echo's
+    notes and a new one ✏️, style amendments, the background digest
+    (24 hours, 7 days).
+  - `research` (`RESEARCH_ENABLED`): topics, a new topic ✏️ and study ✏️
+    (each through `packet_interest` / `packet_study`, listing only the
+    packets that have sites, since a packet with none would answer
+    «пока не настроен» to every topic), run next, run № ✏️, suggest
+    (Telegram only), read ✏️, cards, card № ✏️ (its reply carries
+    [Принять][Отклонить], the `r:a:`/`r:r:` buttons a `/notes` card has).
+  - `knowledge` (`VAULT_MODE` not `off`): notes consent, vault status,
+    link pruning and its undo ⚠️ (Telegram only), and `lens`
+    (Telegram only): garden now, research now, undo ⚠️, Claude Code's
+    door on ⚠️ / off.
+  - `links`: `planner` (status, plan, sync on/off, link ⚠️) and `claude`
+    (Telegram only: status and the window picker, connect by code ✏️⚠️,
+    the library read and write switches, write limits, undo ⚠️ ×2,
+    disconnect ⚠️), Grok (its own picker), close web sessions ⚠️, close
+    all access.
+  - `settings`: intensity, pause, quiet ›, time zone ✏️, hide the menu
+    button.
+  - `quiet`: the presets, and «off» only while quiet is on. It has two
+    parents, main and settings; its callbacks carry where it was opened
+    from (`mn:s:quiet:settings`, `mn:a:quiet_2h:settings`), so its back
+    button and the re-render after a preset return to the same place.
+  - `data`: privacy, export ⚠️, delete ⚠️, close all access.
+  Every section but main ends with its back row, «‹ Меню» + «✕ Закрыть»
+  for a top-level one and «‹ <родитель>» + «✕ Закрыть» for a
+  subsection; switches stay state-aware, drawing only the button that
+  changes the current state, and the router re-renders the section the
+  press came from (`Action.refresh`).
+- **Nothing is left out for being sensitive or for taking text.** The
+  coverage test (`tests/test_menu.py`) holds every `BOT_COMMANDS` entry
+  except `start` and `menu`, plus `/weblogout`, against the commands the
+  actions reach, so a new command cannot be forgotten again. What is
+  still typed, by design: the exact arguments of `/claude limits <KEY>
+  <N>` and `limits counters` (the menu opens the +/- keyboard that edits
+  the same caps), `/graph apply <hash>` (the dry run's reply carries the
+  apply button, and the hash is the guard that the plan has not
+  changed), `/paid N` (the debts list closes them by button) and
+  `/interests`' topic removal (its [✖]). Those are contextual buttons on
+  the bot's own messages, as proposals, holds, the garden and
+  suggestions are; none of them is a sensitive act left typed-only.
+  `/start` and `/menu` are the entry points.
+- **Callback data** stays under Telegram's 64 bytes: `mn:s:<section>
+  [:<from>]`, `mn:a:<key>[:<from>]`, `mn:i:<key>`, `mn:y:<key>[:<arg>]`,
+  `mn:c` (✕ Отмена, «Нет») and `mn:x`. The handler checks the prefix
+  against the key's kind: a prompt key under `mn:a:` never runs without
+  its text, and `mn:y:` runs only what a confirmation card could have
+  offered. `forget`'s and `claude_connect`'s typed id or code is
+  validated before it rides in a callback (an id beyond the BIGINT range
+  is a missing record, a code that is not code-shaped goes straight to
+  `/claude connect` for its own answer).
