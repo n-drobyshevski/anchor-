@@ -17,7 +17,10 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
 
 1. Read every mapped board (`GET /v1/boards`) and, per board, the
    planner's own top-level tasks with its tag (`list_tasks`), and the
-   stored pairs. Compute every board's plan.
+   stored pairs; once per pass, the user's own open top-level tasks
+   with no tag, which a card may adopt by title (board_sync's module
+   docstring). Compute every board's plan; a task adopted by one board
+   is not offered to the next.
 2. Per board: the planner creates (idempotent by `clientRequestId`, so a
    pass that dies after one and before the board write gets the same
    task back next time, or pairs it by title).
@@ -25,7 +28,7 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
    changeset (`boards_...`). A 409 (the user typed, Sync landed) changes
    nothing more for that board this pass; the next pass reads it again.
 4. Pairs whose unit needs no planner call are committed now.
-5. The planner updates (title, due, done, untag), each unit's row
+5. The planner updates (title, due, done, untag, tag), each unit's row
    committed only once its calls succeeded: a row never records a value
    the planner has not taken, so a lost call is retried, never reverted.
 
@@ -165,11 +168,10 @@ async def enqueue_command(session: AsyncSession, clock: Clock, trigger: str) -> 
 # -- reading -----------------------------------------------------------------------------
 
 
-def parse_tasks(raw: object, tag: str) -> list[board_sync.Task]:
-    """`list_tasks`' answer as merge input, strictly: a row of the wrong
-    shape is a planner failure (the pass aborts), never a task the merge
-    could act on wrongly. A subtask or a row without the tag (neither
-    should come back) is left out."""
+def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
+    """`list_tasks`' answer, strictly: a row of the wrong shape is a
+    planner failure (the pass aborts), never a task the merge could act
+    on wrongly. Each task with its parent id."""
     if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
         raise PlannerToolError("list_tasks: malformed answer")
     out = []
@@ -188,10 +190,20 @@ def parse_tasks(raw: object, tag: str) -> list[board_sync.Task]:
         if task_id in seen:
             raise PlannerToolError("list_tasks: a task twice")
         seen.add(task_id)
-        if parent is not None or tag not in tags:
-            continue
-        out.append(board_sync.Task(id=task_id, title=title, done=done, due=due, tags=tuple(tags)))
+        out.append((board_sync.Task(id=task_id, title=title, done=done, due=due, tags=tuple(tags)), parent))
     return out
+
+
+def parse_tasks(raw: object, tag: str) -> list[board_sync.Task]:
+    """`list_tasks`' answer for one tag as merge input. A subtask or a
+    row without the tag (neither should come back) is left out."""
+    return [task for task, parent in _read_rows(raw) if parent is None and tag in task.tags]
+
+
+def parse_untagged(raw: object) -> list[board_sync.Task]:
+    """`list_tasks`' answer with no tag filter, cut to the tasks a card
+    may adopt: top-level, open, with no tag at all."""
+    return [task for task, parent in _read_rows(raw) if parent is None and not task.done and not task.tags]
 
 
 def as_board(board: TaskBoard) -> board_sync.Board:
@@ -346,18 +358,31 @@ async def _read_and_plan(
     if not mapped:
         raise _Abort(NO_BOARDS)
     plans = []
+    untagged: list[board_sync.Task] | None = None
     for board in sorted(mapped, key=lambda b: b.name):
         if board.state != "ok":
             result.boards.append(BoardResult(board.name, MISSING if board.state == "missing" else NOT_BOARD))
             continue
+        if untagged is None:
+            raw = await planner.list_tasks(settings, session, clock, tag=None, include_completed=False)
+            untagged = parse_untagged(raw)
         tag = settings.BOARD_SYNC_TAGS[board.name]
         raw = await planner.list_tasks(settings, session, clock, tag=tag)
         tasks = parse_tasks(raw, tag)
         rows = await load_rows(session, board.name)
         merged = as_board(board)
         plan = board_sync.merge(
-            merged, tasks, rows, tag=tag, creates_max=settings.BOARD_SYNC_CREATES_PER_PASS, guard=guard
+            merged,
+            tasks,
+            rows,
+            tag=tag,
+            creates_max=settings.BOARD_SYNC_CREATES_PER_PASS,
+            guard=guard,
+            untagged=untagged,
         )
+        # One task, one board: what this board adopts is not offered to the next.
+        taken = {call.task_id for call in plan.calls if call.kind == "tag"}
+        untagged = [task for task in untagged if task.id not in taken]
         plans.append((tag, merged, plan))
     return plans
 
@@ -453,7 +478,7 @@ async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock
         await planner.update_task(settings, session, clock, task_id=call.task_id, due_date=call.value)
     elif call.kind == "done":
         await planner.complete_task(settings, session, clock, task_id=call.task_id, done=bool(call.value))
-    elif call.kind == "untag":
+    elif call.kind in ("untag", "tag"):
         await planner.update_task(settings, session, clock, task_id=call.task_id, tags=list(call.value))
     else:
         raise ValueError(f"unknown board call: {call.kind}")

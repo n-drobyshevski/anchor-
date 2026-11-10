@@ -416,26 +416,23 @@ class PlannerClient:
         session: AsyncSession,
         clock: Clock,
         *,
-        tag: str,
+        tag: str | None,
         mine: bool = True,
         include_subtasks: bool = False,
         include_completed: bool = True,
     ) -> dict:
-        """The tasks carrying `tag`: by default the user's own (`mine`),
-        top-level ones, done or not. Rows are `{id, title, done, tags?,
-        dueDate?, parentId?, ...}`; the caller parses them."""
-        return await self.call_tool(
-            settings,
-            session,
-            clock,
-            "list_tasks",
-            {
-                "tag": tag,
-                "mine": bool(mine),
-                "includeSubtasks": bool(include_subtasks),
-                "includeCompleted": bool(include_completed),
-            },
-        )
+        """The tasks carrying `tag` (None: any tags or none): by default
+        the user's own (`mine`), top-level ones, done or not. Rows are
+        `{id, title, done, tags?, dueDate?, parentId?, ...}`; the caller
+        parses them."""
+        args: dict = {
+            "mine": bool(mine),
+            "includeSubtasks": bool(include_subtasks),
+            "includeCompleted": bool(include_completed),
+        }
+        if tag is not None:
+            args = {"tag": tag, **args}
+        return await self.call_tool(settings, session, clock, "list_tasks", args)
 
     async def update_task(
         self,

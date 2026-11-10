@@ -363,6 +363,62 @@ def test_a_copied_card_with_a_tracked_id_is_left_alone():
     assert plan.ops == [] and plan.creates == [] and plan.calls == []
 
 
+# -- adopting untagged tasks ----------------------------------------------------------
+
+
+def test_a_free_card_adopts_an_untagged_task_of_the_same_title():
+    b = board(card("Отчёт", date="2026-11-20"), card("Только на доске"))
+    loose = [task("u1", "отчёт ", due="2026-11-12", tags=())]
+    plan = merge(b, [], [], untagged=loose)
+    assert plan.counts.paired == 1 and plan.counts.tasks_changed == 1
+    assert [c.title for c in plan.creates] == ["Только на доске"]
+    assert bs.Call("tag", "u1", (TAG,)) in plan.calls
+    inserted = [c for c in plan.row_changes if c.task_id == "u1"]
+    assert len(inserted) == 1
+    # A fresh pair: the planner's title and due win, as with a tagged one.
+    block = inserted[0].block_id
+    assert {"op": "text", "id": block, "text": "отчёт"} in plan.ops
+    assert {"op": "date", "id": block, "date": "2026-11-12"} in plan.ops
+
+
+def test_only_open_tasks_with_no_tag_at_all_are_adopted():
+    b = board(card("A"), card("B"), card("C"))
+    loose = [task("u1", "A", tags=("дом",)), task("u2", "B", done=True, tags=()), task("u3", "C", tags=())]
+    plan = merge(b, [], [], untagged=loose)
+    assert [c.task_id for c in plan.calls] == ["u3"]
+    assert sorted(c.title for c in plan.creates) == ["A", "B"]
+
+
+def test_a_tagged_task_pairs_before_an_untagged_one_is_adopted():
+    b = board(card("A"), card("A"))
+    plan = merge(b, [task("t1", "A")], [], untagged=[task("u1", "A", tags=()), task("u2", "A", tags=())])
+    assert plan.counts.paired == 2 and plan.creates == []
+    assert [c.task_id for c in plan.calls if c.kind == "tag"] == ["u1"]
+
+
+def test_an_untagged_task_with_no_card_is_never_touched():
+    plan = merge(board(card("A")), [], [], untagged=[task("u1", "Другое", tags=())])
+    assert plan.calls == [] and [op["op"] for op in plan.ops] == ["tag"]
+    assert [c.title for c in plan.creates] == ["A"]
+
+
+def test_an_adopted_task_already_in_a_row_or_the_tagged_list_is_ignored():
+    rows = [row("aaaa1", "t1", "A")]
+    plan = merge(board(card("A", "aaaa1"), card("B")), [task("t1", "A")], rows, untagged=[task("t1", "B", tags=())])
+    assert plan.calls == [] and [c.title for c in plan.creates] == ["B"]
+
+
+def test_adoption_then_nothing():
+    b = board(card("Отчёт"), card("Позвонить", checked=True))
+    loose = [task("u1", "Отчёт", tags=()), task("u2", "позвонить", tags=())]
+    plan = merge(b, [], [], untagged=loose)
+    b, tasks, rows = bs.apply_to_state(b, [], [], plan, tag=TAG, untagged=loose)
+    assert {t.id: t.tags for t in tasks} == {"u1": (TAG,), "u2": (TAG,)}
+    # The card's done wins nothing on a fresh pair: the planner's open stays.
+    assert [c.checked for c in b.cards] == [False, False]
+    assert_idle(b, tasks, rows)
+
+
 # -- caps and order -------------------------------------------------------------------
 
 
