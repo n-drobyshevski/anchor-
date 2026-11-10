@@ -334,31 +334,41 @@ STREAMS_PURPOSE = "streams"
 
 @dataclass(frozen=True)
 class StreamNotesResult:
-    """What `/flows notes` did: `outcome` is OK, EMPTY (no tag stream to
-    write) or UNAVAILABLE (the vault stopped answering; the counts say
-    how far it got)."""
+    """What `/flows notes` did. `outcome` is OK, EMPTY (no tag stream to
+    write), REFUSED (the vault refused every note: no inbox, an older
+    vault service) or UNAVAILABLE (the vault stopped answering; the
+    counts say how far it got). `skipped` notes the vault refused,
+    `screened` ones the content screen refused, `omitted` streams that
+    got no note at all (over the cap, or no usable file name)."""
 
     outcome: str
     written: int = 0
     unchanged: int = 0
     skipped: int = 0
+    screened: int = 0
+    omitted: int = 0
 
 
 async def write_stream_notes(client: VaultClient, flows: object) -> StreamNotesResult:
     """Write or refresh one note per tag stream of a cached `get_flows`
     payload (module docstring). A note vaultd refuses -- the user edited
     it, the name is taken, a cap -- or whose text the content screen
-    refuses is counted as skipped and left alone; the rest still go."""
+    refuses is counted and left alone; the rest still go."""
     notes = stream_note.notes_for(flows)
     if not notes:
         return StreamNotesResult(EMPTY)
+    omitted = max(0, stream_note.tag_stream_count(flows) - len(notes))
     vault_ref = STREAMS_REF_PREFIX + secrets.token_hex(12)
-    written = unchanged = skipped = 0
+    written = unchanged = skipped = screened = 0
+
+    def result(outcome: str) -> StreamNotesResult:
+        return StreamNotesResult(outcome, written, unchanged, skipped, screened, omitted)
+
     for name, key, body in notes:
         try:
             note_checks.check_content(body)
         except note_checks.Refused:
-            skipped += 1
+            screened += 1
             continue
         try:
             put = await client.put_stream_note(name, key, body, vault_ref)
@@ -367,33 +377,38 @@ async def write_stream_notes(client: VaultClient, flows: object) -> StreamNotesR
                 skipped += 1
                 continue
             _log(f"streams_{UNAVAILABLE}")
-            return StreamNotesResult(UNAVAILABLE, written, unchanged, skipped)
+            return result(UNAVAILABLE)
         if put.changed:
             written += 1
         else:
             unchanged += 1
-    _log(f"streams_{OK}")
-    return StreamNotesResult(OK, written, unchanged, skipped)
+    # Every note refused and none accepted is not twelve edited notes: the
+    # vault has no inbox, or its service does not know the route yet.
+    outcome = REFUSED if skipped and not (written or unchanged) else OK
+    _log(f"streams_{outcome}")
+    return result(outcome)
 
 
 async def undo_stream_notes(client: VaultClient) -> str:
-    """`/flows notes undo`: take back the newest stream-note write that
-    is not undone yet. Returns `UNDONE`, `NOTHING`, `EXPIRED`,
-    `CHANGED` (every note in it was edited since), `REFUSED` or
-    `UNAVAILABLE`."""
+    """`/flows notes undo`: take back the last stream-note write, and
+    only the last. Returns `UNDONE`, `NOTHING` (there is none, or the
+    last one is already undone), `EXPIRED`, `CHANGED` (every note in it
+    was edited since), `REFUSED` or `UNAVAILABLE`.
+
+    One level on purpose: the target is always the newest stream write,
+    undone or not. So a retry after an undo whose answer was lost finds
+    it undone and stops, instead of taking back the write before it."""
     try:
         changes = await client.list_changes()
     except VaultError:
         _log(f"streams_undo_{UNAVAILABLE}")
         return UNAVAILABLE
-    mine = [
-        c
-        for c in changes
-        if c.writer == "echo" and c.purpose == STREAMS_PURPOSE and c.kind == "write" and not c.undone
-    ]
+    mine = [c for c in changes if c.writer == "echo" and c.purpose == STREAMS_PURPOSE and c.kind == "write"]
     if not mine:
         return NOTHING
     newest = max(mine, key=lambda c: c.time)
+    if newest.undone:
+        return NOTHING
     outcome, restored = await _undo_ref(client, newest.id)
     if outcome is None:
         outcome = UNDONE if restored else CHANGED

@@ -137,4 +137,12 @@ def notes_for(flows: object) -> list[tuple[str, str, str]]:
     return out
 
 
-__all__ = ["notes_for", "render_body", "note_name", "stream_key", "NOTICE", "MAX_STREAMS"]
+def tag_stream_count(flows: object) -> int:
+    """How many tag streams a `get_flows` payload holds, whether or not
+    each can have a note (`notes_for` may return fewer: the cap, a tag no
+    file name can be made from, two tags that share a name)."""
+    streams = flows.get("streams") if isinstance(flows, dict) else None
+    return sum(1 for stream in streams if stream_key(stream)) if isinstance(streams, list) else 0
+
+
+__all__ = ["tag_stream_count", "notes_for", "render_body", "note_name", "stream_key", "NOTICE", "MAX_STREAMS"]

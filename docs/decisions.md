@@ -4219,6 +4219,17 @@ planner and menu test files).
   every title and tag passes through `render.report_escape`, then the content
   screen (an instruction or a secret skips that note). Only tag streams get a
   note; the untagged bucket and other groupings are views.
+- **Undo is one level.** `/flows notes undo` targets the newest stream write,
+  undone or not, and stops if it is already undone. A retry after an undo
+  whose answer was lost therefore cannot reach the write before it. The cost:
+  only the last write can ever be taken back. Stream undos share Echo's four
+  undos an hour with `/lens undo` and `/graph undo`.
+- **The reply names the cause.** Refused by the vault, refused by the content
+  screen, and left without a note (over twelve streams, or a tag no file name
+  can be made from) are counted separately. When the vault refuses every note
+  and accepts none, the reply says to check the inbox and the vault service
+  instead of blaming twelve hand edits. A refusal's reason never leaves vaultd
+  (the bare 403), so the bot cannot be more precise than that.
 - **Not done.** No rename or delete: a tag that disappears leaves its last
   note behind. No button in `/menu`. Notes for saved streams or other
   groupings.

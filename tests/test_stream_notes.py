@@ -143,7 +143,7 @@ def test_at_most_twelve_streams():
 async def test_write_sends_one_note_per_stream_under_one_changeset():
     client = FakeClient(fail={"дом.md": False})
     result = await echo_write.write_stream_notes(client, flows(stream("tag:диплом"), stream("tag:дом")))
-    assert result == echo_write.StreamNotesResult(echo_write.OK, written=1, unchanged=1, skipped=0)
+    assert result == echo_write.StreamNotesResult(echo_write.OK, written=1, unchanged=1)
     assert [(name, key) for name, key, _, _ in client.puts] == [("диплом.md", "tag:диплом"), ("дом.md", "tag:дом")]
     refs = {ref for *_, ref in client.puts}
     assert len(refs) == 1 and next(iter(refs)).startswith("streams_")
@@ -168,7 +168,7 @@ async def test_a_title_the_content_screen_refuses_never_reaches_the_vault():
     secret = stream("tag:ключи", tasks=[{"title": "sk-ant-api03-" + "a" * 90, "score": 0.9}])
     client = FakeClient()
     result = await echo_write.write_stream_notes(client, flows(secret, stream("tag:дом")))
-    assert (result.written, result.skipped) == (1, 1)
+    assert (result.written, result.skipped, result.screened) == (1, 0, 1)
     assert [name for name, *_ in client.puts] == ["дом.md"]
 
 
@@ -178,15 +178,28 @@ async def test_nothing_to_write_touches_nothing():
     assert client.puts == []
 
 
+async def test_every_note_refused_is_a_refusal_not_twelve_edited_notes():
+    client = FakeClient(fail={"диплом.md": errors.REFUSED, "дом.md": errors.NOT_FOUND})
+    result = await echo_write.write_stream_notes(client, flows(stream("tag:диплом"), stream("tag:дом")))
+    assert result.outcome == echo_write.REFUSED
+    assert planner_ui.notes_result_text(result) == planner_ui.NOTES_REFUSED
+
+
+async def test_streams_that_got_no_note_are_counted():
+    many = flows(*(stream(f"tag:t{i}") for i in range(14)), stream("tag:a/b"), stream("tag:a_b"))
+    result = await echo_write.write_stream_notes(FakeClient(), many)
+    assert (result.written, result.omitted) == (12, 4)
+    assert "без заметки 4" in planner_ui.notes_result_text(result)
+
+
 # -- /flows notes undo ---------------------------------------------------------------
 
 
-async def test_undo_takes_the_newest_live_stream_changeset_and_no_other_kind():
+async def test_undo_takes_the_newest_stream_changeset_and_no_other_kind():
     client = FakeClient(
         changes=[
             change("streams_old", 1),
             change("streams_new", 5),
-            change("streams_done", 9, undone=True),
             change("echo_inbox", 20, purpose=None),
             change("echo_prune", 21, purpose="prune"),
             change("claude_x", 22, writer="claude", purpose=None),
@@ -195,6 +208,13 @@ async def test_undo_takes_the_newest_live_stream_changeset_and_no_other_kind():
     )
     assert await echo_write.undo_stream_notes(client) == echo_write.UNDONE
     assert client.undone == [("streams_new", "echo")]
+
+
+async def test_a_retry_after_a_lost_answer_never_reaches_the_write_before():
+    """One level only: once the newest write is undone, undo stops."""
+    client = FakeClient(changes=[change("streams_old", 1), change("streams_new", 5, undone=True)])
+    assert await echo_write.undo_stream_notes(client) == echo_write.NOTHING
+    assert client.undone == []
 
 
 @pytest.mark.parametrize(

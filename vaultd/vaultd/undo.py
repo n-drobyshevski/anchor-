@@ -498,13 +498,9 @@ class UndoStore:
         A content write like any other, so `/v1/undo?writer=echo`
         restores the replaced note. Callers must have called
         `precheck_streams` first, under the same lock."""
-        self._append_files(changeset_id, "write", [entry], "content_files", 1, ECHO)
-        meta = self._read_meta(changeset_id)
-        meta["purpose"] = PURPOSE_STREAMS
-        if folders:
-            meta.setdefault("folders", [])
-            meta["folders"].extend(folders)
-        self._write_meta(changeset_id, meta)
+        self._append_files(
+            changeset_id, "write", [entry], "content_files", 1, ECHO, purpose=PURPOSE_STREAMS, folders=folders
+        )
 
     def echo_replay(self, changeset_id: str) -> tuple[str, str] | None:
         """(path, sha256) of the note an Echo changeset already created,
@@ -549,6 +545,9 @@ class UndoStore:
         counter: str,
         count: int,
         writer: str = CLAUDE,
+        *,
+        purpose: str | None = None,
+        folders: list[str] | None = None,
     ) -> None:
         cdir = self._dir(changeset_id)
         blobs_dir = cdir / "blobs"
@@ -567,6 +566,14 @@ class UndoStore:
                 {"path": entry.path, "pre_image_file": pre_image_file, "written_sha256": entry.written_sha256}
             )
         meta[counter] = meta.get(counter, 0) + count
+        # In the same write as the files: a changeset must never be on
+        # disk with its files and without its purpose, or it would count
+        # against the wrong budget and be invisible to its own undo.
+        if purpose is not None:
+            meta["purpose"] = purpose
+        if folders:
+            meta.setdefault("folders", [])
+            meta["folders"].extend(folders)
         self._write_meta(changeset_id, meta)
 
     def append(self, changeset_id: str, kind: str, entries: list[FileEntry], *, writer: str = CLAUDE) -> None:

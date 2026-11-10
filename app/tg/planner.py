@@ -134,13 +134,17 @@ FLOWS_LABEL_MAX = 40
 NOTES_VAULT_OFF = "Заметки потоков недоступны: хранилище выключено (VAULT_MODE)."
 NOTES_USAGE = (
     "«/flows notes» — записать или обновить заметки потоков в Obsidian; "
-    "«/flows notes undo» — отменить последнюю запись."
+    "«/flows notes undo» — отменить последнюю запись (только её)."
 )
 NOTES_EMPTY = "Нет потоков с тегами: записывать нечего."
 NOTES_UNAVAILABLE = "Хранилище не ответило. Попробуй ещё раз позже."
+NOTES_REFUSED = (
+    "Хранилище не приняло ни одной заметки. Проверь, что в Anchor/settings.md "
+    "есть папка для заметок Echo (inbox) и что сервис vault обновлён."
+)
 NOTES_UNDO_REPLIES = {
     echo_write.UNDONE: "Отменено: заметки потоков возвращены к прежнему виду.",
-    echo_write.NOTHING: "Нечего отменять: нет записей заметок потоков, которые ещё можно отменить.",
+    echo_write.NOTHING: "Нечего отменять: последней записи заметок потоков нет или она уже отменена.",
     echo_write.EXPIRED: "Отменить уже нельзя: хранилище больше не держит эту запись.",
     echo_write.CHANGED: "Не отменено: заметки меняли после записи, я их не трогаю.",
     echo_write.REFUSED: "Хранилище отказало в отмене (например, лимит отмен в час). Попробуй позже.",
@@ -152,9 +156,15 @@ def notes_result_text(result: echo_write.StreamNotesResult) -> str:
     """The `/flows notes` reply for one run's outcome."""
     if result.outcome == echo_write.EMPTY:
         return NOTES_EMPTY
+    if result.outcome == echo_write.REFUSED:
+        return NOTES_REFUSED
     parts = [f"записано {result.written}", f"без изменений {result.unchanged}"]
     if result.skipped:
         parts.append(f"пропущено {result.skipped} (заметку меняли вручную, имя занято или лимит)")
+    if result.screened:
+        parts.append(f"не записано {result.screened} (в названии задачи похожее на секрет или инструкцию)")
+    if result.omitted:
+        parts.append(f"без заметки {result.omitted} (не больше 12 потоков за раз, либо тег не годится в имя файла)")
     text = "Заметки потоков: " + ", ".join(parts) + "."
     if result.outcome == echo_write.UNAVAILABLE:
         return text + " " + NOTES_UNAVAILABLE

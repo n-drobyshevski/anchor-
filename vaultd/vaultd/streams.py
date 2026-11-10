@@ -39,8 +39,8 @@ echo.py stays create-only. What is different here, and why it is safe:
    refresh holds every note of that refresh, and these changesets do
    not spend the inbox writer's daily budget, nor it theirs.
 
-There is no rename and no delete. A stream that ends gets one last body
-from the bot saying so, and is not written again.
+There is no rename and no delete: a stream that ends leaves its last
+note behind, for the user to remove.
 """
 
 from __future__ import annotations
