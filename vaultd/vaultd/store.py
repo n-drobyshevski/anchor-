@@ -70,9 +70,10 @@ class Store:
         decided the path is writable by its own rules (classes.py, or a
         stored pre-image being put back exactly where it came from).
         """
-        folder, name = rel.rsplit("/", 1)
+        # A file at the vault's root has no folder (boards.py's task boards).
+        folder, _, name = rel.rpartition("/")
         with paths.open_root(self.vault_path) as root_fd, paths.open_root(self.tmp_path) as tmp_fd:
-            dir_fd = paths.open_dir(root_fd, folder.split("/"), create=True)
+            dir_fd = paths.open_dir(root_fd, folder.split("/") if folder else [], create=True)
             assert dir_fd is not None
             try:
                 if if_sha256 is not None:

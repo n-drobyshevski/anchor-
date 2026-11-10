@@ -165,3 +165,17 @@ def from_env(env: Mapping[str, str]) -> Config:
         port=int(port_raw),
         undo_root=Path(get("VAULT_UNDO_ROOT", DEFAULT_UNDO_ROOT) or DEFAULT_UNDO_ROOT),
     )
+
+# Task boards (boards.py): the user's own Kanban Starlane boards, named in
+# `Anchor/settings.md` (`task_boards`), that the bot may read as cards and
+# change card by card. At most this many boards; a write is one changeset per
+# board per sync, with its own daily cap (a sync runs every quarter of an
+# hour and writes only when something changed, so the cap is generous and
+# still bounds what the undo store can hold).
+TASK_BOARDS_MAX = 4
+BOARD_MAX_BYTES = 512 * 1024
+BOARD_MAX_CARDS = 500
+BOARD_OPS_MAX = 100
+BOARD_CARD_MAX_CHARS = 500
+BOARD_CHANGESETS_PER_DAY = 200
+
