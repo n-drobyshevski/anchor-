@@ -111,6 +111,7 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
         "untag": "снять тег" if preview else "снят тег",
         "planner": "создать в планере" if preview else "создано в планере",
         "detach": "отцепить" if preview else "отцеплено",
+        "link": "связать" if preview else "связано",
     }
     parts = [
         f"карточки: {verb['add']} {counts.cards_added}, {verb['change']} {counts.cards_changed}, "
@@ -120,7 +121,7 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
         (
             f"подзадачи: {verb['add']} {counts.subs_added}, {verb['change']} {counts.subs_changed}, "
             f"{verb['remove']} {counts.subs_removed}, {verb['planner']} {counts.subs_created}, "
-            f"{verb['detach']} {counts.subs_detached}"
+            f"{verb['detach']} {counts.subs_detached}, {verb['link']} {counts.subs_paired}"
         ),
         f"связи: {verb['change']} {counts.deps_changed}",
         f"пар по названию {counts.paired}",

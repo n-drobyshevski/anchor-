@@ -15,9 +15,12 @@ with its planner task's subtasks, and its `after:` line with the task's
   truncates it, and there is no debug view, like `board_pair`.
 - `board_pair.deps` is the snapshot of a card's dependencies, the sorted
   planner task ids both sides last agreed on; null until compared once.
-- `board_sync_run` gains six counts, default 0: `subs_added`,
+  `board_pair.deps_card` is null while the card's `after:` line shows
+  `deps`; when the line could not be written, the task ids it resolved
+  to as last read (its side of the merge, tracked apart).
+- `board_sync_run` gains seven counts, default 0: `subs_added`,
   `subs_changed`, `subs_removed`, `subs_created`, `subs_detached`,
-  `deps_changed`.
+  `deps_changed`, `subs_paired`.
 
 Reversible: downgrade drops the table and the columns; the boards and the
 planner keep what the passes wrote, and the next pass after an upgrade
@@ -48,6 +51,7 @@ COUNTS = (
     'subs_created',
     'subs_detached',
     'deps_changed',
+    'subs_paired',
 )
 
 
@@ -72,6 +76,7 @@ def upgrade() -> None:
         sa.UniqueConstraint('board', 'task_id', name='uq_board_sub_pair_task'),
     )
     op.add_column('board_pair', sa.Column('deps', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
+    op.add_column('board_pair', sa.Column('deps_card', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
     for name in COUNTS:
         op.add_column('board_sync_run', sa.Column(name, sa.Integer(), server_default=sa.text('0'), nullable=False))
 
@@ -80,5 +85,6 @@ def downgrade() -> None:
     """Downgrade schema."""
     for name in reversed(COUNTS):
         op.drop_column('board_sync_run', name)
+    op.drop_column('board_pair', 'deps_card')
     op.drop_column('board_pair', 'deps')
     op.drop_table('board_sub_pair')

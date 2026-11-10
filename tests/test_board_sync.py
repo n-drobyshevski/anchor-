@@ -366,6 +366,24 @@ def test_a_copied_card_with_a_tracked_id_is_left_alone():
 # -- adopting untagged tasks ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("odd", ["Plan-1", "ab", "UPPER", "a" * 17])
+def test_a_card_with_a_block_id_vaultd_cannot_name_is_never_paired_or_written(odd):
+    # Free: not paired by title, no task made for it, no card added for its task.
+    b = board(card("План", odd), card("Новая", odd + "x"))
+    plan = merge(b, [task("t1", "план")], [])
+    assert plan.units == [] and plan.counts.skipped == 2
+    # Rowed: the pair stays as it is, whatever either side did.
+    b = board(card("План 2", odd, checked=True))
+    plan = merge(b, [task("t1", "План 3")], [row(odd, "t1", "План")])
+    assert plan.units == [] and plan.counts.skipped == 1
+    plan = merge(b, [], [row(odd, "t1", "План")])
+    assert plan.ops == [] and plan.units == [] and plan.counts.skipped == 1
+    # A valid card of the same title still pairs first.
+    b = board(card("План", "good1"), card("План", odd))
+    plan = merge(b, [task("t1", "План")], [])
+    assert [r.block_id for r in plan.row_changes] == ["good1"] and plan.counts.skipped == 1
+
+
 def test_a_free_card_adopts_an_untagged_task_of_the_same_title():
     b = board(card("Отчёт", date="2026-11-20"), card("Только на доске"))
     loose = [task("u1", "отчёт ", due="2026-11-12", tags=())]
@@ -660,7 +678,7 @@ def test_a_card_subtask_and_a_planner_subtask_of_the_same_title_pair():
     ]
     assert plan.creates == [] and plan.calls == []
     assert plan.sub_row_changes == [bs.SubRowChange("insert", block, "card1", "s1", None, "билеты", False, None)]
-    assert (plan.counts.paired, plan.counts.subs_changed) == (1, 1)
+    assert (plan.counts.paired, plan.counts.subs_paired, plan.counts.subs_changed) == (0, 1, 1)
     b, p, rows, subs, _ = ssettle(b, p, [TOP_ROW], [])
     assert_sidle(b, p, rows, subs)
 
@@ -822,7 +840,7 @@ def test_a_board_read_without_subtasks_leaves_them_alone():
     assert_sidle(b, p, [TOP_ROW], subs)
 
 
-def test_the_guard_counts_subtask_losses_with_the_cards():
+def test_the_guard_weighs_subtask_losses_against_subtask_pairs():
     subs = [srow(f"sub{i}", "card1", f"s{i}", f"S{i}") for i in range(5)]
     b = sboard(scard("Поездка", "card1"))
     p = planner(TOP, *(stask(f"s{i}", f"S{i}", "t1") for i in range(5)))
@@ -830,6 +848,71 @@ def test_the_guard_counts_subtask_losses_with_the_cards():
     assert plan.sub_row_changes == [] and plan.counts.held == 5
     plan = smerge(b, p, [TOP_ROW], subs, guard=False)
     assert plan.counts.subs_detached == 5
+
+
+def test_subtask_rows_do_not_dilute_the_cards_guard():
+    """Four cards with a subtask each, and the board reads as empty: four card
+    losses over four card pairs is a mass, whatever the subtask rows."""
+    tops = [task(f"t{i}", f"T{i}") for i in range(4)]
+    rows = [row(f"card{i}", f"t{i}", f"T{i}") for i in range(4)]
+    subs = [srow(f"sub{i}", f"card{i}", f"s{i}", f"S{i}") for i in range(4)]
+    p = planner(*tops, *(stask(f"s{i}", f"S{i}", f"t{i}") for i in range(4)))
+    plan = smerge(sboard(), p, rows, subs)
+    assert plan.units == [] and plan.calls == [] and plan.sub_row_changes == []
+    assert (plan.counts.held, plan.counts.tasks_untagged) == (4, 0)
+    forced = smerge(sboard(), p, rows, subs, guard=False)
+    assert forced.counts.tasks_untagged == 4 and len(forced.sub_row_changes) == 4
+
+
+def test_card_losses_do_not_dilute_the_subtasks_guard_nor_hold_each_other():
+    # Two cards go (a minority of ten), and one card's four subtasks of five leave it.
+    tops = [task(f"t{i}", f"T{i}") for i in range(10)]
+    rows = [row(f"card{i}", f"t{i}", f"T{i}") for i in range(10)]
+    subs = [srow(f"sub{k}", "card0", f"s{k}", f"S{k}") for k in range(5)]
+    cards = [scard("T0", "card0", sub("S4", "sub4"))] + [scard(f"T{i}", f"card{i}") for i in range(1, 8)]
+    p = planner(*tops, *(stask(f"s{k}", f"S{k}", "t0") for k in range(5)))
+    plan = smerge(sboard(*cards), p, rows, subs)
+    # The cards' two losses go through; the four subtask losses are held.
+    assert (plan.counts.tasks_untagged, plan.counts.subs_detached, plan.counts.held) == (2, 0, 4)
+
+
+def test_a_detached_subtask_back_on_its_card_is_a_pair_again():
+    subs = [srow("sub1", "card1", "s1", "Билеты", status=bs.ROW_DETACHED)]
+    b = sboard(scard("Поездка", "card1", sub("Билеты на поезд", "sub1")))
+    p = planner(TOP, stask("s1", "Билеты", "t1"))
+    plan = smerge(b, p, [TOP_ROW], subs)
+    # Three-way against the old snapshot: the card's retitle travels.
+    assert plan.calls == [bs.Call("title", "s1", "Билеты на поезд")] and plan.ops == []
+    assert plan.sub_row_changes == [bs.SubRowChange("update", "sub1", "card1", "s1", None, "Билеты на поезд", False, None)]
+    assert plan.counts.subs_paired == 1
+    b, p, rows, subs, _ = ssettle(b, p, [TOP_ROW], subs)
+    assert_sidle(b, p, rows, subs)
+    # And its planner edits travel again.
+    p["s1"] = bs.replace(p["s1"], done=True)
+    assert smerge(b, p, rows, subs).ops == [{"op": "sub_check", "card": "card1", "id": "sub1", "checked": True}]
+
+
+def test_a_detached_subtask_whose_id_turns_up_on_another_card_gives_it_up():
+    rows = [TOP_ROW, row("card2", "t2", "Ремонт")]
+    subs = [srow("sub1", "card1", "s1", "Билеты", status=bs.ROW_DETACHED)]
+    b = sboard(scard("Поездка", "card1"), scard("Ремонт", "card2", sub("Билеты", "sub1")))
+    p = planner(TOP, task("t2", "Ремонт"), stask("s1", "Билеты", "t1"))
+    plan = smerge(b, p, rows, subs)
+    # The other card's subtask becomes a planner subtask of that card's task...
+    (create,) = plan.creates
+    assert (create.block_id, create.parent_task_id) == ("sub1", "t2")
+    # ...and the old one stays detached under an id no card carries.
+    rekeyed = [c for c in plan.sub_row_changes if c.task_id == "s1"]
+    assert len(rekeyed) == 1 and rekeyed[0].status == bs.ROW_DETACHED and rekeyed[0].block_id != "sub1"
+    assert not any(op["op"] == "sub_add" for op in plan.ops)
+    b, p, rows, subs, _ = ssettle(b, p, rows, subs, passes=2)
+    assert_sidle(b, p, rows, subs)
+    assert b.cards[0].subs == () and "s1" in p
+    assert [t.title for t in p.values() if t.parent_id == "t2"] == ["Билеты"]
+    # The planner's old subtask goes: its row is dropped, nothing else moves.
+    del p["s1"]
+    plan = smerge(b, p, rows, subs)
+    assert plan.ops == [] and [c.op for c in plan.sub_row_changes] == ["delete"]
 
 
 def test_subtask_titles_either_side_cannot_take_are_skipped():
@@ -1024,8 +1107,81 @@ def test_a_line_with_other_text_on_it_is_not_rewritten_but_the_planner_still_fol
     assert plan.ops == []
     assert plan.calls == [bs.Call("blocked_by", "t2", ("t3", "t1"))]
     assert plan.counts.skipped == 1
-    # The snapshot is not moved, so the card side is retried every pass.
-    assert bs.RowChange("deps", "bbbb1", deps=None) in plan.row_changes
+    # The planner took the union; the line's own side is kept apart, as read.
+    assert bs.RowChange("deps", "bbbb1", deps=("t1", "t3"), deps_card=("t1",)) in plan.row_changes
+
+
+def _deps_pass(b, p, rows):
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    b, p, rows, _subs = bs.apply_state(b, p, rows, [], plan)
+    return b, p, rows, plan
+
+
+def test_an_unwritable_line_settles_and_a_planner_removal_stays_removed():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], extra=True, blocked=["t3"])
+    b, p, rows, _ = _deps_pass(b, p, rows)
+    assert p["t2"].blocked_by == ("t3", "t1")
+    # Settled: the union is not sent again; the line is still skipped each pass.
+    again = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert again.units == [] and again.counts.skipped == 1
+    # The user takes t1 (which came from the card) off in the planner: it stays off.
+    p["t2"] = bs.replace(p["t2"], blocked_by=("t3",))
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    assert plan.calls == [] and plan.ops == []
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+    assert p["t2"].blocked_by == ("t3",)
+    # A link the user adds to the line still reaches the planner.
+    b = bs.replace(b, cards=(b.cards[0], bs.replace(b.cards[1], after=((NAME, "aaaa1"), (NAME, "cccc1"))), b.cards[2]))
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    # (t3 the planner already had: nothing to send.)
+    assert plan.calls == [] and p["t2"].blocked_by == ("t3",)
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+    # The user cleans the line: it is written once, to the planner's set (t1,
+    # which the planner took off, comes off the card too).
+    b = bs.replace(b, cards=(b.cards[0], bs.replace(b.cards[1], after_raw_extra=False), b.cards[2]))
+    b, p, rows, _ = _deps_pass(b, p, rows)
+    assert b.cards[1].after == ((NAME, "cccc1"),) and p["t2"].blocked_by == ("t3",)
+    assert {r.block_id: r.deps_card for r in rows}["bbbb1"] is None
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+
+
+def test_a_link_added_on_an_unwritable_line_reaches_the_planner():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], extra=True, blocked=["t1"], deps=["t1"])
+    rows[1] = bs.replace(rows[1], deps_card=("t1",))
+    b = bs.replace(b, cards=(b.cards[0], bs.replace(b.cards[1], after=((NAME, "aaaa1"), (NAME, "cccc1"))), b.cards[2]))
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t1", "t3"))] and plan.ops == []
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+
+
+def test_a_board_missing_for_a_pass_keeps_its_blockers_in_the_snapshot():
+    work = sboard(scard("Потом", "bbbb1", after=[(OTHER, "gen01")]))
+    general = sboard(scard("Купить краску", "gen01"), name=OTHER)
+    p = planner(dtask("t2", "Потом", blocked=["g1"]), dtask("g1", "Купить краску", tags=("general",)))
+    rows = {NAME: [drow("bbbb1", "t2", "Потом", deps=["g1"])], OTHER: [drow("gen01", "g1", "Купить краску", deps=[])]}
+    # The general board is not read this pass: g1 is nothing it can compare.
+    plan = deps_plan([dside(work, p, rows[NAME])], p)[NAME]
+    assert plan.units == [] and plan.ops == [] and plan.calls == []
+    # Back, after the user took g1 off in the planner: the card follows, the
+    # planner is not given g1 back.
+    p["t2"] = bs.replace(p["t2"], blocked_by=())
+    sides = [dside(work, p, rows[NAME]), dside(general, p, rows[OTHER], tag="general")]
+    plan = deps_plan(sides, p)[NAME]
+    assert plan.calls == []
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": []}]
+
+
+def test_a_blocker_set_over_the_planners_limit_is_not_sent():
+    many = [f"x{i:02d}" for i in range(19)]
+    b, p, rows = two_cards(after=[(NAME, "aaaa1"), (NAME, "cccc1")], blocked=many, deps=[])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    # 19 the planner keeps plus 2 from the card is 21: nothing on either side,
+    # the snapshot stays.
+    assert plan.calls == [] and plan.ops == [] and plan.counts.skipped == 1
+    assert [u for u in plan.units if u.row.block_id == "bbbb1"] == []
+    p["t2"] = bs.replace(p["t2"], blocked_by=tuple(many[:18]))
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.calls == [bs.Call("blocked_by", "t2", (*many[:18], "t1", "t3"))]
 
 
 def test_a_board_read_without_subtasks_has_no_dependencies_either():

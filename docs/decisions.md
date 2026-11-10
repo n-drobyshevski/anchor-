@@ -4407,8 +4407,10 @@ planner and menu test files).
   vaultd's half (`GET /v1/boards?subs=1`, the `sub_*` and `after_set` ops,
   vaultd/vaultd/board_subs.py) shipped first; Echo's half is in
   app/planner/board_sync.py (`merge`'s subtask step, `merge_deps`), the job,
-  one table (`board_sub_pair`), one column (`board_pair.deps`) and six counts
-  on `board_sync_run`.
+  one table (`board_sub_pair`), two columns (`board_pair.deps`,
+  `board_pair.deps_card`) and seven counts on `board_sync_run` (`subs_paired`
+  is shown in `/boards` as "связано" in the subtasks segment, apart from the
+  cards' "пар по названию").
 - **Reading.** Subtasks carry no tag in the planner, so a tag filter cannot
   find them: a pass now makes one `list_tasks` with no tag, subtasks and done
   tasks included, and takes each board's tagged top-level tasks and their
@@ -4446,14 +4448,26 @@ planner and menu test files).
   card again, forever), and it is dropped once the planner subtask is gone
   too. It counts as "отцепить" in the preview. A card that leaves the board
   takes its subtask rows with it and touches no planner subtask; the card's own
-  rule (untag the task) is the whole of it.
+  rule (untag the task) is the whole of it. A detached subtask whose block id
+  comes back on the same card (an undo, a paste), its planner subtask still
+  under that card's task, is a pair again, compared against its old snapshot.
+  One whose id turns up on another card gives the id up, so that card's
+  subtask is paired or created like any free one (a row per block id), and
+  the planner subtask stays detached under a minted id no card carries, so it
+  is not added back to the card it left.
 - **Not synced:** the order of subtasks inside a card (added ones go last), a
   subtask moved to another parent or another card (moved to another card reads
   as gone from this one: detached there), and planner subtasks deeper than the
   board allows (counted as skipped).
-- **The guard covers subtasks.** Removed and detached subtask pairs count as
-  losses with removed cards and untagged tasks, against the card and subtask
-  pairs together, with the same thresholds; `/boards now` still gets past it.
+- **The guard covers subtasks, each kind on its own.** A lost card pair (card
+  removed, task untagged) is one card loss, weighed against the card pairs
+  exactly as before subtasks; the subtask rows that go with it are no loss of
+  their own. Removed and detached subtask pairs are subtask losses, weighed
+  against the subtask pairs, with the same thresholds. Either triggering holds
+  its own kind (a held card keeps its subtask rows). Counted together, subtask
+  rows would dilute the cards' threshold: four cards with a subtask each,
+  read as an empty board, would have been four losses over eight pairs, not a
+  mass. `/boards now` still gets past both.
 - **Dependencies: cards only.** The `after:` line belongs to a card; a
   subtask has no line of its own, and writing one into a nested checklist would
   be structure the plugin does not know. So a subtask's own blockers stay
@@ -4468,6 +4482,11 @@ planner and menu test files).
   writes the union to both sides, so nothing either side had is lost on the
   first pass. After that, a change on one side is carried to the other; both
   changed, the planner wins. Whole sets, not link by link, as the brief said.
+  Only ids this pass can compare are replaced in the snapshot: a blocker
+  whose board was not read this pass (or whose pair is not known) is carried
+  over unchanged, so a board missing for one pass does not drop its blockers
+  from the snapshot and a later removal by the user is not read as the other
+  side's addition and reverted.
 - **Writing.** `after_set` rewrites the whole line, each link labelled with the
   blocker's planner title (`[`, `]`, `|` stripped and the result screened like
   a card text), else that block's own text, else the card side is skipped and
@@ -4475,11 +4494,30 @@ planner and menu test files).
   set changes, and an existing label is replaced by the blocker's title then.
   A line with anything besides links on it (`after_raw_extra`) is not
   rewritten (the rewrite would drop that text): skipped, the planner side still
-  follows. `update_task(blockedBy=...)` sends the whole set; the planner
-  refuses a cycle with a tool error (`isError`), which the client now raises as
-  `PlannerToolRefused` (a `PlannerToolError`, so every other caller is
-  unchanged): the job counts it as skipped and keeps the old snapshot, so it is
-  retried each pass and the rest of the pass goes on.
+  follows.
+- **A line that cannot be written has its own base.** With one snapshot, a
+  card side that cannot be written never agrees with it: storing nothing
+  re-sent the union every pass (so the user could never remove, in the
+  planner, a blocker that came from such a card), and storing the planner's
+  set would read every blocker the line never showed as removed on the card
+  the day the line became writable. So `deps` still moves to what the planner
+  took, and `deps_card` records what the line resolved to as read. While it is
+  set, the line's changes are read against it and the planner's against
+  `deps` (the planner wins when both moved); the first pass that writes the
+  line clears it. The merge settles: an unwritable line is skipped each pass,
+  like a held title, with no call and no row change.
+- **Caps and refusals.** A set over the planner's 20 blockers
+  (`update_task`'s `blockedBy` max) is not sent: neither side is written, the
+  snapshot stays, skipped. `update_task(blockedBy=...)` sends the whole set;
+  the planner refuses a cycle with a tool error (`isError`), which the client
+  raises as `PlannerToolRefused` (a `PlannerToolError`, so every other caller
+  is unchanged). By then the board write may already have put the loop's link
+  on the card, so keeping the old snapshot would retry the same link (and
+  leave the loop on the board) forever. Instead the job counts a conflict and
+  a skip and stores the snapshot as planned: the next pass reads the planner
+  as the side that moved and writes its set back to the card, which takes the
+  link off. The planner wins, as in any conflict, and the rest of the pass
+  goes on.
 - **Priority.** Dependency units go into each board's batch last, in what room
   the 100 ops leave; the rest waits.
 - **Deploy order.** vaultd first, then Echo. Echo asks `?subs=1`; an older

@@ -61,7 +61,12 @@ planner: the subtask leaves the card (`sub_remove`, with what is under
 it). Gone from the card: the planner subtask is *not* deleted (the
 client has no delete tool, on purpose); the pair is kept as `detached`
 so no pass adds it back, and dropped once the planner subtask is gone
-too. Both gone: the row goes. A card that leaves takes its subtask rows
+too. A detached subtask whose block id comes back on the same card (an
+undo, a paste), its planner subtask still under that card's task, is a
+pair again, compared against its old snapshot; one whose id turns up on
+another card gives the id up (that card's subtask then pairs or is
+created like any free one) and stays detached under an id no card
+carries. Both gone: the row goes. A card that leaves takes its subtask rows
 with it and touches no planner subtask. Order inside a card, and a
 subtask moved between parents or cards, are not synced (moved to another
 card reads as gone from this one). A board read without subtasks (an
@@ -78,12 +83,28 @@ link no row resolves is left as it was (written back unchanged), and a
 blocker no board shows is never touched. The snapshot (`Row.deps`) is the
 set both sides last agreed on: none yet, both get the union; otherwise a
 change on one side is carried over, and when both changed the planner
-wins. The card's line is rewritten whole by `after_set`, each link
-labelled with the blocker's planner title; the task's whole `blockedBy`
-is sent by `update_task`. A line with text other than links on it, a
-label or a link vaultd would refuse, leaves the card side unwritten
-(skipped, retried); a set the planner refuses (a cycle) keeps the old
-snapshot, so it is retried too.
+wins. Only ids this pass can compare (blockers paired on a board read
+this pass) are replaced in the snapshot; the others are carried over
+unchanged, so a board missing for one pass does not later read as its
+blockers removed. The card's line is rewritten whole by `after_set`, each
+link labelled with the blocker's planner title; the task's whole
+`blockedBy` is sent by `update_task`.
+
+A line that cannot be written (text other than links on it, a label or
+a link vaultd would refuse, more links than vaultd takes) is skipped and
+retried, and its side is tracked apart: `deps` still moves to what was
+agreed (the planner took it), and `Row.deps_card` records what the line
+resolved to as read. While that is set, the line's own changes are read
+against `deps_card` and the planner's against `deps` (the planner wins
+when both moved), so the merge settles instead of resending the union,
+and a blocker the planner only ever had is never read as removed on the
+card; the first pass that writes the line clears it. A set larger than
+the planner's 20 blockers is not sent: neither side moves, the snapshot
+stays, skipped. A set the planner refuses (a cycle, the card's line
+already written) counts as a conflict and a skip, and the snapshot is
+stored as planned all the same: the next pass then reads the planner as
+the side that moved and writes its set back to the card, taking the
+loop's link off it (board_job.py).
 
 **What is not synced.** Lanes beyond open/done, continuation lines
 other than subtasks and `after:`, descriptions, the archive. A board
@@ -91,6 +112,13 @@ whose dates use their own syntax (`dates: false`) syncs no due date in either di
 planner task with no row is not added as a card: the planner keeps
 every completed task forever, and adding them all to a board would bury
 it (and past vaultd's 500 cards a board stops being one).
+
+**Block ids the user wrote.** A card whose block id is not of the form
+vaultd's write ops take (`^[a-z0-9]{4,16}$`; a hand-typed `^Plan-1` is
+read but cannot be named back) is never paired, created for or written:
+one op on it would make vaultd refuse the whole batch. It is counted as
+skipped once per pass, keeps a pair it already had as it was, and keeps
+an unrowed task of its title from becoming a second card.
 
 **Titles.** vaultd refuses a whole batch for one bad card text, so
 `card_text_ok` mirrors its check (vaultd/vaultd/boards.py's
@@ -139,6 +167,9 @@ MASS_LOSS_MIN = 3
 SUB_MAX_DEPTH = 3
 SUBS_PER_CARD_MAX = 50
 AFTER_LINKS_MAX = 20
+# The planner's `update_task` takes at most this many blockers
+# (lib/mcp/tools.ts: `MAX_BLOCKED_BY`).
+BLOCKED_BY_MAX = 20
 
 ID_RE = re.compile(r"^[a-z0-9]{4,16}$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -223,7 +254,10 @@ class Task:
 class Row:
     """A tracked pair and its last synced snapshot. `deps` is the sorted
     task ids of the card's dependencies both sides last agreed on, None
-    until they were first compared."""
+    until they were first compared. `deps_card` is None while the card's
+    `after:` line shows `deps`; when the line could not be written, it is
+    what the line resolved to when last read (module docstring,
+    "Dependencies")."""
 
     block_id: str
     task_id: str
@@ -232,6 +266,7 @@ class Row:
     due: str | None
     status: str = ROW_OK
     deps: tuple[str, ...] | None = None
+    deps_card: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -289,7 +324,7 @@ class Call:
 class RowChange:
     """`insert` (task_id is None when the unit's Create supplies it),
     `update` or `delete` of one row of this board, or `deps`: only the
-    row's `deps` snapshot changes."""
+    row's `deps` and `deps_card` snapshots change."""
 
     op: str
     block_id: str
@@ -299,6 +334,7 @@ class RowChange:
     due: str | None = None
     status: str = ROW_OK
     deps: tuple[str, ...] | None = None
+    deps_card: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +397,8 @@ class Counts:
     subs_created: int = 0
     subs_detached: int = 0
     deps_changed: int = 0
+    # Subtask pairs made (by id or title, or a detached one back on its card).
+    subs_paired: int = 0
 
     def add(self, other: "Counts") -> None:
         for name in self.__dataclass_fields__:
@@ -699,8 +737,10 @@ class _Candidate:
     kind: str
     unit: Unit
     counts: Counts
-    # The pairs (or subtask pairs) this unit lets go of, for the guard.
+    # The card pairs, and the subtask pairs, this unit lets go of, for the
+    # guard (`merge`): each kind is weighed against its own pairs.
     loss: int = 0
+    sub_loss: int = 0
 
 
 def _merge_card_subs(
@@ -741,16 +781,20 @@ def _merge_card_subs(
         if row.status == ROW_DETACHED:
             if task is None:
                 out.append(_Candidate("sub", Unit(sub_rows=(SubRowChange("delete", row.block_id),)), Counts()))
-            else:
+                continue
+            if k is None:
                 detached_tasks.add(task.id)
-            continue
+                continue
+            # Back on the card it left, its planner subtask still under this
+            # card's task: a pair again, compared against its old snapshot
+            # (below, as any rowed subtask).
         if k is None and task is None:
             out.append(_Candidate("sub", Unit(sub_rows=(SubRowChange("delete", row.block_id),)), Counts()))
         elif k is None:
             # Gone from the card, kept by the planner: let go of, never deleted.
             detached_tasks.add(task.id)
             change = replace(_snapshot_change(row), status=ROW_DETACHED)
-            out.append(_Candidate("sub", Unit(sub_rows=(change,)), Counts(subs_detached=1), loss=1))
+            out.append(_Candidate("sub", Unit(sub_rows=(change,)), Counts(subs_detached=1), sub_loss=1))
         else:
             rows_at[k] = row
             if task is None:
@@ -773,7 +817,7 @@ def _merge_card_subs(
             j += 1
         deletes = tuple(SubRowChange("delete", rows_at[j].block_id) for j in under if j in rows_at)
         unit = Unit(ops=({"op": "sub_remove", "card": cid, "id": subs[k].id},), sub_rows=deletes)
-        out.append(_Candidate("sub", unit, Counts(subs_removed=1), loss=len(deletes)))
+        out.append(_Candidate("sub", unit, Counts(subs_removed=1), sub_loss=len(deletes)))
     for k in doomed:
         live.pop(k, None)
 
@@ -783,6 +827,7 @@ def _merge_card_subs(
         f = _compare(board, subs[k], task, row, row.block_id, card_id=cid)
         change = _sub_row_for(row.block_id, cid, row.task_id, row.parent_block_id, f, "update")
         c = Counts(subs_changed=1 if f.ops or f.calls else 0, conflicts=f.conflicts, skipped=f.skipped)
+        c.subs_paired = 1 if row.status == ROW_DETACHED else 0
         if f.ops or f.calls or not _sub_row_unchanged(row, change):
             out.append(_Candidate("sub", Unit(ops=tuple(f.ops), calls=tuple(f.calls), sub_rows=(change,)), c))
         else:
@@ -858,7 +903,7 @@ def _merge_card_subs(
         for k, task in sorted(pairs, key=lambda p: p[0]):
             block_id = block_for(k)
             f = _compare(board, subs[k], task, None, block_id, card_id=cid)
-            c = Counts(paired=1, subs_changed=1 if f.ops or f.calls else 0, skipped=f.skipped)
+            c = Counts(subs_paired=1, subs_changed=1 if f.ops or f.calls else 0, skipped=f.skipped)
             unit = Unit(
                 ops=tuple(tag_op(k, block_id) + f.ops),
                 calls=tuple(f.calls),
@@ -953,9 +998,14 @@ def merge(
     is reported as `held`, pass after pass, until the two sides agree
     again or the user runs `/boards now`, which passes `guard=False`
     because a person asked for exactly this board to be brought in step.
-    Subtask pairs count with the cards: a subtask removed from the card
-    and a subtask let go of (`detached`) are losses, over the card and
-    subtask pairs together."""
+    Card pairs and subtask pairs are weighed apart, each against its own
+    kind with the same thresholds: a card pair lost (untag, remove) is one
+    card loss, its subtask rows going with it count as nothing more; a
+    subtask removed from the card (with the rows under it) or let go of
+    (`detached`) is a subtask loss, over the subtask pairs. Either
+    triggering holds its own kind of losses (a held card keeps its
+    subtask rows too), so subtask rows never dilute the cards' threshold
+    nor the cards the subtasks'."""
     plan = Plan(board=board.name)
     counts = plan.counts
     ids = _Ids(board.cards)
@@ -1003,6 +1053,12 @@ def merge(
             )
             candidates.append(_Candidate("pair", unit, c, loss=1))
             continue
+        if not ID_RE.match(card.id or ""):
+            # A block id the user wrote in a form vaultd's write ops cannot
+            # name (`^Plan-1`): any op on it would make vaultd refuse the
+            # whole batch, so the pair is left as it is.
+            counts.skipped += 1
+            continue
         if task is None:
             # Gone from the tagged list: the card goes.
             c.cards_removed = 1
@@ -1032,6 +1088,11 @@ def merge(
 
     # 2. Pairing what has no row.
     free_cards = [card for card in board.cards if card.id is None or (card.id not in row_ids and cards_by_id.get(card.id) is card)]
+    # A card whose user-written block id vaultd's ops cannot name is never
+    # paired, created for or written (see step 1); it only keeps a task of
+    # its title from becoming a second card (below).
+    odd_cards = [card for card in free_cards if card.id is not None and not ID_RE.match(card.id)]
+    free_cards = [card for card in free_cards if card.id is None or ID_RE.match(card.id)]
     free_tasks = sorted((t for t in tasks if t.id not in row_tasks), key=lambda t: t.id)
     pairs: list[tuple[Card, Task]] = []
     by_mint = {mint_for_task(board.name, t.id): t for t in free_tasks}
@@ -1066,6 +1127,11 @@ def merge(
             pairs.append((card, task))
             adopted.add(task.id)
             free_cards.remove(card)
+    for card in odd_cards:
+        counts.skipped += 1
+        bucket = tasks_by_key.get(title_key(card.text))
+        if bucket:
+            free_tasks.remove(bucket.pop(0))
 
     # Ids for the untracked cards that will need one, by occurrence of text.
     seen: dict[str, int] = {}
@@ -1138,7 +1204,37 @@ def merge(
     # 5. Subtasks of the pairs that had a row when the pass began.
     if board.subs_known:
         tree = descendants({task.id for _card, task, _row in kept_pairs}, subtasks)
-        board_sub_ids = {r.block_id for r in sub_rows}
+        # A detached subtask whose block id now sits on another card (cut
+        # and pasted there): its row gives the id up, so that card's
+        # subtask is paired or created as any free one, and the planner
+        # subtask stays detached under an id no card carries, so it is not
+        # added back to the card it left.
+        home: dict[str, str] = {}
+        for card in board.cards:
+            for sub in card.subs:
+                if card.id and sub.id:
+                    home.setdefault(sub.id, card.id)
+        kept_ids = {card.id for card, _task, _row in kept_pairs}
+        planner_subs = {task.id for task in subtasks}
+        moved: set[str] = set()
+        for sub_row in sorted(sub_rows, key=lambda r: r.block_id):
+            where = home.get(sub_row.block_id)
+            if (
+                sub_row.status != ROW_DETACHED
+                or sub_row.card_block_id not in kept_ids
+                or where is None
+                or where == sub_row.card_block_id
+            ):
+                continue
+            moved.add(sub_row.block_id)
+            changes = [SubRowChange("delete", sub_row.block_id)]
+            if sub_row.task_id in planner_subs:
+                rekeyed = replace(sub_row, block_id=ids.claim(_hex(f"detached\0{sub_row.block_id}")))
+                changes.append(replace(_snapshot_change(rekeyed), op="insert"))
+                subs_by_card[sub_row.card_block_id].append(rekeyed)
+            subs_by_card[sub_row.card_block_id] = [r for r in subs_by_card[sub_row.card_block_id] if r.block_id != sub_row.block_id]
+            candidates.append(_Candidate("sub", Unit(sub_rows=tuple(changes)), Counts()))
+        board_sub_ids = {r.block_id for r in sub_rows} - moved
         board_sub_tasks = {r.task_id for r in sub_rows}
         for card, task, _row in kept_pairs:
             if not ID_RE.match(card.id or ""):
@@ -1159,10 +1255,16 @@ def merge(
                 )
             )
 
+    # The guard, card pairs and subtask pairs each against their own kind
+    # (a card's subtask rows go with it and count as no loss of their own).
     lost = sum(cand.loss for cand in candidates)
-    pairs_now = len(rows) + sum(1 for r in sub_rows if r.status != ROW_DETACHED)
-    hold = guard and lost > MASS_LOSS_MIN and lost * 2 > pairs_now
-    held_units = {id(cand.unit) for cand in candidates if cand.loss} if hold else set()
+    sub_lost = sum(cand.sub_loss for cand in candidates)
+    sub_pairs = sum(1 for r in sub_rows if r.status != ROW_DETACHED)
+    hold = guard and lost > MASS_LOSS_MIN and lost * 2 > len(rows)
+    sub_hold = guard and sub_lost > MASS_LOSS_MIN and sub_lost * 2 > sub_pairs
+    held_units = {
+        id(cand.unit) for cand in candidates if (hold and cand.loss) or (sub_hold and cand.sub_loss)
+    }
     counts.held = len(held_units)
 
     # Caps: vaultd's batch size, the planner's creates, the board's cards.
@@ -1276,11 +1378,23 @@ def merge_deps(sides: list[DepsSide], every_task: list[Task] | tuple[Task, ...])
             on_card = frozenset(linked)
             in_planner = frozenset(t for t in task.blocked_by if t in mapped and t != task.id)
             base = None if row.deps is None else frozenset(t for t in row.deps if t in mapped)
+            card_base = None if row.deps_card is None else frozenset(t for t in row.deps_card if t in mapped)
             conflict = False
             if base is None:
                 new = on_card | in_planner
             elif on_card == in_planner:
                 new = on_card
+            elif card_base is not None:
+                # The line was not written last time: its own changes are
+                # read against what it showed then, the planner's against
+                # `deps`; the planner wins when both moved.
+                card_moved, planner_moved = on_card != card_base, in_planner != base
+                if card_moved and planner_moved:
+                    new, conflict = in_planner, True
+                elif card_moved:
+                    new = (in_planner | (on_card - card_base)) - (card_base - on_card)
+                else:
+                    new = in_planner
             elif on_card == base:
                 new = in_planner
             elif in_planner == base:
@@ -1288,24 +1402,41 @@ def merge_deps(sides: list[DepsSide], every_task: list[Task] | tuple[Task, ...])
             else:
                 new, conflict = in_planner, True
 
+            def carried(ids: frozenset[str], previous: tuple[str, ...] | None) -> tuple[str, ...]:
+                # Only ids this pass could compare are replaced: a blocker on
+                # a board not read this pass keeps its place in the snapshot,
+                # so its absence is never read as a removal later.
+                kept = {t for t in previous or () if t not in mapped and t in tasks_by_id}
+                return tuple(sorted(ids | kept))
+
             ops: list[dict] = []
             calls: list[Call] = []
             skipped = 0
-            card_ok = True
-            if new != on_card:
-                links = _after_links(name, task.id, new, linked, unresolved, blocks_of, tasks_by_id, texts, names)
-                if card.after_raw_extra or links is None or not ID_RE.match(row.block_id):
-                    skipped, card_ok = 1, False
-                else:
-                    ops.append({"op": "after_set", "id": row.block_id, "links": links})
             if new != in_planner:
                 keep = [t for t in task.blocked_by if (t not in mapped or t in new) and t != task.id]
                 keep += sorted(new - set(keep))
+                if len(keep) > BLOCKED_BY_MAX:
+                    # More than the planner takes: nothing is written on
+                    # either side, the snapshot stays, the pass retries.
+                    plan.counts.add(Counts(conflicts=int(conflict), skipped=1))
+                    continue
                 calls.append(Call("blocked_by", task.id, tuple(keep)))
-            snapshot = tuple(sorted(new)) if card_ok else row.deps
+            card_written = new == on_card
+            if new != on_card:
+                links = _after_links(name, task.id, new, linked, unresolved, blocks_of, tasks_by_id, texts, names)
+                if card.after_raw_extra or links is None or not ID_RE.match(row.block_id):
+                    skipped = 1
+                else:
+                    ops.append({"op": "after_set", "id": row.block_id, "links": links})
+                    card_written = True
+            snapshot = carried(new, row.deps)
+            card_snapshot = None if card_written else carried(
+                on_card, row.deps_card if row.deps_card is not None else row.deps
+            )
             c = Counts(deps_changed=1 if ops or calls else 0, conflicts=int(conflict), skipped=skipped)
-            if ops or calls or snapshot != row.deps:
-                plan.units.append((Unit(ops=tuple(ops), calls=tuple(calls), row=RowChange("deps", row.block_id, deps=snapshot)), c))
+            if ops or calls or snapshot != row.deps or card_snapshot != row.deps_card:
+                change = RowChange("deps", row.block_id, deps=snapshot, deps_card=card_snapshot)
+                plan.units.append((Unit(ops=tuple(ops), calls=tuple(calls), row=change), c))
             else:
                 plan.counts.add(c)
     return out
@@ -1476,12 +1607,15 @@ def apply_state(
             by_block.pop(change.block_id, None)
             continue
         if change.op == "deps":
-            by_block[change.block_id] = replace(by_block[change.block_id], deps=change.deps)
+            by_block[change.block_id] = replace(by_block[change.block_id], deps=change.deps, deps_card=change.deps_card)
             continue
         old = by_block.get(change.block_id)
         task_id = change.task_id if change.task_id is not None else created_ids[change.block_id]
-        deps = old.deps if old is not None and change.op == "update" else None
-        by_block[change.block_id] = Row(change.block_id, task_id, change.title, change.done, change.due, change.status, deps)
+        keep = old is not None and change.op == "update"
+        by_block[change.block_id] = Row(
+            change.block_id, task_id, change.title, change.done, change.due, change.status,
+            old.deps if keep else None, old.deps_card if keep else None,
+        )
     subs_by_block = {row.block_id: row for row in sub_rows}
     for change in plan.sub_row_changes:
         if change.op == "delete":

@@ -38,8 +38,10 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
    unit's rows committed only once its calls succeeded: a row never
    records a value the planner has not taken, so a lost call is retried,
    never reverted. Blockers the planner refuses (a cycle) are counted as
-   skipped and their snapshot kept, so the pass goes on and the next one
-   tries again.
+   a conflict and skipped, and their snapshot stored as planned: the next
+   pass reads the planner as having moved and writes its set back to the
+   card, so a loop's link put on the card by this pass's write comes off
+   again instead of being retried forever.
 
 A planner or vault failure aborts the pass quietly: logged by event name
 only, recorded as an outcome in `board_sync_run`, never retried by the
@@ -222,16 +224,10 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
     return out
 
 
-def parse_tasks(raw: object, tag: str) -> list[board_sync.Task]:
-    """`list_tasks`' answer for one tag as merge input. A subtask or a
-    row without the tag (neither should come back) is left out."""
-    return [task for task, parent in _read_rows(raw) if parent is None and tag in task.tags]
-
-
-def parse_untagged(raw: object) -> list[board_sync.Task]:
-    """`list_tasks`' answer with no tag filter, cut to the tasks a card
-    may adopt: top-level, open, with no tag at all."""
-    return [task for task, parent in _read_rows(raw) if parent is None and not task.done and not task.tags]
+def untagged_of(tasks: list[board_sync.Task]) -> list[board_sync.Task]:
+    """The tasks a card may adopt (`parse_all`'s answer cut down):
+    top-level, open, with no tag at all."""
+    return [task for task in tasks if task.parent_id is None and not task.done and not task.tags]
 
 
 def knows_subtasks(raw: object) -> bool:
@@ -285,6 +281,7 @@ async def load_rows(session: AsyncSession, board: str) -> list[board_sync.Row]:
             due=r.due.isoformat() if r.due else None,
             status=r.status,
             deps=tuple(r.deps) if r.deps is not None else None,
+            deps_card=tuple(r.deps_card) if r.deps_card is not None else None,
         )
         for r in rows
     ]
@@ -327,6 +324,7 @@ async def _apply_row(
     if change.op == "deps":
         if existing is not None:
             existing.deps = list(change.deps) if change.deps is not None else None
+            existing.deps_card = list(change.deps_card) if change.deps_card is not None else None
             existing.updated_at = now
         await session.flush()
         return
@@ -492,7 +490,7 @@ async def _read_and_plan(
                 settings, session, clock, tag=None, include_subtasks=True, include_completed=True
             )
             every = parse_all(raw)
-            untagged = parse_untagged(raw)
+            untagged = untagged_of(every)
             planner_subs = knows_subtasks(raw)
         tag = settings.BOARD_SYNC_TAGS[board.name]
         tasks = [t for t in every if t.parent_id is None and tag in t.tags]
@@ -616,12 +614,18 @@ async def _carry_out(
             except PlannerToolRefused:
                 if call.kind != "blocked_by":
                     raise
-                # A cycle: the snapshot stays, so the next pass tries again.
                 refused = True
         if refused:
+            # A cycle, refused after the board write may already have put
+            # the link on the card. The planner's set stands: the snapshot
+            # is stored as planned all the same, so the next pass sees the
+            # planner as the side that moved and writes its set back to
+            # the card, taking the loop's link off (board_sync,
+            # "Dependencies"). A conflict and a skip, never a loop.
             plan.counts.skipped += 1
-            plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
-            continue
+            plan.counts.conflicts += 1
+            if not unit.ops:
+                plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
         await _apply_unit_rows(session, board.name, unit, None, now)
         await session.commit()
     return OK

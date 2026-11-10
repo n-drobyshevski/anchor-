@@ -3066,8 +3066,11 @@ class BoardPair(Base):
     (a title that cannot be a card, a due date that is not a date). `deps`
     is the snapshot of the card's dependencies: the sorted planner task ids
     its `after:` line and the task's `blockedBy` last agreed on (null until
-    the first pass that compared them). Written only by
-    app/planner/board_job.py, after the board write succeeded.
+    the first pass that compared them). `deps_card` is null while the
+    card's line shows `deps`; when the line could not be written, the
+    task ids it resolved to as last read, so its own changes are read
+    against that (app/planner/board_sync.py, "Dependencies"). Written only
+    by app/planner/board_job.py, after the board write succeeded.
     """
 
     __tablename__ = "board_pair"
@@ -3081,6 +3084,7 @@ class BoardPair(Base):
     due: Mapped[datetime.date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'ok'"))
     deps: Mapped[list | None] = mapped_column(JSONB)
+    deps_card: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -3168,6 +3172,7 @@ class BoardSyncRun(Base):
     subs_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     subs_detached: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     deps_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_paired: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(
