@@ -215,6 +215,12 @@ async def test_list_tasks_asks_for_the_users_own_top_level_tasks():
     ]
 
 
+async def test_list_tasks_with_no_tag_sends_no_tag_filter():
+    client = _Recorder()
+    await client.list_tasks(None, None, None, tag=None, include_completed=False)
+    assert client.calls == [("list_tasks", {"mine": True, "includeSubtasks": False, "includeCompleted": False})]
+
+
 async def test_complete_task_sends_done_only_when_given():
     client = _Recorder()
     await client.complete_task(None, None, None, task_id="t1")

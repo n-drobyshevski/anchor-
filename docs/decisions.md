@@ -4306,6 +4306,19 @@ planner and menu test files).
   the first-run rule as asked. The cost: a card and a task the user made
   separately with the same title become one pair, which is what they would
   want anyway.
+- **Adopting untagged tasks** (added after the first preview: a first pass
+  would have created a task for nearly every card, next to the untagged tasks
+  the user already had for them). A card still free after pairing takes an
+  open, top-level task of the user's own with **no tag at all** and the same
+  title (same rule as above): the task is given the board's tag
+  (`update_task` with its tags plus the board's) and the two are paired, with
+  the planner winning the fresh pair as usual. It shows in `/boards preview`
+  as a pair by title. A task with any tag is never adopted: its tags are the
+  user's choice and a board must not claim it from another one. Boards are
+  read in name order and a task one board adopts is not offered to the next,
+  so a title on two boards goes to the first. One extra `list_tasks` (no tag
+  filter, open tasks only) per pass. A lost tag call leaves no row; the next
+  pass adopts again (still untagged) or pairs by title (already tagged).
 - **Gone.** A card that left the board (deleted, archived) while its task still
   has the tag: the tag comes off the task (`update_task` with the other tags),
   never the task. A task that left the tagged list (untagged, deleted, no longer

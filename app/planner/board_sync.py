@@ -28,6 +28,15 @@ a board has no rows yet: a pass interrupted between the planner's
 create and the board write leaves exactly such an unrowed couple, and
 pairing is what keeps the next pass from duplicating it.
 
+**Adopting untagged tasks.** A card still free after that is paired with
+an open, top-level task of the user's own that carries *no tag at all*
+and has the same title (`untagged`): the task gets the board's tag (a
+`tag` call) and the pair is made as above, instead of a duplicate task.
+So tasks the user kept in the planner before the board was mapped join
+it by title. A task with any tag is never adopted (its tags are a
+choice the user made), and an untagged task with no such card is never
+touched.
+
 **Gone things.** A card that left the board (deleted, archived) while
 its task still has the tag: the tag is removed from the task, never the
 task. A task that left the tagged list (untagged, deleted, no longer the
@@ -168,8 +177,10 @@ class Call:
     """A planner write on an existing task, made after the board write.
 
     `kind` is `title` (`update_task` title), `due` (`update_task`
-    dueDate, None clears it), `done` (`complete_task`) or `untag`
-    (`update_task` tags, `value` being the tags that stay)."""
+    dueDate, None clears it), `done` (`complete_task`), `untag`
+    (`update_task` tags, `value` being the tags that stay) or `tag`
+    (`update_task` tags, `value` being the tags with the board's added:
+    an adopted untagged task)."""
 
     kind: str
     task_id: str
@@ -468,8 +479,12 @@ def merge(
     tag: str,
     creates_max: int = CREATES_MAX_DEFAULT,
     guard: bool = True,
+    untagged: list[Task] | tuple[Task, ...] = (),
 ) -> Plan:
-    """What one pass does for one board (module docstring).
+    """What one pass does for one board (module docstring). `untagged`
+    are the user's own open top-level tasks with no tag, the ones a free
+    card may adopt by title; any of them with a tag, done, or already in
+    a row is ignored.
 
     **The mass-loss guard.** A pair whose card or task is gone means a
     removal on the other side, and one side reading as empty by mistake
@@ -556,6 +571,21 @@ def merge(
             free_cards.remove(card)
             free_tasks.remove(task)
 
+    # Adoption: a card still free takes an untagged task of the same title.
+    adopted: set[str] = set()
+    untagged_by_key: dict[str, list[Task]] = {}
+    for task in sorted(untagged, key=lambda t: t.id):
+        if task.tags or task.done or task.id in row_tasks or task.id in tasks_by_id:
+            continue
+        untagged_by_key.setdefault(title_key(task.title), []).append(task)
+    for card in list(free_cards):
+        bucket = untagged_by_key.get(title_key(card.text))
+        if bucket:
+            task = bucket.pop(0)
+            pairs.append((card, task))
+            adopted.add(task.id)
+            free_cards.remove(card)
+
     # Ids for the untracked cards that will need one, by occurrence of text.
     seen: dict[str, int] = {}
     minted: dict[int, str] = {}
@@ -570,11 +600,14 @@ def merge(
         block_id = card.id or minted[card.n]
         f = _compare(board, card, task, None, block_id)
         ops = ([{"op": "tag", "n": card.n, "id": block_id}] if card.id is None else []) + f.ops
+        calls = f.calls
+        if task.id in adopted:
+            calls = [Call("tag", task.id, (*task.tags, tag)), *calls]
         c = Counts(paired=1, cards_tagged=1 if card.id is None else 0)
         c.cards_changed = 1 if f.ops else 0
-        c.tasks_changed = 1 if f.calls else 0
+        c.tasks_changed = 1 if calls else 0
         c.skipped = f.skipped
-        unit = Unit(ops=tuple(ops), calls=tuple(f.calls), row=_row_for(block_id, task.id, f, "insert"))
+        unit = Unit(ops=tuple(ops), calls=tuple(calls), row=_row_for(block_id, task.id, f, "insert"))
         candidates.append(("pair", unit, c))
 
     # 3. New cards: a planner task each.
@@ -654,7 +687,14 @@ def merge(
 
 
 def apply_to_state(
-    board: Board, tasks: list[Task], rows: list[Row], plan: Plan, *, tag: str, created_ids: dict[str, str] | None = None
+    board: Board,
+    tasks: list[Task],
+    rows: list[Row],
+    plan: Plan,
+    *,
+    tag: str,
+    created_ids: dict[str, str] | None = None,
+    untagged: list[Task] | tuple[Task, ...] = (),
 ) -> tuple[Board, list[Task], list[Row]]:
     """The state after `plan` ran in full: the board with its batch
     applied, the planner with its creates and calls made, the rows with
@@ -683,7 +723,7 @@ def apply_to_state(
             del cards[index]
     cards = [replace(card, n=i) for i, card in enumerate(cards)]
 
-    by_id = {task.id: task for task in tasks}
+    by_id = {task.id: task for task in (*untagged, *tasks)}
     for create in plan.creates:
         task_id = created_ids.setdefault(create.block_id, f"new-{create.block_id}")
         by_id[task_id] = Task(task_id, create.title, create.done, create.due, (create.tag,))
@@ -695,7 +735,7 @@ def apply_to_state(
             by_id[call.task_id] = replace(task, due=call.value)
         elif call.kind == "done":
             by_id[call.task_id] = replace(task, done=call.value)
-        elif call.kind == "untag":
+        elif call.kind in ("untag", "tag"):
             by_id[call.task_id] = replace(task, tags=tuple(call.value))
     new_tasks = [task for task in by_id.values() if tag in task.tags]
 

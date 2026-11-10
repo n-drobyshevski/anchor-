@@ -21,7 +21,7 @@ from app.config import Settings
 from app.core import echo_write
 from app.db.models import BoardPair, BoardSyncRun, Job, PlannerCredential, PlannerSnapshot, UserState
 from app.planner import board_job, board_sync
-from app.planner.client import UNSET, PlannerUnavailable
+from app.planner.client import UNSET, PlannerToolError, PlannerUnavailable
 from app.tg import boards as boards_ui
 from app.vault import errors
 from app.vault.client import BoardCard, BoardPost, ChangeEntry, ChangeFile, TaskBoard, UndoResult
@@ -86,14 +86,18 @@ class FakePlanner:
         self.writes: list[tuple[str, dict]] = []
         self.log = log if log is not None else []
         self.by_request: dict[str, str] = {}
+        self.reads: list[str | None] = []
 
     def _maybe_fail(self, name):
         if name in self.fail_on:
             raise PlannerUnavailable(name)
 
-    async def list_tasks(self, settings, session, clock, *, tag, **kw):
+    async def list_tasks(self, settings, session, clock, *, tag, include_completed=True, **kw):
         self._maybe_fail("list_tasks")
-        rows = [dict(t) for t in self.tasks.values() if tag in t.get("tags", [])]
+        self.reads.append(tag)
+        rows = [dict(t) for t in self.tasks.values() if tag is None or tag in t.get("tags", [])]
+        if not include_completed:
+            rows = [t for t in rows if not t["done"]]
         return {"count": len(rows), "tasks": rows}
 
     async def create_task(self, settings, session, clock, *, title, due_date, client_request_id, tags=None):
@@ -232,6 +236,54 @@ async def test_a_second_pass_on_the_state_the_first_left_does_nothing(sessionmak
     result = await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert result.outcome == board_job.OK
     assert vault.posts == [] and planner.writes == []
+
+
+async def test_an_untagged_task_is_adopted_by_title_once_across_boards(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    general = _board({"text": "Отчёт"}, name="General tasks.md")
+    work = _board({"text": "Отчёт"}, {"text": "Оплатить"})
+    vault = FakeVault([work, general])
+    planner = FakePlanner(
+        [_task("u1", "отчёт", tags=()), _task("u2", "Оплатить", tags=("дом",)), _task("u3", "Старое", tags=(), done=True)]
+    )
+
+    preview = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_PREVIEW)
+    assert {b.name: b.counts.paired for b in preview.boards} == {"General tasks.md": 1, NAME: 0}
+    assert planner.writes == [] and vault.posts == []
+    # One untagged read per pass, then one per board's tag.
+    assert planner.reads == [None, "general", "work"]
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    # Boards go in name order: "General tasks.md" adopts u1, "Work tasks.md"
+    # creates its own "Отчёт"; u2 has a tag of its own and is left alone.
+    assert planner.tasks["u1"]["tags"] == ["general"]
+    assert planner.tasks["u2"]["tags"] == ["дом"]
+    assert planner.tasks["u3"]["tags"] == []
+    created = sorted(w[1]["title"] for w in planner.writes if w[0] == "create")
+    assert created == ["Оплатить", "Отчёт"]
+    pairs = {(r.board, r.task_id) for r in await _rows(sessionmaker)}
+    assert ("General tasks.md", "u1") in pairs
+
+
+async def test_a_lost_tag_call_is_adopted_again_next_pass(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    board = _board({"text": "Отчёт"})
+    vault = FakeVault([board])
+    planner = FakePlanner([_task("u1", "Отчёт", tags=())], fail_on={"update_task"})
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.PLANNER_UNAVAILABLE
+    assert await _rows(sessionmaker) == []
+
+    planner.fail_on = set()
+    vault.boards = [_rebuild(vault, board)]
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert planner.tasks["u1"]["tags"] == ["work"]
+    assert [(r.block_id, r.task_id) for r in await _rows(sessionmaker)] == [(vault.boards[0].cards[0].id, "u1")]
+    assert not any(w[0] == "create" for w in planner.writes)
 
 
 async def test_planner_updates_follow_the_board_write(sessionmaker, frozen_clock):
@@ -583,3 +635,18 @@ async def test_logs_never_carry_a_title_or_a_board_name(sessionmaker, frozen_clo
     logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert SECRET_TITLE not in logged and NAME not in logged and "Work tasks" not in logged
     assert "board_sync_ok" in logged
+
+
+async def test_parse_untagged_keeps_open_top_level_tasks_with_no_tag():
+    raw = {
+        "tasks": [
+            {"id": "a", "title": "A", "done": False},
+            {"id": "b", "title": "B", "done": False, "tags": ["work"]},
+            {"id": "c", "title": "C", "done": True},
+            {"id": "d", "title": "D", "done": False, "parentId": "a"},
+            {"id": "e", "title": "E", "done": False, "tags": [], "dueDate": "2026-11-12"},
+        ]
+    }
+    assert [(t.id, t.due) for t in board_job.parse_untagged(raw)] == [("a", None), ("e", "2026-11-12")]
+    with pytest.raises(PlannerToolError):
+        board_job.parse_untagged({"tasks": [{"id": "a", "title": "A"}]})
