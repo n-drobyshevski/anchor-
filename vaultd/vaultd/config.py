@@ -98,6 +98,17 @@ ECHO_WRITE_MAX_BYTES = 32 * 1024
 ECHO_NAME_SUFFIX_MAX = 9
 ECHO_INBOX_DEFAULT = "Echo/Inbox"
 
+# Echo's stream notes (streams.py): one note per planner stream, in this
+# subfolder of the inbox. A refresh is one changeset holding every note
+# it changed, so the per-changeset cap is the most streams a refresh may
+# write and the daily cap is how many refreshes; both are this purpose's
+# own and never spend the inbox writer's budget above. A stream's key is
+# a planner tag or a saved stream's name.
+STREAMS_SUBFOLDER = "Streams"
+STREAM_FILES_PER_CHANGESET = 12
+STREAM_CHANGESETS_PER_DAY = 6
+STREAM_KEY_MAX_CHARS = 120
+
 # Footer link pruning (prune.py): one apply edits at most this many
 # notes, as one Echo changeset (writer `echo`, purpose `prune`).
 PRUNE_MAX_FILES = 500

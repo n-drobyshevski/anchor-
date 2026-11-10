@@ -36,7 +36,7 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, echo, frontmatter, graph, knowledge, paths, prune
+from vaultd import classes, echo, frontmatter, graph, knowledge, paths, prune, streams
 from vaultd import limits as limits_mod
 from vaultd.config import BODY_MAX_BYTES, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
@@ -551,6 +551,58 @@ async def put_echo_inbox(request: web.Request) -> web.Response:
     return web.json_response({"name": rel.rsplit("/", 1)[-1], "sha256": sha, "replayed": False})
 
 
+async def put_echo_stream(request: web.Request) -> web.Response:
+    """`PUT /v1/echo/streams` (streams.py): create Echo's note for one
+    planner stream, or replace it if it is still the note Echo left.
+    Body `{name, stream, body, changeset}`: a bare basename, the
+    stream's key and the body text; vaultd writes the frontmatter
+    (`anchor: never`) and builds the path. The answer is
+    `{name, sha256, changed}`, `changed: false` when the note already
+    held this body (nothing written, no changeset spent). A refusal is
+    the same bare 403 as every other write's, its reason in the log
+    only. The log line carries no name, key or content."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    parsed = _parse_json_body(raw, frozenset({"name", "stream", "body", "changeset"}))
+    if parsed is None:
+        return _json_error("bad_body", 400)
+    name, stream, text, changeset = parsed["name"], parsed["stream"], parsed["body"], parsed["changeset"]
+    if not all(isinstance(v, str) for v in (name, stream, text)):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            planned = await asyncio.to_thread(streams.plan, store, name, stream, text, now=now)
+            if planned.data is None:
+                assert planned.pre_image is not None
+                logger.info("echo_write", extra={"event": "stream_unchanged"})
+                return web.json_response(
+                    {"name": name, "sha256": hashlib.sha256(planned.pre_image).hexdigest(), "changed": False}
+                )
+            await asyncio.to_thread(undo_store.precheck_streams, changeset)
+            sha = await asyncio.to_thread(streams.perform, store, planned)
+        except (knowledge.Refused, CapExceeded) as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        except OSError:
+            return _json_error("io_error", 500)
+        await asyncio.to_thread(
+            undo_store.append_stream,
+            changeset,
+            FileEntry(planned.rel, planned.pre_image, sha),
+            list(planned.new_folders),
+        )
+    logger.info("echo_write", extra={"event": "stream_put", "count": len(planned.new_folders)})
+    return web.json_response({"name": name, "sha256": sha, "changed": True})
+
+
 _PLAN_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -768,6 +820,7 @@ def make_app(
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/knowledge/graph", get_knowledge_graph)
     app.router.add_put("/v1/echo/inbox", put_echo_inbox)
+    app.router.add_put("/v1/echo/streams", put_echo_stream)
     app.router.add_get("/v1/graph/prune", get_graph_prune)
     app.router.add_post("/v1/graph/prune", post_graph_prune)
     app.router.add_get("/v1/changes", get_changes)
