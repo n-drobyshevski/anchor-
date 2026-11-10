@@ -48,7 +48,8 @@ off at deploy level is not drawn and not reachable):
     main            status table (bot, quiet, focus, intensity, main
                     action) + check-in, /state, and the sections below
       today         check-in, today's plan, the main action (set ✏️ /
-                    clear ⚠️), focus, planner task ✏️ / event ✏️ / done
+                    clear ⚠️), focus, planner task ✏️ / event ✏️ / done / flows
+                    (PLANNER_FLOWS)
       deals         orders, a new order ✏️ (via order_cadence), debts,
                     the weekly review
         order_cadence   daily / weekdays / weekly › / once
@@ -268,6 +269,10 @@ def _planner(settings: Settings) -> bool:
     return settings.PLANNER_ENABLED
 
 
+def _planner_flows(settings: Settings) -> bool:
+    return settings.PLANNER_ENABLED and settings.PLANNER_FLOWS
+
+
 def _research(settings: Settings) -> bool:
     return settings.RESEARCH_ENABLED
 
@@ -312,6 +317,13 @@ def _lens_research(settings: Settings) -> bool:
 def _graph(settings: Settings) -> bool:
     """app/tg/graph.py's own `enabled`."""
     return settings.GRAPH_PRUNE_ENABLED and _vault(settings)
+
+
+def _boards(settings: Settings) -> bool:
+    """Board sync (app/tg/boards.py): drawn once its own flag is on, with
+    the planner and the vault it joins. `/boards preview` works before
+    that, typed."""
+    return settings.BOARD_SYNC_ENABLED and settings.PLANNER_ENABLED and _vault(settings)
 
 
 def _claude(settings: Settings) -> bool:
@@ -477,6 +489,7 @@ ACTIONS: dict[str, Action] = {
     "task": _prompt("✏️ Задача в планер", "task", gate=_planner),
     "event": _prompt("✏️ Событие в планер", "event", gate=_planner),
     "done": _run("☑️ Отметить сделанной", "done", gate=_planner),
+    "flows": _run("🌊 Потоки задач", "flows", gate=_planner_flows),
     # deals
     "orders": _run("📜 Договорённости", "orders"),
     "order_daily": _prompt("Каждый день", "order", args="daily"),
@@ -528,6 +541,10 @@ ACTIONS: dict[str, Action] = {
     # The dry run; its own reply carries the `gp:a:` apply button.
     "graph": _run("🧹 Чистка ссылок", "graph", gate=_graph),
     "graph_undo": _confirm("⚠️ Отменить чистку", "graph", args="undo", gate=_graph),
+    # Board sync: status, the dry run, and the undo of the last board write.
+    "boards": _run("📌 Доски ⇄ планер", "boards", gate=_boards),
+    "boards_preview": _run("🔍 Пробный проход", "boards", args="preview", gate=_boards),
+    "boards_undo": _confirm("⚠️ Отменить запись в доски", "boards", args="undo", gate=_boards),
     # lens
     "lens": _run("ℹ️ Статус линзы", "lens", gate=_lens_card),
     "lens_garden": _run("🌱 Сад сейчас", "lens", args="garden now", gate=_lens_garden),
@@ -744,6 +761,7 @@ def prompt_text(action: str) -> str:
 _CONFIRMS = {
     "due_clear": ("Снять главное действие?", "Да, снять"),
     "graph_undo": ("Отменить последнюю чистку ссылок?", "Да, отменить"),
+    "boards_undo": ("Отменить последнюю запись в доски? Планер не откатится.", "Да, отменить"),
     "lens_undo": ("Отменить последнюю запись Echo в Inbox?", "Да, отменить"),
     "lens_code_on": (
         "Открыть Claude Code доступ к заметкам линзы? Прочитанное уйдёт в Anthropic.",
@@ -1373,7 +1391,7 @@ def _render_today(settings: Settings, *, web: bool, view: MenuView, origin: str 
     _add(rows, _row(settings, web, "due_set", *(("due_clear",) if view.due_action else ())))
     _add(rows, _row(settings, web, "focus_off" if view.focus_on else "focus_on"))
     _add(rows, _row(settings, web, "task", "event"))
-    _add(rows, _row(settings, web, "done"))
+    _add(rows, _row(settings, web, "done", "flows"))
     rows.append(_nav_row("today"))
     return Section(title=TODAY_TITLE, hint=hint, table_rows=None, rows=rows)
 
@@ -1483,6 +1501,8 @@ def _render_knowledge(
     if section_exists("lens", settings, web=web):
         rows.append([_section_btn("lens", "🔭 Линза ›")])
     _add(rows, _row(settings, web, "graph", "graph_undo"))
+    _add(rows, _row(settings, web, "boards", "boards_preview"))
+    _add(rows, _row(settings, web, "boards_undo"))
     rows.append(_nav_row("knowledge"))
     hint = _lines(status, _settings_hint(view.settings_state, view.knowledge_roots))
     return Section(title=KNOWLEDGE_TITLE, hint=hint, table_rows=None, rows=rows)

@@ -20,6 +20,23 @@ every module in app/, eval/ and scripts/:
   the models, purge (/delete) and export (/export);
 - echo_write.py imports nothing that writes a memory: a lens card is
   material to read, never something Echo knows about the user.
+
+**Board sync is the one write without a tap**, and it is named here as
+such (docs/decisions.md, "Board sync"): the user chose to have their
+task boards kept in step with the planner in the background. So:
+
+- `post_board` (vaultd's board write) is named only by the client and
+  echo_write.py, like `put_echo_note`;
+- echo_write.py's `write_board` is named only by echo_write.py and
+  app/planner/board_job.py, the `BOARD_SYNC` job -- its own job kind,
+  which app/worker.py alone runs (`run_pass`), and which no idle module
+  may import (tests/test_idle_isolation.py);
+- `undo_boards` is named only by app/tg/boards.py (`/boards undo`);
+- every other writer and undo in echo_write.py is still named only by
+  the Telegram module whose tap or command runs it: the inbox writer by
+  app/tg/garden.py, `/lens undo` by app/tg/lens.py, the stream notes by
+  app/tg/planner.py. A new caller of any of them from a job would be a
+  second background writer, and fails here.
 """
 
 from __future__ import annotations
@@ -34,6 +51,23 @@ SCANNED = ("app", "eval", "scripts")
 WRITER = "app/core/echo_write.py"
 CLIENT = "app/vault/client.py"
 GRAPH = "app/tg/graph.py"
+BOARD_JOB = "app/planner/board_job.py"
+WORKER = "app/worker.py"
+# Each of echo_write.py's entry points, and the only module besides
+# echo_write.py that may name it: the tap or command that runs it, or,
+# for `write_board`, the board-sync job (the documented exception).
+WRITER_CALLERS = {
+    "adopt_research": "app/tg/garden.py",
+    "settle_open": "app/tg/garden.py",
+    "orphan_rows": "app/tg/garden.py",
+    "undo_last": "app/tg/lens.py",
+    "write_stream_notes": "app/tg/planner.py",
+    "undo_stream_notes": "app/tg/planner.py",
+    "write_board": BOARD_JOB,
+    "undo_boards": "app/tg/boards.py",
+}
+# Who may import the board-sync job at all, and who may run a pass.
+BOARD_JOB_IMPORTERS = (WORKER, "app/tg/boards.py")
 LEDGER_EXEMPT = ("app/db/models.py", "app/core/purge.py", "app/core/export.py")
 # An id column (study_card's) and a log key: ids, never the ledger.
 NOT_LEDGER_WORDS = ("echo_changeset_id",)
@@ -95,6 +129,18 @@ def _echo_undo_calls(tree: ast.AST) -> int:
     return count
 
 
+def _imports_board_job(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name == "app.planner.board_job" for a in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "app.planner.board_job":
+                return True
+            if node.module == "app.planner" and any(a.name == "board_job" for a in node.names):
+                return True
+    return False
+
+
 def _violations(path: Path, rel: str) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     words = _words(tree)
@@ -103,6 +149,15 @@ def _violations(path: Path, rel: str) -> list[str]:
         found.append(f"{rel}: names put_echo_note")
     if "graph_prune_apply" in words and rel not in (GRAPH, CLIENT):
         found.append(f"{rel}: names graph_prune_apply")
+    if "post_board" in words and rel not in (WRITER, CLIENT):
+        found.append(f"{rel}: names post_board")
+    for name, caller in WRITER_CALLERS.items():
+        if name in words and rel not in (WRITER, caller):
+            found.append(f"{rel}: names {name}")
+    if _imports_board_job(tree) and rel not in (*BOARD_JOB_IMPORTERS, BOARD_JOB):
+        found.append(f"{rel}: imports the board-sync job")
+    if _imports_board_job(tree) and "run_pass" in words and rel != WORKER:
+        found.append(f"{rel}: runs a board-sync pass")
     if _echo_undo_calls(tree) and rel not in (WRITER, GRAPH):
         found.append(f"{rel}: undoes with writer='echo'")
     if rel not in (WRITER, *LEDGER_EXEMPT) and any(
@@ -123,6 +178,20 @@ def test_echo_write_does_both():
     assert "put_echo_note" in _words(tree)
     assert _echo_undo_calls(tree) == 1
     assert "EchoChangeset" in _words(tree)
+
+
+def test_the_board_exception_is_real_and_named():
+    """Not vacuous: the job really writes through echo_write.py, the
+    worker really runs it, and echo_write.py really posts the board."""
+    job = ast.parse((ROOT / BOARD_JOB).read_text(encoding="utf-8"))
+    assert "write_board" in _words(job)
+    worker = ast.parse((ROOT / WORKER).read_text(encoding="utf-8"))
+    assert _imports_board_job(worker) and "run_pass" in _words(worker)
+    writer = ast.parse((ROOT / WRITER).read_text(encoding="utf-8"))
+    assert "post_board" in _words(writer)
+    # Each named caller really does call its writer.
+    for name, caller in WRITER_CALLERS.items():
+        assert name in _words(ast.parse((ROOT / caller).read_text(encoding="utf-8"))), (name, caller)
 
 
 def test_echo_write_never_writes_a_memory():
@@ -146,6 +215,13 @@ def test_echo_write_never_writes_a_memory():
         ("async def f(c):\n    await c.undo_changeset('echo_1', writer='echo')\n", "app/tg/lens.py"),
         ("from app.db.models import EchoChangeset\n", "app/tg/lens.py"),
         ("q = 'select vault_ref from echo_changeset'\n", "app/web/mcp_core.py"),
+        ("async def f(c):\n    await c.post_board('B.md', 'x', [], 'boards_1')\n", "app/core/idle/lens_research.py"),
+        ("from app.core.echo_write import write_board\n", "app/core/idle/reflect.py"),
+        ("from app.core.echo_write import write_board\n", "app/worker.py"),
+        ("from app.core import echo_write\nx = echo_write.write_stream_notes\n", "app/planner/board_job.py"),
+        ("from app.core import echo_write\nx = echo_write.adopt_research\n", "app/core/idle/lens_research.py"),
+        ("from app.planner import board_job\n", "app/core/idle/reflect.py"),
+        ("from app.planner import board_job\nboard_job.run_pass\n", "app/tg/boards.py"),
     ],
 )
 def test_the_check_catches_each_violation(tmp_path, code, rel):

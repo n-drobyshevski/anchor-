@@ -47,6 +47,26 @@ compare-and-swap refused) -- or a refusal/unavailable vault. An undo
 whose answer was lost is not "changed" on the retry: vaultd's index
 marks the changeset undone, and the row is marked too.
 
+**`write_stream_notes` / `undo_stream_notes`** (`/flows notes`, `/flows
+notes undo`): the user's own command writes one note per tag stream of
+the cached planner flows through vaultd's `PUT /v1/echo/streams`, all
+under one fresh changeset. There is no ledger row: the note's text is
+not web text, a rerun is harmless (vaultd writes nothing for a body it
+already holds), and vaultd's own index says which changeset to undo
+(the newest `echo` one whose purpose is `streams`). vaultd marks these
+notes `anchor: never`, so nothing here can read one back.
+
+**`write_board` / `undo_boards`** (board sync, `/boards undo`): one
+board's card operations through vaultd's `POST /v1/boards`, and the
+newest such changeset's undo. `write_board` is the one write here with
+no tap behind it: the board-sync job (app/planner/board_job.py) calls it
+from its own job kind, never from idle, because the user chose a
+background sync of their boards over an on-command one
+(docs/decisions.md, "Board sync"). tests/test_echo_isolation.py names
+that job as the exception; every other writer here still runs only on
+the user's tap. No ledger row either: vaultd's index names the changeset
+(`writer: echo`, `purpose: boards`), and the pairs are the job's.
+
 All commit. Logs carry the row's id and an outcome code, never the
 gap's id (with it, the logs would tell a researched gap from a resolved
 one, the L4 spec section 6), the note's name, a card's text, a quote, a
@@ -58,12 +78,13 @@ from __future__ import annotations
 import datetime
 import logging
 import secrets
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import echo_note, note_checks
+from app.core import echo_note, note_checks, stream_note
 from app.core.clock import Clock
 from app.db.models import EchoChangeset
 from app.research import jobs
@@ -278,18 +299,11 @@ async def undo_last(session: AsyncSession, client: VaultClient, clock: Clock) ->
     ).scalar_one_or_none()
     if row is None:
         return NOTHING
-    try:
-        result = await client.undo_changeset(row.vault_ref, writer="echo")
-    except VaultError as exc:
-        if exc.code == errors.NOT_FOUND:
-            outcome = EXPIRED
-        elif exc.code == errors.REFUSED:
-            outcome = REFUSED
-        else:
-            outcome = UNAVAILABLE
+    outcome, restored = await _undo_ref(client, row.vault_ref)
+    if outcome is not None:
         _log(f"undo_{outcome}", changeset_id=row.id)
         return outcome
-    if result.restored == 0 and not await _undone_in_vault(client, row.vault_ref):
+    if restored == 0 and not await _undone_in_vault(client, row.vault_ref):
         _log(f"undo_{CHANGED}", changeset_id=row.id)
         return CHANGED
     row.undone_at = now
@@ -308,3 +322,176 @@ async def _undone_in_vault(client: VaultClient, vault_ref: str) -> bool:
     except VaultError:
         return False
     return any(c.id == vault_ref and c.writer == "echo" and c.undone for c in changes)
+
+
+async def _undo_ref(client: VaultClient, vault_ref: str) -> tuple[str | None, int]:
+    """Echo's one undo call: `(failure outcome or None, files restored)`."""
+    try:
+        result = await client.undo_changeset(vault_ref, writer="echo")
+    except VaultError as exc:
+        if exc.code == errors.NOT_FOUND:
+            return EXPIRED, 0
+        if exc.code == errors.REFUSED:
+            return REFUSED, 0
+        return UNAVAILABLE, 0
+    return None, result.restored
+
+
+# -- stream notes (/flows notes) ---------------------------------------------------
+
+STREAMS_REF_PREFIX = "streams_"
+STREAMS_PURPOSE = "streams"
+
+
+@dataclass(frozen=True)
+class StreamNotesResult:
+    """What `/flows notes` did. `outcome` is OK, EMPTY (no tag stream to
+    write), REFUSED (the vault refused every note: no inbox, an older
+    vault service) or UNAVAILABLE (the vault stopped answering; the
+    counts say how far it got). `skipped` notes the vault refused,
+    `screened` ones the content screen refused, `omitted` streams that
+    got no note at all (over the cap, or no usable file name)."""
+
+    outcome: str
+    written: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+    screened: int = 0
+    omitted: int = 0
+
+
+async def write_stream_notes(client: VaultClient, flows: object) -> StreamNotesResult:
+    """Write or refresh one note per tag stream of a cached `get_flows`
+    payload (module docstring). A note vaultd refuses -- the user edited
+    it, the name is taken, a cap -- or whose text the content screen
+    refuses is counted and left alone; the rest still go."""
+    notes = stream_note.notes_for(flows)
+    if not notes:
+        return StreamNotesResult(EMPTY)
+    omitted = max(0, stream_note.tag_stream_count(flows) - len(notes))
+    vault_ref = STREAMS_REF_PREFIX + secrets.token_hex(12)
+    written = unchanged = skipped = screened = 0
+
+    def result(outcome: str) -> StreamNotesResult:
+        return StreamNotesResult(outcome, written, unchanged, skipped, screened, omitted)
+
+    for name, key, body in notes:
+        try:
+            note_checks.check_content(body)
+        except note_checks.Refused:
+            screened += 1
+            continue
+        try:
+            put = await client.put_stream_note(name, key, body, vault_ref)
+        except VaultError as exc:
+            if exc.code in _DEFINITE_REFUSALS:
+                skipped += 1
+                continue
+            _log(f"streams_{UNAVAILABLE}")
+            return result(UNAVAILABLE)
+        if put.changed:
+            written += 1
+        else:
+            unchanged += 1
+    # Every note refused and none accepted is not twelve edited notes: the
+    # vault has no inbox, or its service does not know the route yet.
+    outcome = REFUSED if skipped and not (written or unchanged) else OK
+    _log(f"streams_{outcome}")
+    return result(outcome)
+
+
+async def undo_stream_notes(client: VaultClient) -> str:
+    """`/flows notes undo`: take back the last stream-note write, and
+    only the last. Returns `UNDONE`, `NOTHING` (there is none, or the
+    last one is already undone), `EXPIRED`, `CHANGED` (every note in it
+    was edited since), `REFUSED` or `UNAVAILABLE`.
+
+    One level on purpose: the target is always the newest stream write,
+    undone or not. So a retry after an undo whose answer was lost finds
+    it undone and stops, instead of taking back the write before it."""
+    outcome, _ = await _undo_newest(client, STREAMS_PURPOSE, "streams")
+    return outcome
+
+
+async def _undo_newest(client: VaultClient, purpose: str, log_prefix: str) -> tuple[str, list[str]]:
+    """Undo the newest Echo write of `purpose`, one level only (see
+    `undo_stream_notes`): `(outcome, the paths that changeset held)`.
+    Both the stream notes' and the boards' undo come through here, and
+    so through the one `_undo_ref` call."""
+    try:
+        changes = await client.list_changes()
+    except VaultError:
+        _log(f"{log_prefix}_undo_{UNAVAILABLE}")
+        return UNAVAILABLE, []
+    mine = [c for c in changes if c.writer == "echo" and c.purpose == purpose and c.kind == "write"]
+    if not mine:
+        return NOTHING, []
+    newest = max(mine, key=lambda c: c.time)
+    if newest.undone:
+        return NOTHING, []
+    outcome, restored = await _undo_ref(client, newest.id)
+    if outcome is None:
+        outcome = UNDONE if restored else CHANGED
+    _log(f"{log_prefix}_undo_{outcome}")
+    return outcome, [f.path for f in newest.files]
+
+
+# -- task boards (app/planner/board_job.py, /boards) -----------------------------------
+
+BOARDS_REF_PREFIX = "boards_"
+BOARDS_PURPOSE = "boards"
+# write_board's outcomes besides OK, REFUSED and UNAVAILABLE: the board
+# changed since it was read (vaultd's 409), and nothing was written.
+BOARD_CHANGED = "board_changed"
+
+
+def new_boards_ref() -> str:
+    """One fresh changeset id per board-sync pass: every board it writes
+    goes into that one changeset, which `/boards undo` takes back whole."""
+    return BOARDS_REF_PREFIX + secrets.token_hex(12)
+
+
+@dataclass(frozen=True)
+class BoardWrite:
+    """What `write_board` did: `outcome` is OK (written, or nothing to
+    change: `changed` says which), BOARD_CHANGED (the 409: nothing
+    written), REFUSED (vaultd refused the batch: nothing written) or
+    UNAVAILABLE (no answer: whether it was written is unknown, and the
+    next pass reads the board again)."""
+
+    outcome: str
+    changed: bool = False
+
+
+async def write_board(client: VaultClient, name: str, if_sha256: str, ops: list[dict], changeset: str) -> BoardWrite:
+    """Apply one board's card operations through vaultd's `POST
+    /v1/boards`, as part of `changeset`.
+
+    The one write into the vault Echo makes without a tap: the board-sync
+    job (app/planner/board_job.py, its own job kind and never an idle
+    job) is its only caller, a documented exception that
+    tests/test_echo_isolation.py names. The batch was built by
+    app/planner/board_sync.py, which screens every card text the way
+    vaultd does, so a refusal here is a surprise, not a routine skip.
+    The log carries the outcome only, never the board's name or a card."""
+    if not ops:
+        return BoardWrite(OK)
+    try:
+        post = await client.post_board(name, if_sha256, ops, changeset)
+    except VaultError as exc:
+        outcome = REFUSED if exc.code in _DEFINITE_REFUSALS else UNAVAILABLE
+        _log(f"boards_{outcome}")
+        return BoardWrite(outcome)
+    if post.conflict:
+        _log(f"boards_{BOARD_CHANGED}")
+        return BoardWrite(BOARD_CHANGED)
+    _log(f"boards_{OK}")
+    return BoardWrite(OK, changed=post.changed)
+
+
+async def undo_boards(client: VaultClient) -> tuple[str, list[str]]:
+    """`/boards undo`: take back the last board-sync write, one level
+    only, exactly as `/flows notes undo` does for stream notes. Returns
+    the outcome and the board names that write held. The planner side of
+    that pass is not undone: it is the planner's own state."""
+    return await _undo_newest(client, BOARDS_PURPOSE, "boards")

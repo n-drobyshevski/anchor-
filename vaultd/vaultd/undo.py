@@ -60,8 +60,12 @@ from pathlib import Path
 from typing import Callable
 
 from vaultd.config import (
+    BOARD_CHANGESETS_PER_DAY,
     ECHO_CHANGESETS_PER_DAY,
     ECHO_FILES_PER_CHANGESET,
+    STREAM_CHANGESETS_PER_DAY,
+    STREAM_FILES_PER_CHANGESET,
+    TASK_BOARDS_MAX,
     UNDO_TTL_DAYS,
 )
 from vaultd.limits import LimitsStore
@@ -73,6 +77,11 @@ Clock = Callable[[], datetime]
 CLAUDE = "claude"
 ECHO = "echo"
 WRITERS = (CLAUDE, ECHO)
+# What an Echo changeset was for, when not the inbox (`meta.purpose`).
+PURPOSE_STREAMS = "streams"
+PURPOSE_BOARDS = "boards"
+# Purposes with a budget of their own: the inbox writer's does not count them.
+_OWN_BUDGET = (PURPOSE_STREAMS, PURPOSE_BOARDS)
 
 
 def utc_now() -> datetime:
@@ -135,6 +144,17 @@ REFUSAL_REASONS = frozenset(
         "frontmatter_keys",
         "changeset_writer_mismatch",
         "cap_echo",
+        # streams.py: Echo's stream notes
+        "stream_edited",
+        "cap_streams",
+        # boards.py: the user's task boards
+        "boards_unavailable",
+        "not_board",
+        "bad_card",
+        "card_missing",
+        "board_no_lane",
+        "board_changed",
+        "cap_boards",
         # prune.py: footer link pruning
         "plan_changed",
         "prune_config",
@@ -173,7 +193,7 @@ class ChangeSummary:
     undone: bool
     files: list[dict] = field(default_factory=list)
     writer: str = CLAUDE
-    # What an Echo changeset was for: None (the inbox) or "prune".
+    # What an Echo changeset was for: None (the inbox), "prune", "streams" or "boards".
     purpose: str | None = None
 
     def as_json(self) -> dict:
@@ -441,13 +461,86 @@ class UndoStore:
         self.sweep()
         meta = self._read_meta(changeset_id)
         if meta is None:
-            if self.count_recent("write", ECHO, hours=24) >= ECHO_CHANGESETS_PER_DAY:
+            if self._count_echo_day(None) >= ECHO_CHANGESETS_PER_DAY:
                 raise CapExceeded("cap_echo")
             return
         if _writer(meta) != ECHO:
             raise CapExceeded("changeset_writer_mismatch")
+        if meta.get("purpose") in _OWN_BUDGET:
+            raise CapExceeded("changeset_kind_mismatch")
         if meta.get("content_files", 0) + 1 > ECHO_FILES_PER_CHANGESET:
             raise CapExceeded("cap_echo")
+
+    def _count_echo_day(self, purpose: str | None) -> int:
+        """Echo's write changesets started in the last 24 hours with this
+        purpose; None counts the inbox writer's own (everything but the
+        purposes that have a budget of their own). The budgets are
+        separate, so no writer can starve another."""
+        cutoff = self._since(timedelta(hours=24), ECHO)
+        count = 0
+        for meta_dict in self.list_changes():
+            if meta_dict["kind"] != "write" or meta_dict["writer"] != ECHO:
+                continue
+            found = meta_dict.get("purpose")
+            counted = found not in _OWN_BUDGET if purpose is None else found == purpose
+            if not counted:
+                continue
+            if datetime.fromisoformat(meta_dict["time"]) >= cutoff:
+                count += 1
+        return count
+
+    def precheck_streams(self, changeset_id: str) -> None:
+        """The stream notes' caps (streams.py), before any byte is
+        written: a new changeset needs room under
+        STREAM_CHANGESETS_PER_DAY (rolling 24h, stream changesets only),
+        an existing one must be Echo's own stream changeset and hold
+        fewer than STREAM_FILES_PER_CHANGESET files."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            if self._count_echo_day(PURPOSE_STREAMS) >= STREAM_CHANGESETS_PER_DAY:
+                raise CapExceeded("cap_streams")
+            return
+        if _writer(meta) != ECHO:
+            raise CapExceeded("changeset_writer_mismatch")
+        if meta.get("purpose") != PURPOSE_STREAMS:
+            raise CapExceeded("changeset_kind_mismatch")
+        if meta.get("content_files", 0) + 1 > STREAM_FILES_PER_CHANGESET:
+            raise CapExceeded("cap_streams")
+
+    def precheck_boards(self, changeset_id: str) -> None:
+        """The task boards' caps (boards.py), before any byte is written:
+        a new changeset needs room under BOARD_CHANGESETS_PER_DAY, an
+        existing one must be Echo's own board changeset and hold fewer
+        files than there can be boards."""
+        self.sweep()
+        meta = self._read_meta(changeset_id)
+        if meta is None:
+            if self._count_echo_day(PURPOSE_BOARDS) >= BOARD_CHANGESETS_PER_DAY:
+                raise CapExceeded("cap_boards")
+            return
+        if _writer(meta) != ECHO:
+            raise CapExceeded("changeset_writer_mismatch")
+        if meta.get("purpose") != PURPOSE_BOARDS:
+            raise CapExceeded("changeset_kind_mismatch")
+        if meta.get("content_files", 0) + 1 > TASK_BOARDS_MAX:
+            raise CapExceeded("cap_boards")
+
+    def append_board(self, changeset_id: str, entry: FileEntry) -> None:
+        """Record one board write (boards.py) with the board as it was, so
+        `/v1/undo?writer=echo` puts it back. Callers must have called
+        `precheck_boards` first, under the same lock."""
+        self._append_files(changeset_id, "write", [entry], "content_files", 1, ECHO, purpose=PURPOSE_BOARDS)
+
+    def append_stream(self, changeset_id: str, entry: FileEntry, folders: list[str]) -> None:
+        """Record one stream-note write (streams.py) in its refresh's
+        Echo changeset, `purpose: streams`, with the folders it created.
+        A content write like any other, so `/v1/undo?writer=echo`
+        restores the replaced note. Callers must have called
+        `precheck_streams` first, under the same lock."""
+        self._append_files(
+            changeset_id, "write", [entry], "content_files", 1, ECHO, purpose=PURPOSE_STREAMS, folders=folders
+        )
 
     def echo_replay(self, changeset_id: str) -> tuple[str, str] | None:
         """(path, sha256) of the note an Echo changeset already created,
@@ -460,6 +553,11 @@ class UndoStore:
             return None
         if _writer(meta) != ECHO:
             raise CapExceeded("changeset_writer_mismatch")
+        # A stream-note changeset (streams.py) is Echo's too, but its
+        # files are not inbox notes: answering with one would hand the
+        # inbox route a stream note's name as "the note you made".
+        if meta.get("purpose") in _OWN_BUDGET:
+            raise CapExceeded("changeset_kind_mismatch")
         for entry in meta["files"]:
             if entry.get("written_sha256"):
                 return entry["path"], entry["written_sha256"]
@@ -487,6 +585,9 @@ class UndoStore:
         counter: str,
         count: int,
         writer: str = CLAUDE,
+        *,
+        purpose: str | None = None,
+        folders: list[str] | None = None,
     ) -> None:
         cdir = self._dir(changeset_id)
         blobs_dir = cdir / "blobs"
@@ -505,6 +606,14 @@ class UndoStore:
                 {"path": entry.path, "pre_image_file": pre_image_file, "written_sha256": entry.written_sha256}
             )
         meta[counter] = meta.get(counter, 0) + count
+        # In the same write as the files: a changeset must never be on
+        # disk with its files and without its purpose, or it would count
+        # against the wrong budget and be invisible to its own undo.
+        if purpose is not None:
+            meta["purpose"] = purpose
+        if folders:
+            meta.setdefault("folders", [])
+            meta["folders"].extend(folders)
         self._write_meta(changeset_id, meta)
 
     def append(self, changeset_id: str, kind: str, entries: list[FileEntry], *, writer: str = CLAUDE) -> None:

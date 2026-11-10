@@ -103,6 +103,7 @@ from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
 from app.tg import graph as graph_ui
+from app.tg import boards as boards_ui
 from app.tg import lens as lens_ui
 from app.tg import memory as memory_ui
 from app.tg import menu
@@ -256,12 +257,16 @@ BOT_COMMANDS = [
     BotCommand(command="task", description="Добавить задачу в планер"),
     BotCommand(command="event", description="Добавить событие в планер"),
     BotCommand(command="done", description="Отметить задачу сделанной"),
+    # PLANNER_FLOWS: streams of tasks and which need attention (cached).
+    BotCommand(command="flows", description="Потоки задач и что требует внимания"),
     # 8a (phase-8 plan section 8): the Obsidian vault's status.
     BotCommand(command="vault", description="Хранилище Obsidian"),
     # L1 (anchor-lens-plan.md section 11): the lens and Claude Code's door.
     BotCommand(command="lens", description="Линза и доступ Claude Code"),
     # Footer link pruning (app/tg/graph.py): dry run, apply, undo.
     BotCommand(command="graph", description="Чистка ссылок в футерах заметок"),
+    # Board sync (app/tg/boards.py): status, preview, a pass now, undo.
+    BotCommand(command="boards", description="Доски задач ⇄ планер"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1508,6 +1513,27 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/graph]", scene_id=scene_id
         )
 
+    @router.message(Command("boards"))
+    async def boards_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """Board sync (app/tg/boards.py): `/boards` status, `/boards
+        preview` dry run, `/boards now`, `/boards undo`. Telegram only,
+        like /graph: `now` and `undo` change the vault."""
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        reply = await boards_ui.command(
+            sessionmaker, settings, clock, command.args, client_factory=VaultClient.from_settings
+        )
+        await send_keyboard(message.bot, message.chat.id, reply, None)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/boards]", scene_id=scene_id
+        )
+
     @router.message(Command("revoke"))
     async def revoke_command(message: Message, event_update: Update) -> None:
         """Closes every open grant. Works even with the feature switched
@@ -2026,8 +2052,45 @@ def build_router(
             user_state = await get_state(session)
             snap = await planner_snapshot.get_snapshot(session)
         text = planner_ui.render_plan_text(
-            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+            snap,
+            clock,
+            user_state.timezone,
+            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+            flows=settings.PLANNER_FLOWS,
         )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("flows"))
+    async def flows_command(
+        message: Message, event_update: Update, command: CommandObject | None = None
+    ) -> None:
+        """Streams of tasks and which need attention. Snapshot only, like
+        /plan. `/flows notes [undo]` writes (or takes back) one note per
+        stream in the vault: Telegram only, like /graph, since it edits
+        the vault."""
+        args = (command.args or "").strip() if command is not None else ""
+        if args and getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        if not settings.PLANNER_FLOWS:
+            await _reply_once(message, event_update.update_id, planner_ui.FLOWS_DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            credential = await planner_auth.get_status(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.flows_unavailable_reply(credential)
+        if text is None and args:
+            text = await planner_ui.flows_notes(
+                snap, settings, clock, user_state.timezone, args, client_factory=VaultClient.from_settings
+            )
+        elif text is None:
+            text = planner_ui.render_flows_text(
+                snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+            )
         await _reply_once(message, event_update.update_id, text)
 
     @router.message(Command("planner"))
@@ -2177,10 +2240,13 @@ def build_router(
                 session, settings, safety_provider or provider, clock,
                 text=(command.args or "").strip(), timezone=timezone,
             )
-            return {
+            payload = {
                 "title": parsed.title,
                 "due_date": parsed.due_date.isoformat() if parsed.due_date else None,
             }
+            if parsed.tags:
+                payload["tags"] = list(parsed.tags)
+            return payload
 
         await _handle_write_command(
             message, event_update,
@@ -2496,6 +2562,7 @@ def build_router(
         "checkin": checkin_command,
         "state": _menu_state,
         "plan": plan_command,
+        "flows": flows_command,
         "focus_on": _fixed(focus, "focus", "on"),
         "focus_off": _fixed(focus, "focus", "off"),
         "done": done_command,
@@ -2517,6 +2584,8 @@ def build_router(
         "notes_off": _menu_vault("notes off"),
         "vault": _menu_vault(None),
         "graph": _fixed(graph_command, "graph"),
+        "boards": _fixed(boards_command, "boards"),
+        "boards_preview": _fixed(boards_command, "boards", "preview"),
         "lens": _fixed(lens_command, "lens"),
         "lens_garden": _fixed(lens_command, "lens", "garden now"),
         "lens_research": _fixed(lens_command, "lens", "research now"),
@@ -2575,6 +2644,7 @@ def build_router(
         # A bare /due clears the main action (menu.ACTIONS' own comment).
         "due_clear": _confirmed(due, "due"),
         "graph_undo": _confirmed(graph_command, "graph", "undo"),
+        "boards_undo": _confirmed(boards_command, "boards", "undo"),
         "lens_undo": _confirmed(lens_command, "lens", "undo"),
         "lens_code_on": _confirmed(lens_command, "lens", "code on"),
         "weblogout": _confirmed_bare(_menu_weblogout),

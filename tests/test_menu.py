@@ -116,6 +116,8 @@ def _settings(
     links: bool = True,
     graph: bool = True,
     packets: bool = True,
+    planner_flows: bool = True,
+    boards: bool = True,
     **extra,
 ) -> Settings:
     """A deploy with the given feature flags. The defaults are the fully
@@ -125,6 +127,8 @@ def _settings(
     values = dict(
         _env_file=None,
         PLANNER_ENABLED=planner,
+        PLANNER_FLOWS=planner_flows,
+        BOARD_SYNC_ENABLED=boards,
         RESEARCH_ENABLED=research,
         VAULT_MODE=vault_mode,
         VAULT_API_TOKEN="x" * 32,
@@ -573,7 +577,8 @@ def test_main_quiet_row_reads_the_live_quiet_period():
 
 def test_today_layout_with_everything_on():
     view = menu.MenuView(due_action="дописать отчёт", focus_on=False)
-    text, markup = _render("today", view=view)
+    # PLANNER_FLOWS is off here: the layout every deploy had before it.
+    text, markup = _render("today", _settings(planner_flows=False), view=view)
     assert "Главное: дописать отчёт · Фокус: выкл" in text
     rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
     assert rows == [
@@ -760,7 +765,8 @@ def _knowledge_text(settings=None, *, web=False, view=None) -> str:
 
 
 def test_knowledge_layout():
-    _, markup = _render("knowledge")
+    # BOARD_SYNC_ENABLED is off here: the layout every deploy had before it.
+    _, markup = _render("knowledge", _settings(boards=False))
     rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
     assert rows == [
         ["mn:a:notes_on"],
@@ -769,6 +775,29 @@ def test_knowledge_layout():
         ["mn:a:graph", "mn:a:graph_undo"],
         ["mn:s:main", "mn:x"],
     ]
+
+
+def test_knowledge_layout_with_board_sync_puts_its_rows_under_the_pruning():
+    _, markup = _render("knowledge")
+    rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
+    assert rows[3:] == [
+        ["mn:a:graph", "mn:a:graph_undo"],
+        ["mn:a:boards", "mn:a:boards_preview"],
+        ["mn:a:boards_undo"],
+        ["mn:s:main", "mn:x"],
+    ]
+
+
+def test_board_rows_need_the_flag_the_planner_and_the_vault_and_are_telegram_only():
+    for key in ("boards", "boards_preview", "boards_undo"):
+        assert menu.action_available(key, FULL, web=False) is True, key
+        assert menu.action_available(key, FULL, web=True) is False, key
+        for off in (_settings(boards=False), _settings(planner=False), _settings(vault_mode="off")):
+            assert menu.action_available(key, off, web=False) is False, key
+        assert not menu.action_available(key, Settings(_env_file=None), web=False)
+    assert menu.action_kind("boards_undo") == menu.CONFIRM
+    assert "Планер не откатится" in menu.confirm_text("boards_undo")
+    assert menu.ACTIONS["boards_preview"].args == "preview"
 
 
 def test_notes_toggle_flips_with_consent():
@@ -1216,8 +1245,10 @@ def test_data_layout_and_the_sensitive_acts_are_telegram_only():
 
 
 def test_action_count_and_kinds():
-    # 91 before runtime model choice, plus a pick, ✏️ and ↩️ per role.
-    assert len(menu.ACTIONS) == 91 + 3 * len(llm_models.ROLES)
+    # 91 before runtime model choice (92 with PLANNER_FLOWS' «Потоки»,
+    # 95 with board sync's status, preview and undo), plus a pick, ✏️
+    # and ↩️ per role.
+    assert len(menu.ACTIONS) == 95 + 3 * len(llm_models.ROLES)
     assert menu.KINDS == (menu.RUN, menu.PROMPT, menu.CONFIRM)
     for key, action in menu.ACTIONS.items():
         assert action.kind in menu.KINDS, key
@@ -2111,3 +2142,19 @@ async def test_planner_on_press_with_a_linked_credential_enables_sync_and_rerend
     flat = flatten_rich_message(fake.edits[-1].rich_message)
     assert "Синхронизация: вкл" in flat
     assert f"{menu.ACTION_PREFIX}planner_off" in rich_callback_data(fake.edits[-1].rich_message)
+
+
+def test_today_flows_button_needs_both_the_planner_and_the_flag():
+    assert "flows" in _offered("today")
+    # Off by default in a real deploy: no flag, no button, planner on or not.
+    assert "flows" not in _offered("today", _settings(planner_flows=False))
+    # The flag alone does nothing without the planner link switched on.
+    assert "flows" not in _offered("today", _settings(planner=False))
+    assert menu.action_kind("flows") == menu.RUN
+    assert not menu.action_available("flows", Settings(_env_file=None), web=False)
+
+
+def test_today_layout_with_flows_puts_the_button_beside_done():
+    _, markup = _render("today", view=menu.MenuView())
+    rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
+    assert ["mn:a:done", "mn:a:flows"] in rows

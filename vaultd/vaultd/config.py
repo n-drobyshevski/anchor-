@@ -98,6 +98,17 @@ ECHO_WRITE_MAX_BYTES = 32 * 1024
 ECHO_NAME_SUFFIX_MAX = 9
 ECHO_INBOX_DEFAULT = "Echo/Inbox"
 
+# Echo's stream notes (streams.py): one note per planner stream, in this
+# subfolder of the inbox. A refresh is one changeset holding every note
+# it changed, so the per-changeset cap is the most streams a refresh may
+# write and the daily cap is how many refreshes; both are this purpose's
+# own and never spend the inbox writer's budget above. A stream's key is
+# a planner tag or a saved stream's name.
+STREAMS_SUBFOLDER = "Streams"
+STREAM_FILES_PER_CHANGESET = 12
+STREAM_CHANGESETS_PER_DAY = 6
+STREAM_KEY_MAX_CHARS = 120
+
 # Footer link pruning (prune.py): one apply edits at most this many
 # notes, as one Echo changeset (writer `echo`, purpose `prune`).
 PRUNE_MAX_FILES = 500
@@ -154,3 +165,17 @@ def from_env(env: Mapping[str, str]) -> Config:
         port=int(port_raw),
         undo_root=Path(get("VAULT_UNDO_ROOT", DEFAULT_UNDO_ROOT) or DEFAULT_UNDO_ROOT),
     )
+
+# Task boards (boards.py): the user's own Kanban Starlane boards, named in
+# `Anchor/settings.md` (`task_boards`), that the bot may read as cards and
+# change card by card. At most this many boards; a write is one changeset per
+# board per sync, with its own daily cap (a sync runs every quarter of an
+# hour and writes only when something changed, so the cap is generous and
+# still bounds what the undo store can hold).
+TASK_BOARDS_MAX = 4
+BOARD_MAX_BYTES = 512 * 1024
+BOARD_MAX_CARDS = 500
+BOARD_OPS_MAX = 100
+BOARD_CARD_MAX_CHARS = 500
+BOARD_CHANGESETS_PER_DAY = 200
+

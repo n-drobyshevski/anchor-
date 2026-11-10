@@ -87,7 +87,7 @@ from typing import Literal
 import yaml
 
 from vaultd import frontmatter, paths
-from vaultd.config import ECHO_INBOX_DEFAULT, NOTE_MAX_BYTES
+from vaultd.config import ECHO_INBOX_DEFAULT, NOTE_MAX_BYTES, TASK_BOARDS_MAX
 from vaultd.frontmatter import NoteMark
 
 SETTINGS_PATH = "Anchor/settings.md"
@@ -111,7 +111,9 @@ _LIST_KEYS = (
 )
 # Lens L4: the one scalar folder key (module docstring).
 ECHO_INBOX_KEY = "echo_inbox"
-_ALLOWED_KEYS = frozenset({frontmatter.MARK_KEY, ECHO_INBOX_KEY, *_LIST_KEYS})
+# boards.py: a list of file names, not folders, so it is not one of _LIST_KEYS.
+TASK_BOARDS_KEY = "task_boards"
+_ALLOWED_KEYS = frozenset({frontmatter.MARK_KEY, ECHO_INBOX_KEY, TASK_BOARDS_KEY, *_LIST_KEYS})
 _ANCHOR_TOP = "Anchor"
 
 # never > personal > knowledge > lens.
@@ -144,6 +146,9 @@ class FolderRules:
     # Lens L4: Echo's inbox (explicit or the default), or None when
     # there is none. A knowledge folder too: see `knowledge_rules`.
     echo_inbox: Segments | None = None
+    # boards.py: bare `.md` file names at the vault's root the user opened
+    # to the bot as task boards. Empty: none.
+    task_boards: tuple[str, ...] = ()
 
 
 SETTINGS_ABSENT = FolderRules("absent")
@@ -214,6 +219,9 @@ def parse_settings(data: bytes) -> FolderRules:
                 return SETTINGS_INVALID
             entries.append(parts)
         lists[key] = tuple(entries)
+    boards = _task_boards(loaded.get(TASK_BOARDS_KEY, []))
+    if boards is None:
+        return SETTINGS_INVALID
     explicit: Segments | None = None
     if ECHO_INBOX_KEY in loaded:
         explicit = _folder_entry(loaded[ECHO_INBOX_KEY])
@@ -247,7 +255,30 @@ def parse_settings(data: bytes) -> FolderRules:
         lens=lists["lens_folders"],
         lens_person=lists["lens_person_folders"],
         echo_inbox=inbox,
+        task_boards=boards,
     )
+
+
+def _task_boards(raw: object) -> tuple[str, ...] | None:
+    """`task_boards`: a list of bare `.md` file names at the vault's root,
+    or None when the value is unusable (which invalidates the file, like
+    every other bad entry: a typo must not quietly open or close a board).
+    A name is one NFC segment with no `/`, `\\` or leading `.`, and never
+    the settings file's own. Repeats are dropped."""
+    if not isinstance(raw, list) or len(raw) > TASK_BOARDS_MAX:
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        name = unicodedata.normalize("NFC", item)
+        if not name.endswith(".md") or len(name) <= 3 or len(name) > 120:
+            return None
+        if "/" in name or "\\" in name or name.startswith(".") or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            return None
+        if name not in out:
+            out.append(name)
+    return tuple(out)
 
 
 def _inbox_conflicts(inbox: Segments, lists: dict[str, tuple[Segments, ...]]) -> bool:

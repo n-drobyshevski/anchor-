@@ -4106,3 +4106,283 @@ opinion of which model is better; other models arrive through «Своя
   separate cards for the same role and model writes a second audit row
   whose old and new value are equal; and the pick being confirmed is
   in memory only, as above.
+
+## Planner flows: streams and what needs attention
+
+The planner gained a read-only `get_flows` MCP tool: the user's tasks
+gathered into streams (by tag here) with an attention score from 0 to 1
+(deadline close, priority high, or both). Echo shows it on the Telegram
+side behind `PLANNER_FLOWS`, off by default and only meaningful with
+`PLANNER_ENABLED` (`app/planner/client.py`, `snapshot.py`, `app/tg/planner.py`,
+`app/tg/menu.py`, `app/planner/parse.py`; tests/test_planner_flows.py and the
+planner and menu test files).
+
+- **Same shape as the health call.** `sync()` makes one extra
+  `get_flows(date=today, group_by="tag", mine=True, limit=3)` strictly after
+  the agenda (and health) call. Any exception is logged by type only and
+  swallowed, and the agenda upsert still happens. The result is stored
+  untouched under `payload["flows"]`; nothing on the chat path calls the
+  planner. `get_flows` is on `ALLOWED_TOOLS`; the wrapper omits every option
+  it was not given (the planner's defaults apply) and clamps `limit` to 1..10.
+  `mine=True` because the now-block is the user's own, not the shared agenda's.
+- **One line, after the cap.** `render_lines()` appends at most one
+  «Требует внимания: …» line after the item cap and the health line: up to
+  three tasks with a score of 0.5 or more, highest first, a task in two
+  streams listed once, titles clipped to 40 characters and passed through the
+  same injection check as every title (a failing one becomes «(без названия)»;
+  whitespace is collapsed so a title cannot start a line of its own). Same
+  staleness and calendar-date rules as the rest of the block, and the flows
+  must carry today's date too. 0.5 is a constant (`ATTENTION_MIN_SCORE`), not
+  a setting: the planner owns the scale.
+- **The flag gates the read too.** `render_lines()` has a `flows` argument and
+  its callers pass `settings.PLANNER_FLOWS`, so turning the flag off stops the
+  titles reaching a prompt at once rather than after the next sync overwrites
+  the row. (`PLANNER_HEALTH` has no such argument; left as it was.)
+- **Privacy, stated plainly.** With the flag on, the titles of the user's own
+  top attention tasks are cached in `planner_snapshot` and can go to
+  OpenRouter in that line, as agenda task titles already do. Stream labels
+  (tag names) are cached but never put in a prompt. `/export` dumps whole rows
+  of `planner_snapshot`, so it includes the cached flows, and `/delete` purges
+  the table; tests/test_planner_flows.py checks both.
+- **`/flows`.** Reads only the snapshot, like `/plan`, in a pure renderer
+  (`render_flows_text`) apart from the handler. One header line per stream
+  (open, overdue, needs attention, nearest deadline), then up to three of its
+  attention tasks with «просрочено / сегодня / завтра / через N дн. / ДД.ММ»
+  (a week out at most as «через N дн.»). At most eight streams are shown.
+  Separate messages for: planner off, flag off, not linked, revoked, paused,
+  stale or missing data, no streams, nothing needing attention. Every field
+  is read defensively; a malformed payload degrades to fewer lines, never an
+  exception.
+- **Menu.** «🌊 Потоки задач» beside «Отметить сделанной» in «Сегодня», gated on
+  `PLANNER_ENABLED and PLANNER_FLOWS`. The menu tests' fully open deploy now
+  includes the flag; the layout test that pins the pre-flows button rows runs
+  with it off.
+- **`#теги` in `/task`.** A `#` at the start of a word, followed by letters,
+  digits, `_` or `-` with at least one letter, is a tag: stripped from the
+  title, lowercased, deduplicated, at most 12 (the rest are still removed from
+  the title), carried in the action payload, shown on the confirm card and sent
+  as `tags` to `create_task` (key omitted when empty). `#1`, `C#` and a token
+  longer than 40 characters are not tags and stay in the title, so nothing that
+  parsed before changes. A text of only tags is the same «Не поняла название
+  задачи.» as an empty title, raised before any model call, and the model
+  fallback never sees the tags. Chat-proposed tasks (`PLANNER_INTENT`) carry no
+  tags.
+- **Not done**: grouping by anything but tag, `stream` and `attention`
+  arguments from Telegram (the wrapper supports them), a live refresh from
+  `/flows`, and the web sink's own panel.
+
+## Stream notes: one note per planner stream, on the user's command
+
+- **What.** `/flows notes` writes one note per tag stream of the cached
+  planner flows into the vault; `/flows notes undo` takes the newest such
+  write back. vaultd's side is a new route, `PUT /v1/echo/streams`
+  (vaultd/vaultd/streams.py), beside the inbox writer and not a loosening of
+  it: the inbox writer stays create-only.
+- **Only on a command.** The first design refreshed the notes after each
+  `PLANNER_SYNC`. That would have been the first write into the vault with no
+  tap behind it, against the rule tests/test_echo_isolation.py and
+  tests/test_idle_isolation.py pin, so it was dropped: the notes are as fresh
+  as the last time the user asked. The writer lives in app/core/echo_write.py,
+  which stays the only module that writes or undoes for Echo, and its two
+  undo paths share one call.
+- **`anchor: never`, not a new class.** A stream note is a digest of the task
+  list; Echo must not learn it back from the vault. `never` is already the
+  strictest class and already hidden on every read route, in the manifest and
+  in the graph, so the note cannot reach memory, search, a prompt or a
+  connector, and no ingest code changed. The price: Echo cannot read its own
+  note, so it cannot show it or compare against it.
+- **vaultd writes the frontmatter.** The bot sends a bare name, the stream's
+  key and the body. The block is exactly `anchor`, `echo_stream`,
+  `echo_body_sha256` and the `echo` stamp.
+- **No new settings key.** The folder is `<echo_inbox>/Streams`: the inbox is
+  already the one place Echo may create notes, so `Anchor/settings.md` and its
+  fail-closed parser are untouched. No inbox, no stream notes. The knowledge
+  tree therefore lists the folder (a constant) and nothing in it.
+- **Replace only its own untouched note.** An existing file is replaced only
+  when its keys are exactly those five, it is `never`, stamped `echo`, names
+  the same stream, and its body still hashes to `echo_body_sha256`. The hash
+  travels in the note, so the check needs no state and survives the undo
+  store's 14-day expiry. A body the user edited, a note whose properties
+  changed, another stream's note and the user's own file are all refused and
+  left as they are; the command counts them as skipped. A user who wants the
+  note maintained again deletes it.
+- **An unchanged body writes nothing** and spends no changeset, so a rerun is
+  harmless and needs no ledger. That is why there is no bot-side table: the
+  text is the user's own task titles, not web text, and vaultd's index names
+  the changeset to undo (`writer: echo`, `purpose: streams`).
+- **Caps of its own.** One command is one changeset of at most 12 notes, at
+  most 6 such changesets a day. They neither spend nor are spent by the inbox
+  writer's 20 a day. The inbox route now refuses to replay a stream changeset:
+  before, a retried inbox write that reused such an id would have been
+  answered with a stream note's name.
+- **The body.** Absolute dates only («завтра» would be wrong by morning), and
+  every title and tag passes through `render.report_escape`, then the content
+  screen (an instruction or a secret skips that note). Only tag streams get a
+  note; the untagged bucket and other groupings are views.
+- **Undo is one level.** `/flows notes undo` targets the newest stream write,
+  undone or not, and stops if it is already undone. A retry after an undo
+  whose answer was lost therefore cannot reach the write before it. The cost:
+  only the last write can ever be taken back. Stream undos share Echo's four
+  undos an hour with `/lens undo` and `/graph undo`.
+- **The reply names the cause.** Refused by the vault, refused by the content
+  screen, and left without a note (over twelve streams, or a tag no file name
+  can be made from) are counted separately. When the vault refuses every note
+  and accepts none, the reply says to check the inbox and the vault service
+  instead of blaming twelve hand edits. A refusal's reason never leaves vaultd
+  (the bare 403), so the bot cannot be more precise than that.
+- **Not done.** No rename or delete: a tag that disappears leaves its last
+  note behind. No button in `/menu`. Notes for saved streams or other
+  groupings.
+
+
+## Board sync: the task boards and the planner, both ways, in the background
+
+- **What.** The user keeps tasks on two Kanban Starlane boards at the root of
+  the vault (`Work tasks.md`, `General tasks.md`) and in the planner, and asked
+  for the two to be kept in step both ways. A board is mapped to one planner
+  tag (`BOARD_SYNC_TAGS`, default `Work tasks.md` → `work`, `General tasks.md`
+  → `general`); a board vaultd reports with no mapping is left alone. vaultd's
+  half is `GET`/`POST /v1/boards` (vaultd/vaultd/boards.py, already shipped);
+  Echo's half is a pure merge (app/planner/board_sync.py), a job
+  (app/planner/board_job.py), the writer (app/core/echo_write.py's
+  `write_board`), two tables (`board_pair`, `board_sync_run`) and `/boards`
+  (app/tg/boards.py). Behind `BOARD_SYNC_ENABLED`, off by default.
+- **The exception to "Echo writes to the vault only on the user's tap".** Every
+  earlier Echo write (the inbox, stream notes, link pruning) runs on a tap or a
+  typed command, and the stream-notes record dropped a background refresh for
+  that reason. Here the user chose a background sync, knowing it relaxes the
+  rule: a board that only follows the planner when asked is not "in step". So
+  the rule changes narrowly. The sync is its own job kind (`BOARD_SYNC`), never
+  an idle job; tests/test_echo_isolation.py names app/planner/board_job.py as
+  the one caller of `write_board` and app/worker.py as the one runner of a
+  pass, and tests/test_idle_isolation.py forbids idle from importing either the
+  writer or the job. Every other writer is now pinned to the one Telegram
+  module whose tap runs it (garden for the inbox, lens for `/lens undo`,
+  planner for stream notes), which is stricter than before: a second
+  background writer fails the test.
+- **When it runs.** Enqueued after a `PLANNER_SYNC` that refreshed the snapshot
+  (`run_planner_sync` now returns whether it did), at most once per 15-minute
+  bucket, only while the flag is on, the planner link is active and
+  `VAULT_MODE` is not `off`. Never inside the planner sync: a board pass failing
+  must not cost the agenda, and it never touches the agenda snapshot.
+- **State.** One `board_pair` row per tracked pair: board, card block id,
+  planner task id, and the last synced snapshot of `title`, `done`, `due`, plus
+  `status` (`ok`, or `held` while a field cannot be carried). It holds card
+  text, so it is user content: `/export` includes it, `/delete` truncates it,
+  nothing logs it, and it has no debug view (neither does `board_sync_run`:
+  a board's name is a file name the user chose, which vault_file's debug view
+  leaves out for the same reason).
+- **Three-way, field by field.** Each side is compared with the snapshot:
+  changed on one side only, carried to the other; changed on both to the same
+  value, only the snapshot moves; changed on both to different values, the
+  planner wins and it counts as a conflict. The planner wins because it is the
+  richer record (descriptions, subtasks, the partner's view) and the board is
+  the quicker surface; a rule that never asks is better than a prompt every
+  15 minutes. Titles are compared stripped and NFC-normalized, as vaultd
+  normalizes a card it writes, so whitespace never ping-pongs.
+- **New card, no row** (no block id, or one no row knows): a planner task with
+  the board's tag (title = the card's text, due = its date, done = its box),
+  a `tag` op giving the card a block id if it had none, and a row. The
+  `clientRequestId` is built from the board's name and the block id, and the
+  minted id is derived from the board, the card's text and its occurrence among
+  untracked cards with that text, so a retried create returns the task it
+  already made.
+- **New task, no row** (the user's own, top-level, with the tag): an `add` card
+  with a minted id (derived from the task's id) and a row. **Open tasks only**,
+  a deviation from the brief, which said every new tagged task: the planner
+  keeps every completed task, so a first pass would have filled the done lane
+  with the tag's whole history, and past vaultd's 500 cards a board stops
+  parsing as one (`not_board`) and the sync stops. A checked card with no row
+  still becomes a done task, as asked.
+- **Pairing, on every pass.** Before the "new" rules, an unrowed card and an
+  unrowed task are paired when the card carries the id minted for that task,
+  or their titles are equal stripped and case-insensitively (duplicates pair
+  one to one, cards in board order, tasks by id); the planner's done and due
+  win on a fresh pair, and that is not a conflict. The brief asked for title
+  pairing on the first run only; it runs on every pass because a pass that
+  died between the planner's create and the board write (or after the board
+  write, before the rows' commit) leaves exactly such an unrowed couple, and
+  pairing is what stops the next pass from duplicating it. With no rows it is
+  the first-run rule as asked. The cost: a card and a task the user made
+  separately with the same title become one pair, which is what they would
+  want anyway.
+- **Gone.** A card that left the board (deleted, archived) while its task still
+  has the tag: the tag comes off the task (`update_task` with the other tags),
+  never the task. A task that left the tagged list (untagged, deleted, no longer
+  the user's own): the card is removed. Both gone: the row is dropped. Nothing
+  without a row is touched except by the "new" rules. A board vaultd reports as
+  `missing` or `not_board` is skipped whole, never read as "every card gone".
+- **Dates.** A board whose own settings change the date syntax (`dates: false`)
+  syncs no due date either way. A planner due date that is not `yyyy-MM-dd`,
+  or a card date that is not a real day (`@{2026-02-30}`), holds that pair's
+  date field and counts as skipped; nothing is overwritten.
+- **Titles vaultd would refuse.** vaultd refuses a whole batch for one bad card
+  text, so `card_text_ok` mirrors its check exactly (one line, at most 500
+  characters, no control or separator characters, no `%%`, no `@{yyyy-MM-dd}`,
+  no trailing ` ^id`). A title that fails is not added or retitled, the pass
+  counts it as skipped, and the pair is `held` with its old snapshot so it is
+  retried each pass; everything else goes on. A card text the planner cannot
+  take as a title (empty, over 500 characters) is skipped the same way.
+  Hashtags and `@@{time}` are part of the title and travel verbatim.
+- **Caps, deterministic.** At most 100 operations per board per pass (vaultd's
+  limit), `BOARD_SYNC_CREATES_PER_PASS` (20) planner creates, and never a board
+  past 500 cards; what does not fit waits for the next pass. Each pair's work
+  is one unit, deferred whole or not at all, taken in a fixed order (existing
+  pairs by block id, new pairs, new cards, new tasks). The batch sends `tag`
+  ops first, since only `tag` names a card by its index and the others can move
+  cards. Run again on the state its own output produced, the merge yields no
+  op, no call and no row change (tested, including after capped passes).
+- **Order within a pass, so a crash can only cause a harmless repeat.** Read
+  every mapped board and its tagged tasks, compute every plan; per board, the
+  planner creates (idempotent by request id); `POST /v1/boards` with one fresh
+  changeset per pass (`boards_…`, every board's write in it); then the rows
+  that wait on nothing else; then the planner updates, each unit's row
+  committed only after its calls succeeded. That last part goes a step past the
+  brief ("on success commit the rows"): a row that recorded a value before the
+  planner took it would make the next pass read the planner's old value as a
+  planner-side change and carry it back over the user's card. A tag is taken
+  off a task before its row goes, for the same reason. A 409 for a board
+  changes nothing more for it this pass. A create retried by its request id
+  that answers with a task this pass meant to add as a card drops that add.
+- **Failures are quiet.** A planner or vault failure (or a vault refusal of the
+  batch) aborts the pass, logged by event name only, recorded as an outcome
+  in `board_sync_run`, never retried by the queue (the next pass is 15 minutes
+  away). Boards done before it stay done.
+- **The planner client.** `update_task` joins `ALLOWED_TOOLS`. It was left out
+  because `update_event` can edit the partner's joint events and nothing needed
+  an edit; the wrapper can send only a title, a due date and tags, and the job
+  calls it only on tasks it listed with `mine: true` (the planner's RLS lets a
+  member edit the partner's shared tasks, so `mine` is this side's line).
+  `update_event` and every `delete_*` tool stay out.
+- **Controls, Telegram only** (`boards` joins the web ingress's blocked
+  commands, like `graph`). `/boards`: stored state only. `/boards preview`: a
+  dry run that writes nothing anywhere (no board, no planner write, no pair, no
+  run row) and works with the flag off, so the first pairing can be checked
+  first. `/boards now`: one pass (flag on). Both are queued as jobs and answered
+  by the worker, because the planner client lives on the job path, never the
+  chat path. `/boards undo`: the newest `purpose: boards` changeset through the
+  same one-level undo as `/flows notes undo` (the two share `_undo_newest` and
+  so the one `_undo_ref` call). It says plainly that the planner is not
+  undone, and it forgets the pairs of the boards it restored: otherwise the
+  next pass would read the restored cards' missing ids as cards gone and take
+  the tag off their tasks. The menu rows (status, preview, undo) sit under the
+  link pruning in «Знания», drawn once the flag is on.
+- **Digest.** The daily digest (app/tg/claude.py's `run_library_digest`) gains
+  one line when the last day's passes met a conflict or a skipped title, and
+  is queued while the board flag is on too. Conflicts are summed; skipped
+  titles are the most any one pass skipped, since a held title is skipped
+  again every pass.
+- **Not done.** Subtasks, lanes beyond open/done (a card's lane is read but
+  carries no meaning), card continuation lines and task descriptions, the
+  board's archive, planner deletes (a removed card untags, never deletes), done
+  planner tasks with no row, and an undo of the planner side.
+- **The mass-loss guard.** A pair whose card or task is gone becomes a removal
+  on the other side, so one side reading as empty by mistake (a planner answer
+  cut short, a tag renamed, a board caught half way through a reorganisation)
+  would remove every card or untag every task. When one pass would drop more
+  than three pairs and more than half of a board's pairs, it drops none: the
+  pairs stay, everything else in the pass still happens, and the count is
+  reported as held in `/boards`, the preview and the run row. `/boards now`
+  runs without the guard, because a person asked for that board to be brought
+  in step; the background pass and the preview always keep it.
+

@@ -263,6 +263,13 @@ PURGED_TABLES = (
     # or promoted, and vaultd's undo store (which could take them back)
     # is wiped by the vault_purge job's POST /v1/purge.
     "echo_changeset",
+    # Board sync: the card <-> task pairs (titles from both sides) and
+    # the passes' outcomes per board. The boards and the planner keep
+    # what the passes wrote: those are the user's own files and tasks,
+    # and vaultd's undo store is wiped by POST /v1/purge as for every
+    # other Echo write.
+    "board_pair",
+    "board_sync_run",
     "vault_file",
     "vault_hold",
     "vault_status",

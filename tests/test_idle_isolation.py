@@ -65,8 +65,13 @@ FORBIDDEN_IMPORTS = {
     "app.core.review": "the weekly review -- writes WeeklyReview/ReviewProposal",
     "app.core.cards": "research card adoption",
     # L4 (the L4 spec sections 5 and 7): Echo writes into the vault only
-    # on the user's «в Inbox» tap, never from idle.
-    "app.core.echo_write": "Echo's inbox writes happen only on the user's tap",
+    # on the user's «в Inbox» tap, never from idle. Board sync is the one
+    # write without a tap (docs/decisions.md, "Board sync"), and it is a
+    # job kind of its own, app/planner/board_job.py, never an idle job:
+    # idle may import neither (tests/test_echo_isolation.py names the
+    # exception).
+    "app.core.echo_write": "Echo's vault writes happen on the user's tap or in the board-sync job, never in idle",
+    "app.planner.board_job": "board sync is its own job kind, never an idle job",
     # 8e (8e plan sections 7-8): vault notes reach only the persona's
     # turn. Personal note text never reaches an idle model, in any phase;
     # knowledge note text does not in 8e either.

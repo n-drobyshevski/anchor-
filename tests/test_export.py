@@ -305,6 +305,17 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         )
         await session.commit()
 
+    # Board sync: one tracked pair and one pass.
+    async with sessionmaker() as session:
+        session.add(
+            models.BoardPair(
+                board="Work tasks.md", block_id="abcd1234", task_id="t1", title="Отчёт",
+                done=False, created_at=now, updated_at=now,
+            )
+        )
+        session.add(models.BoardSyncRun(at=now, board="Work tasks.md", outcome="ok", conflicts=1))
+        await session.commit()
+
 
 # --- contents ---
 

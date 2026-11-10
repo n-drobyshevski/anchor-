@@ -417,6 +417,61 @@ small_component_max: 3       # the report lists components up to this size
 and, per note, `graph-keep: [Target, ...]` in its own frontmatter,
 which the pruning honours and never writes.
 
+## 12. Task boards: kept in step with the planner
+
+Echo can keep your Kanban Starlane boards and the planner in step, both
+ways: a card you add becomes a planner task with the board's tag, an open
+task with the tag becomes a card, and a renamed card, a ticked box or a
+moved date travels to the other side (the planner wins when both sides
+changed the same thing). It runs in the background, after each planner
+sync, at most every 15 minutes.
+
+1. **Name the boards** in `Anchor/settings.md`, as bare file names at the
+   vault's root (at most four):
+
+   ```yaml
+   task_boards:
+     - Work tasks.md
+     - General tasks.md
+   ```
+
+   Deploy the vault service first: an older one treats a settings file
+   with `task_boards` as invalid and then reads no note at all. A name
+   that is not a Kanban Starlane board (no `kanban-starlane:` in its
+   frontmatter) is reported and left alone.
+2. **Map each board to a planner tag.** By default `Work tasks.md` is the
+   tag `work` and `General tasks.md` is `general`. For other names set
+   `BOARD_SYNC_TAGS` on the bot, as JSON:
+   `{"Work tasks.md": "work", "Дом.md": "дом"}`. A board with no entry is
+   ignored.
+3. **Check the first pairing with `/boards preview`** in Telegram, with
+   the flag still off. It reads both sides and says what a pass would do
+   (cards to add, change, remove; tasks to create, change, untag; pairs
+   by title; conflicts; skipped titles) and writes nothing. Cards and
+   tasks with exactly the same title are paired, not duplicated. If the
+   numbers look wrong — a tag that matches nothing would add every task
+   as a card — fix the mapping first.
+4. **Turn it on**: `BOARD_SYNC_ENABLED=true` on the bot (it also needs
+   `PLANNER_ENABLED`, the planner linked, and a `VAULT_MODE` other than
+   `off`). `/boards` shows each board's pairs and its last pass;
+   `/boards now` runs one pass at once.
+
+What it does not touch: lanes other than open and done, the lines under
+a card, the archive, subtasks and task descriptions. A card you delete or
+archive takes the board's tag off its task (the task stays in the
+planner); a task you untag or delete loses its card. Completed planner
+tasks that were never on the board are not added.
+
+**Undo:** `/boards undo` puts the boards back as they were before the
+last write (14 days). It does not undo the planner side, and the next
+pass pairs the cards again by title, so turn the flag off first if you
+want the board to stay that way.
+
+**Obsidian Sync:** the vault service refuses to write over a board that
+changed since it was read, and tries again on the next pass. An edit
+still on its way from another device can still meet a write and leave a
+conflicted copy of the board; open both and keep the one you want.
+
 ## Turning it off
 
 Set `VAULT_MODE=off` on the bot. The bot then makes no request to the

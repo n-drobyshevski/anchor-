@@ -3047,3 +3047,83 @@ class EchoChangeset(Base):
             postgresql_where=text("confirmed_at is null"),
         ),
     )
+
+
+class BoardPair(Base):
+    """One tracked pair between a card on one of the user's task boards
+    and a planner task (app/planner/board_sync.py, app/planner/board_job.py).
+
+    **This is user content.** `title` is the card's text and the task's
+    title as last synced, so the row carries a task title from both the
+    vault and the planner: `/export` includes the table, `/delete`
+    truncates it, nothing logs a column of it, and there is no debug view
+    (`board` is a file name the user chose, `title` their own words).
+
+    `board` is the board's file name as vaultd reports it, `block_id` the
+    card's block id there, `task_id` the planner's id; `title`, `done` and
+    `due` are the snapshot the next pass compares both sides against.
+    `status` is `ok`, or `held` while a field of the pair cannot be carried
+    (a title that cannot be a card, a due date that is not a date). Written
+    only by app/planner/board_job.py, after the board write succeeded.
+    """
+
+    __tablename__ = "board_pair"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    board: Mapped[str] = mapped_column(String, nullable=False)
+    block_id: Mapped[str] = mapped_column(String, nullable=False)
+    task_id: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    done: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    due: Mapped[datetime.date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'ok'"))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("board", "block_id", name="uq_board_pair_block"),
+        UniqueConstraint("board", "task_id", name="uq_board_pair_task"),
+        # The plugin's block ids (vaultd/vaultd/boards.py's `_BLOCK_ID_RE`).
+        CheckConstraint("block_id ~ '^[A-Za-z0-9-]{1,64}$'", name="ck_board_pair_block_id"),
+        CheckConstraint("status in ('ok', 'held')", name="ck_board_pair_status"),
+    )
+
+
+class BoardSyncRun(Base):
+    """One board's outcome in one board-sync pass, or (`board` null) the
+    outcome of a pass that never reached a board. Counts and codes only:
+    no title, no card text. `/boards` shows the newest per board and the
+    daily digest sums the last day's conflicts and skipped titles; each
+    pass deletes rows older than RUNS_KEEP_DAYS (app/planner/board_job.py).
+
+    `board` is still the user's file name, so `/export` includes the table,
+    `/delete` truncates it, and there is no debug view.
+    """
+
+    __tablename__ = "board_sync_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    board: Mapped[str | None] = mapped_column(String)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    cards_added: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cards_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cards_tagged: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cards_removed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tasks_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tasks_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tasks_untagged: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    paired: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    conflicts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    skipped: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    waiting: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    held: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome in ('ok', 'changed', 'unavailable', 'refused', 'planner_unavailable',"
+            " 'no_boards', 'missing', 'not_board')",
+            name="ck_board_sync_run_outcome",
+        ),
+        Index("ix_board_sync_run_at", "at"),
+    )

@@ -36,7 +36,7 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import classes, echo, frontmatter, graph, knowledge, paths, prune
+from vaultd import boards, classes, echo, frontmatter, graph, knowledge, paths, prune, streams
 from vaultd import limits as limits_mod
 from vaultd.config import BODY_MAX_BYTES, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
@@ -551,6 +551,143 @@ async def put_echo_inbox(request: web.Request) -> web.Response:
     return web.json_response({"name": rel.rsplit("/", 1)[-1], "sha256": sha, "replayed": False})
 
 
+async def put_echo_stream(request: web.Request) -> web.Response:
+    """`PUT /v1/echo/streams` (streams.py): create Echo's note for one
+    planner stream, or replace it if it is still the note Echo left.
+    Body `{name, stream, body, changeset}`: a bare basename, the
+    stream's key and the body text; vaultd writes the frontmatter
+    (`anchor: never`) and builds the path. The answer is
+    `{name, sha256, changed}`, `changed: false` when the note already
+    held this body (nothing written, no changeset spent). A refusal is
+    the same bare 403 as every other write's, its reason in the log
+    only. The log line carries no name, key or content."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    parsed = _parse_json_body(raw, frozenset({"name", "stream", "body", "changeset"}))
+    if parsed is None:
+        return _json_error("bad_body", 400)
+    name, stream, text, changeset = parsed["name"], parsed["stream"], parsed["body"], parsed["changeset"]
+    if not all(isinstance(v, str) for v in (name, stream, text)):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    now = lambda: _now_iso(request.app[CLOCK_KEY])  # noqa: E731
+    async with request.app[LOCK_KEY]:
+        try:
+            planned = await asyncio.to_thread(streams.plan, store, name, stream, text, now=now)
+            if planned.data is None:
+                assert planned.pre_image is not None
+                logger.info("echo_write", extra={"event": "stream_unchanged"})
+                return web.json_response(
+                    {"name": name, "sha256": hashlib.sha256(planned.pre_image).hexdigest(), "changed": False}
+                )
+            await asyncio.to_thread(undo_store.precheck_streams, changeset)
+            sha = await asyncio.to_thread(streams.perform, store, planned)
+        except (knowledge.Refused, CapExceeded) as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        except OSError:
+            return _json_error("io_error", 500)
+        await asyncio.to_thread(
+            undo_store.append_stream,
+            changeset,
+            FileEntry(planned.rel, planned.pre_image, sha),
+            list(planned.new_folders),
+        )
+    logger.info("echo_write", extra={"event": "stream_put", "count": len(planned.new_folders)})
+    return web.json_response({"name": name, "sha256": sha, "changed": True})
+
+
+def _read_boards(store: Store) -> list[dict]:
+    rules = classes.load_rules(store.vault_path)
+    out = []
+    for name in rules.task_boards if rules.state == "ok" else ():
+        try:
+            data = paths.read_file(store.vault_path, name)
+        except paths.Refused:
+            data = None
+        if data is None:
+            out.append({"name": name, "state": "missing"})
+            continue
+        board = boards.parse(data)
+        if board is None:
+            out.append({"name": name, "state": "not_board"})
+            continue
+        out.append({"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board)})
+    return out
+
+
+async def get_boards(request: web.Request) -> web.Response:
+    """`GET /v1/boards` (boards.py): the task boards the user named in
+    `Anchor/settings.md`, each as its lanes' titles and its active cards
+    (lane, first line, checked, date, block id). Nothing else of the
+    file. No list, an invalid settings file: no boards."""
+    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY])
+    logger.info("boards", extra={"event": "boards_read", "count": len(found)})
+    return web.json_response({"boards": found})
+
+
+async def post_board(request: web.Request) -> web.Response:
+    """`POST /v1/boards` (boards.py): apply card operations to one named
+    board. Body `{name, if_sha256, ops, changeset}`; the answer is the
+    board's new hash. A board that changed since `if_sha256` is a 409
+    and nothing is written; any other refusal is the bare 403, its
+    reason in the log only. The log carries no name and no card text."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"name", "if_sha256", "ops", "changeset"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    name, expected, ops, changeset = body["name"], body["if_sha256"], body["ops"], body["changeset"]
+    if not isinstance(name, str) or not isinstance(expected, str) or not isinstance(ops, list):
+        return _json_error("bad_body", 400)
+    if not (isinstance(changeset, str) and _CHANGESET_RE.match(changeset)):
+        return _json_error("bad_body", 400)
+
+    store = request.app[STORE_KEY]
+    undo_store = request.app[UNDO_KEY]
+    async with request.app[LOCK_KEY]:
+        try:
+            rules = await asyncio.to_thread(classes.load_rules, store.vault_path)
+            if rules.state != "ok" or name not in rules.task_boards:
+                raise knowledge.Refused("boards_unavailable")
+            try:
+                data = await asyncio.to_thread(paths.read_file, store.vault_path, name)
+            except paths.Refused:
+                raise knowledge.Refused("symlink") from None
+            if data is None:
+                raise knowledge.Refused("boards_unavailable")
+            if hashlib.sha256(data).hexdigest() != expected:
+                _log_refused(request, "board_changed")
+                return _json_error("conflict", 409)
+            new = await asyncio.to_thread(boards.apply, data, ops)
+            if new == data:
+                return web.json_response({"sha256": expected, "changed": False})
+            await asyncio.to_thread(undo_store.precheck_boards, changeset)
+            try:
+                sha = await asyncio.to_thread(store.put_unchecked, name, new, expected)
+            except Conflict:
+                _log_refused(request, "board_changed")
+                return _json_error("conflict", 409)
+            except paths.Refused:
+                raise knowledge.Refused("symlink") from None
+        except (knowledge.Refused, CapExceeded) as exc:
+            _log_refused(request, exc.reason)
+            return _refused()
+        except OSError:
+            return _json_error("io_error", 500)
+        await asyncio.to_thread(undo_store.append_board, changeset, FileEntry(name, data, sha))
+    logger.info("boards", extra={"event": "board_write", "count": len(ops)})
+    return web.json_response({"sha256": sha, "changed": True})
+
+
 _PLAN_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -768,6 +905,9 @@ def make_app(
     app.router.add_get("/v1/knowledge/tree", get_knowledge_tree)
     app.router.add_get("/v1/knowledge/graph", get_knowledge_graph)
     app.router.add_put("/v1/echo/inbox", put_echo_inbox)
+    app.router.add_put("/v1/echo/streams", put_echo_stream)
+    app.router.add_get("/v1/boards", get_boards)
+    app.router.add_post("/v1/boards", post_board)
     app.router.add_get("/v1/graph/prune", get_graph_prune)
     app.router.add_post("/v1/graph/prune", post_graph_prune)
     app.router.add_get("/v1/changes", get_changes)

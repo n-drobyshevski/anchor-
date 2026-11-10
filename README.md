@@ -28,6 +28,8 @@ no model call, no outbound).
 | Research loop: `/study`, `/read`, `/interests run`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED`; `RESEARCH_JOBS_PER_DAY` (1) is the shared `/study` slot, `RESEARCH_MANUAL_PER_DAY` (3) is `/interests run`'s own |
 | Suggested research topics: `/interests suggest` (and once a week, unasked, an idle job) asks the model for a few topics drawn from your saved topics and, while the lens is on, the lens notes' titles and summaries; each comes with buttons «добавить», «добавить и искать» and ✖, and a topic exists only after a tap. The same batch goes out for both triggers, in Telegram only, under the usual quiet-hours holds | **off** (it lives under the research switch) | `RESEARCH_ENABLED`; `INTEREST_SUGGEST_PER_DAY` (2, 0–10) caps manual batches a day, `INTEREST_SUGGEST_MAX` (5, 1–8) the suggestions in one, `INTEREST_SUGGEST_MAX_CHARS` (6000, 2000–20000) the lens text the call reads, `INTEREST_SUGGEST_MAX_TOKENS` (1200, 500–4000) its answer, `INTEREST_SUGGEST_MODEL` (empty: `LLM_MODEL_SAFETY`) moves it to another model; `INTEREST_SUGGEST_WEEKLY` (true) is the weekly batch, which also needs `IDLE_ENABLED`; the lens text needs `LENS_ENABLED` |
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
+| Planner flows: each `PLANNER_SYNC` also asks the planner's `get_flows` for your own tasks grouped into streams (by tag) with an attention score; `/flows` shows them from the cache, the now-block gets at most one «Требует внимания» line, and `/task` takes `#теги` | **off** (needs `PLANNER_ENABLED`) | `PLANNER_FLOWS` |
+| Board sync: your Kanban Starlane boards in the vault (`Work tasks.md` ⇄ planner tag `work`, `General tasks.md` ⇄ `general`) and the planner's tasks with that tag kept in step both ways, in the background after each planner sync (at most every 15 minutes): a new card becomes a tagged task, a new open task becomes a card, title, done and due date travel whichever side changed them (the planner wins when both did), a card taken off the board takes the tag off its task, and a task that lost the tag loses its card. `/boards preview` shows what a pass would do first | **off** (needs `PLANNER_ENABLED`, the planner linked, a `VAULT_MODE` other than `off`, and the boards named under `task_boards` in `Anchor/settings.md`) | `BOARD_SYNC_ENABLED`; `BOARD_SYNC_TAGS` (JSON, board file name → tag; the default is the two above, a board with no entry is left alone); `BOARD_SYNC_CREATES_PER_PASS` (20, 1–100) caps new planner tasks per pass. Setup in [docs/vault-setup.md](docs/vault-setup.md) |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Welfare shadow: Jev (TypeSafe's typed-decision model, via OpenRouter) is asked the welfare question beside the classifier, recorded in `welfare_shadow`, never acted on. Compare offline with `python -m eval.welfare` | **off** | `WELFARE_SHADOW_MODEL` (e.g. `typesafe/jev-1.14`); `WELFARE_SHADOW_TIMEOUT_SECONDS` (3); also on/off from `/menu` → Настройки → 🧠 Модели → 🫀 Welfare-тень |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
@@ -53,7 +55,7 @@ switched at run time from `/menu` → Настройки → 🧠 Модели (
 | Command | What it does | Gate |
 |---|---|---|
 | `/start` | Start | — |
-| `/menu` | A rich card with in-body buttons (Bot API 10.1) that reaches every command, grouped by task: a status table on top (pause, quiet, focus, intensity, main action), «Чек-ин» and «Состояние», and eight sections — «Сегодня» (main action, focus, planner task/event), «Договорённости» (orders with a cadence picker, debts, weekly review), «Память», «Исследования» (topics, study, read, cards; with `RESEARCH_ENABLED`), «Знания» (vault, notes consent, link pruning, the lens; with `VAULT_MODE`), «Подключения» (planner, Claude, Grok, web sessions), «Настройки» and «Данные»; «Тишина» is its own card, reachable from the menu and from «Настройки», which also holds «🧠 Модели» (below). A section whose feature is off is hidden. Every switch shows only the button that changes its current state and re-renders in place; every section ends with «‹ назад» and «✕ Закрыть». A button marked ✏️ **asks for text**: the next message you send runs that command (`✏️ Запомнить` → `/remember <ваш текст>`), is not treated as chat and never reaches the model; the prompt ends after `MENU_PROMPT_TTL_MIN` minutes (10), on «✕ Отмена», on any command, menu tap or pause word, and then text is ordinary chat again. A button marked ⚠️ **asks «Точно?»** first, and its «Да» works once (a double tap runs the command once). The sensitive acts — `/export`, `/delete`, `/grok`, `/planner_link`, `/lens code on`, `/claude connect`, `/weblogout`, the Claude undo and disconnect — are buttons in Telegram only; the web chat never shows them and refuses them if forged. Typing any command still works exactly as before. `/start` also adds a persistent «☰ Меню» button | — |
+| `/menu` | A rich card with in-body buttons (Bot API 10.1) that reaches every command, grouped by task: a status table on top (pause, quiet, focus, intensity, main action), «Чек-ин» and «Состояние», and eight sections — «Сегодня» (main action, focus, planner task/event), «Договорённости» (orders with a cadence picker, debts, weekly review), «Память», «Исследования» (topics, study, read, cards; with `RESEARCH_ENABLED`), «Знания» (vault, notes consent, link pruning, board sync, the lens; with `VAULT_MODE`), «Подключения» (planner, Claude, Grok, web sessions), «Настройки» and «Данные»; «Тишина» is its own card, reachable from the menu and from «Настройки», which also holds «🧠 Модели» (below). A section whose feature is off is hidden. Every switch shows only the button that changes its current state and re-renders in place; every section ends with «‹ назад» and «✕ Закрыть». A button marked ✏️ **asks for text**: the next message you send runs that command (`✏️ Запомнить` → `/remember <ваш текст>`), is not treated as chat and never reaches the model; the prompt ends after `MENU_PROMPT_TTL_MIN` minutes (10), on «✕ Отмена», on any command, menu tap or pause word, and then text is ordinary chat again. A button marked ⚠️ **asks «Точно?»** first, and its «Да» works once (a double tap runs the command once). The sensitive acts — `/export`, `/delete`, `/grok`, `/planner_link`, `/lens code on`, `/claude connect`, `/weblogout`, the Claude undo and disconnect — are buttons in Telegram only; the web chat never shows them and refuses them if forged. Typing any command still works exactly as before. `/start` also adds a persistent «☰ Меню» button | — |
 | `/menu` → Настройки → 🧠 Модели | The model of each LLM role: «Чат», «Сводки», «Проверки» (strict JSON: welfare, memory, command parsing, the idle jobs), «Судья», «Сад», «Темы» and «Welfare-тень» (can be switched «выкл»). A role's card lists the models from `MODEL_CHOICES` that suit it, with prices per 1M tokens, ✏️ «Своя модель» (the next message is an OpenRouter id, which is checked first: it exists, it can return strict JSON with a temperature where the role needs it, one of its providers keeps no prompts, the judge is not the chat's model, a welfare-shadow id answers the Decisions API; otherwise a one-line reason), and ↩️ «По умолчанию» while the role is switched. Every pick, and the reset, asks «Сменить модель … на …?» with the price first; «Да» works once and the next request already uses the model. «Сад» and «Темы» run on the checks model unless env names one for them, follow a «Проверки» switch, and are set apart in their own card. The choice survives a restart; `/export` includes it and `/delete` puts every role back on its env model. Telegram only: the web chat never shows it and refuses it if forged. The cost OpenRouter reports for a call still decides the spend; the stored price is used only when it reports none | `MODEL_CHOICES`, `MODEL_CATALOG_TTL_H` |
 | `/state` | Current state: persona version, intensity, streak, mood, debts, spend, idle, backup, and one «Модель «…»» line per role, marked «· изменена» when it is not the model env names; a rich message with a 🔄 Обновить refresh button | — |
 | `/out`, `/in` | Pause the persona / come back | — |
@@ -78,6 +80,11 @@ switched at run time from `/menu` → Настройки → 🧠 Модели (
 | `/claude undo`, `/claude undo all` | Undo Claude's latest batch of note changes, or everything from the last 24 hours | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; all six are in `/menu` (Сегодня, Подключения → Планер), `/planner_link` after a «Точно?» | `PLANNER_ENABLED` |
+| `/flows` | Your tasks gathered into streams (by tag): per stream the open, overdue and needs-attention counts and the nearest deadline, then up to three tasks that need attention with «просрочено / сегодня / завтра / через N дн.». Reads only the cached snapshot (never a live call), so it can say the data is stale. A button in `/menu` → Сегодня | `PLANNER_ENABLED` + `PLANNER_FLOWS` |
+| `/flows notes`, `/flows notes undo` | Writes (or refreshes) one note per tag stream into your vault, in `<echo_inbox>/Streams`: counts, the nearest deadline and the tasks that need attention, with absolute dates. Only on this command, never in the background. Telegram only. A note you edited by hand is left alone and counted as skipped. `undo` takes the last such write back, and only the last | `PLANNER_FLOWS` + a `VAULT_MODE` other than `off` |
+| `/boards` | Board sync's status from what is stored: per board the paired cards (and how many wait on a title that cannot be carried), the last pass's time and outcome, its conflicts and skipped titles; and what is not set up (the flag, the vault, the planner link, no board named in `Anchor/settings.md`). In `/menu` → Знания once the flag is on; Telegram only | `PLANNER_ENABLED` + a `VAULT_MODE` other than `off` |
+| `/boards preview` | A dry run: reads the boards and the planner, works out the pass, and replies with counts (cards to add, change, remove, give an id; tasks to create, change, untag; pairs by title; conflicts; skipped titles) while writing nothing anywhere. Works with `BOARD_SYNC_ENABLED` off: check the first pairing with it before you turn the flag on. Telegram only | `PLANNER_ENABLED` + the planner linked + a `VAULT_MODE` other than `off` |
+| `/boards now`, `/boards undo` | Run one pass right away (the reply comes when it is done). A background pass that would remove more than three cards or untag more than three tasks, and more than half of a board's pairs, holds those removals back and says so; `now` runs without that guard. `undo`: take back the last board write through the vault service's undo, one level only, like `/flows notes undo`. Undo does **not** undo the planner side (tasks created, changed or untagged stay), and it forgets that write's pairs, so the next pass pairs them again by title and may redo the same changes — turn the flag off first if you do not want that. Telegram only | `now`: `BOARD_SYNC_ENABLED`; `undo`: the vault service |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu` → Знания | — |
 | `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
@@ -1740,6 +1747,59 @@ data only, and the now-block gets up to one extra line built from it
 of that line, same as the rest of the now-block, whenever the flag is
 on. Off by default. The persona is instructed to use it for tone only
 -- never a diagnosis or medical advice (`persona/persona.md`).
+
+**Planner flows.** With `PLANNER_FLOWS=true` (and the planner linked),
+each `PLANNER_SYNC` also calls the planner's read-only `get_flows` tool
+for your own tasks only (`mine`), and the now-block gets at most one
+extra line, «Требует внимания: …», naming up to three of your top
+attention tasks with a deadline phrase. **The titles of those tasks are
+cached in the planner snapshot and do go to OpenRouter** as part of that
+line, same as agenda task titles already do; the streams' labels (your
+tag names) are cached with them but are never put in a prompt. `/export` includes the cached flows (they live in the
+`planner_snapshot` row's payload) and `/delete` purges them with the
+snapshot (`app/core/export.py`, `app/core/purge.py`). Turning the flag
+off stops the line at once, without waiting for the next sync. The
+`#теги` you type in `/task` go to the planner with the task and are stored in its planner action
+row, which `/export` and `/delete` cover like the rest of that table. Off by
+default.
+
+**Stream notes.** `/flows notes` sends the cached streams to the vault
+service, which writes one note per tag into `<echo_inbox>/Streams`
+(`Echo/Inbox/Streams` by default). The note holds the tag, the counts
+and the titles of that stream's tasks that need attention: **those
+titles and your tag names are written into your vault**, and from there
+Obsidian Sync carries them like any other note. It happens only when you
+type the command; no job writes these notes. The vault service marks
+each note `anchor: never`, so Echo cannot read it back: it is not
+indexed, never retrieved, never put in a prompt and never shown to
+Claude's or Grok's connector. Echo keeps no record of these writes of
+its own; the vault service's undo store holds the previous version of
+each note for 14 days, which is what `/flows notes undo` restores and
+what `/delete` wipes along with the rest of that store. `/delete` does
+not remove the notes themselves: like every note in your vault, they
+are yours to delete.
+
+**Board sync.** With `BOARD_SYNC_ENABLED=true`, the boards you name under
+`task_boards` in `Anchor/settings.md` are read by the vault service and
+sent to Echo: each active card's lane, first line, checked box, date and
+block id, and nothing else of the file. **Those card titles go on to the
+planner** as task titles, and **your planner task titles (with the
+board's tag) are written into those board files**, from where Obsidian
+Sync carries them like any other edit. This is the one write into your
+vault that happens without a tap: a background job after each planner
+sync, at most every 15 minutes, which you chose over a command. Echo's
+database keeps a pair table, one row per card it follows, **holding that
+card's title as last synced**, plus each pass's counts; both are in
+`/export` and both are purged by `/delete`. None of it goes into a
+prompt or a log line (logs carry an event name and counts), and there is
+no debug view of either table. The vault service keeps the board as it
+was before each write for 14 days, which `/boards undo` restores and
+`/delete` wipes with the rest of that store; the planner side is never
+undone. Obsidian Sync can still produce a conflicted copy of a board if
+you edit it on a device at the same moment a write lands: the vault
+service refuses to write over a board that changed since it was read,
+but it cannot see an edit still on its way from your phone. Off by
+default.
 
 **P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
 a regex prefilter on your own message (never the partner's, and never

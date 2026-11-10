@@ -76,8 +76,10 @@ async def run_planner_sync(
     timezone: str,
     bot: Bot | None = None,
     chat_id: int | None = None,
-) -> None:
+) -> bool:
     """Refresh `planner_snapshot`. No provider call, no persona involved.
+    True when the snapshot was refreshed: app/worker.py queues a board
+    sync pass (app/planner/board_job.py) only after one that was.
 
     On `PlannerAuthError` this does not re-raise: a revoked grant will
     not un-revoke itself on retry, and the point of the notice is to ask
@@ -89,10 +91,11 @@ async def run_planner_sync(
     except PlannerAuthError:
         if await auth.mark_notice_sent(session) and bot is not None and chat_id is not None:
             await bot.send_message(chat_id=chat_id, text=RELINK_NOTICE)
-        return
+        return False
     except (PlannerUnavailable, PlannerToolError) as exc:
         logger.warning("planner sync failed", extra={"event": type(exc).__name__})
         raise
+    return True
 
 
 async def _do_write(client: PlannerClient, settings: Settings, session: AsyncSession, clock: Clock, action, timezone: str) -> str:
@@ -106,10 +109,13 @@ async def _do_write(client: PlannerClient, settings: Settings, session: AsyncSes
     request_id = f"anchor:{action.request_key}"
 
     if action.kind == actions.CREATE_TASK:
+        extra: dict = {}
+        if payload.get("tags"):
+            extra["tags"] = list(payload["tags"])
         await client.create_task(
             settings, session, clock,
             title=payload["title"], due_date=payload.get("due_date"),
-            client_request_id=request_id,
+            client_request_id=request_id, **extra,
         )
         return WRITE_OK_TASK.format(title=payload["title"])
 

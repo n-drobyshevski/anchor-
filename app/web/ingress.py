@@ -61,11 +61,13 @@ from app.web.hub import WebHub
 # `lens` joins it for the same reason: `/lens code on` opens a database
 # login for Claude Code (app/tg/lens.py, anchor-lens-plan.md section 11).
 # `graph` joins it because `/graph apply` edits the vault's notes
-# (app/tg/graph.py). `weblogout` joins it because it is the kill switch
+# (app/tg/graph.py), and `boards` for the same reason: `/boards now` and
+# `/boards undo` change the task boards in the vault (app/tg/boards.py).
+# `weblogout` joins it because it is the kill switch
 # for a stolen web session (app/tg/router.py's weblogout): ending every
 # web session must stay in Telegram's hands, never that session's.
 BLOCKED_COMMANDS = frozenset(
-    {"delete", "export", "planner_link", "grok", "claude", "lens", "graph", "weblogout"}
+    {"delete", "export", "planner_link", "grok", "claude", "lens", "graph", "boards", "weblogout"}
 )
 
 # The /delete confirm keyboard's callback_data prefix (app/tg/data.py's
