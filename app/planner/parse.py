@@ -235,6 +235,9 @@ def extract_tags(text: str) -> tuple[str, list[str]]:
         return ""
 
     remainder = _TAG_RE.sub(_take, text)
+    if tags:
+        # "молоко #дом, срочно" -> "молоко , срочно" -> "молоко, срочно"
+        remainder = re.sub(r"\s+([,.;:!?])", r"\1", remainder)
     remainder = re.sub(r"\s{2,}", " ", remainder).strip()
     return remainder, tags
 

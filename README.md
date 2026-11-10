@@ -28,6 +28,7 @@ no model call, no outbound).
 | Research loop: `/study`, `/read`, `/interests run`, cards, idle research (phase 4) | **off** | `RESEARCH_ENABLED`; `RESEARCH_JOBS_PER_DAY` (1) is the shared `/study` slot, `RESEARCH_MANUAL_PER_DAY` (3) is `/interests run`'s own |
 | Suggested research topics: `/interests suggest` (and once a week, unasked, an idle job) asks the model for a few topics drawn from your saved topics and, while the lens is on, the lens notes' titles and summaries; each comes with buttons «добавить», «добавить и искать» and ✖, and a topic exists only after a tap. The same batch goes out for both triggers, in Telegram only, under the usual quiet-hours holds | **off** (it lives under the research switch) | `RESEARCH_ENABLED`; `INTEREST_SUGGEST_PER_DAY` (2, 0–10) caps manual batches a day, `INTEREST_SUGGEST_MAX` (5, 1–8) the suggestions in one, `INTEREST_SUGGEST_MAX_CHARS` (6000, 2000–20000) the lens text the call reads, `INTEREST_SUGGEST_MAX_TOKENS` (1200, 500–4000) its answer, `INTEREST_SUGGEST_MODEL` (empty: `LLM_MODEL_SAFETY`) moves it to another model; `INTEREST_SUGGEST_WEEKLY` (true) is the weekly batch, which also needs `IDLE_ENABLED`; the lens text needs `LENS_ENABLED` |
 | Planner integration (P2–P4) | **off** | `PLANNER_ENABLED`, `PLANNER_INTENT` |
+| Planner flows: each `PLANNER_SYNC` also asks the planner's `get_flows` for your own tasks grouped into streams (by tag) with an attention score; `/flows` shows them from the cache, the now-block gets at most one «Требует внимания» line, and `/task` takes `#теги` | **off** (needs `PLANNER_ENABLED`) | `PLANNER_FLOWS` |
 | Web UI | **off** | `WEB_UI_ENABLED` |
 | Welfare shadow: Jev (TypeSafe's typed-decision model, via OpenRouter) is asked the welfare question beside the classifier, recorded in `welfare_shadow`, never acted on. Compare offline with `python -m eval.welfare` | **off** | `WELFARE_SHADOW_MODEL` (e.g. `typesafe/jev-1.14`); `WELFARE_SHADOW_TIMEOUT_SECONDS` (3); also on/off from `/menu` → Настройки → 🧠 Модели → 🫀 Welfare-тень |
 | Read-only access for grok.com | **off** | `GROK_ACCESS_ENABLED` (webhook mode) |
@@ -78,6 +79,7 @@ switched at run time from `/menu` → Настройки → 🧠 Модели (
 | `/claude undo`, `/claude undo all` | Undo Claude's latest batch of note changes, or everything from the last 24 hours | `CLAUDE_ACCESS_ENABLED` |
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; all six are in `/menu` (Сегодня, Подключения → Планер), `/planner_link` after a «Точно?» | `PLANNER_ENABLED` |
+| `/flows` | Your tasks gathered into streams (by tag): per stream the open, overdue and needs-attention counts and the nearest deadline, then up to three tasks that need attention with «просрочено / сегодня / завтра / через N дн.». Reads only the cached snapshot (never a live call), so it can say the data is stale. A button in `/menu` → Сегодня | `PLANNER_ENABLED` + `PLANNER_FLOWS` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu` → Знания | — |
 | `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
@@ -1740,6 +1742,21 @@ data only, and the now-block gets up to one extra line built from it
 of that line, same as the rest of the now-block, whenever the flag is
 on. Off by default. The persona is instructed to use it for tone only
 -- never a diagnosis or medical advice (`persona/persona.md`).
+
+**Planner flows.** With `PLANNER_FLOWS=true` (and the planner linked),
+each `PLANNER_SYNC` also calls the planner's read-only `get_flows` tool
+for your own tasks only (`mine`), and the now-block gets at most one
+extra line, «Требует внимания: …», naming up to three of your top
+attention tasks with a deadline phrase. **The titles of those tasks are
+cached in the planner snapshot and do go to OpenRouter** as part of that
+line, same as agenda task titles already do; the streams' labels (your
+tag names) are cached with them but are never put in a prompt. `/export` includes the cached flows (they live in the
+`planner_snapshot` row's payload) and `/delete` purges them with the
+snapshot (`app/core/export.py`, `app/core/purge.py`). Turning the flag
+off stops the line at once, without waiting for the next sync. The
+`#теги` you type in `/task` go to the planner with the task and are stored in its planner action
+row, which `/export` and `/delete` cover like the rest of that table. Off by
+default.
 
 **P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
 a regex prefilter on your own message (never the partner's, and never

@@ -368,7 +368,7 @@ def test_negative_and_absurd_counts_are_clamped(frozen_clock):
     clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
     flows = _flows(_stream("x", [], open=-4, overdue=float("inf"), needsAttention=True))
     text = planner_ui.render_flows_text(_snap(clock, flows), clock, TZ, max_age_min=30)
-    assert "x — открыто 0" in text and "просрочено" not in text and "внимания" not in text
+    assert text.splitlines()[1] == "x — открыто 0"
 
 
 # --- /flows handler -------------------------------------------------------------------
@@ -461,3 +461,30 @@ async def test_flows_renders_the_cached_streams_without_a_live_call(sessionmaker
         "диплом — открыто 1, внимания 1, ближайший срок: сегодня",
         "  · «Глава 2» — сегодня",
     ]
+
+
+# --- /export and /delete cover the cached flows ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_export_includes_and_delete_purges_the_cached_flows(sessionmaker, frozen_clock):
+    from sqlalchemy import select
+
+    from app.core import export, purge
+
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    flows = _flows(_stream("диплом", [_task("Глава 2")]))
+    async with sessionmaker() as session:
+        session.add(UserState(id=1, chat_id=TEST_CHAT_ID, timezone=TZ))
+        session.add(_snap(clock, flows))
+        await session.commit()
+
+    async with sessionmaker() as session:
+        exported = await export.build_export(session, clock)
+    (row,) = exported["tables"]["planner_snapshot"]
+    assert row["payload"]["flows"]["streams"][0]["tasks"][0]["title"] == "Глава 2"
+
+    async with sessionmaker() as session:
+        await purge.delete_everything(session, _settings(), clock)
+    async with sessionmaker() as session:
+        assert (await session.execute(select(PlannerSnapshot))).scalars().all() == []

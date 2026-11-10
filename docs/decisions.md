@@ -4106,3 +4106,67 @@ opinion of which model is better; other models arrive through «Своя
   separate cards for the same role and model writes a second audit row
   whose old and new value are equal; and the pick being confirmed is
   in memory only, as above.
+
+## Planner flows: streams and what needs attention
+
+The planner gained a read-only `get_flows` MCP tool: the user's tasks
+gathered into streams (by tag here) with an attention score from 0 to 1
+(deadline close, priority high, or both). Echo shows it on the Telegram
+side behind `PLANNER_FLOWS`, off by default and only meaningful with
+`PLANNER_ENABLED` (`app/planner/client.py`, `snapshot.py`, `app/tg/planner.py`,
+`app/tg/menu.py`, `app/planner/parse.py`; tests/test_planner_flows.py and the
+planner and menu test files).
+
+- **Same shape as the health call.** `sync()` makes one extra
+  `get_flows(date=today, group_by="tag", mine=True, limit=3)` strictly after
+  the agenda (and health) call. Any exception is logged by type only and
+  swallowed, and the agenda upsert still happens. The result is stored
+  untouched under `payload["flows"]`; nothing on the chat path calls the
+  planner. `get_flows` is on `ALLOWED_TOOLS`; the wrapper omits every option
+  it was not given (the planner's defaults apply) and clamps `limit` to 1..10.
+  `mine=True` because the now-block is the user's own, not the shared agenda's.
+- **One line, after the cap.** `render_lines()` appends at most one
+  «Требует внимания: …» line after the item cap and the health line: up to
+  three tasks with a score of 0.5 or more, highest first, a task in two
+  streams listed once, titles clipped to 40 characters and passed through the
+  same injection check as every title (a failing one becomes «(без названия)»;
+  whitespace is collapsed so a title cannot start a line of its own). Same
+  staleness and calendar-date rules as the rest of the block, and the flows
+  must carry today's date too. 0.5 is a constant (`ATTENTION_MIN_SCORE`), not
+  a setting: the planner owns the scale.
+- **The flag gates the read too.** `render_lines()` has a `flows` argument and
+  its callers pass `settings.PLANNER_FLOWS`, so turning the flag off stops the
+  titles reaching a prompt at once rather than after the next sync overwrites
+  the row. (`PLANNER_HEALTH` has no such argument; left as it was.)
+- **Privacy, stated plainly.** With the flag on, the titles of the user's own
+  top attention tasks are cached in `planner_snapshot` and can go to
+  OpenRouter in that line, as agenda task titles already do. Stream labels
+  (tag names) are cached but never put in a prompt. `/export` dumps whole rows
+  of `planner_snapshot`, so it includes the cached flows, and `/delete` purges
+  the table; tests/test_planner_flows.py checks both.
+- **`/flows`.** Reads only the snapshot, like `/plan`, in a pure renderer
+  (`render_flows_text`) apart from the handler. One header line per stream
+  (open, overdue, needs attention, nearest deadline), then up to three of its
+  attention tasks with «просрочено / сегодня / завтра / через N дн. / ДД.ММ»
+  (a week out at most as «через N дн.»). At most eight streams are shown.
+  Separate messages for: planner off, flag off, not linked, revoked, paused,
+  stale or missing data, no streams, nothing needing attention. Every field
+  is read defensively; a malformed payload degrades to fewer lines, never an
+  exception.
+- **Menu.** «🌊 Потоки задач» beside «Отметить сделанной» in «Сегодня», gated on
+  `PLANNER_ENABLED and PLANNER_FLOWS`. The menu tests' fully open deploy now
+  includes the flag; the layout test that pins the pre-flows button rows runs
+  with it off.
+- **`#теги` in `/task`.** A `#` at the start of a word, followed by letters,
+  digits, `_` or `-` with at least one letter, is a tag: stripped from the
+  title, lowercased, deduplicated, at most 12 (the rest are still removed from
+  the title), carried in the action payload, shown on the confirm card and sent
+  as `tags` to `create_task` (key omitted when empty). `#1`, `C#` and a token
+  longer than 40 characters are not tags and stay in the title, so nothing that
+  parsed before changes. A text of only tags is the same «Не поняла название
+  задачи.» as an empty title, raised before any model call, and the model
+  fallback never sees the tags. Chat-proposed tasks (`PLANNER_INTENT`) carry no
+  tags.
+- **Not done**: grouping by anything but tag, `stream` and `attention`
+  arguments from Telegram (the wrapper supports them), a live refresh from
+  `/flows`, and the web sink's own panel.

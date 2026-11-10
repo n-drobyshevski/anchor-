@@ -116,6 +116,7 @@ def _settings(
     links: bool = True,
     graph: bool = True,
     packets: bool = True,
+    planner_flows: bool = True,
     **extra,
 ) -> Settings:
     """A deploy with the given feature flags. The defaults are the fully
@@ -125,6 +126,7 @@ def _settings(
     values = dict(
         _env_file=None,
         PLANNER_ENABLED=planner,
+        PLANNER_FLOWS=planner_flows,
         RESEARCH_ENABLED=research,
         VAULT_MODE=vault_mode,
         VAULT_API_TOKEN="x" * 32,
@@ -573,7 +575,8 @@ def test_main_quiet_row_reads_the_live_quiet_period():
 
 def test_today_layout_with_everything_on():
     view = menu.MenuView(due_action="дописать отчёт", focus_on=False)
-    text, markup = _render("today", view=view)
+    # PLANNER_FLOWS is off here: the layout every deploy had before it.
+    text, markup = _render("today", _settings(planner_flows=False), view=view)
     assert "Главное: дописать отчёт · Фокус: выкл" in text
     rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
     assert rows == [
@@ -1216,8 +1219,9 @@ def test_data_layout_and_the_sensitive_acts_are_telegram_only():
 
 
 def test_action_count_and_kinds():
-    # 91 before runtime model choice, plus a pick, ✏️ and ↩️ per role.
-    assert len(menu.ACTIONS) == 91 + 3 * len(llm_models.ROLES)
+    # 91 before runtime model choice (92 with PLANNER_FLOWS' «Потоки»),
+    # plus a pick, ✏️ and ↩️ per role.
+    assert len(menu.ACTIONS) == 92 + 3 * len(llm_models.ROLES)
     assert menu.KINDS == (menu.RUN, menu.PROMPT, menu.CONFIRM)
     for key, action in menu.ACTIONS.items():
         assert action.kind in menu.KINDS, key
@@ -2114,16 +2118,16 @@ async def test_planner_on_press_with_a_linked_credential_enables_sync_and_rerend
 
 
 def test_today_flows_button_needs_both_the_planner_and_the_flag():
-    on = _offered("today", _settings(PLANNER_FLOWS=True))
-    assert "flows" in on
-    # Off by default, even with the planner on.
-    assert "flows" not in _offered("today")
+    assert "flows" in _offered("today")
+    # Off by default in a real deploy: no flag, no button, planner on or not.
+    assert "flows" not in _offered("today", _settings(planner_flows=False))
     # The flag alone does nothing without the planner link switched on.
-    assert "flows" not in _offered("today", _settings(planner=False, PLANNER_FLOWS=True))
+    assert "flows" not in _offered("today", _settings(planner=False))
     assert menu.action_kind("flows") == menu.RUN
+    assert not menu.action_available("flows", Settings(_env_file=None), web=False)
 
 
 def test_today_layout_with_flows_puts_the_button_beside_done():
-    _, markup = _render("today", _settings(PLANNER_FLOWS=True), view=menu.MenuView())
+    _, markup = _render("today", view=menu.MenuView())
     rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
     assert ["mn:a:done", "mn:a:flows"] in rows
