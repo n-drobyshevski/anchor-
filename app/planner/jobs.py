@@ -106,10 +106,13 @@ async def _do_write(client: PlannerClient, settings: Settings, session: AsyncSes
     request_id = f"anchor:{action.request_key}"
 
     if action.kind == actions.CREATE_TASK:
+        extra: dict = {}
+        if payload.get("tags"):
+            extra["tags"] = list(payload["tags"])
         await client.create_task(
             settings, session, clock,
             title=payload["title"], due_date=payload.get("due_date"),
-            client_request_id=request_id,
+            client_request_id=request_id, **extra,
         )
         return WRITE_OK_TASK.format(title=payload["title"])
 

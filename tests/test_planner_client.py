@@ -273,3 +273,93 @@ async def test_get_health_sends_the_right_tool_and_arguments(sessionmaker, froze
 
 async def test_get_health_is_allowlisted() -> None:
     assert "get_health" in ALLOWED_TOOLS
+
+
+# --- PLANNER_FLOWS: get_flows and create_task tags --------------------------
+
+
+async def _call_args(sessionmaker, frozen_clock, invoke) -> dict:
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    await _seed_credential(sessionmaker, clock)
+    fake = _FakeMcpServer()
+    app = web.Application()
+    app.router.add_post("/mcp", fake.handle)
+    async with TestClient(TestServer(app)) as client:
+        planner_client = PlannerClient(client.session, str(client.make_url("/mcp")))
+        async with sessionmaker() as session:
+            await invoke(planner_client, session, clock)
+    return next(c for c in fake.calls if c.get("method") == "tools/call")["params"]
+
+
+async def test_get_flows_is_allowlisted() -> None:
+    assert "get_flows" in ALLOWED_TOOLS
+
+
+async def test_get_flows_sends_the_right_tool_and_arguments(sessionmaker, frozen_clock):
+    async def invoke(pc, session, clock):
+        await pc.get_flows(
+            _settings(), session, clock, date="2026-09-23", group_by="tag", mine=True, limit=3
+        )
+
+    params = await _call_args(sessionmaker, frozen_clock, invoke)
+    assert params["name"] == "get_flows"
+    assert params["arguments"] == {
+        "date": "2026-09-23", "groupBy": "tag", "mine": True, "limit": 3,
+    }
+
+
+async def test_get_flows_omits_unset_options_and_clamps_the_limit(sessionmaker, frozen_clock):
+    async def invoke(pc, session, clock):
+        await pc.get_flows(_settings(), session, clock, date="2026-09-23", limit=99)
+
+    params = await _call_args(sessionmaker, frozen_clock, invoke)
+    assert params["arguments"] == {"date": "2026-09-23", "limit": 10}
+
+
+async def test_get_flows_passes_stream_and_attention(sessionmaker, frozen_clock):
+    async def invoke(pc, session, clock):
+        await pc.get_flows(
+            _settings(), session, clock, date="2026-09-23",
+            group_by="priority", stream="диплом", attention="deadline", mine=False,
+        )
+
+    params = await _call_args(sessionmaker, frozen_clock, invoke)
+    assert params["arguments"] == {
+        "date": "2026-09-23", "groupBy": "priority", "stream": "диплом",
+        "attention": "deadline", "mine": False,
+    }
+
+
+async def test_get_flows_rejects_an_unknown_enum_before_any_call(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 9, 23, 9, 0)
+    pc = PlannerClient(None, "http://unused")  # type: ignore[arg-type]
+    async with sessionmaker() as session:
+        with pytest.raises(ValueError):
+            await pc.get_flows(_settings(), session, clock, date="2026-09-23", group_by="nope")
+        with pytest.raises(ValueError):
+            await pc.get_flows(_settings(), session, clock, date="2026-09-23", attention="nope")
+
+
+async def test_create_task_sends_tags_when_there_are_some(sessionmaker, frozen_clock):
+    async def invoke(pc, session, clock):
+        await pc.create_task(
+            _settings(), session, clock,
+            title="Глава 2", due_date=None, client_request_id="anchor:2", tags=["диплом", "учёба"],
+        )
+
+    params = await _call_args(sessionmaker, frozen_clock, invoke)
+    assert params["arguments"] == {
+        "title": "Глава 2", "clientRequestId": "anchor:2", "tags": ["диплом", "учёба"],
+    }
+
+
+@pytest.mark.parametrize("tags", [None, []])
+async def test_create_task_omits_the_tags_key_without_tags(sessionmaker, frozen_clock, tags):
+    async def invoke(pc, session, clock):
+        await pc.create_task(
+            _settings(), session, clock,
+            title="Глава 2", due_date=None, client_request_id="anchor:3", tags=tags,
+        )
+
+    params = await _call_args(sessionmaker, frozen_clock, invoke)
+    assert "tags" not in params["arguments"]

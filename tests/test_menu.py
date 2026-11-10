@@ -2111,3 +2111,19 @@ async def test_planner_on_press_with_a_linked_credential_enables_sync_and_rerend
     flat = flatten_rich_message(fake.edits[-1].rich_message)
     assert "Синхронизация: вкл" in flat
     assert f"{menu.ACTION_PREFIX}planner_off" in rich_callback_data(fake.edits[-1].rich_message)
+
+
+def test_today_flows_button_needs_both_the_planner_and_the_flag():
+    on = _offered("today", _settings(PLANNER_FLOWS=True))
+    assert "flows" in on
+    # Off by default, even with the planner on.
+    assert "flows" not in _offered("today")
+    # The flag alone does nothing without the planner link switched on.
+    assert "flows" not in _offered("today", _settings(planner=False, PLANNER_FLOWS=True))
+    assert menu.action_kind("flows") == menu.RUN
+
+
+def test_today_layout_with_flows_puts_the_button_beside_done():
+    _, markup = _render("today", _settings(PLANNER_FLOWS=True), view=menu.MenuView())
+    rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
+    assert ["mn:a:done", "mn:a:flows"] in rows

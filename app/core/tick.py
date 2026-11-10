@@ -256,7 +256,11 @@ async def run_tick_decide(
     if settings.PLANNER_ENABLED:
         snap = await planner_snapshot.get_snapshot(session)
         planner_lines = planner_snapshot.render_lines(
-            snap, clock, state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+            snap,
+            clock,
+            state.timezone,
+            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+            flows=settings.PLANNER_FLOWS,
         )
     now_block = build_now_block(
         clock=clock,

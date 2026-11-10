@@ -1037,6 +1037,7 @@ async def run(
                             clock,
                             user_state.timezone,
                             max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+                            flows=settings.PLANNER_FLOWS,
                         )
                     # P4: a still-pending planner_action -- typed as
                     # /task, /event, or proposed from chat -- gets a

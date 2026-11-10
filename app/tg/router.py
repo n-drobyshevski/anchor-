@@ -256,6 +256,8 @@ BOT_COMMANDS = [
     BotCommand(command="task", description="Добавить задачу в планер"),
     BotCommand(command="event", description="Добавить событие в планер"),
     BotCommand(command="done", description="Отметить задачу сделанной"),
+    # PLANNER_FLOWS: streams of tasks and which need attention (cached).
+    BotCommand(command="flows", description="Потоки задач и что требует внимания"),
     # 8a (phase-8 plan section 8): the Obsidian vault's status.
     BotCommand(command="vault", description="Хранилище Obsidian"),
     # L1 (anchor-lens-plan.md section 11): the lens and Claude Code's door.
@@ -2026,6 +2028,28 @@ def build_router(
             user_state = await get_state(session)
             snap = await planner_snapshot.get_snapshot(session)
         text = planner_ui.render_plan_text(
+            snap,
+            clock,
+            user_state.timezone,
+            max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN,
+            flows=settings.PLANNER_FLOWS,
+        )
+        await _reply_once(message, event_update.update_id, text)
+
+    @router.message(Command("flows"))
+    async def flows_command(message: Message, event_update: Update) -> None:
+        """Streams of tasks and which need attention. Snapshot only, like /plan."""
+        if not settings.PLANNER_ENABLED:
+            await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
+            return
+        if not settings.PLANNER_FLOWS:
+            await _reply_once(message, event_update.update_id, planner_ui.FLOWS_DISABLED)
+            return
+        async with sessionmaker() as session:
+            user_state = await get_state(session)
+            credential = await planner_auth.get_status(session)
+            snap = await planner_snapshot.get_snapshot(session)
+        text = planner_ui.flows_unavailable_reply(credential) or planner_ui.render_flows_text(
             snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
         )
         await _reply_once(message, event_update.update_id, text)
@@ -2177,10 +2201,13 @@ def build_router(
                 session, settings, safety_provider or provider, clock,
                 text=(command.args or "").strip(), timezone=timezone,
             )
-            return {
+            payload = {
                 "title": parsed.title,
                 "due_date": parsed.due_date.isoformat() if parsed.due_date else None,
             }
+            if parsed.tags:
+                payload["tags"] = list(parsed.tags)
+            return payload
 
         await _handle_write_command(
             message, event_update,
@@ -2496,6 +2523,7 @@ def build_router(
         "checkin": checkin_command,
         "state": _menu_state,
         "plan": plan_command,
+        "flows": flows_command,
         "focus_on": _fixed(focus, "focus", "on"),
         "focus_off": _fixed(focus, "focus", "off"),
         "done": done_command,

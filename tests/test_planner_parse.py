@@ -205,3 +205,95 @@ async def test_a_title_over_the_limit_is_rejected_even_from_the_model(sessionmak
                 session, _settings(), provider, clock, text="завтра", timezone=TZ,
             )
     assert provider.calls == 1
+
+
+# --- PLANNER_FLOWS: #tags in /task -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, title, tags",
+    [
+        ("Глава 2 #диплом", "Глава 2", ("диплом",)),
+        ("#Диплом Глава 2 #УЧЁБА", "Глава 2", ("диплом", "учёба")),
+        ("Купить #молоко #Молоко", "Купить", ("молоко",)),
+        ("Купить молоко #дом, срочно", "Купить молоко, срочно", ("дом",)),
+        ("Сдать отчёт #work-items", "Сдать отчёт", ("work-items",)),
+        # Not tags: no letter, a mid-word '#', or too long -- left in the title.
+        ("Задача #1", "Задача #1", ()),
+        ("Выучить C# сегодня", "Выучить C#", ()),
+        ("Купить #" + "я" * 41, "Купить #" + "я" * 41, ()),
+        ("Сделать #" + "я" * 40, "Сделать", ("я" * 40,)),
+    ],
+)
+async def test_task_hashtags_become_tags(
+    sessionmaker, frozen_clock, fake_llm_provider, text, title, tags
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    async with sessionmaker() as session:
+        result = await planner_parse.parse_task(
+            session, _settings(), fake_llm_provider, clock, text=text, timezone=TZ
+        )
+    assert result.title == title
+    assert result.tags == tags
+    assert fake_llm_provider.calls == 0
+
+
+async def test_task_tags_combine_with_a_date(sessionmaker, frozen_clock, fake_llm_provider):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    async with sessionmaker() as session:
+        result = await planner_parse.parse_task(
+            session, _settings(), fake_llm_provider, clock,
+            text="Позвонить маме на завтра #семья", timezone=TZ,
+        )
+    assert result.title == "Позвонить маме"
+    assert result.due_date == datetime.date(2026, 9, 24)
+    assert result.tags == ("семья",)
+
+
+async def test_task_tags_are_capped_at_twelve_but_all_leave_the_title(
+    sessionmaker, frozen_clock, fake_llm_provider
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    text = "Разобрать " + " ".join(f"#т{n}" for n in range(15))
+    async with sessionmaker() as session:
+        result = await planner_parse.parse_task(
+            session, _settings(), fake_llm_provider, clock, text=text, timezone=TZ
+        )
+    assert result.title == "Разобрать"
+    assert result.tags == tuple(f"т{n}" for n in range(12))
+
+
+@pytest.mark.parametrize("text", ["#диплом", "#a #b", "  #диплом   #учёба "])
+async def test_a_text_of_only_tags_is_a_title_error_without_a_model_call(
+    sessionmaker, frozen_clock, fake_llm_provider, text
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    async with sessionmaker() as session:
+        with pytest.raises(planner_parse.ParseError) as caught:
+            await planner_parse.parse_task(
+                session, _settings(), fake_llm_provider, clock, text=text, timezone=TZ
+            )
+    assert caught.value.message == "Не поняла название задачи."
+    assert fake_llm_provider.calls == 0
+
+
+def test_extract_tags_leaves_text_without_hashes_alone():
+    assert planner_parse.extract_tags("Купить молоко на завтра") == ("Купить молоко на завтра", [])
+
+
+async def test_tags_survive_the_model_fallback_and_the_model_never_sees_them(
+    sessionmaker, frozen_clock
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    provider = FakeLLMProvider(text='{"title": "Позвонить Ане", "due_date": "2026-09-30"}')
+    async with sessionmaker() as session:
+        # An invalid calendar date sends the regex path to the model.
+        result = await planner_parse.parse_task(
+            session, _settings(), provider, clock,
+            text="Позвонить Ане 31.02 #Семья", timezone=TZ,
+        )
+    assert provider.calls == 1
+    assert result.title == "Позвонить Ане"
+    assert result.tags == ("семья",)
+    sent = " ".join(m.content for m in provider.received_messages[0])
+    assert "#" not in sent

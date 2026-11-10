@@ -25,6 +25,7 @@ checks it right before calling app.planner.actions.create.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import logging
@@ -48,6 +49,7 @@ __all__ = [
     "EventInput",
     "parse_task",
     "parse_event",
+    "extract_tags",
 ]
 
 PLANNER_CATEGORY = "planner"
@@ -73,6 +75,10 @@ class ParseError(Exception):
 class TaskInput:
     title: str
     due_date: datetime.date | None
+    # `#тег` tokens from the /task text (extract_tags): lowercased,
+    # deduplicated, in order of appearance. Empty for the LLM-only paths
+    # that never see them (app/planner/intent.py).
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,43 @@ def _extract_duration(text: str) -> tuple[str, datetime.timedelta | None]:
     remainder = (text[: match.start()] + text[match.end() :]).strip()
     remainder = re.sub(r"\s{2,}", " ", remainder)
     return remainder, delta
+
+
+# --- #tags in a /task text ------------------------------------------------
+
+TAGS_MAX = 12
+TAG_MAX_LEN = 40
+
+# A tag is `#` at the start of a word, then word characters and inner
+# hyphens. Nothing in /task's vocabulary used `#` before this (dates,
+# times and durations do not), but `#1`, `#2026-11-12` and a `#` in the
+# middle of a word (`C#`, `a#b`) must stay what they were: ordinary title
+# text -- so a tag needs at least one letter and must follow whitespace
+# or the start of the text.
+_TAG_RE = re.compile(r"(?<!\S)#(\w[\w-]*)")
+
+
+def extract_tags(text: str) -> tuple[str, list[str]]:
+    """`(text without its tags, tags)`.
+
+    Tags are lowercased and deduplicated, in order of appearance; at
+    most TAGS_MAX are kept (the rest are still removed from the title --
+    the user meant them as tags). A token longer than TAG_MAX_LEN, or
+    with no letter in it, is not a tag and stays in the text.
+    """
+    tags: list[str] = []
+
+    def _take(match: re.Match) -> str:
+        name = match.group(1).strip("-").lower()
+        if not name or len(name) > TAG_MAX_LEN or not any(ch.isalpha() for ch in name):
+            return match.group(0)
+        if name not in tags and len(tags) < TAGS_MAX:
+            tags.append(name)
+        return ""
+
+    remainder = _TAG_RE.sub(_take, text)
+    remainder = re.sub(r"\s{2,}", " ", remainder).strip()
+    return remainder, tags
 
 
 def _clean_title(text: str) -> str | None:
@@ -478,14 +521,27 @@ async def parse_task(
     text: str,
     timezone: str,
 ) -> TaskInput:
-    """`text` is the raw `/task` argument string. Raises ParseError."""
+    """`text` is the raw `/task` argument string. Raises ParseError.
+
+    `#тег` tokens are taken out first (extract_tags) and put on the
+    result; the model fallback never sees them. A text that is nothing
+    but tags has no title, which is the same error as an empty one --
+    raised here rather than handed to the model.
+    """
     text = (text or "").strip()
     if not text:
         raise ParseError("Что за задача? /task <название> [на <дата>].")
+    text, tags = extract_tags(text)
+    if not text:
+        raise ParseError("Не поняла название задачи.")
     result = _regex_parse_task(text, clock, timezone)
     if result is not None:
-        return _validate_task(result.title, result.due_date)
-    return await _llm_parse_task(session, settings, provider, clock, text=text, timezone=timezone)
+        task = _validate_task(result.title, result.due_date)
+    else:
+        task = await _llm_parse_task(
+            session, settings, provider, clock, text=text, timezone=timezone
+        )
+    return dataclasses.replace(task, tags=tuple(tags))
 
 
 async def parse_event(

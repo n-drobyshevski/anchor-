@@ -48,7 +48,8 @@ off at deploy level is not drawn and not reachable):
     main            status table (bot, quiet, focus, intensity, main
                     action) + check-in, /state, and the sections below
       today         check-in, today's plan, the main action (set ✏️ /
-                    clear ⚠️), focus, planner task ✏️ / event ✏️ / done
+                    clear ⚠️), focus, planner task ✏️ / event ✏️ / done / flows
+                    (PLANNER_FLOWS)
       deals         orders, a new order ✏️ (via order_cadence), debts,
                     the weekly review
         order_cadence   daily / weekdays / weekly › / once
@@ -268,6 +269,10 @@ def _planner(settings: Settings) -> bool:
     return settings.PLANNER_ENABLED
 
 
+def _planner_flows(settings: Settings) -> bool:
+    return settings.PLANNER_ENABLED and settings.PLANNER_FLOWS
+
+
 def _research(settings: Settings) -> bool:
     return settings.RESEARCH_ENABLED
 
@@ -477,6 +482,7 @@ ACTIONS: dict[str, Action] = {
     "task": _prompt("✏️ Задача в планер", "task", gate=_planner),
     "event": _prompt("✏️ Событие в планер", "event", gate=_planner),
     "done": _run("☑️ Отметить сделанной", "done", gate=_planner),
+    "flows": _run("🌊 Потоки задач", "flows", gate=_planner_flows),
     # deals
     "orders": _run("📜 Договорённости", "orders"),
     "order_daily": _prompt("Каждый день", "order", args="daily"),
@@ -1373,7 +1379,7 @@ def _render_today(settings: Settings, *, web: bool, view: MenuView, origin: str 
     _add(rows, _row(settings, web, "due_set", *(("due_clear",) if view.due_action else ())))
     _add(rows, _row(settings, web, "focus_off" if view.focus_on else "focus_on"))
     _add(rows, _row(settings, web, "task", "event"))
-    _add(rows, _row(settings, web, "done"))
+    _add(rows, _row(settings, web, "done", "flows"))
     rows.append(_nav_row("today"))
     return Section(title=TODAY_TITLE, hint=hint, table_rows=None, rows=rows)
 

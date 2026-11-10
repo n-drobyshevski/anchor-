@@ -29,6 +29,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
+from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import PlannerCredential
 from app.planner import actions as planner_actions
@@ -65,8 +66,8 @@ STATUS_HEADER = "Планер"
 # --- P3: /task, /event ---------------------------------------------------
 
 TASK_USAGE = (
-    "Что за задача? /task <название> [на <дата>].\n"
-    "Например: /task Купить молоко на завтра"
+    "Что за задача? /task <название> [на <дата>] [#тег …].\n"
+    "Например: /task Купить молоко на завтра #дом"
 )
 EVENT_USAGE = (
     "Что за событие? /event <название> в <ЧЧ:ММ> [дата] [на <длительность>].\n"
@@ -102,11 +103,102 @@ def render_plan_text(
     timezone: str,
     *,
     max_age_min: int,
+    flows: bool = True,
 ) -> str:
-    lines = planner_snapshot.render_lines(snapshot, clock, timezone, max_age_min=max_age_min)
+    lines = planner_snapshot.render_lines(
+        snapshot, clock, timezone, max_age_min=max_age_min, flows=flows
+    )
     if not lines:
         return f"{PLAN_HEADER}\n{PLAN_EMPTY}"
     return "\n".join([PLAN_HEADER, *lines])
+
+
+# --- PLANNER_FLOWS: /flows -----------------------------------------------------
+
+FLOWS_HEADER = "Потоки"
+FLOWS_DISABLED = "Потоки выключены на этом сервере."
+FLOWS_STALE = (
+    "Данные о потоках устарели или ещё не синхронизировались. "
+    "Попробуй через несколько минут."
+)
+FLOWS_EMPTY = "Потоков пока нет — либо задач нет, либо данные о них ещё не пришли."
+FLOWS_QUIET = "Ничего срочного: ни одна задача не требует внимания прямо сейчас."
+FLOWS_MAX_STREAMS = 8
+FLOWS_TASKS_PER_STREAM = 3
+FLOWS_LABEL_MAX = 40
+
+
+def flows_unavailable_reply(credential: PlannerCredential | None) -> str | None:
+    """Why `/flows` has nothing to show about the link itself, or None."""
+    if credential is None:
+        return NOT_LINKED
+    if credential.status != "active":
+        return REVOKED
+    if not credential.enabled:
+        return PAUSED
+    return None
+
+
+def _stream_header(stream: dict, today: datetime.date) -> str:
+    label = planner_snapshot.clip_flow_title(stream.get("label"), FLOWS_LABEL_MAX)
+    parts = [f"открыто {planner_snapshot.stream_count(stream, 'open')}"]
+    overdue = planner_snapshot.stream_count(stream, "overdue")
+    if overdue:
+        parts.append(f"просрочено {overdue}")
+    needs = planner_snapshot.stream_count(stream, "needsAttention")
+    if needs:
+        parts.append(f"внимания {needs}")
+    next_due = planner_snapshot.deadline_phrase(stream.get("nextDue"), today)
+    if next_due:
+        parts.append(f"ближайший срок: {next_due}")
+    return f"{label} — " + ", ".join(parts)
+
+
+def _stream_task_line(task: dict, today: datetime.date) -> str:
+    title = planner_snapshot.clip_flow_title(task.get("title"))
+    phrase = planner_snapshot.deadline_phrase(task, today)
+    return f"  · «{title}» — {phrase}" if phrase else f"  · «{title}»"
+
+
+def render_flows_text(
+    snapshot,
+    clock: Clock,
+    timezone: str,
+    *,
+    max_age_min: int,
+) -> str:
+    """The `/flows` reply: one header line per stream, then up to three of
+    its tasks that need attention.
+
+    Reads only the cached snapshot (like `render_plan_text`) and applies
+    the same staleness and calendar-date rules. Titles and labels go
+    through `clip_flow_title`, i.e. the injection check and clip that
+    `/plan` applies, and never raise on a malformed payload.
+    """
+    if planner_snapshot.is_stale(snapshot, clock, max_age_min):
+        return FLOWS_STALE
+    payload = snapshot.payload if isinstance(snapshot.payload, dict) else {}
+    today = clock_module.local_date(clock, timezone)
+    if payload.get("date") != today.isoformat():
+        return FLOWS_STALE
+    flows = planner_snapshot.flows_for(payload, today.isoformat())
+    streams = planner_snapshot.flows_streams(flows) if flows is not None else []
+    if not streams:
+        return FLOWS_EMPTY
+
+    lines = [FLOWS_HEADER]
+    any_attention = False
+    for stream in streams[:FLOWS_MAX_STREAMS]:
+        lines.append(_stream_header(stream, today))
+        for task in planner_snapshot.attention_tasks(stream)[:FLOWS_TASKS_PER_STREAM]:
+            any_attention = True
+            lines.append(_stream_task_line(task, today))
+    hidden = len(streams) - FLOWS_MAX_STREAMS
+    if hidden > 0:
+        lines.append(f"…и ещё потоков: {hidden}")
+    if not any_attention:
+        lines.append(FLOWS_QUIET)
+    return "\n".join(lines)
 
 
 def render_status_text(
@@ -143,7 +235,9 @@ def _clip(title: str | None, limit: int = DONE_TITLE_MAX) -> str:
 def confirm_task_text(payload: dict) -> str:
     due = payload.get("due_date")
     due_line = f"\nСрок: {due}" if due else ""
-    return f"Добавить в планер?\nЗадача: «{payload['title']}»{due_line}"
+    tags = [t for t in (payload.get("tags") or []) if isinstance(t, str) and t]
+    tags_line = "\nТеги: " + " ".join(f"#{t}" for t in tags) if tags else ""
+    return f"Добавить в планер?\nЗадача: «{payload['title']}»{due_line}{tags_line}"
 
 
 def _fmt_event_when(payload: dict, timezone: str) -> str:
@@ -350,7 +444,13 @@ __all__ = [
     "DONE_EMPTY",
     "DONE_STALE",
     "DONE_MARKING",
+    "FLOWS_DISABLED",
+    "FLOWS_STALE",
+    "FLOWS_EMPTY",
+    "FLOWS_QUIET",
     "render_plan_text",
+    "render_flows_text",
+    "flows_unavailable_reply",
     "render_status_text",
     "confirm_task_text",
     "confirm_event_text",

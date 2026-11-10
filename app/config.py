@@ -879,6 +879,14 @@ class Settings(BaseSettings):
     # sleep and heart metrics reach OpenRouter only when this is true
     # (README privacy note), same discipline as every other planner flag.
     PLANNER_HEALTH: bool = False
+    # Flows: gates the one extra best-effort `get_flows` MCP call each
+    # PLANNER_SYNC makes, the one «Требует внимания» line render_lines()
+    # adds to the now-block, the `/flows` command and its /menu button.
+    # Only has effect while PLANNER_ENABLED is true. Off by default --
+    # with it on, the titles of your own top attention tasks are cached
+    # in the planner snapshot and reach OpenRouter as part of that line
+    # (README privacy note), same as agenda task titles already do.
+    PLANNER_FLOWS: bool = False
     # --- 8a: the vault (phase-8 plan section 3) ---
     #
     # The kill switch, staged per milestone: off -> status -> mirror ->

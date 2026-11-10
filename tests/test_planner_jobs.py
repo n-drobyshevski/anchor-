@@ -320,3 +320,28 @@ async def test_write_sends_the_relink_notice_exactly_once_on_a_revoked_grant(ses
 
     assert len(fake_session.sent) == 1
     assert fake_session.sent[0].text == WRITE_AUTH_FAILED_NOTICE
+
+
+# --- PLANNER_FLOWS: tags reach create_task ----------------------------------
+
+
+async def test_write_passes_tags_to_create_task_only_when_the_action_has_them(
+    sessionmaker, frozen_clock
+):
+    clock = frozen_clock(2026, 9, 23, 9, 0, tz=TZ)
+    settings = Settings(_env_file=None, PLANNER_ENABLED=True)
+    bot, _ = make_bot()
+    client = _WriteClient()
+
+    async with sessionmaker() as session:
+        action = await actions.create(
+            session, clock, kind=actions.CREATE_TASK,
+            payload={"title": "Глава 2", "due_date": None, "tags": ["диплом", "учёба"]},
+        )
+        await actions.accept(session, clock, action.id)
+        await run_planner_write(
+            session, settings, client, clock,
+            planner_action_id=action.id, timezone=TZ, bot=bot, chat_id=4242,
+        )
+
+    assert client.create_task_calls[0]["tags"] == ["диплом", "учёба"]

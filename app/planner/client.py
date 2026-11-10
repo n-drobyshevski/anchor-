@@ -63,8 +63,15 @@ ALLOWED_TOOLS: frozenset[str] = frozenset(
         "create_event",
         "complete_task",
         "get_health",
+        # PLANNER_FLOWS: read-only, the caller's own tasks grouped into
+        # streams with an attention score.
+        "get_flows",
     }
 )
+
+FLOWS_GROUP_BY = frozenset({"tag", "category", "collection", "assignee", "status", "priority"})
+FLOWS_ATTENTION = frozenset({"deadline", "priority", "combined"})
+FLOWS_LIMIT_MAX = 10
 
 
 class PlannerToolError(Exception):
@@ -268,6 +275,41 @@ class PlannerClient:
             settings, session, clock, "get_health", {"date": date, "days": days}
         )
 
+    async def get_flows(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        date: str,
+        group_by: str | None = None,
+        stream: str | None = None,
+        attention: str | None = None,
+        mine: bool | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        # PLANNER_FLOWS: called once per sync (app/planner/snapshot.py),
+        # never per-turn. Every optional argument is omitted when None so
+        # the planner's own defaults (groupBy "tag", attention
+        # "combined", limit 3) apply; `limit` is clamped to the 1..10
+        # the planner accepts rather than risking a rejected call.
+        arguments: dict[str, Any] = {"date": date}
+        if group_by is not None:
+            if group_by not in FLOWS_GROUP_BY:
+                raise ValueError(f"unknown groupBy: {group_by}")
+            arguments["groupBy"] = group_by
+        if stream:
+            arguments["stream"] = stream
+        if attention is not None:
+            if attention not in FLOWS_ATTENTION:
+                raise ValueError(f"unknown attention: {attention}")
+            arguments["attention"] = attention
+        if mine is not None:
+            arguments["mine"] = bool(mine)
+        if limit is not None:
+            arguments["limit"] = max(1, min(FLOWS_LIMIT_MAX, int(limit)))
+        return await self.call_tool(settings, session, clock, "get_flows", arguments)
+
     # --- P3: writes (app/planner/jobs.py's PLANNER_WRITE job) -------------
     #
     # Each of the three wraps call_tool the same way get_agenda does --
@@ -283,6 +325,7 @@ class PlannerClient:
         title: str,
         due_date: str | None,
         client_request_id: str,
+        tags: list[str] | None = None,
     ) -> dict:
         # The planner's schema is `dueDate: z.string().optional()`, which
         # rejects an explicit null -- omit the key entirely rather than
@@ -290,6 +333,10 @@ class PlannerClient:
         arguments: dict[str, Any] = {"title": title, "clientRequestId": client_request_id}
         if due_date is not None:
             arguments["dueDate"] = due_date
+        # `tags` is optional on the planner side too; omit the key when
+        # there are none rather than sending an empty list.
+        if tags:
+            arguments["tags"] = list(tags)
         return await self.call_tool(settings, session, clock, "create_task", arguments)
 
     async def create_event(
