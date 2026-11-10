@@ -47,6 +47,15 @@ compare-and-swap refused) -- or a refusal/unavailable vault. An undo
 whose answer was lost is not "changed" on the retry: vaultd's index
 marks the changeset undone, and the row is marked too.
 
+**`write_stream_notes` / `undo_stream_notes`** (`/flows notes`, `/flows
+notes undo`): the user's own command writes one note per tag stream of
+the cached planner flows through vaultd's `PUT /v1/echo/streams`, all
+under one fresh changeset. There is no ledger row: the note's text is
+not web text, a rerun is harmless (vaultd writes nothing for a body it
+already holds), and vaultd's own index says which changeset to undo
+(the newest `echo` one whose purpose is `streams`). vaultd marks these
+notes `anchor: never`, so nothing here can read one back.
+
 All commit. Logs carry the row's id and an outcome code, never the
 gap's id (with it, the logs would tell a researched gap from a resolved
 one, the L4 spec section 6), the note's name, a card's text, a quote, a
@@ -58,12 +67,13 @@ from __future__ import annotations
 import datetime
 import logging
 import secrets
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import echo_note, note_checks
+from app.core import echo_note, note_checks, stream_note
 from app.core.clock import Clock
 from app.db.models import EchoChangeset
 from app.research import jobs
@@ -278,18 +288,11 @@ async def undo_last(session: AsyncSession, client: VaultClient, clock: Clock) ->
     ).scalar_one_or_none()
     if row is None:
         return NOTHING
-    try:
-        result = await client.undo_changeset(row.vault_ref, writer="echo")
-    except VaultError as exc:
-        if exc.code == errors.NOT_FOUND:
-            outcome = EXPIRED
-        elif exc.code == errors.REFUSED:
-            outcome = REFUSED
-        else:
-            outcome = UNAVAILABLE
+    outcome, restored = await _undo_ref(client, row.vault_ref)
+    if outcome is not None:
         _log(f"undo_{outcome}", changeset_id=row.id)
         return outcome
-    if result.restored == 0 and not await _undone_in_vault(client, row.vault_ref):
+    if restored == 0 and not await _undone_in_vault(client, row.vault_ref):
         _log(f"undo_{CHANGED}", changeset_id=row.id)
         return CHANGED
     row.undone_at = now
@@ -308,3 +311,91 @@ async def _undone_in_vault(client: VaultClient, vault_ref: str) -> bool:
     except VaultError:
         return False
     return any(c.id == vault_ref and c.writer == "echo" and c.undone for c in changes)
+
+
+async def _undo_ref(client: VaultClient, vault_ref: str) -> tuple[str | None, int]:
+    """Echo's one undo call: `(failure outcome or None, files restored)`."""
+    try:
+        result = await client.undo_changeset(vault_ref, writer="echo")
+    except VaultError as exc:
+        if exc.code == errors.NOT_FOUND:
+            return EXPIRED, 0
+        if exc.code == errors.REFUSED:
+            return REFUSED, 0
+        return UNAVAILABLE, 0
+    return None, result.restored
+
+
+# -- stream notes (/flows notes) ---------------------------------------------------
+
+STREAMS_REF_PREFIX = "streams_"
+STREAMS_PURPOSE = "streams"
+
+
+@dataclass(frozen=True)
+class StreamNotesResult:
+    """What `/flows notes` did: `outcome` is OK, EMPTY (no tag stream to
+    write) or UNAVAILABLE (the vault stopped answering; the counts say
+    how far it got)."""
+
+    outcome: str
+    written: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+
+
+async def write_stream_notes(client: VaultClient, flows: object) -> StreamNotesResult:
+    """Write or refresh one note per tag stream of a cached `get_flows`
+    payload (module docstring). A note vaultd refuses -- the user edited
+    it, the name is taken, a cap -- or whose text the content screen
+    refuses is counted as skipped and left alone; the rest still go."""
+    notes = stream_note.notes_for(flows)
+    if not notes:
+        return StreamNotesResult(EMPTY)
+    vault_ref = STREAMS_REF_PREFIX + secrets.token_hex(12)
+    written = unchanged = skipped = 0
+    for name, key, body in notes:
+        try:
+            note_checks.check_content(body)
+        except note_checks.Refused:
+            skipped += 1
+            continue
+        try:
+            put = await client.put_stream_note(name, key, body, vault_ref)
+        except VaultError as exc:
+            if exc.code in _DEFINITE_REFUSALS:
+                skipped += 1
+                continue
+            _log(f"streams_{UNAVAILABLE}")
+            return StreamNotesResult(UNAVAILABLE, written, unchanged, skipped)
+        if put.changed:
+            written += 1
+        else:
+            unchanged += 1
+    _log(f"streams_{OK}")
+    return StreamNotesResult(OK, written, unchanged, skipped)
+
+
+async def undo_stream_notes(client: VaultClient) -> str:
+    """`/flows notes undo`: take back the newest stream-note write that
+    is not undone yet. Returns `UNDONE`, `NOTHING`, `EXPIRED`,
+    `CHANGED` (every note in it was edited since), `REFUSED` or
+    `UNAVAILABLE`."""
+    try:
+        changes = await client.list_changes()
+    except VaultError:
+        _log(f"streams_undo_{UNAVAILABLE}")
+        return UNAVAILABLE
+    mine = [
+        c
+        for c in changes
+        if c.writer == "echo" and c.purpose == STREAMS_PURPOSE and c.kind == "write" and not c.undone
+    ]
+    if not mine:
+        return NOTHING
+    newest = max(mine, key=lambda c: c.time)
+    outcome, restored = await _undo_ref(client, newest.id)
+    if outcome is None:
+        outcome = UNDONE if restored else CHANGED
+    _log(f"streams_undo_{outcome}")
+    return outcome

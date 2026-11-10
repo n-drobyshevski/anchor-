@@ -2037,8 +2037,17 @@ def build_router(
         await _reply_once(message, event_update.update_id, text)
 
     @router.message(Command("flows"))
-    async def flows_command(message: Message, event_update: Update) -> None:
-        """Streams of tasks and which need attention. Snapshot only, like /plan."""
+    async def flows_command(
+        message: Message, event_update: Update, command: CommandObject | None = None
+    ) -> None:
+        """Streams of tasks and which need attention. Snapshot only, like
+        /plan. `/flows notes [undo]` writes (or takes back) one note per
+        stream in the vault: Telegram only, like /graph, since it edits
+        the vault."""
+        args = (command.args or "").strip() if command is not None else ""
+        if args and getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
         if not settings.PLANNER_ENABLED:
             await _reply_once(message, event_update.update_id, planner_ui.DISABLED)
             return
@@ -2049,9 +2058,15 @@ def build_router(
             user_state = await get_state(session)
             credential = await planner_auth.get_status(session)
             snap = await planner_snapshot.get_snapshot(session)
-        text = planner_ui.flows_unavailable_reply(credential) or planner_ui.render_flows_text(
-            snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
-        )
+        text = planner_ui.flows_unavailable_reply(credential)
+        if text is None and args:
+            text = await planner_ui.flows_notes(
+                snap, settings, clock, user_state.timezone, args, client_factory=VaultClient.from_settings
+            )
+        elif text is None:
+            text = planner_ui.render_flows_text(
+                snap, clock, user_state.timezone, max_age_min=settings.PLANNER_SNAPSHOT_MAX_AGE_MIN
+            )
         await _reply_once(message, event_update.update_id, text)
 
     @router.message(Command("planner"))

@@ -80,6 +80,7 @@ switched at run time from `/menu` → Настройки → 🧠 Модели (
 | `/study`, `/read`, `/notes`, `/card`, `/adopt`, `/reject` | Research loop | `RESEARCH_ENABLED` |
 | `/plan`, `/planner`, `/planner_link`, `/task`, `/event`, `/done` | Planner; all six are in `/menu` (Сегодня, Подключения → Планер), `/planner_link` after a «Точно?» | `PLANNER_ENABLED` |
 | `/flows` | Your tasks gathered into streams (by tag): per stream the open, overdue and needs-attention counts and the nearest deadline, then up to three tasks that need attention with «просрочено / сегодня / завтра / через N дн.». Reads only the cached snapshot (never a live call), so it can say the data is stale. A button in `/menu` → Сегодня | `PLANNER_ENABLED` + `PLANNER_FLOWS` |
+| `/flows notes`, `/flows notes undo` | Writes (or refreshes) one note per tag stream into your vault, in `<echo_inbox>/Streams`: counts, the nearest deadline and the tasks that need attention, with absolute dates. Only on this command, never in the background. Telegram only. A note you edited by hand is left alone and counted as skipped. `undo` takes the newest such write back | `PLANNER_FLOWS` + a `VAULT_MODE` other than `off` |
 | `/vault` | Vault status: is the sync running, how many facts are in Obsidian, how many notes of each class, and up to five files that need attention | `VAULT_MODE` |
 | `/vault notes on`, `/vault notes off` | Let Anchor read your classified notes / forget everything read from them; also a toggle in `/menu` → Знания | — |
 | `/lens` | The lens: on or off, how many notes (people, concepts), a warning over `LENS_CATALOG_MAX_NOTES`, whether Claude Code may read it, reads today, and «последний разбор: <date>, <outcome>» for the review's last lens round; «Последняя рефлексия с линзой: <date>, <outcome>» once the reflection has used it; with the garden, «Сад: <дата>, открыто N»; with research in flight, «Исследования: идёт N, ждут решения M» | — (the lens itself: `LENS_ENABLED`) |
@@ -1757,6 +1758,22 @@ off stops the line at once, without waiting for the next sync. The
 `#теги` you type in `/task` go to the planner with the task and are stored in its planner action
 row, which `/export` and `/delete` cover like the rest of that table. Off by
 default.
+
+**Stream notes.** `/flows notes` sends the cached streams to the vault
+service, which writes one note per tag into `<echo_inbox>/Streams`
+(`Echo/Inbox/Streams` by default). The note holds the tag, the counts
+and the titles of that stream's tasks that need attention: **those
+titles and your tag names are written into your vault**, and from there
+Obsidian Sync carries them like any other note. It happens only when you
+type the command; no job writes these notes. The vault service marks
+each note `anchor: never`, so Echo cannot read it back: it is not
+indexed, never retrieved, never put in a prompt and never shown to
+Claude's or Grok's connector. Echo keeps no record of these writes of
+its own; the vault service's undo store holds the previous version of
+each note for 14 days, which is what `/flows notes undo` restores and
+what `/delete` wipes along with the rest of that store. `/delete` does
+not remove the notes themselves: like every note in your vault, they
+are yours to delete.
 
 **P4 (planner writes proposed from chat).** With `PLANNER_INTENT=true`,
 a regex prefilter on your own message (never the partner's, and never

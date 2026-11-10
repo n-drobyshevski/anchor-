@@ -166,7 +166,8 @@ class ChangeEntry:
     undone: bool
     files: list[ChangeFile]
     writer: str = "claude"
-    # An Echo changeset's purpose: None (the inbox) or "prune" (graph pruning).
+    # An Echo changeset's purpose: None (the inbox), "prune" (graph
+    # pruning) or "streams" (stream notes).
     purpose: str | None = None
 
 
@@ -240,6 +241,16 @@ class EchoPut:
     name: str
     sha256: str
     replayed: bool
+
+
+@dataclass(frozen=True)
+class StreamPut:
+    """`PUT /v1/echo/streams`'s body: the note's hash, and whether
+    anything was written (`changed` is false when the note already held
+    this body)."""
+
+    sha256: str
+    changed: bool
 
 
 @dataclass(frozen=True)
@@ -387,7 +398,7 @@ def _summary(raw: Any) -> NotesSummary:
 
 
 def _purpose(value: Any) -> str | None:
-    _require(value is None or value == "prune")
+    _require(value is None or value in ("prune", "streams"))
     return value
 
 
@@ -698,6 +709,23 @@ class VaultClient:
         _require(isinstance(restored, int) and not isinstance(restored, bool) and restored >= 0)
         _require(isinstance(refused, int) and not isinstance(refused, bool) and refused >= 0)
         return UndoResult(restored=restored, refused=refused)
+
+    async def put_stream_note(self, name: str, stream: str, body: str, changeset: str) -> StreamPut:
+        """Create or refresh Echo's note for one planner stream
+        (vaultd/vaultd/streams.py). `name` is a bare `.md` basename,
+        `stream` the stream's key, `body` the text; vaultd writes the
+        frontmatter (`anchor: never`, so the bot can never read the
+        note back) and builds the path. REFUSED when vaultd will not
+        write: no inbox, a bad name, a cap, or a file at that name that
+        is not Echo's own untouched note for this stream."""
+        data = await self._request(
+            "PUT",
+            "/v1/echo/streams",
+            body={"name": name, "stream": stream, "body": body, "changeset": changeset},
+        )
+        sha, changed = data.get("sha256"), data.get("changed")
+        _require(isinstance(sha, str) and isinstance(changed, bool))
+        return StreamPut(sha256=sha, changed=changed)
 
     # -- Footer link pruning (vaultd/vaultd/prune.py) --------------------------------
 

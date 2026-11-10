@@ -30,6 +30,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Settings
 from app.core import clock as clock_module
+from app.core import echo_write
 from app.core.clock import Clock
 from app.db.models import PlannerCredential
 from app.planner import actions as planner_actions
@@ -126,6 +127,63 @@ FLOWS_QUIET = "Ничего срочного: ни одна задача не т
 FLOWS_MAX_STREAMS = 8
 FLOWS_TASKS_PER_STREAM = 3
 FLOWS_LABEL_MAX = 40
+
+
+# `/flows notes` and `/flows notes undo`: the user's own command writes
+# one note per tag stream into the vault (app/core/echo_write.py).
+NOTES_VAULT_OFF = "Заметки потоков недоступны: хранилище выключено (VAULT_MODE)."
+NOTES_USAGE = (
+    "«/flows notes» — записать или обновить заметки потоков в Obsidian; "
+    "«/flows notes undo» — отменить последнюю запись."
+)
+NOTES_EMPTY = "Нет потоков с тегами: записывать нечего."
+NOTES_UNAVAILABLE = "Хранилище не ответило. Попробуй ещё раз позже."
+NOTES_UNDO_REPLIES = {
+    echo_write.UNDONE: "Отменено: заметки потоков возвращены к прежнему виду.",
+    echo_write.NOTHING: "Нечего отменять: нет записей заметок потоков, которые ещё можно отменить.",
+    echo_write.EXPIRED: "Отменить уже нельзя: хранилище больше не держит эту запись.",
+    echo_write.CHANGED: "Не отменено: заметки меняли после записи, я их не трогаю.",
+    echo_write.REFUSED: "Хранилище отказало в отмене (например, лимит отмен в час). Попробуй позже.",
+    echo_write.UNAVAILABLE: NOTES_UNAVAILABLE,
+}
+
+
+def notes_result_text(result: echo_write.StreamNotesResult) -> str:
+    """The `/flows notes` reply for one run's outcome."""
+    if result.outcome == echo_write.EMPTY:
+        return NOTES_EMPTY
+    parts = [f"записано {result.written}", f"без изменений {result.unchanged}"]
+    if result.skipped:
+        parts.append(f"пропущено {result.skipped} (заметку меняли вручную, имя занято или лимит)")
+    text = "Заметки потоков: " + ", ".join(parts) + "."
+    if result.outcome == echo_write.UNAVAILABLE:
+        return text + " " + NOTES_UNAVAILABLE
+    return text
+
+
+async def flows_notes(snapshot, settings, clock: Clock, timezone: str, args: str, *, client_factory) -> str:
+    """`/flows notes [undo]`. Reads only the cached snapshot, under the
+    same staleness and date rules as `/flows`; the vault is touched only
+    here, on the user's command."""
+    words = args.split()
+    if words not in (["notes"], ["notes", "undo"]):
+        return NOTES_USAGE
+    if settings.VAULT_MODE == "off":
+        return NOTES_VAULT_OFF
+    client = client_factory(settings)
+    if words[-1] == "undo":
+        outcome = await echo_write.undo_stream_notes(client)
+        return NOTES_UNDO_REPLIES.get(outcome, NOTES_UNAVAILABLE)
+    if planner_snapshot.is_stale(snapshot, clock, settings.PLANNER_SNAPSHOT_MAX_AGE_MIN):
+        return FLOWS_STALE
+    payload = snapshot.payload if isinstance(snapshot.payload, dict) else {}
+    today = clock_module.local_date(clock, timezone).isoformat()
+    if payload.get("date") != today:
+        return FLOWS_STALE
+    flows = planner_snapshot.flows_for(payload, today)
+    if flows is None:
+        return FLOWS_STALE
+    return notes_result_text(await echo_write.write_stream_notes(client, flows))
 
 
 def flows_unavailable_reply(credential: PlannerCredential | None) -> str | None:

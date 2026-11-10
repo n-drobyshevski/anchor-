@@ -4170,3 +4170,56 @@ planner and menu test files).
 - **Not done**: grouping by anything but tag, `stream` and `attention`
   arguments from Telegram (the wrapper supports them), a live refresh from
   `/flows`, and the web sink's own panel.
+
+## Stream notes: one note per planner stream, on the user's command
+
+- **What.** `/flows notes` writes one note per tag stream of the cached
+  planner flows into the vault; `/flows notes undo` takes the newest such
+  write back. vaultd's side is a new route, `PUT /v1/echo/streams`
+  (vaultd/vaultd/streams.py), beside the inbox writer and not a loosening of
+  it: the inbox writer stays create-only.
+- **Only on a command.** The first design refreshed the notes after each
+  `PLANNER_SYNC`. That would have been the first write into the vault with no
+  tap behind it, against the rule tests/test_echo_isolation.py and
+  tests/test_idle_isolation.py pin, so it was dropped: the notes are as fresh
+  as the last time the user asked. The writer lives in app/core/echo_write.py,
+  which stays the only module that writes or undoes for Echo, and its two
+  undo paths share one call.
+- **`anchor: never`, not a new class.** A stream note is a digest of the task
+  list; Echo must not learn it back from the vault. `never` is already the
+  strictest class and already hidden on every read route, in the manifest and
+  in the graph, so the note cannot reach memory, search, a prompt or a
+  connector, and no ingest code changed. The price: Echo cannot read its own
+  note, so it cannot show it or compare against it.
+- **vaultd writes the frontmatter.** The bot sends a bare name, the stream's
+  key and the body. The block is exactly `anchor`, `echo_stream`,
+  `echo_body_sha256` and the `echo` stamp.
+- **No new settings key.** The folder is `<echo_inbox>/Streams`: the inbox is
+  already the one place Echo may create notes, so `Anchor/settings.md` and its
+  fail-closed parser are untouched. No inbox, no stream notes. The knowledge
+  tree therefore lists the folder (a constant) and nothing in it.
+- **Replace only its own untouched note.** An existing file is replaced only
+  when its keys are exactly those five, it is `never`, stamped `echo`, names
+  the same stream, and its body still hashes to `echo_body_sha256`. The hash
+  travels in the note, so the check needs no state and survives the undo
+  store's 14-day expiry. A body the user edited, a note whose properties
+  changed, another stream's note and the user's own file are all refused and
+  left as they are; the command counts them as skipped. A user who wants the
+  note maintained again deletes it.
+- **An unchanged body writes nothing** and spends no changeset, so a rerun is
+  harmless and needs no ledger. That is why there is no bot-side table: the
+  text is the user's own task titles, not web text, and vaultd's index names
+  the changeset to undo (`writer: echo`, `purpose: streams`).
+- **Caps of its own.** One command is one changeset of at most 12 notes, at
+  most 6 such changesets a day. They neither spend nor are spent by the inbox
+  writer's 20 a day. The inbox route now refuses to replay a stream changeset:
+  before, a retried inbox write that reused such an id would have been
+  answered with a stream note's name.
+- **The body.** Absolute dates only («завтра» would be wrong by morning), and
+  every title and tag passes through `render.report_escape`, then the content
+  screen (an instruction or a secret skips that note). Only tag streams get a
+  note; the untagged bucket and other groupings are views.
+- **Not done.** No rename or delete: a tag that disappears leaves its last
+  note behind. No button in `/menu`. Notes for saved streams or other
+  groupings.
+
