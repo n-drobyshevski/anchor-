@@ -603,7 +603,7 @@ async def put_echo_stream(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "sha256": sha, "changed": True})
 
 
-def _read_boards(store: Store) -> list[dict]:
+def _read_boards(store: Store, subs: bool = False) -> list[dict]:
     rules = classes.load_rules(store.vault_path)
     out = []
     for name in rules.task_boards if rules.state == "ok" else ():
@@ -618,16 +618,19 @@ def _read_boards(store: Store) -> list[dict]:
         if board is None:
             out.append({"name": name, "state": "not_board"})
             continue
-        out.append({"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board)})
+        out.append({"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board, name=name, subs=subs)})
     return out
 
 
 async def get_boards(request: web.Request) -> web.Response:
     """`GET /v1/boards` (boards.py): the task boards the user named in
     `Anchor/settings.md`, each as its lanes' titles and its active cards
-    (lane, first line, checked, date, block id). Nothing else of the
-    file. No list, an invalid settings file: no boards."""
-    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY])
+    (lane, first line, checked, date, block id). With `?subs=1` each card
+    also carries its subtasks and its `after:` links (board_subs.py); an
+    older bot, which checks a card's keys exactly, asks without it. Nothing
+    else of the file. No list, an invalid settings file: no boards."""
+    subs = request.query.get("subs") == "1"
+    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY], subs)
     logger.info("boards", extra={"event": "boards_read", "count": len(found)})
     return web.json_response({"boards": found})
 
@@ -667,7 +670,7 @@ async def post_board(request: web.Request) -> web.Response:
             if hashlib.sha256(data).hexdigest() != expected:
                 _log_refused(request, "board_changed")
                 return _json_error("conflict", 409)
-            new = await asyncio.to_thread(boards.apply, data, ops)
+            new = await asyncio.to_thread(boards.apply, data, ops, name=name, named=rules.task_boards)
             if new == data:
                 return web.json_response({"sha256": expected, "changed": False})
             await asyncio.to_thread(undo_store.precheck_boards, changeset)

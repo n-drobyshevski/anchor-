@@ -456,8 +456,35 @@ sync, at most every 15 minutes.
    `off`). `/boards` shows each board's pairs and its last pass;
    `/boards now` runs one pass at once.
 
-What it does not touch: lanes other than open and done, the lines under
-a card, the archive, subtasks and task descriptions. A card you delete or
+**Subtasks and dependencies.** The vault service reads two kinds of
+line under a card, and can write them:
+
+```markdown
+- [ ] Plan the trip @{2026-11-14} ^card01
+    - [x] Pick dates ^sub001
+    - [ ] Book the train @{2026-11-17} ^sub002
+        - [ ] Compare fares ^sub003
+- [ ] Water the plants ^card02
+    after: [[#^card01|Plan the trip]], [[General tasks#^gen001|Buy soil]]
+```
+
+- A **subtask** is a checkbox line indented under the card by one to
+  three steps of a tab or four spaces, at most one step deeper than the
+  subtask above it (a line that jumps two steps is left as text). It can
+  have its own `@{date}` and `^id`, like a card. Lines indented under a
+  subtask belong to it.
+- An **`after:` line**, indented one step, lists the cards this one
+  waits for: `[[#^id|Label]]` for a card on the same board,
+  `[[Board name#^id|Label]]` for one on another board named in
+  `task_boards`, separated by commas.
+- New lines are written with tabs if the board's cards already use
+  tabs, otherwise four spaces. A new subtask goes at the end of its
+  parent's subtasks, the `after:` line right under the card's first
+  line. Every other line under a card stays exactly as you wrote it,
+  where you wrote it.
+
+What it does not touch: lanes other than open and done, the other lines
+under a card, the archive and task descriptions. A card you delete or
 archive takes the board's tag off its task (the task stays in the
 planner); a task you untag or delete loses its card. Completed planner
 tasks that were never on the board are not added.

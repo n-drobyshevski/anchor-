@@ -179,3 +179,10 @@ BOARD_OPS_MAX = 100
 BOARD_CARD_MAX_CHARS = 500
 BOARD_CHANGESETS_PER_DAY = 200
 
+# Subtasks and `after:` links inside a card (board_subs.py): a subtask is
+# at most this deep (indent units under the card), a card holds at most
+# this many (the bot adds no more), and an `after:` line names at most this
+# many cards.
+BOARD_SUB_MAX_DEPTH = 3
+BOARD_SUBS_PER_CARD_MAX = 50
+BOARD_AFTER_LINKS_MAX = 20
