@@ -56,6 +56,17 @@ already holds), and vaultd's own index says which changeset to undo
 (the newest `echo` one whose purpose is `streams`). vaultd marks these
 notes `anchor: never`, so nothing here can read one back.
 
+**`write_board` / `undo_boards`** (board sync, `/boards undo`): one
+board's card operations through vaultd's `POST /v1/boards`, and the
+newest such changeset's undo. `write_board` is the one write here with
+no tap behind it: the board-sync job (app/planner/board_job.py) calls it
+from its own job kind, never from idle, because the user chose a
+background sync of their boards over an on-command one
+(docs/decisions.md, "Board sync"). tests/test_echo_isolation.py names
+that job as the exception; every other writer here still runs only on
+the user's tap. No ledger row either: vaultd's index names the changeset
+(`writer: echo`, `purpose: boards`), and the pairs are the job's.
+
 All commit. Logs carry the row's id and an outcome code, never the
 gap's id (with it, the logs would tell a researched gap from a resolved
 one, the L4 spec section 6), the note's name, a card's text, a quote, a
@@ -398,19 +409,89 @@ async def undo_stream_notes(client: VaultClient) -> str:
     One level on purpose: the target is always the newest stream write,
     undone or not. So a retry after an undo whose answer was lost finds
     it undone and stops, instead of taking back the write before it."""
+    outcome, _ = await _undo_newest(client, STREAMS_PURPOSE, "streams")
+    return outcome
+
+
+async def _undo_newest(client: VaultClient, purpose: str, log_prefix: str) -> tuple[str, list[str]]:
+    """Undo the newest Echo write of `purpose`, one level only (see
+    `undo_stream_notes`): `(outcome, the paths that changeset held)`.
+    Both the stream notes' and the boards' undo come through here, and
+    so through the one `_undo_ref` call."""
     try:
         changes = await client.list_changes()
     except VaultError:
-        _log(f"streams_undo_{UNAVAILABLE}")
-        return UNAVAILABLE
-    mine = [c for c in changes if c.writer == "echo" and c.purpose == STREAMS_PURPOSE and c.kind == "write"]
+        _log(f"{log_prefix}_undo_{UNAVAILABLE}")
+        return UNAVAILABLE, []
+    mine = [c for c in changes if c.writer == "echo" and c.purpose == purpose and c.kind == "write"]
     if not mine:
-        return NOTHING
+        return NOTHING, []
     newest = max(mine, key=lambda c: c.time)
     if newest.undone:
-        return NOTHING
+        return NOTHING, []
     outcome, restored = await _undo_ref(client, newest.id)
     if outcome is None:
         outcome = UNDONE if restored else CHANGED
-    _log(f"streams_undo_{outcome}")
-    return outcome
+    _log(f"{log_prefix}_undo_{outcome}")
+    return outcome, [f.path for f in newest.files]
+
+
+# -- task boards (app/planner/board_job.py, /boards) -----------------------------------
+
+BOARDS_REF_PREFIX = "boards_"
+BOARDS_PURPOSE = "boards"
+# write_board's outcomes besides OK, REFUSED and UNAVAILABLE: the board
+# changed since it was read (vaultd's 409), and nothing was written.
+BOARD_CHANGED = "board_changed"
+
+
+def new_boards_ref() -> str:
+    """One fresh changeset id per board-sync pass: every board it writes
+    goes into that one changeset, which `/boards undo` takes back whole."""
+    return BOARDS_REF_PREFIX + secrets.token_hex(12)
+
+
+@dataclass(frozen=True)
+class BoardWrite:
+    """What `write_board` did: `outcome` is OK (written, or nothing to
+    change: `changed` says which), BOARD_CHANGED (the 409: nothing
+    written), REFUSED (vaultd refused the batch: nothing written) or
+    UNAVAILABLE (no answer: whether it was written is unknown, and the
+    next pass reads the board again)."""
+
+    outcome: str
+    changed: bool = False
+
+
+async def write_board(client: VaultClient, name: str, if_sha256: str, ops: list[dict], changeset: str) -> BoardWrite:
+    """Apply one board's card operations through vaultd's `POST
+    /v1/boards`, as part of `changeset`.
+
+    The one write into the vault Echo makes without a tap: the board-sync
+    job (app/planner/board_job.py, its own job kind and never an idle
+    job) is its only caller, a documented exception that
+    tests/test_echo_isolation.py names. The batch was built by
+    app/planner/board_sync.py, which screens every card text the way
+    vaultd does, so a refusal here is a surprise, not a routine skip.
+    The log carries the outcome only, never the board's name or a card."""
+    if not ops:
+        return BoardWrite(OK)
+    try:
+        post = await client.post_board(name, if_sha256, ops, changeset)
+    except VaultError as exc:
+        outcome = REFUSED if exc.code in _DEFINITE_REFUSALS else UNAVAILABLE
+        _log(f"boards_{outcome}")
+        return BoardWrite(outcome)
+    if post.conflict:
+        _log(f"boards_{BOARD_CHANGED}")
+        return BoardWrite(BOARD_CHANGED)
+    _log(f"boards_{OK}")
+    return BoardWrite(OK, changed=post.changed)
+
+
+async def undo_boards(client: VaultClient) -> tuple[str, list[str]]:
+    """`/boards undo`: take back the last board-sync write, one level
+    only, exactly as `/flows notes undo` does for stream notes. Returns
+    the outcome and the board names that write held. The planner side of
+    that pass is not undone: it is the planner's own state."""
+    return await _undo_newest(client, BOARDS_PURPOSE, "boards")

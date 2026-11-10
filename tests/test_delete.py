@@ -22,6 +22,8 @@ from sqlalchemy import func, select, update as sql_update
 from app.config import Settings
 from app.core import purge
 from app.db.models import (
+    BoardPair,
+    BoardSyncRun,
     Obligation,
     AccessGrant,
     ClaudeChangeset,
@@ -491,6 +493,14 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         # L4: one of Echo's inbox writes for that gap.
         session.add(EchoChangeset(vault_ref="echo_delete_test", lens_gap_id=gap.id, created_at=now))
         session.add(VaultStatus(id=1, last_ok_at=now))
+        # Board sync: one tracked pair and one pass.
+        session.add(
+            BoardPair(
+                board="Work tasks.md", block_id="abcd1234", task_id="t1", title="Отчёт",
+                done=False, created_at=now, updated_at=now,
+            )
+        )
+        session.add(BoardSyncRun(at=now, board="Work tasks.md", outcome="ok"))
         await session.commit()
 
 

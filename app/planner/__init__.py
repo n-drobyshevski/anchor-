@@ -13,6 +13,9 @@ Submodules:
 - `snapshot.py`— the local cache (`planner_snapshot`) the chat-turn path
                  reads from, so a turn never waits on the network.
 - `jobs.py`    — the `PLANNER_SYNC` job body (read path only in P2).
+- `board_sync.py` — board sync's pure merge: a task board's cards against
+                 the planner's tasks with its tag, three ways.
+- `board_job.py` — the `BOARD_SYNC` job: reads, writes and stores one pass.
 
 Nothing in `app/core/extract.py`, `app/core/scene.py` or
 `app/core/memory.py` may import this package — see

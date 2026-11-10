@@ -103,6 +103,7 @@ from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
 from app.tg import graph as graph_ui
+from app.tg import boards as boards_ui
 from app.tg import lens as lens_ui
 from app.tg import memory as memory_ui
 from app.tg import menu
@@ -264,6 +265,8 @@ BOT_COMMANDS = [
     BotCommand(command="lens", description="Линза и доступ Claude Code"),
     # Footer link pruning (app/tg/graph.py): dry run, apply, undo.
     BotCommand(command="graph", description="Чистка ссылок в футерах заметок"),
+    # Board sync (app/tg/boards.py): status, preview, a pass now, undo.
+    BotCommand(command="boards", description="Доски задач ⇄ планер"),
 ]
 
 # Web-chat plan track 2 (design section 4): the kill switch for a stolen
@@ -1510,6 +1513,27 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/graph]", scene_id=scene_id
         )
 
+    @router.message(Command("boards"))
+    async def boards_command(
+        message: Message, event_update: Update, command: CommandObject
+    ) -> None:
+        """Board sync (app/tg/boards.py): `/boards` status, `/boards
+        preview` dry run, `/boards now`, `/boards undo`. Telegram only,
+        like /graph: `now` and `undo` change the vault."""
+        if not await _once(event_update.update_id):
+            return
+        if getattr(message.bot, "is_web_sink", False):
+            await _reply_once(message, event_update.update_id, WEB_ONLY_REPLY)
+            return
+        scene_id = await turn.ensure_scene(sessionmaker, settings, clock)
+        reply = await boards_ui.command(
+            sessionmaker, settings, clock, command.args, client_factory=VaultClient.from_settings
+        )
+        await send_keyboard(message.bot, message.chat.id, reply, None)
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/boards]", scene_id=scene_id
+        )
+
     @router.message(Command("revoke"))
     async def revoke_command(message: Message, event_update: Update) -> None:
         """Closes every open grant. Works even with the feature switched
@@ -2560,6 +2584,8 @@ def build_router(
         "notes_off": _menu_vault("notes off"),
         "vault": _menu_vault(None),
         "graph": _fixed(graph_command, "graph"),
+        "boards": _fixed(boards_command, "boards"),
+        "boards_preview": _fixed(boards_command, "boards", "preview"),
         "lens": _fixed(lens_command, "lens"),
         "lens_garden": _fixed(lens_command, "lens", "garden now"),
         "lens_research": _fixed(lens_command, "lens", "research now"),
@@ -2618,6 +2644,7 @@ def build_router(
         # A bare /due clears the main action (menu.ACTIONS' own comment).
         "due_clear": _confirmed(due, "due"),
         "graph_undo": _confirmed(graph_command, "graph", "undo"),
+        "boards_undo": _confirmed(boards_command, "boards", "undo"),
         "lens_undo": _confirmed(lens_command, "lens", "undo"),
         "lens_code_on": _confirmed(lens_command, "lens", "code on"),
         "weblogout": _confirmed_bare(_menu_weblogout),

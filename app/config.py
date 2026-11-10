@@ -14,6 +14,7 @@ doc (the wallet guard must exist the moment the API key goes live).
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import urllib.parse
 
@@ -332,6 +333,42 @@ class Settings(BaseSettings):
                 raise ValueError(f"MODEL_CHOICES lists {choice.id!r} twice")
             choices.append(choice)
         return tuple(choice.canonical() for choice in choices)
+
+    @field_validator("BOARD_SYNC_TAGS", mode="before")
+    @classmethod
+    def _parse_board_sync_tags(cls, value):
+        """A JSON object of board file name -> planner tag. Refused
+        loudly rather than half-read: a board mapped to a misspelt tag
+        would pair nothing and add every task with the right one as a
+        new card. A name is a bare `.md` file name (vaultd's
+        `task_boards` are at the vault's root); a tag is in the planner's
+        normal form (lowercase, no `#`, no spaces), and no two boards
+        share one."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value) if value.strip() else {}
+            except ValueError:
+                raise ValueError("BOARD_SYNC_TAGS must be a JSON object") from None
+        if not isinstance(value, dict):
+            raise ValueError("BOARD_SYNC_TAGS must be a JSON object")
+        out: dict[str, str] = {}
+        for name, tag in value.items():
+            if not (isinstance(name, str) and name.endswith(".md") and "/" not in name and "\\" not in name
+                    and name.strip() == name and len(name) > 3):
+                raise ValueError(f"BOARD_SYNC_TAGS: {name!r} is not a bare .md file name")
+            if not (isinstance(tag, str) and re.fullmatch(r"[^\s#,A-ZА-ЯЁ]{1,40}", tag)):
+                raise ValueError(f"BOARD_SYNC_TAGS: the tag for {name!r} is not a planner tag")
+            if tag in out.values():
+                raise ValueError(f"BOARD_SYNC_TAGS: tag {tag!r} is mapped twice")
+            out[name] = tag
+        return out
+
+    @field_validator("BOARD_SYNC_CREATES_PER_PASS")
+    @classmethod
+    def _board_sync_creates_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("BOARD_SYNC_CREATES_PER_PASS must be 1-100")
+        return value
 
     @field_validator("MODEL_CATALOG_TTL_H")
     @classmethod
@@ -887,6 +924,24 @@ class Settings(BaseSettings):
     # in the planner snapshot and reach OpenRouter as part of that line
     # (README privacy note), same as agenda task titles already do.
     PLANNER_FLOWS: bool = False
+    # Board sync (app/planner/board_job.py, docs/decisions.md "Board
+    # sync"): keeps the user's Kanban Starlane boards in the vault and the
+    # planner's tasks with the board's tag in step, both ways, in the
+    # background -- a job after each successful PLANNER_SYNC, at most once
+    # per 15 minutes. Needs PLANNER_ENABLED, an active planner link and a
+    # VAULT_MODE other than `off`; the boards themselves must be named
+    # under `task_boards` in `Anchor/settings.md`. Off by default: with it
+    # on, card titles go to the planner and task titles into the board
+    # files (README privacy note). `/boards preview` works with it off.
+    BOARD_SYNC_ENABLED: bool = False
+    # Board file name (as in `task_boards`) -> planner tag, as JSON. A
+    # board vaultd reports with no entry here is left alone.
+    BOARD_SYNC_TAGS: Annotated[dict[str, str], NoDecode] = {
+        "Work tasks.md": "work",
+        "General tasks.md": "general",
+    }
+    # Planner creates per pass (new cards); the rest wait for the next.
+    BOARD_SYNC_CREATES_PER_PASS: int = 20
     # --- 8a: the vault (phase-8 plan section 3) ---
     #
     # The kill switch, staged per milestone: off -> status -> mirror ->

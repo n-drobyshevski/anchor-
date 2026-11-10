@@ -29,6 +29,14 @@ id after a lost answer) comes back `replayed`. `undo_changeset` names
 the writer, `claude` or `echo`, and vaultd refuses the other's
 changesets; `list_changes` reports each changeset's writer.
 
+**Task boards** (`GET`/`POST /v1/boards`, vaultd/vaultd/boards.py):
+`get_boards` returns the boards the user named, each card with its
+index, block id, lane, first line, checked state and date, parsed as
+strictly as the rest (a missing key, an extra one, a card out of order
+is BAD_RESPONSE). `post_board` sends card operations; its 409 (the board
+changed since it was read) is an outcome, `BoardPost(conflict=True)`,
+not an error.
+
 **What the client refuses to do.** No redirects (a 3xx is a bad
 response, not a hop). No proxy or `.netrc` from the environment
 (`trust_env=False`), so the bearer token only ever goes to VAULT_URL,
@@ -46,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -167,7 +176,7 @@ class ChangeEntry:
     files: list[ChangeFile]
     writer: str = "claude"
     # An Echo changeset's purpose: None (the inbox), "prune" (graph
-    # pruning) or "streams" (stream notes).
+    # pruning), "streams" (stream notes) or "boards" (task boards).
     purpose: str | None = None
 
 
@@ -251,6 +260,91 @@ class StreamPut:
 
     sha256: str
     changed: bool
+
+
+BOARD_STATES = ("ok", "missing", "not_board")
+_BOARD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SHA256_RE_CHARS = frozenset("0123456789abcdef")
+
+
+@dataclass(frozen=True)
+class BoardCard:
+    """One active card of a task board (vaultd/vaultd/boards.py): its
+    index in the board, block id (None when it has none), lane title,
+    first line, checked state and date (`yyyy-MM-dd`, or None)."""
+
+    n: int
+    id: str | None
+    lane: str
+    text: str
+    checked: bool
+    date: str | None
+
+
+@dataclass(frozen=True)
+class TaskBoard:
+    """One board the user named under `task_boards` in
+    `Anchor/settings.md`. `state` is `ok`, `missing` (no such file) or
+    `not_board` (not a Kanban Starlane board); only an `ok` board has a
+    hash, lanes and cards. `dates` is false when the board's own settings
+    change the date syntax: its dates then stay in the card's text."""
+
+    name: str
+    state: str
+    sha256: str | None = None
+    lanes: tuple[str, ...] = ()
+    done_lane: bool = False
+    dates: bool = False
+    cards: tuple[BoardCard, ...] = ()
+
+
+@dataclass(frozen=True)
+class BoardPost:
+    """`POST /v1/boards`'s outcome. `conflict` is the 409: the board
+    changed since the hash the write named, and nothing was written
+    (`sha256` is then None)."""
+
+    sha256: str | None
+    changed: bool
+    conflict: bool = False
+
+
+def _sha256(value: Any) -> str:
+    _require(isinstance(value, str) and len(value) == 64 and set(value) <= _SHA256_RE_CHARS)
+    return value
+
+
+def _board_card(item: Any, index: int) -> BoardCard:
+    _require(isinstance(item, dict) and set(item) == {"n", "id", "lane", "text", "checked", "date"})
+    _require(_count(item["n"]) == index)
+    block_id, lane, text, checked, date = (item[k] for k in ("id", "lane", "text", "checked", "date"))
+    _require(block_id is None or (isinstance(block_id, str) and block_id != ""))
+    _require(isinstance(lane, str) and isinstance(text, str) and isinstance(checked, bool))
+    # The shape only: a user can type `@{2026-02-30}`, and vaultd reports
+    # what is there. Whether it is a real day is the merge's to decide.
+    _require(date is None or (isinstance(date, str) and _BOARD_DATE_RE.match(date) is not None))
+    return BoardCard(n=index, id=block_id, lane=lane, text=text, checked=checked, date=date)
+
+
+def _task_board(item: Any) -> TaskBoard:
+    _require(isinstance(item, dict))
+    name, state = item.get("name"), item.get("state")
+    _require(isinstance(name, str) and name != "" and state in BOARD_STATES)
+    if state != "ok":
+        _require(set(item) == {"name", "state"})
+        return TaskBoard(name=name, state=state)
+    _require(set(item) == {"name", "state", "sha256", "lanes", "done_lane", "dates", "cards"})
+    done_lane, dates, cards = item["done_lane"], item["dates"], item["cards"]
+    _require(isinstance(done_lane, bool) and isinstance(dates, bool) and isinstance(cards, list))
+    return TaskBoard(
+        name=name,
+        state=state,
+        sha256=_sha256(item["sha256"]),
+        lanes=_strings(item["lanes"]),
+        done_lane=done_lane,
+        dates=dates,
+        cards=tuple(_board_card(card, i) for i, card in enumerate(cards)),
+    )
 
 
 @dataclass(frozen=True)
@@ -398,7 +492,7 @@ def _summary(raw: Any) -> NotesSummary:
 
 
 def _purpose(value: Any) -> str | None:
-    _require(value is None or value in ("prune", "streams"))
+    _require(value is None or value in ("prune", "streams", "boards"))
     return value
 
 
@@ -479,7 +573,11 @@ class VaultClient:
         *,
         params: dict[str, str] | None = None,
         body: dict | None = None,
-    ) -> dict:
+        conflict_ok: bool = False,
+    ) -> dict | None:
+        """The answer's JSON object. With `conflict_ok`, a 409 is not an
+        error: it returns None, for the one route where a conflict is an
+        expected outcome rather than a failure (`post_board`)."""
         headers = {"Authorization": f"Bearer {self._token}"}
         try:
             async with self._opener() as session:
@@ -497,6 +595,8 @@ class VaultClient:
             raise VaultError(errors.UNAVAILABLE) from None
         except (aiohttp.ClientError, OSError):
             raise VaultError(errors.UNAVAILABLE) from None
+        if status == 409 and conflict_ok:
+            return None
         if status != 200:
             raise VaultError(_status_error(status))
         _require(len(raw) <= MAX_RESPONSE_BYTES)
@@ -726,6 +826,36 @@ class VaultClient:
         sha, changed = data.get("sha256"), data.get("changed")
         _require(isinstance(sha, str) and isinstance(changed, bool))
         return StreamPut(sha256=sha, changed=changed)
+
+    # -- Task boards (vaultd/vaultd/boards.py) ---------------------------------------
+
+    async def get_boards(self) -> list[TaskBoard]:
+        """`GET /v1/boards`: the boards named under `task_boards` in
+        `Anchor/settings.md`, each with its cards. Parsed strictly: an
+        answer of any other shape is BAD_RESPONSE, never a partial list.
+        Two boards with one name are BAD_RESPONSE too."""
+        data = await self._request("GET", "/v1/boards")
+        _require(set(data) == {"boards"} and isinstance(data["boards"], list))
+        boards = [_task_board(item) for item in data["boards"]]
+        _require(len({b.name for b in boards}) == len(boards))
+        return boards
+
+    async def post_board(self, name: str, if_sha256: str, ops: list[dict], changeset: str) -> BoardPost:
+        """`POST /v1/boards`: apply `ops` to one board, all or nothing, as
+        part of Echo changeset `changeset` (`purpose: boards`). A board
+        that changed since `if_sha256` is `BoardPost(conflict=True)` and
+        nothing was written; any refusal (a bad card text, a missing card,
+        a board no longer named, a cap) is the bare 403, REFUSED."""
+        data = await self._request(
+            "POST",
+            "/v1/boards",
+            body={"name": name, "if_sha256": if_sha256, "ops": ops, "changeset": changeset},
+            conflict_ok=True,
+        )
+        if data is None:
+            return BoardPost(sha256=None, changed=False, conflict=True)
+        _require(set(data) == {"sha256", "changed"} and isinstance(data["changed"], bool))
+        return BoardPost(sha256=_sha256(data["sha256"]), changed=data["changed"])
 
     # -- Footer link pruning (vaultd/vaultd/prune.py) --------------------------------
 

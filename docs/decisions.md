@@ -4234,3 +4234,155 @@ planner and menu test files).
   note behind. No button in `/menu`. Notes for saved streams or other
   groupings.
 
+
+## Board sync: the task boards and the planner, both ways, in the background
+
+- **What.** The user keeps tasks on two Kanban Starlane boards at the root of
+  the vault (`Work tasks.md`, `General tasks.md`) and in the planner, and asked
+  for the two to be kept in step both ways. A board is mapped to one planner
+  tag (`BOARD_SYNC_TAGS`, default `Work tasks.md` → `work`, `General tasks.md`
+  → `general`); a board vaultd reports with no mapping is left alone. vaultd's
+  half is `GET`/`POST /v1/boards` (vaultd/vaultd/boards.py, already shipped);
+  Echo's half is a pure merge (app/planner/board_sync.py), a job
+  (app/planner/board_job.py), the writer (app/core/echo_write.py's
+  `write_board`), two tables (`board_pair`, `board_sync_run`) and `/boards`
+  (app/tg/boards.py). Behind `BOARD_SYNC_ENABLED`, off by default.
+- **The exception to "Echo writes to the vault only on the user's tap".** Every
+  earlier Echo write (the inbox, stream notes, link pruning) runs on a tap or a
+  typed command, and the stream-notes record dropped a background refresh for
+  that reason. Here the user chose a background sync, knowing it relaxes the
+  rule: a board that only follows the planner when asked is not "in step". So
+  the rule changes narrowly. The sync is its own job kind (`BOARD_SYNC`), never
+  an idle job; tests/test_echo_isolation.py names app/planner/board_job.py as
+  the one caller of `write_board` and app/worker.py as the one runner of a
+  pass, and tests/test_idle_isolation.py forbids idle from importing either the
+  writer or the job. Every other writer is now pinned to the one Telegram
+  module whose tap runs it (garden for the inbox, lens for `/lens undo`,
+  planner for stream notes), which is stricter than before: a second
+  background writer fails the test.
+- **When it runs.** Enqueued after a `PLANNER_SYNC` that refreshed the snapshot
+  (`run_planner_sync` now returns whether it did), at most once per 15-minute
+  bucket, only while the flag is on, the planner link is active and
+  `VAULT_MODE` is not `off`. Never inside the planner sync: a board pass failing
+  must not cost the agenda, and it never touches the agenda snapshot.
+- **State.** One `board_pair` row per tracked pair: board, card block id,
+  planner task id, and the last synced snapshot of `title`, `done`, `due`, plus
+  `status` (`ok`, or `held` while a field cannot be carried). It holds card
+  text, so it is user content: `/export` includes it, `/delete` truncates it,
+  nothing logs it, and it has no debug view (neither does `board_sync_run`:
+  a board's name is a file name the user chose, which vault_file's debug view
+  leaves out for the same reason).
+- **Three-way, field by field.** Each side is compared with the snapshot:
+  changed on one side only, carried to the other; changed on both to the same
+  value, only the snapshot moves; changed on both to different values, the
+  planner wins and it counts as a conflict. The planner wins because it is the
+  richer record (descriptions, subtasks, the partner's view) and the board is
+  the quicker surface; a rule that never asks is better than a prompt every
+  15 minutes. Titles are compared stripped and NFC-normalized, as vaultd
+  normalizes a card it writes, so whitespace never ping-pongs.
+- **New card, no row** (no block id, or one no row knows): a planner task with
+  the board's tag (title = the card's text, due = its date, done = its box),
+  a `tag` op giving the card a block id if it had none, and a row. The
+  `clientRequestId` is built from the board's name and the block id, and the
+  minted id is derived from the board, the card's text and its occurrence among
+  untracked cards with that text, so a retried create returns the task it
+  already made.
+- **New task, no row** (the user's own, top-level, with the tag): an `add` card
+  with a minted id (derived from the task's id) and a row. **Open tasks only**,
+  a deviation from the brief, which said every new tagged task: the planner
+  keeps every completed task, so a first pass would have filled the done lane
+  with the tag's whole history, and past vaultd's 500 cards a board stops
+  parsing as one (`not_board`) and the sync stops. A checked card with no row
+  still becomes a done task, as asked.
+- **Pairing, on every pass.** Before the "new" rules, an unrowed card and an
+  unrowed task are paired when the card carries the id minted for that task,
+  or their titles are equal stripped and case-insensitively (duplicates pair
+  one to one, cards in board order, tasks by id); the planner's done and due
+  win on a fresh pair, and that is not a conflict. The brief asked for title
+  pairing on the first run only; it runs on every pass because a pass that
+  died between the planner's create and the board write (or after the board
+  write, before the rows' commit) leaves exactly such an unrowed couple, and
+  pairing is what stops the next pass from duplicating it. With no rows it is
+  the first-run rule as asked. The cost: a card and a task the user made
+  separately with the same title become one pair, which is what they would
+  want anyway.
+- **Gone.** A card that left the board (deleted, archived) while its task still
+  has the tag: the tag comes off the task (`update_task` with the other tags),
+  never the task. A task that left the tagged list (untagged, deleted, no longer
+  the user's own): the card is removed. Both gone: the row is dropped. Nothing
+  without a row is touched except by the "new" rules. A board vaultd reports as
+  `missing` or `not_board` is skipped whole, never read as "every card gone".
+- **Dates.** A board whose own settings change the date syntax (`dates: false`)
+  syncs no due date either way. A planner due date that is not `yyyy-MM-dd`,
+  or a card date that is not a real day (`@{2026-02-30}`), holds that pair's
+  date field and counts as skipped; nothing is overwritten.
+- **Titles vaultd would refuse.** vaultd refuses a whole batch for one bad card
+  text, so `card_text_ok` mirrors its check exactly (one line, at most 500
+  characters, no control or separator characters, no `%%`, no `@{yyyy-MM-dd}`,
+  no trailing ` ^id`). A title that fails is not added or retitled, the pass
+  counts it as skipped, and the pair is `held` with its old snapshot so it is
+  retried each pass; everything else goes on. A card text the planner cannot
+  take as a title (empty, over 500 characters) is skipped the same way.
+  Hashtags and `@@{time}` are part of the title and travel verbatim.
+- **Caps, deterministic.** At most 100 operations per board per pass (vaultd's
+  limit), `BOARD_SYNC_CREATES_PER_PASS` (20) planner creates, and never a board
+  past 500 cards; what does not fit waits for the next pass. Each pair's work
+  is one unit, deferred whole or not at all, taken in a fixed order (existing
+  pairs by block id, new pairs, new cards, new tasks). The batch sends `tag`
+  ops first, since only `tag` names a card by its index and the others can move
+  cards. Run again on the state its own output produced, the merge yields no
+  op, no call and no row change (tested, including after capped passes).
+- **Order within a pass, so a crash can only cause a harmless repeat.** Read
+  every mapped board and its tagged tasks, compute every plan; per board, the
+  planner creates (idempotent by request id); `POST /v1/boards` with one fresh
+  changeset per pass (`boards_…`, every board's write in it); then the rows
+  that wait on nothing else; then the planner updates, each unit's row
+  committed only after its calls succeeded. That last part goes a step past the
+  brief ("on success commit the rows"): a row that recorded a value before the
+  planner took it would make the next pass read the planner's old value as a
+  planner-side change and carry it back over the user's card. A tag is taken
+  off a task before its row goes, for the same reason. A 409 for a board
+  changes nothing more for it this pass. A create retried by its request id
+  that answers with a task this pass meant to add as a card drops that add.
+- **Failures are quiet.** A planner or vault failure (or a vault refusal of the
+  batch) aborts the pass, logged by event name only, recorded as an outcome
+  in `board_sync_run`, never retried by the queue (the next pass is 15 minutes
+  away). Boards done before it stay done.
+- **The planner client.** `update_task` joins `ALLOWED_TOOLS`. It was left out
+  because `update_event` can edit the partner's joint events and nothing needed
+  an edit; the wrapper can send only a title, a due date and tags, and the job
+  calls it only on tasks it listed with `mine: true` (the planner's RLS lets a
+  member edit the partner's shared tasks, so `mine` is this side's line).
+  `update_event` and every `delete_*` tool stay out.
+- **Controls, Telegram only** (`boards` joins the web ingress's blocked
+  commands, like `graph`). `/boards`: stored state only. `/boards preview`: a
+  dry run that writes nothing anywhere (no board, no planner write, no pair, no
+  run row) and works with the flag off, so the first pairing can be checked
+  first. `/boards now`: one pass (flag on). Both are queued as jobs and answered
+  by the worker, because the planner client lives on the job path, never the
+  chat path. `/boards undo`: the newest `purpose: boards` changeset through the
+  same one-level undo as `/flows notes undo` (the two share `_undo_newest` and
+  so the one `_undo_ref` call). It says plainly that the planner is not
+  undone, and it forgets the pairs of the boards it restored: otherwise the
+  next pass would read the restored cards' missing ids as cards gone and take
+  the tag off their tasks. The menu rows (status, preview, undo) sit under the
+  link pruning in «Знания», drawn once the flag is on.
+- **Digest.** The daily digest (app/tg/claude.py's `run_library_digest`) gains
+  one line when the last day's passes met a conflict or a skipped title, and
+  is queued while the board flag is on too. Conflicts are summed; skipped
+  titles are the most any one pass skipped, since a held title is skipped
+  again every pass.
+- **Not done.** Subtasks, lanes beyond open/done (a card's lane is read but
+  carries no meaning), card continuation lines and task descriptions, the
+  board's archive, planner deletes (a removed card untags, never deletes), done
+  planner tasks with no row, and an undo of the planner side.
+- **The mass-loss guard.** A pair whose card or task is gone becomes a removal
+  on the other side, so one side reading as empty by mistake (a planner answer
+  cut short, a tag renamed, a board caught half way through a reorganisation)
+  would remove every card or untag every task. When one pass would drop more
+  than three pairs and more than half of a board's pairs, it drops none: the
+  pairs stay, everything else in the pass still happens, and the count is
+  reported as held in `/boards`, the preview and the run row. `/boards now`
+  runs without the guard, because a person asked for that board to be brought
+  in step; the background pass and the preview always keep it.
+

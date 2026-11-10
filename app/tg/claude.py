@@ -41,6 +41,7 @@ from app.core.report import may_report_now
 from app.core.scheduler import lens_digest_window
 from app.core.scene import Deferred
 from app.core.state import get_state
+from app.tg import boards as boards_ui
 from app.tg import lens as lens_ui
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
@@ -756,7 +757,10 @@ async def run_library_digest(
     write_rows = await claude_write.changesets_between(session, day_start, day_end)
     lens_start, lens_end = lens_digest_window(local_date, state.timezone)
     lens_line = await lens_ui.digest_line(session, lens_start, lens_end)
-    if read_count == 0 and not write_rows and lens_line is None:
+    # Board sync: one line when the window's passes met a conflict or a
+    # title they could not carry (counts only, app/tg/boards.py).
+    boards_line = await boards_ui.digest_line(session, lens_start, lens_end)
+    if read_count == 0 and not write_rows and lens_line is None and boards_line is None:
         return
     if not may_report_now(settings, clock, state):
         raise Deferred(clock.now_utc() + DIGEST_RETRY)
@@ -783,6 +787,8 @@ async def run_library_digest(
             keyboard = undo_all_keyboard(local_date, state.vault_epoch)
     if lens_line is not None:
         lines.append(lens_line)
+    if boards_line is not None:
+        lines.append(boards_line)
     if not lines:
         return
     await bot.send_message(chat_id=state.chat_id, text=" ".join(lines), reply_markup=keyboard)

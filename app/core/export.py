@@ -40,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import (
+    BoardPair,
+    BoardSyncRun,
     BriefNote,
     Checkin,
     CheckinOrderResult,
@@ -197,6 +199,12 @@ EXPORTED_MODELS = (
     # path, no name, no text. The lens gaps it points at stay out, as
     # above.
     EchoChangeset,
+    # Board sync: the tracked card <-> task pairs, each with the title
+    # last synced (the user's own words, from both the board and the
+    # planner), and each pass's outcome and counts per board (the
+    # board's file name, no text). Both plainly user data.
+    BoardPair,
+    BoardSyncRun,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

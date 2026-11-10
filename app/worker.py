@@ -133,6 +133,7 @@ from app.db.queue import claim, complete, fail, recover_stuck
 from app.llm.provider import LLMProvider
 from app.ops.backup import BACKUP, run_backup
 from app.planner import actions as planner_actions
+from app.planner import board_job
 from app.planner.client import PlannerClient
 from app.planner.jobs import (
     PLANNER_SYNC,
@@ -150,8 +151,10 @@ from app.tg import vault as vault_ui
 from app.tg import garden as garden_ui
 from app.tg import claude as claude_ui
 from app.tg import graph as graph_ui
+from app.tg import boards as boards_ui
 from app.tg.orders import send_order_proposal
 from app.tg.proposals import send_proposal
+from app.vault.client import VaultClient
 from app.vault.kinds import VAULT_PURGE, VAULT_SYNC
 from app.vault.sync import maybe_enqueue_vault_sync, run_vault_purge, run_vault_sync
 
@@ -489,7 +492,7 @@ async def _run_job(
         # notice on a revoked grant (see app/planner/jobs.py).
         if planner_client is None:
             raise ValueError("planner_sync needs a PlannerClient")
-        await run_planner_sync(
+        synced = await run_planner_sync(
             session,
             settings,
             planner_client,
@@ -498,6 +501,26 @@ async def _run_job(
             bot=bot,
             chat_id=user_state.chat_id,
         )
+        # Board sync: one pass after a sync that worked, never inside
+        # it -- its own job kind, gated and bucketed by maybe_enqueue.
+        if synced:
+            await board_job.maybe_enqueue(session, settings, clock)
+        return ExtractOutcome()
+
+    if kind == board_job.BOARD_SYNC:
+        # Board sync (app/planner/board_job.py): no LLM call. Never
+        # raises for a planner or vault failure -- the pass records its
+        # outcome and the next one is 15 minutes away. `/boards now` and
+        # `/boards preview` queue it with a trigger, and get its result
+        # as a reply; an automatic pass sends nothing.
+        if planner_client is None:
+            raise ValueError("board_sync needs a PlannerClient")
+        trigger = payload.get("trigger", board_job.TRIGGER_AUTO)
+        result = await board_job.run_pass(
+            session, settings, planner_client, VaultClient.from_settings(settings), clock, trigger=trigger
+        )
+        if trigger != board_job.TRIGGER_AUTO and bot is not None:
+            await bot.send_message(chat_id=user_state.chat_id, text=boards_ui.result_text(result))
         return ExtractOutcome()
 
     if kind == PLANNER_WRITE:

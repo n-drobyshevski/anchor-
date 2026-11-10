@@ -319,6 +319,13 @@ def _graph(settings: Settings) -> bool:
     return settings.GRAPH_PRUNE_ENABLED and _vault(settings)
 
 
+def _boards(settings: Settings) -> bool:
+    """Board sync (app/tg/boards.py): drawn once its own flag is on, with
+    the planner and the vault it joins. `/boards preview` works before
+    that, typed."""
+    return settings.BOARD_SYNC_ENABLED and settings.PLANNER_ENABLED and _vault(settings)
+
+
 def _claude(settings: Settings) -> bool:
     return settings.CLAUDE_ACCESS_ENABLED
 
@@ -534,6 +541,10 @@ ACTIONS: dict[str, Action] = {
     # The dry run; its own reply carries the `gp:a:` apply button.
     "graph": _run("🧹 Чистка ссылок", "graph", gate=_graph),
     "graph_undo": _confirm("⚠️ Отменить чистку", "graph", args="undo", gate=_graph),
+    # Board sync: status, the dry run, and the undo of the last board write.
+    "boards": _run("📌 Доски ⇄ планер", "boards", gate=_boards),
+    "boards_preview": _run("🔍 Пробный проход", "boards", args="preview", gate=_boards),
+    "boards_undo": _confirm("⚠️ Отменить запись в доски", "boards", args="undo", gate=_boards),
     # lens
     "lens": _run("ℹ️ Статус линзы", "lens", gate=_lens_card),
     "lens_garden": _run("🌱 Сад сейчас", "lens", args="garden now", gate=_lens_garden),
@@ -750,6 +761,7 @@ def prompt_text(action: str) -> str:
 _CONFIRMS = {
     "due_clear": ("Снять главное действие?", "Да, снять"),
     "graph_undo": ("Отменить последнюю чистку ссылок?", "Да, отменить"),
+    "boards_undo": ("Отменить последнюю запись в доски? Планер не откатится.", "Да, отменить"),
     "lens_undo": ("Отменить последнюю запись Echo в Inbox?", "Да, отменить"),
     "lens_code_on": (
         "Открыть Claude Code доступ к заметкам линзы? Прочитанное уйдёт в Anthropic.",
@@ -1489,6 +1501,8 @@ def _render_knowledge(
     if section_exists("lens", settings, web=web):
         rows.append([_section_btn("lens", "🔭 Линза ›")])
     _add(rows, _row(settings, web, "graph", "graph_undo"))
+    _add(rows, _row(settings, web, "boards", "boards_preview"))
+    _add(rows, _row(settings, web, "boards_undo"))
     rows.append(_nav_row("knowledge"))
     hint = _lines(status, _settings_hint(view.settings_state, view.knowledge_roots))
     return Section(title=KNOWLEDGE_TITLE, hint=hint, table_rows=None, rows=rows)

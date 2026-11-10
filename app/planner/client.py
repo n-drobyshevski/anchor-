@@ -19,7 +19,9 @@ design review's P0 spike).
 future caller that tries `update_event` (which can edit the partner's
 joint events) or any `delete_*` tool fails fast and loud, in Anchor's
 own process, rather than depending on the planner never adding a tool
-this client should not use.
+this client should not use. `update_task` is on the list for board sync
+only, and its wrapper can send a title, a due date and tags and nothing
+else (see the comment on ALLOWED_TOOLS).
 """
 
 from __future__ import annotations
@@ -47,9 +49,22 @@ CLIENT_INFO = {"name": "anchor", "version": "1.0"}
 # planner therefore costs one job retry, not a delayed reply.
 _TIMEOUT = aiohttp.ClientTimeout(total=5)
 
-# Plan section 2.3: no update or delete tool. update_event can edit the
-# partner's own joint events (design review, table 1), and nothing here
-# needs to remove anything.
+# Plan section 2.3 left out every update and delete tool. The reason was
+# update_event: it can edit the partner's own joint events (design
+# review, table 1), and in P2-P4 nothing needed to change an item once
+# made -- `/done` uses complete_task, which only flips a task's done
+# state -- so a generic edit tool was a risk with no use.
+#
+# Board sync (app/planner/board_job.py) needs one: keeping a board card
+# and a planner task in step means carrying a renamed card's title, a
+# moved due date and a removed board tag to the task. So update_task is
+# allowed now, and only through `update_task` below, which can send
+# nothing but a task's title, due date and tags; and the board job only
+# ever calls it on tasks it read with `list_tasks(mine=True)`, the user's
+# own (the planner's `update_task` is RLS-scoped, but RLS lets a member
+# edit the partner's shared tasks, so `mine` is this side's own line).
+# update_event and every delete_* tool stay out: a card that leaves a
+# board takes the board's tag off its task, never the task.
 #
 # Anchor plan, "Anchor" section: get_health, read-only, caller's own
 # data only (same as get_agenda). No get_sleep_summary -- get_health's
@@ -62,12 +77,17 @@ ALLOWED_TOOLS: frozenset[str] = frozenset(
         "create_task",
         "create_event",
         "complete_task",
+        # Board sync: a task's title, due date and tags only (above).
+        "update_task",
         "get_health",
         # PLANNER_FLOWS: read-only, the caller's own tasks grouped into
         # streams with an attention score.
         "get_flows",
     }
 )
+
+# update_task's "leave the due date as it is", distinct from None ("clear it").
+UNSET = object()
 
 FLOWS_GROUP_BY = frozenset({"tag", "category", "collection", "assignee", "status", "priority"})
 FLOWS_ATTENTION = frozenset({"deadline", "priority", "combined"})
@@ -379,8 +399,68 @@ class PlannerClient:
         clock: Clock,
         *,
         task_id: str,
+        done: bool | None = None,
     ) -> dict:
-        return await self.call_tool(settings, session, clock, "complete_task", {"id": task_id})
+        # `done` omitted is the planner's default (complete); board sync
+        # sends it both ways, since an unchecked card reopens its task.
+        arguments: dict[str, Any] = {"id": task_id}
+        if done is not None:
+            arguments["done"] = bool(done)
+        return await self.call_tool(settings, session, clock, "complete_task", arguments)
+
+    # --- Board sync (app/planner/board_job.py) ----------------------------
+
+    async def list_tasks(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        tag: str,
+        mine: bool = True,
+        include_subtasks: bool = False,
+        include_completed: bool = True,
+    ) -> dict:
+        """The tasks carrying `tag`: by default the user's own (`mine`),
+        top-level ones, done or not. Rows are `{id, title, done, tags?,
+        dueDate?, parentId?, ...}`; the caller parses them."""
+        return await self.call_tool(
+            settings,
+            session,
+            clock,
+            "list_tasks",
+            {
+                "tag": tag,
+                "mine": bool(mine),
+                "includeSubtasks": bool(include_subtasks),
+                "includeCompleted": bool(include_completed),
+            },
+        )
+
+    async def update_task(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        task_id: str,
+        title: str | None = None,
+        due_date: str | None | object = UNSET,
+        tags: list[str] | None = None,
+    ) -> dict:
+        """Change a task's title, due date (None clears it) or tags (the
+        whole list), and nothing else: there is no argument here for any
+        other field update_task accepts (ALLOWED_TOOLS' comment)."""
+        arguments: dict[str, Any] = {"id": task_id}
+        if title is not None:
+            arguments["title"] = title
+        if due_date is not UNSET:
+            arguments["dueDate"] = due_date
+        if tags is not None:
+            arguments["tags"] = list(tags)
+        if len(arguments) == 1:
+            raise ValueError("update_task needs a field to change")
+        return await self.call_tool(settings, session, clock, "update_task", arguments)
 
 
 def build_planner_client(settings: Settings, http: aiohttp.ClientSession) -> PlannerClient:

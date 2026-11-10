@@ -636,7 +636,9 @@ async def maybe_enqueue_library_digest(
     target = clock_module.combine_local(local_date, CLAUDE_LIBRARY_DIGEST_TIME, timezone)
     if clock.now_utc() < target:
         return False
-    if not (settings.CLAUDE_ACCESS_ENABLED or settings.LENS_ENABLED):
+    # Board sync's line (app/tg/boards.py) rides the same digest, so the
+    # board flag keeps it queued too.
+    if not (settings.CLAUDE_ACCESS_ENABLED or settings.LENS_ENABLED or settings.BOARD_SYNC_ENABLED):
         start, _end = lens_digest_window(local_date, timezone)
         if not (
             await lens.code_access(session)
