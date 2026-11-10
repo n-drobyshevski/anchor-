@@ -587,3 +587,477 @@ def test_the_guard_holds_only_the_removals_and_a_hand_run_pass_gets_past_it():
     assert (plan.counts.held, plan.counts.tasks_created, plan.counts.cards_removed) == (8, 1, 0)
     forced = board_sync.merge(board, [], rows, tag="work", guard=False)
     assert (forced.counts.held, forced.counts.cards_removed) == (0, 8)
+
+
+# -- subtasks ----------------------------------------------------------------------------
+
+Sub = bs.Sub
+SubRow = bs.SubRow
+
+
+def sub(text: str, id: str | None = None, depth: int = 1, *, checked: bool = False, date: str | None = None) -> Sub:
+    return Sub(n=0, id=id, depth=depth, text=text, checked=checked, date=date)
+
+
+def scard(text: str, id: str, *subs: Sub, checked: bool = False, after=(), extra: bool = False) -> Card:
+    return Card(
+        n=0, id=id, text=text, checked=checked, date=None,
+        subs=tuple(bs.replace(s, n=k) for k, s in enumerate(subs)), after=tuple(after), after_raw_extra=extra,
+    )
+
+
+def sboard(*cards: Card, dates: bool = True, name: str = NAME, known: bool = True) -> Board:
+    return Board(name=name, dates=dates, cards=tuple(bs.replace(c, n=i) for i, c in enumerate(cards)), subs_known=known)
+
+
+def stask(id: str, title: str, parent: str, *, position: float = 0, done: bool = False, due: str | None = None) -> Task:
+    return Task(id=id, title=title, done=done, due=due, parent_id=parent, position=position)
+
+
+def srow(block: str, card_id: str, task_id: str, title: str, *, parent=None, done=False, due=None, status=bs.ROW_OK) -> SubRow:
+    return SubRow(block, card_id, task_id, parent, title, done, due, status)
+
+
+def planner(*tasks: Task) -> dict[str, Task]:
+    return {t.id: t for t in tasks}
+
+
+def smerge(b: Board, p: dict, rows, sub_rows, **kw) -> bs.Plan:
+    tops, subs = bs.view(p, TAG)
+    return bs.merge(b, tops, list(rows), tag=TAG, subtasks=subs, sub_rows=list(sub_rows), **kw)
+
+
+def ssettle(b: Board, p: dict, rows, sub_rows, *, passes: int = 1, **kw):
+    rows, sub_rows = list(rows), list(sub_rows)
+    plan = None
+    for _ in range(passes):
+        plan = smerge(b, p, rows, sub_rows, **kw)
+        b, p, rows, sub_rows = bs.apply_state(b, p, rows, sub_rows, plan)
+    return b, p, rows, sub_rows, plan
+
+
+def assert_sidle(b: Board, p: dict, rows, sub_rows, **kw) -> bs.Plan:
+    plan = smerge(b, p, rows, sub_rows, **kw)
+    assert plan.ops == [] and plan.creates == [] and plan.calls == []
+    assert plan.row_changes == [] and plan.sub_row_changes == []
+    return plan
+
+
+TOP = task("t1", "Поездка")
+TOP_ROW = row("card1", "t1", "Поездка")
+
+
+def test_a_card_subtask_and_a_planner_subtask_of_the_same_title_pair():
+    b = sboard(scard("Поездка", "card1", sub("Билеты", checked=True)))
+    p = planner(TOP, stask("s1", "билеты", "t1"))
+    plan = smerge(b, p, [TOP_ROW], [])
+    block = plan.sub_row_changes[0].block_id
+    # The planner wins a fresh pair: its title and its open box.
+    assert plan.ops == [
+        {"op": "sub_tag", "card": "card1", "n": 0, "id": block},
+        {"op": "sub_text", "card": "card1", "id": block, "text": "билеты"},
+        {"op": "sub_check", "card": "card1", "id": block, "checked": False},
+    ]
+    assert plan.creates == [] and plan.calls == []
+    assert plan.sub_row_changes == [bs.SubRowChange("insert", block, "card1", "s1", None, "билеты", False, None)]
+    assert (plan.counts.paired, plan.counts.subs_changed) == (1, 1)
+    b, p, rows, subs, _ = ssettle(b, p, [TOP_ROW], [])
+    assert_sidle(b, p, rows, subs)
+
+
+def test_a_subtask_carrying_the_id_minted_for_a_planner_subtask_pairs_with_it():
+    minted = bs.mint_for_task(NAME, "s1")
+    b = sboard(scard("Поездка", "card1", sub("Другое", minted)))
+    plan = smerge(b, planner(TOP, stask("s1", "Билеты", "t1")), [TOP_ROW], [])
+    assert plan.sub_row_changes[0].task_id == "s1" and plan.creates == []
+
+
+def test_a_new_subtask_on_the_card_becomes_a_planner_subtask_of_the_cards_task():
+    b = sboard(scard("Поездка", "card1", sub("Билеты", checked=True, date="2026-11-14")))
+    plan = smerge(b, planner(TOP), [TOP_ROW], [])
+    (create,) = plan.creates
+    assert (create.title, create.parent_task_id, create.tag, create.done, create.due) == (
+        "Билеты", "t1", None, True, "2026-11-14"
+    )
+    assert create.request_id == bs.request_id(NAME, create.block_id)
+    assert plan.ops == [{"op": "sub_tag", "card": "card1", "n": 0, "id": create.block_id}]
+    assert plan.counts.subs_created == 1
+    b, p, rows, subs, _ = ssettle(b, planner(TOP), [TOP_ROW], [])
+    assert p[f"new-{create.block_id}"].parent_id == "t1"
+    assert_sidle(b, p, rows, subs)
+
+
+def test_a_new_planner_subtask_is_added_under_its_mapped_parent_open_or_done():
+    b = sboard(scard("Поездка", "card1", sub("Билеты", "sub1")))
+    p = planner(
+        TOP,
+        stask("s1", "Билеты", "t1"),
+        stask("s3", "Сравнить цены", "s1", position=2, done=True),
+        stask("s2", "Поезд", "s1", position=1, due="2026-11-17"),
+        stask("s4", "Отель", "t1", position=5),
+    )
+    rows = [TOP_ROW]
+    subs = [srow("sub1", "card1", "s1", "Билеты")]
+    plan = smerge(b, p, rows, subs)
+    adds = [op for op in plan.ops if op["op"] == "sub_add"]
+    # Top level first, then under the paired parent, by position.
+    assert adds == [
+        {"op": "sub_add", "card": "card1", "id": bs.mint_for_task(NAME, "s4"), "text": "Отель", "checked": False},
+        {"op": "sub_add", "card": "card1", "id": bs.mint_for_task(NAME, "s2"), "text": "Поезд", "checked": False,
+         "parent": "sub1", "date": "2026-11-17"},
+        {"op": "sub_add", "card": "card1", "id": bs.mint_for_task(NAME, "s3"), "text": "Сравнить цены", "checked": True,
+         "parent": "sub1"},
+    ]
+    assert plan.counts.subs_added == 3
+    b, p, rows, subs, _ = ssettle(b, p, rows, subs)
+    assert [(s.text, s.depth) for s in b.cards[0].subs] == [("Билеты", 1), ("Поезд", 2), ("Сравнить цены", 2), ("Отель", 1)]
+    assert_sidle(b, p, rows, subs)
+
+
+def test_a_pair_made_in_this_pass_waits_a_pass_for_its_subtasks():
+    b = sboard(scard("Поездка", "card1", sub("Билеты")))
+    p = planner(TOP, stask("s2", "Отель", "t1"))
+    plan = smerge(b, p, [], [])
+    assert plan.counts.paired == 1
+    assert plan.sub_row_changes == [] and not any(op["op"].startswith("sub_") for op in plan.ops)
+    b, p, rows, subs, _ = ssettle(b, p, [], [], passes=2)
+    assert sorted(s.text for s in b.cards[0].subs) == ["Билеты", "Отель"]
+    assert len(subs) == 2
+    assert_sidle(b, p, rows, subs)
+
+
+def test_a_subtask_whose_parent_is_not_paired_yet_waits():
+    b = sboard(scard("Поездка", "card1", sub("Билеты"), sub("Поезд", depth=2)))
+    plan = smerge(b, planner(TOP), [TOP_ROW], [])
+    assert [c.title for c in plan.creates] == ["Билеты"]
+    assert plan.counts.waiting == 1
+    b, p, rows, subs, _ = ssettle(b, planner(TOP), [TOP_ROW], [], passes=2)
+    parent = next(t for t in p.values() if t.title == "Билеты")
+    child = next(t for t in p.values() if t.title == "Поезд")
+    assert child.parent_id == parent.id
+    assert {s.block_id: s.parent_block_id for s in subs}[next(s.block_id for s in subs if s.task_id == child.id)] == next(
+        s.block_id for s in subs if s.task_id == parent.id
+    )
+    assert_sidle(b, p, rows, subs)
+
+
+def test_subtask_fields_merge_three_ways_and_the_planner_wins():
+    rows = [TOP_ROW]
+    subs = [srow("sub1", "card1", "s1", "Билеты"), srow("sub2", "card1", "s2", "Отель")]
+    b = sboard(scard("Поездка", "card1", sub("Билеты на поезд", "sub1", checked=True), sub("Отель у моря", "sub2")))
+    p = planner(TOP, stask("s1", "Билеты", "t1", due="2026-11-20"), stask("s2", "Отель в центре", "t1"))
+    plan = smerge(b, p, rows, subs)
+    assert plan.calls == [bs.Call("title", "s1", "Билеты на поезд"), bs.Call("done", "s1", True)]
+    assert {"op": "sub_date", "card": "card1", "id": "sub1", "date": "2026-11-20"} in plan.ops
+    assert {"op": "sub_text", "card": "card1", "id": "sub2", "text": "Отель в центре"} in plan.ops
+    assert plan.counts.conflicts == 1 and plan.counts.subs_changed == 2
+    b, p, rows, subs, _ = ssettle(b, p, rows, subs)
+    assert_sidle(b, p, rows, subs)
+
+
+def test_a_dates_off_board_syncs_no_subtask_date():
+    b = sboard(scard("Поездка", "card1", sub("Билеты", "sub1")), dates=False)
+    p = planner(TOP, stask("s1", "Билеты", "t1", due="2026-11-20"), stask("s2", "Отель", "t1", due="2026-11-21"))
+    plan = smerge(b, p, [TOP_ROW], [srow("sub1", "card1", "s1", "Билеты")])
+    assert not any(op["op"] == "sub_date" or "date" in op for op in plan.ops)
+
+
+def test_a_subtask_gone_from_the_planner_leaves_the_card_with_what_is_under_it():
+    b = sboard(scard("Поездка", "card1", sub("Билеты", "sub1"), sub("Поезд", "sub2", 2), sub("Новый", None, 3), sub("Отель", "sub3")))
+    subs = [
+        srow("sub1", "card1", "s1", "Билеты"),
+        srow("sub2", "card1", "s2", "Поезд", parent="sub1"),
+        srow("sub3", "card1", "s3", "Отель"),
+    ]
+    p = planner(TOP, stask("s2", "Поезд", "t1"), stask("s3", "Отель", "t1"))
+    plan = smerge(b, p, [TOP_ROW], subs)
+    # One op for the subtree: vaultd removes a subtask with its block.
+    assert plan.ops == [{"op": "sub_remove", "card": "card1", "id": "sub1"}]
+    assert sorted(c.block_id for c in plan.sub_row_changes if c.op == "delete") == ["sub1", "sub2"]
+    assert plan.creates == [] and plan.calls == []
+    assert plan.counts.subs_removed == 1
+
+
+def test_a_subtask_gone_from_the_card_is_detached_never_deleted():
+    subs = [srow("sub1", "card1", "s1", "Билеты")]
+    b = sboard(scard("Поездка", "card1"))
+    p = planner(TOP, stask("s1", "Билеты", "t1"))
+    plan = smerge(b, p, [TOP_ROW], subs)
+    assert plan.ops == [] and plan.calls == [] and plan.creates == []
+    assert plan.sub_row_changes == [bs.SubRowChange("update", "sub1", "card1", "s1", None, "Билеты", False, None, bs.ROW_DETACHED)]
+    assert plan.counts.subs_detached == 1
+    b, p, rows, subs, _ = ssettle(b, p, [TOP_ROW], subs)
+    # Never added back, and the planner's edits no longer travel.
+    assert_sidle(b, p, rows, subs)
+    p["s1"] = bs.replace(p["s1"], title="Билеты 2")
+    assert_sidle(b, p, rows, subs)
+    # The planner's subtask goes too: the row is dropped.
+    del p["s1"]
+    plan = smerge(b, p, rows, subs)
+    assert plan.sub_row_changes == [bs.SubRowChange("delete", "sub1")] and plan.ops == []
+
+
+def test_both_gone_drops_the_subtask_row():
+    plan = smerge(sboard(scard("Поездка", "card1")), planner(TOP), [TOP_ROW], [srow("sub1", "card1", "s1", "Б")])
+    assert plan.sub_row_changes == [bs.SubRowChange("delete", "sub1")]
+    assert plan.ops == [] and plan.calls == [] and plan.counts.subs_detached == 0
+
+
+def test_a_card_that_leaves_takes_its_subtask_rows_and_no_planner_subtask():
+    subs = [srow("sub1", "card1", "s1", "Б")]
+    p = planner(TOP, stask("s1", "Б", "t1"))
+    plan = smerge(sboard(), p, [TOP_ROW], subs)
+    assert plan.calls == [bs.Call("untag", "t1", ())]
+    assert plan.sub_row_changes == [bs.SubRowChange("delete", "sub1")]
+    # And the card stays while its task leaves: the card goes with its subtasks.
+    plan = smerge(sboard(scard("Поездка", "card1", sub("Б", "sub1"))), planner(), [TOP_ROW], subs)
+    assert plan.ops == [{"op": "remove", "id": "card1"}]
+    assert plan.sub_row_changes == [bs.SubRowChange("delete", "sub1")]
+
+
+def test_a_board_read_without_subtasks_leaves_them_alone():
+    subs = [srow("sub1", "card1", "s1", "Б")]
+    b = sboard(scard("Поездка", "card1"), known=False)
+    p = planner(TOP, stask("s1", "Б", "t1"), stask("s2", "В", "t1"))
+    assert_sidle(b, p, [TOP_ROW], subs)
+
+
+def test_the_guard_counts_subtask_losses_with_the_cards():
+    subs = [srow(f"sub{i}", "card1", f"s{i}", f"S{i}") for i in range(5)]
+    b = sboard(scard("Поездка", "card1"))
+    p = planner(TOP, *(stask(f"s{i}", f"S{i}", "t1") for i in range(5)))
+    plan = smerge(b, p, [TOP_ROW], subs)
+    assert plan.sub_row_changes == [] and plan.counts.held == 5
+    plan = smerge(b, p, [TOP_ROW], subs, guard=False)
+    assert plan.counts.subs_detached == 5
+
+
+def test_subtask_titles_either_side_cannot_take_are_skipped():
+    b = sboard(scard("Поездка", "card1", sub("x" * 501)))
+    p = planner(TOP, stask("s1", "Сорок %% процентов", "t1"))
+    plan = smerge(b, p, [TOP_ROW], [])
+    assert plan.ops == [] and plan.creates == [] and plan.counts.skipped == 2
+
+
+def test_a_planner_subtask_deeper_than_the_board_allows_is_skipped():
+    b = sboard(scard("Поездка", "card1", sub("A", "sub1"), sub("B", "sub2", 2), sub("C", "sub3", 3)))
+    subs = [srow("sub1", "card1", "s1", "A"), srow("sub2", "card1", "s2", "B", parent="sub1"), srow("sub3", "card1", "s3", "C", parent="sub2")]
+    p = planner(TOP, stask("s1", "A", "t1"), stask("s2", "B", "s1"), stask("s3", "C", "s2"), stask("s4", "D", "s3"))
+    plan = smerge(b, p, [TOP_ROW], subs)
+    assert plan.ops == [] and plan.counts.skipped == 1
+
+
+def test_sub_tags_go_before_anything_that_moves_subtasks():
+    b = sboard(scard("Поездка", "card1", sub("Старое", "sub1"), sub("Новое")))
+    p = planner(TOP, stask("s2", "Ещё", "t1"))
+    plan = smerge(b, p, [TOP_ROW], [srow("sub1", "card1", "s1", "Старое")])
+    assert [op["op"] for op in plan.ops] == ["sub_tag", "sub_remove", "sub_add"]
+
+
+def test_every_kind_of_subtask_change_converges_then_nothing():
+    b = sboard(
+        scard("Поездка", "card1", sub("Билеты", "sub1"), sub("Поезд", None, 2), sub("Уже нет", "sub9")),
+        scard("Ремонт", "card2", sub("Краска")),
+    )
+    p = planner(
+        TOP,
+        task("t2", "Ремонт"),
+        stask("s1", "Билеты", "t1", done=True),
+        stask("s5", "Отель", "t1"),
+        stask("s6", "Кисти", "t2"),
+        stask("s7", "Краска", "t2"),
+    )
+    rows = [TOP_ROW, row("card2", "t2", "Ремонт")]
+    subs = [srow("sub1", "card1", "s1", "Билеты"), srow("sub9", "card1", "s9", "Уже нет")]
+    b, p, rows, subs, _ = ssettle(b, p, rows, subs, passes=3)
+    assert_sidle(b, p, rows, subs)
+    assert [(s.text, s.checked) for s in b.cards[0].subs] == [("Билеты", True), ("Поезд", False), ("Отель", False)]
+    assert sorted(s.text for s in b.cards[1].subs) == ["Кисти", "Краска"]
+    assert sorted(t.title for t in p.values() if t.parent_id == "s1") == ["Поезд"]
+    assert sorted(t.title for t in p.values() if t.parent_id == "t2") == ["Кисти", "Краска"]
+
+
+def test_subtask_creates_share_the_creates_cap():
+    b = sboard(scard("Поездка", "card1", *(sub(f"П{i}") for i in range(5))))
+    plan = smerge(b, planner(TOP), [TOP_ROW], [], creates_max=2)
+    assert len(plan.creates) == 2 and plan.counts.waiting == 3
+    b, p, rows, subs, _ = ssettle(b, planner(TOP), [TOP_ROW], [], passes=3, creates_max=2)
+    assert_sidle(b, p, rows, subs, creates_max=2)
+
+
+# -- dependencies --------------------------------------------------------------------------
+
+OTHER = "General tasks.md"
+
+
+def dside(b: Board, p: dict, rows, sub_rows=(), tag: str = TAG) -> bs.DepsSide:
+    tops = tuple(t for t in p.values() if t.parent_id is None and tag in t.tags)
+    return bs.DepsSide(b, tops, tuple(rows), tuple(sub_rows))
+
+
+def deps_plan(sides, p: dict) -> dict[str, bs.Plan]:
+    """Each board's dependency units as a plan of their own."""
+    out = {}
+    for name, dp in bs.merge_deps(sides, list(p.values())).items():
+        plan = bs.Plan(board=name)
+        bs.add_units(plan, dp)
+        out[name] = plan
+    return out
+
+
+def dtask(id: str, title: str, *, blocked=(), tags=(TAG,)) -> Task:
+    return Task(id=id, title=title, done=False, tags=tuple(tags), blocked_by=tuple(blocked))
+
+
+def drow(block: str, task_id: str, title: str, deps=None) -> Row:
+    return Row(block, task_id, title, False, None, bs.ROW_OK, None if deps is None else tuple(deps))
+
+
+def two_cards(after=(), extra=False, deps=None, blocked=()):
+    b = sboard(scard("Сначала", "aaaa1"), scard("Потом", "bbbb1", after=after, extra=extra), scard("Третья", "cccc1"))
+    p = planner(dtask("t1", "Сначала"), dtask("t2", "Потом", blocked=blocked), dtask("t3", "Третья"))
+    rows = [drow("aaaa1", "t1", "Сначала"), drow("bbbb1", "t2", "Потом", deps), drow("cccc1", "t3", "Третья")]
+    return b, p, rows
+
+
+def test_the_first_comparison_writes_the_union_to_both_sides():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], blocked=["t3"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [
+        {"op": "after_set", "id": "bbbb1", "links": [
+            {"board": NAME, "id": "aaaa1", "label": "Сначала"},
+            {"board": NAME, "id": "cccc1", "label": "Третья"},
+        ]}
+    ]
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t3", "t1"))]
+    # Every compared card gets its snapshot, empty ones too.
+    assert plan.row_changes == [
+        bs.RowChange("deps", "aaaa1", deps=()),
+        bs.RowChange("deps", "bbbb1", deps=("t1", "t3")),
+        bs.RowChange("deps", "cccc1", deps=()),
+    ]
+    assert plan.counts.deps_changed == 1
+
+
+def test_agreeing_sides_only_record_the_snapshot_then_nothing():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], blocked=["t1"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [] and plan.calls == []
+    assert bs.RowChange("deps", "bbbb1", deps=("t1",)) in plan.row_changes
+    b, p, rows, _subs = bs.apply_state(b, p, rows, [], plan)
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+
+
+def test_a_link_added_on_the_card_reaches_the_planner():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1"), (NAME, "cccc1")], blocked=["t1"], deps=["t1"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [] and plan.calls == [bs.Call("blocked_by", "t2", ("t1", "t3"))]
+
+
+def test_a_blocker_removed_in_the_planner_leaves_the_card():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1"), (NAME, "cccc1")], blocked=["t1"], deps=["t1", "t3"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.calls == []
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": NAME, "id": "aaaa1", "label": "Сначала"}]}]
+    # The last one going removes the line.
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], blocked=[], deps=["t1"])
+    assert deps_plan([dside(b, p, rows)], p)[NAME].ops == [{"op": "after_set", "id": "bbbb1", "links": []}]
+
+
+def test_both_sides_changed_the_planner_wins():
+    b, p, rows = two_cards(after=[(NAME, "cccc1")], blocked=[], deps=["t1"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": []}]
+    assert plan.calls == [] and plan.counts.conflicts == 1
+
+
+def test_blockers_no_board_shows_and_links_no_row_resolves_are_kept():
+    b, p, rows = two_cards(after=[(NAME, "zzzz9"), (NAME, "aaaa1")], blocked=["elsewhere", "t1"], deps=["t1"])
+    p["t2"] = bs.replace(p["t2"], blocked_by=("elsewhere",))
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    # The planner dropped t1: the card follows, the unknown link stays.
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": NAME, "id": "zzzz9", "label": "zzzz9"}]}]
+    # The card added t3: "elsewhere" stays on the task.
+    b, p, rows = two_cards(after=[(NAME, "aaaa1"), (NAME, "cccc1")], blocked=["elsewhere", "t1"], deps=["t1"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("elsewhere", "t1", "t3"))]
+
+
+def test_a_dependency_on_a_card_on_another_board_is_linked_there():
+    work = sboard(scard("Потом", "bbbb1", after=[(OTHER, "gen01")]))
+    general = sboard(scard("Купить краску", "gen01"), scard("Позвонить", "gen02"), name=OTHER)
+    p = planner(dtask("t2", "Потом", blocked=["g2"]), dtask("g1", "Купить краску", tags=("general",)), dtask("g2", "Позвонить", tags=("general",)))
+    sides = [
+        dside(work, p, [drow("bbbb1", "t2", "Потом")]),
+        dside(general, p, [drow("gen01", "g1", "Купить краску"), drow("gen02", "g2", "Позвонить")], tag="general"),
+    ]
+    plans = deps_plan(sides, p)
+    assert plans[NAME].ops == [{"op": "after_set", "id": "bbbb1", "links": [
+        {"board": OTHER, "id": "gen01", "label": "Купить краску"},
+        {"board": OTHER, "id": "gen02", "label": "Позвонить"},
+    ]}]
+    assert plans[NAME].calls == [bs.Call("blocked_by", "t2", ("g2", "g1"))]
+    assert plans[OTHER].units == [] or all(not u.ops and not u.calls for u in plans[OTHER].units)
+
+
+def test_a_blocker_that_is_a_paired_subtask_resolves_through_its_row():
+    b = sboard(scard("Потом", "bbbb1"), scard("Поездка", "card1", sub("Билеты", "sub1")))
+    p = planner(dtask("t2", "Потом", blocked=["s1"]), dtask("t1", "Поездка"), stask("s1", "Билеты", "t1"))
+    side = dside(b, p, [drow("bbbb1", "t2", "Потом"), drow("card1", "t1", "Поездка")], [srow("sub1", "card1", "s1", "Билеты")])
+    plan = deps_plan([side], p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": NAME, "id": "sub1", "label": "Билеты"}]}]
+
+
+def test_labels_are_screened():
+    b, p, rows = two_cards(blocked=["t1"])
+    p["t1"] = bs.replace(p["t1"], title="Сначала [важно] | срочно")
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops[0]["links"] == [{"board": NAME, "id": "aaaa1", "label": "Сначала важно  срочно"}]
+    # A title no label can take: the card's own text instead.
+    p["t1"] = bs.replace(p["t1"], title="%% тайное")
+    assert deps_plan([dside(b, p, rows)], p)[NAME].ops[0]["links"][0]["label"] == "Сначала"
+
+
+def test_a_line_with_other_text_on_it_is_not_rewritten_but_the_planner_still_follows():
+    b, p, rows = two_cards(after=[(NAME, "aaaa1")], extra=True, blocked=["t3"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == []
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t3", "t1"))]
+    assert plan.counts.skipped == 1
+    # The snapshot is not moved, so the card side is retried every pass.
+    assert bs.RowChange("deps", "bbbb1", deps=None) in plan.row_changes
+
+
+def test_a_board_read_without_subtasks_has_no_dependencies_either():
+    b, p, rows = two_cards(blocked=["t1"])
+    b = bs.replace(b, subs_known=False)
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+
+
+def test_dependency_units_take_only_the_room_left_in_the_batch():
+    b, p, rows = two_cards(blocked=["t1"])
+    plan = bs.Plan(board=NAME, units=[bs.Unit(ops=tuple({"op": "check", "id": "aaaa1", "checked": True} for _ in range(100)))])
+    bs.add_units(plan, bs.merge_deps([dside(b, p, rows)], list(p.values()))[NAME])
+    assert len(plan.ops) == 100 and plan.counts.waiting == 1
+
+
+def test_dependencies_settle_then_nothing_across_boards():
+    work = sboard(scard("Потом", "bbbb1", after=[(OTHER, "gen01"), (NAME, "aaaa1")]), scard("Сначала", "aaaa1"))
+    general = sboard(scard("Купить краску", "gen01", after=[(NAME, "aaaa1")]), name=OTHER)
+    p = planner(
+        dtask("t1", "Сначала"),
+        dtask("t2", "Потом", blocked=["outside"]),
+        dtask("g1", "Купить краску", tags=("general",), blocked=["t2"]),
+    )
+    rows = {NAME: [drow("bbbb1", "t2", "Потом"), drow("aaaa1", "t1", "Сначала")], OTHER: [drow("gen01", "g1", "Купить краску")]}
+    boards = {NAME: work, OTHER: general}
+    for _ in range(3):
+        sides = [dside(boards[NAME], p, rows[NAME]), dside(boards[OTHER], p, rows[OTHER], tag="general")]
+        plans = deps_plan(sides, p)
+        for name in (NAME, OTHER):
+            boards[name], p, rows[name], _subs = bs.apply_state(boards[name], p, rows[name], [], plans[name])
+    sides = [dside(boards[NAME], p, rows[NAME]), dside(boards[OTHER], p, rows[OTHER], tag="general")]
+    assert all(plan.units == [] for plan in deps_plan(sides, p).values())
+    assert set(p["t2"].blocked_by) == {"outside", "g1", "t1"}
+    assert set(p["g1"].blocked_by) == {"t2", "t1"}
+    assert set(boards[OTHER].cards[0].after) == {(NAME, "bbbb1"), (NAME, "aaaa1")}

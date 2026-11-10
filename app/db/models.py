@@ -3063,8 +3063,11 @@ class BoardPair(Base):
     card's block id there, `task_id` the planner's id; `title`, `done` and
     `due` are the snapshot the next pass compares both sides against.
     `status` is `ok`, or `held` while a field of the pair cannot be carried
-    (a title that cannot be a card, a due date that is not a date). Written
-    only by app/planner/board_job.py, after the board write succeeded.
+    (a title that cannot be a card, a due date that is not a date). `deps`
+    is the snapshot of the card's dependencies: the sorted planner task ids
+    its `after:` line and the task's `blockedBy` last agreed on (null until
+    the first pass that compared them). Written only by
+    app/planner/board_job.py, after the board write succeeded.
     """
 
     __tablename__ = "board_pair"
@@ -3077,6 +3080,7 @@ class BoardPair(Base):
     done: Mapped[bool] = mapped_column(Boolean, nullable=False)
     due: Mapped[datetime.date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'ok'"))
+    deps: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -3086,6 +3090,46 @@ class BoardPair(Base):
         # The plugin's block ids (vaultd/vaultd/boards.py's `_BLOCK_ID_RE`).
         CheckConstraint("block_id ~ '^[A-Za-z0-9-]{1,64}$'", name="ck_board_pair_block_id"),
         CheckConstraint("status in ('ok', 'held')", name="ck_board_pair_status"),
+    )
+
+
+class BoardSubPair(Base):
+    """One tracked pair between a subtask inside a board card and a planner
+    subtask (app/planner/board_sync.py, "Subtasks").
+
+    **User content**, like `board_pair`: `title` is the subtask's text as
+    last synced. `/export` includes it, `/delete` truncates it, nothing logs
+    a column of it, no debug view.
+
+    `board` and `block_id` (the subtask's block id, unique on the board
+    with the cards' ones) name it; `card_block_id` is the card it sits in,
+    `parent_block_id` the subtask it sits under (null: right under the
+    card), `task_id` the planner subtask. `title`, `done`, `due` are the
+    snapshot. `status` is `ok`, `held` (a field cannot be carried) or
+    `detached`: the subtask left the card while the planner kept it, and
+    since the bot never deletes a planner task the pair is let go of
+    instead -- kept so no pass adds it back, dropped once the planner
+    subtask is gone too.
+    """
+
+    __tablename__ = "board_sub_pair"
+
+    board: Mapped[str] = mapped_column(String, primary_key=True)
+    block_id: Mapped[str] = mapped_column(String, primary_key=True)
+    card_block_id: Mapped[str] = mapped_column(String, nullable=False)
+    task_id: Mapped[str] = mapped_column(String, nullable=False)
+    parent_block_id: Mapped[str | None] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    done: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    due: Mapped[datetime.date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'ok'"))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("board", "task_id", name="uq_board_sub_pair_task"),
+        CheckConstraint("block_id ~ '^[A-Za-z0-9-]{1,64}$'", name="ck_board_sub_pair_block_id"),
+        CheckConstraint("status in ('ok', 'held', 'detached')", name="ck_board_sub_pair_status"),
     )
 
 
@@ -3118,6 +3162,12 @@ class BoardSyncRun(Base):
     skipped: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     waiting: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     held: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_added: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_removed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    subs_detached: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    deps_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(

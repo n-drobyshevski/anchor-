@@ -4385,7 +4385,7 @@ planner and menu test files).
   is queued while the board flag is on too. Conflicts are summed; skipped
   titles are the most any one pass skipped, since a held title is skipped
   again every pass.
-- **Not done.** Subtasks, lanes beyond open/done (a card's lane is read but
+- **Not done.** Subtasks (done since: next section), lanes beyond open/done (a card's lane is read but
   carries no meaning), card continuation lines and task descriptions, the
   board's archive, planner deletes (a removed card untags, never deletes), done
   planner tasks with no row, and an undo of the planner side.
@@ -4399,3 +4399,96 @@ planner and menu test files).
   runs without the guard, because a person asked for that board to be brought
   in step; the background pass and the preview always keep it.
 
+## Board sync: subtasks and dependencies
+
+- **What.** A card's nested checklist (subtasks, depth 1 to 3) is kept in step
+  with its planner task's subtasks, and a card's `after:` line (links to the
+  cards it waits for, on this board or another) with the task's `blockedBy`.
+  vaultd's half (`GET /v1/boards?subs=1`, the `sub_*` and `after_set` ops,
+  vaultd/vaultd/board_subs.py) shipped first; Echo's half is in
+  app/planner/board_sync.py (`merge`'s subtask step, `merge_deps`), the job,
+  one table (`board_sub_pair`), one column (`board_pair.deps`) and six counts
+  on `board_sync_run`.
+- **Reading.** Subtasks carry no tag in the planner, so a tag filter cannot
+  find them: a pass now makes one `list_tasks` with no tag, subtasks and done
+  tasks included, and takes each board's tagged top-level tasks and their
+  descendants from it (it replaces the per-tag reads; the untagged tasks a card
+  may adopt are cut from the same answer). Rows are read as strictly as before,
+  plus `position` (a number) and `blockedBy` (a list of ids).
+- **Subtasks: only for pairs that already had a row.** A card paired in this
+  pass waits one pass for its subtasks. Then a subtask's create always has a
+  known parent task id (from a stored row), and the order of a pass stays
+  creates, board write, rows, calls, with no create waiting on another create.
+  The same holds one level down: a subtask under a subtask that is not paired
+  yet waits, and is counted as waiting. A three-level checklist takes at most
+  three passes.
+- **Same rules as cards.** One `board_sub_pair` row per tracked subtask pair
+  (board, block id, the card, the parent subtask or none, the planner subtask,
+  the snapshot, a status); fields merge three ways with the planner winning a
+  conflict; titles are screened by the same `card_text_ok` and `task_title_ok`;
+  dates only on boards with the default date syntax. Pairing what has no row:
+  by the minted id, then by title among siblings under the same paired parent.
+  A new subtask on the card becomes `create_task` with `parentId` (and a
+  `sub_tag` op when it has no id; the request id comes from the board and the
+  block id as for cards). A new planner subtask becomes a `sub_add` as the last
+  child of its parent, done ones too: unlike the planner's whole done history,
+  one task's subtasks are few, and a checklist shows its ticked items.
+- **Gone from the planner: removed from the card.** One `sub_remove` for the
+  top of what goes (vaultd removes a subtask with its block), and the rows
+  under it dropped in the same unit, so no other op names a subtask that is
+  already gone (vaultd would refuse the whole batch).
+- **Gone from the card: detached, never deleted.** The planner client has no
+  delete tool and must not get one (`ALLOWED_TOOLS`), and a card edit is a
+  weaker signal than a planner delete: a subtask deleted on the board may be
+  one the user only moved, or a line Sync mangled. So the pair is kept with
+  status `detached`: it is never compared again and never added back (without
+  it the next pass would see a planner subtask with no row and add it to the
+  card again, forever), and it is dropped once the planner subtask is gone
+  too. It counts as "отцепить" in the preview. A card that leaves the board
+  takes its subtask rows with it and touches no planner subtask; the card's own
+  rule (untag the task) is the whole of it.
+- **Not synced:** the order of subtasks inside a card (added ones go last), a
+  subtask moved to another parent or another card (moved to another card reads
+  as gone from this one: detached there), and planner subtasks deeper than the
+  board allows (counted as skipped).
+- **The guard covers subtasks.** Removed and detached subtask pairs count as
+  losses with removed cards and untagged tasks, against the card and subtask
+  pairs together, with the same thresholds; `/boards now` still gets past it.
+- **Dependencies: cards only.** The `after:` line belongs to a card; a
+  subtask has no line of its own, and writing one into a nested checklist would
+  be structure the plugin does not know. So a subtask's own blockers stay
+  planner-only. A card may still wait for a subtask (a link to a subtask's
+  block id resolves through its row).
+- **Both sides as task ids.** Every board's rows at the start of the pass make
+  one map, (board, block id) ⇄ task id. The card side is the set of task ids
+  its links resolve to; the planner side is `blockedBy` cut to tasks some board
+  shows. A link nothing resolves is written back unchanged at the end of the
+  line; a blocker no board shows is kept in the `blockedBy` that is sent. The
+  snapshot (`board_pair.deps`, sorted ids) starts null: the first comparison
+  writes the union to both sides, so nothing either side had is lost on the
+  first pass. After that, a change on one side is carried to the other; both
+  changed, the planner wins. Whole sets, not link by link, as the brief said.
+- **Writing.** `after_set` rewrites the whole line, each link labelled with the
+  blocker's planner title (`[`, `]`, `|` stripped and the result screened like
+  a card text), else that block's own text, else the card side is skipped and
+  retried. vaultd does not report labels, so a label is only written when the
+  set changes, and an existing label is replaced by the blocker's title then.
+  A line with anything besides links on it (`after_raw_extra`) is not
+  rewritten (the rewrite would drop that text): skipped, the planner side still
+  follows. `update_task(blockedBy=...)` sends the whole set; the planner
+  refuses a cycle with a tool error (`isError`), which the client now raises as
+  `PlannerToolRefused` (a `PlannerToolError`, so every other caller is
+  unchanged): the job counts it as skipped and keeps the old snapshot, so it is
+  retried each pass and the rest of the pass goes on.
+- **Priority.** Dependency units go into each board's batch last, in what room
+  the 100 ops leave; the rest waits.
+- **Deploy order.** vaultd first, then Echo. Echo asks `?subs=1`; an older
+  vaultd ignores the query and answers the old shape, which the client accepts
+  and marks (`subs_known` false): that board's subtasks and dependencies are
+  left alone that pass, never read as "every subtask gone". An older Echo
+  never asks, so a newer vaultd gives it the old shape. An older
+  planner is the same: it would drop a create's `parentId` (making a
+  top-level task of a card's subtask) and send no `blockedBy` (every blocker
+  read as removed), so a pass whose `list_tasks` rows do not all carry
+  `position`, the new contract's field, leaves subtasks and dependencies alone
+  on every board (`knows_subtasks`). Cards sync as before either way.

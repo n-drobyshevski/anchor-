@@ -314,6 +314,12 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
             )
         )
         session.add(models.BoardSyncRun(at=now, board="Work tasks.md", outcome="ok", conflicts=1))
+        session.add(
+            models.BoardSubPair(
+                board="Work tasks.md", block_id="sub12345", card_block_id="abcd1234", task_id="s1",
+                title="Пункт", done=False, created_at=now, updated_at=now,
+            )
+        )
         await session.commit()
 
 

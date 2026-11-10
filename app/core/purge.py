@@ -269,6 +269,7 @@ PURGED_TABLES = (
     # and vaultd's undo store is wiped by POST /v1/purge as for every
     # other Echo write.
     "board_pair",
+    "board_sub_pair",
     "board_sync_run",
     "vault_file",
     "vault_hold",

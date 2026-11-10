@@ -10,7 +10,8 @@ BLOCKED_COMMANDS), like `/graph`: `now` and `undo` change the vault.
   titles; and what is not set up (the flag, the vault, the planner, no
   board named in `Anchor/settings.md`). No call to anything.
 - `/boards preview` -- a dry run: queues a pass that reads and computes
-  and writes nothing anywhere, and replies with its counts. Works with
+  and writes nothing anywhere, and replies with its counts (cards, tasks,
+  subtasks, dependencies). Works with
   `BOARD_SYNC_ENABLED` off: it is how the first pairing is checked before
   the flag goes on.
 - `/boards now` -- one pass right away (needs the flag).
@@ -108,12 +109,20 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
         "tag": "дать id" if preview else "получили id",
         "create": "создать" if preview else "создано",
         "untag": "снять тег" if preview else "снят тег",
+        "planner": "создать в планере" if preview else "создано в планере",
+        "detach": "отцепить" if preview else "отцеплено",
     }
     parts = [
         f"карточки: {verb['add']} {counts.cards_added}, {verb['change']} {counts.cards_changed}, "
         f"{verb['remove']} {counts.cards_removed}, {verb['tag']} {counts.cards_tagged}",
         f"задачи: {verb['create']} {counts.tasks_created}, {verb['change']} {counts.tasks_changed}, "
         f"{verb['untag']} {counts.tasks_untagged}",
+        (
+            f"подзадачи: {verb['add']} {counts.subs_added}, {verb['change']} {counts.subs_changed}, "
+            f"{verb['remove']} {counts.subs_removed}, {verb['planner']} {counts.subs_created}, "
+            f"{verb['detach']} {counts.subs_detached}"
+        ),
+        f"связи: {verb['change']} {counts.deps_changed}",
         f"пар по названию {counts.paired}",
         f"конфликтов {counts.conflicts} (побеждает планер)",
         f"пропущено {counts.skipped}",

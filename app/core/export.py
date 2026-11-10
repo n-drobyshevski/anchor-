@@ -41,6 +41,7 @@ from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.db.models import (
     BoardPair,
+    BoardSubPair,
     BoardSyncRun,
     BriefNote,
     Checkin,
@@ -205,6 +206,9 @@ EXPORTED_MODELS = (
     # board's file name, no text). Both plainly user data.
     BoardPair,
     BoardSyncRun,
+    # Board sync, subtasks: the tracked subtask pairs, each with the
+    # subtask text last synced. User data like board_pair.
+    BoardSubPair,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"
