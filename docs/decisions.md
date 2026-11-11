@@ -4495,6 +4495,23 @@ planner and menu test files).
   A line with anything besides links on it (`after_raw_extra`) is not
   rewritten (the rewrite would drop that text): skipped, the planner side still
   follows.
+- **Titles on the line.** Users do not know block ids, so a segment of the
+  `after:` line may be a plain card title (`after: Wiz MCP integration,
+  [[#^k3f9a2|Spec]]`). vaultd splits the line on the commas outside `[[...]]`
+  and reports a segment with no `[`, `]` or `|` that passes the card-text
+  check as a title (`after_titles`), only when asked (`?subs=1&titles=1`):
+  the Echo before titles checks a card's keys exactly and would fail on a new
+  key, and asked the old way vaultd counts a title as `after_raw_extra`, so
+  that Echo also never rewrites the line without it. Echo resolves a title by
+  `title_key` among the top-level cards with a row (and a writable id) on the
+  boards read this pass, the card itself left out: the one match on its own
+  board, else the one across all boards. All found: the found cards join the
+  card side and `after_set` is sent even when the set is unchanged, so the
+  line becomes links and the next pass is idle (the label is the blocker's
+  title, as for any link). One not found or ambiguous: the line is unwritable,
+  exactly like `after_raw_extra` (below), the found part still goes to the
+  planner, and the card counts as skipped every pass until the user fixes the
+  title or uses a link. A title with a comma needs a link.
 - **A line that cannot be written has its own base.** With one snapshot, a
   card side that cannot be written never agrees with it: storing nothing
   re-sent the union every pass (so the user could never remove, in the

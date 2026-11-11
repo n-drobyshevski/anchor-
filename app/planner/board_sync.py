@@ -90,6 +90,17 @@ blockers removed. The card's line is rewritten whole by `after_set`, each
 link labelled with the blocker's planner title; the task's whole
 `blockedBy` is sent by `update_task`.
 
+A segment of the line may also be a plain card title (`after: Buy
+soil, [[#^k3f9a2|Spec]]`; vaultd reports it with `?titles=1`). It names
+the paired top-level card of that title (`title_key`, the card itself
+left out) on the card's own board when there is exactly one, else the
+one across the boards read this pass. With every title found, the line
+is rewritten as links on this pass even when its set is unchanged, so
+the next pass reads links only; a title found nowhere, or on several
+cards, makes the line one that cannot be written (below), its found
+part still read, and the card counts as skipped each pass until the
+user fixes it.
+
 A line that cannot be written (text other than links on it, a label or
 a link vaultd would refuse, more links than vaultd takes) is skipped and
 retried, and its side is tracked apart: `deps` still moves to what was
@@ -208,7 +219,8 @@ class Sub:
 @dataclass(frozen=True)
 class Card:
     """One active card as `GET /v1/boards` reports it. `after` is the
-    (board file name, block id) of each card its `after:` line names;
+    (board file name, block id) of each card its `after:` line names,
+    `after_titles` the plain card titles on that line (in order);
     `after_raw_extra` whether that line holds anything else."""
 
     n: int
@@ -220,6 +232,7 @@ class Card:
     subs: tuple[Sub, ...] = ()
     after: tuple[tuple[str, str], ...] = ()
     after_raw_extra: bool = False
+    after_titles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1350,6 +1363,24 @@ def merge_deps(sides: list[DepsSide], every_task: list[Task] | tuple[Task, ...])
             for sub in card.subs:
                 if sub.id:
                     texts.setdefault((side.board.name, sub.id), sub.text)
+    # A plain title on an `after:` line names one of the paired top-level
+    # cards (a row, a block id vaultd takes) of the boards read this pass.
+    by_title: dict[str, list[tuple[str, str]]] = {}
+    for side in sides:
+        rowed = {row.block_id for row in side.rows}
+        for card in side.board.cards:
+            block = (side.board.name, card.id or "")
+            if card.id in rowed and ID_RE.match(block[1]) and block not in by_title.get(title_key(card.text), ()):
+                by_title.setdefault(title_key(card.text), []).append(block)
+
+    def by_its_title(title: str, own: tuple[str, str]) -> tuple[str, str] | None:
+        # The one card of that title on the card's own board, else the one
+        # on any board; none or several: unresolved. Never the card itself.
+        found = [b for b in by_title.get(title_key(title), ()) if b != own]
+        here = [b for b in found if b[0] == own[0]]
+        if len(here) == 1:
+            return here[0]
+        return found[0] if len(found) == 1 else None
 
     out: dict[str, DepsPlan] = {}
     for side in sorted(sides, key=lambda s: s.board.name):
@@ -1375,6 +1406,16 @@ def merge_deps(sides: list[DepsSide], every_task: list[Task] | tuple[Task, ...])
                         unresolved.append(link)
                 elif target != task.id and target not in linked:
                     linked[target] = link
+            titles_open = False
+            for title in card.after_titles:
+                block = by_its_title(title, (name, row.block_id))
+                if block is None:
+                    titles_open = True
+                elif to_task[block] != task.id and to_task[block] not in linked:
+                    linked[to_task[block]] = block
+            # Titles all found: the line is rewritten as links even when the
+            # set is the same. One not found: the line is not written.
+            canonical = bool(card.after_titles) and not titles_open
             on_card = frozenset(linked)
             in_planner = frozenset(t for t in task.blocked_by if t in mapped and t != task.id)
             base = None if row.deps is None else frozenset(t for t in row.deps if t in mapped)
@@ -1422,13 +1463,15 @@ def merge_deps(sides: list[DepsSide], every_task: list[Task] | tuple[Task, ...])
                     continue
                 calls.append(Call("blocked_by", task.id, tuple(keep)))
             card_written = new == on_card
-            if new != on_card:
+            if new != on_card or canonical:
                 links = _after_links(name, task.id, new, linked, unresolved, blocks_of, tasks_by_id, texts, names)
-                if card.after_raw_extra or links is None or not ID_RE.match(row.block_id):
+                if card.after_raw_extra or titles_open or links is None or not ID_RE.match(row.block_id):
                     skipped = 1
                 else:
                     ops.append({"op": "after_set", "id": row.block_id, "links": links})
                     card_written = True
+            if titles_open:
+                skipped = 1
             snapshot = carried(new, row.deps)
             card_snapshot = None if card_written else carried(
                 on_card, row.deps_card if row.deps_card is not None else row.deps
@@ -1553,7 +1596,10 @@ def _apply_ops(board: Board, ops: list[dict]) -> Board:
             cards[index] = replace(cards[index], checked=op["checked"])
         elif kind == "after_set":
             cards[index] = replace(
-                cards[index], after=tuple((link["board"], link["id"]) for link in op["links"]), after_raw_extra=False
+                cards[index],
+                after=tuple((link["board"], link["id"]) for link in op["links"]),
+                after_raw_extra=False,
+                after_titles=(),
             )
         elif kind == "remove":
             del cards[index]

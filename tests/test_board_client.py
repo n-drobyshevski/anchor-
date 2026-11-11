@@ -127,7 +127,19 @@ async def test_get_boards_with_subs_asks_for_them_and_parses_them(stub):
     assert first.after == (("General tasks.md", "gen1"), ("Work tasks.md", "abcd2"))
     assert first.after_raw_extra is True and first.subs_known is True
     assert (second.subs, second.after, second.subs_known) == ((), (), True)
-    assert stub.requests[-1].query == {"subs": "1"}
+    assert stub.requests[-1].query == {"subs": "1", "titles": "1"}
+    # Without `after_titles` (a vaultd from before titles): none.
+    assert first.after_titles == () and second.after_titles == ()
+
+
+async def test_get_boards_reads_after_titles_when_present(stub):
+    card = _subs_card(0, after=[{"board": "Work tasks.md", "id": "abcd2"}], id="abcd1", after_titles=["Wiz MCP", "Купить грунт"])
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board(cards=[card, _subs_card(1, after_titles=[])])]})
+    (board,) = await _client(stub).get_boards(subs=True)
+    first, second = board.cards
+    assert first.after_titles == ("Wiz MCP", "Купить грунт")
+    assert first.after == (("Work tasks.md", "abcd2"),) and first.subs_known is True
+    assert second.after_titles == ()
 
 
 async def test_get_boards_from_an_older_vaultd_says_subtasks_are_unknown(stub):
@@ -158,6 +170,10 @@ async def test_get_boards_from_an_older_vaultd_says_subtasks_are_unknown(stub):
         _subs_card(0, after=["A.md#^x1"]),
         _subs_card(0, extra="no"),
         _subs_card(0, subs="x"),
+        _subs_card(0, after_titles="Wiz"),
+        _subs_card(0, after_titles=[""]),
+        _subs_card(0, after_titles=[5]),
+        _card(0, after_titles=["Wiz"]),  # titles without the subs keys
     ],
 )
 async def test_subtasks_of_the_wrong_shape_are_a_protocol_error(stub, card):

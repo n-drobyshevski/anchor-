@@ -18,7 +18,8 @@ narrow:
 2. **Cards, not the file.** The read returns each active card's lane,
    first line, checked state, date and block id, and on request
    (`describe(subs=True)`, `GET /v1/boards?subs=1`) its subtasks' first
-   lines and the cards its `after:` line names -- not lane descriptions,
+   lines and the cards its `after:` line names (`&titles=1`: by title
+   too) -- not lane descriptions,
    other continuation lines, the archive, the history or the settings.
    The write takes operations, never file content: on cards `add`,
    `text`, `check`, `date`, `tag`, `remove`; on a card's subtasks
@@ -86,16 +87,12 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from dataclasses import dataclass, field
 
 from vaultd import board_subs, frontmatter
-from vaultd.board_subs import BLOCK_ID_RE as _BLOCK_ID_RE
-from vaultd.board_subs import DATE_RE as _DATE_RE
 from vaultd.board_subs import Inside, Sub
 from vaultd.config import (
     BOARD_AFTER_LINKS_MAX,
-    BOARD_CARD_MAX_CHARS,
     BOARD_MAX_BYTES,
     BOARD_MAX_CARDS,
     BOARD_OPS_MAX,
@@ -285,11 +282,13 @@ def _link_board(target: str, name: str | None) -> str | None:
     return target if target.endswith(".md") else f"{target}.md"
 
 
-def describe(board: Board, *, name: str | None = None, subs: bool = False) -> dict:
+def describe(board: Board, *, name: str | None = None, subs: bool = False, titles: bool = False) -> dict:
     """What the bot may know of a board: its lanes' titles and its cards.
     With `subs`, each card also carries its subtasks (first lines only) and
     the cards its `after:` line names, `name` being this board's file name
-    (what a same-board link resolves to)."""
+    (what a same-board link resolves to). With `titles` as well, also the
+    plain titles on that line (`after_titles`); without it a title counts
+    as `after_raw_extra`, which is all an older bot knows to keep."""
     cards = []
     for n, card in enumerate(board.cards):
         item = {
@@ -306,7 +305,11 @@ def describe(board: Board, *, name: str | None = None, subs: bool = False) -> di
                 for k, sub in enumerate(card.inside.subs)
             ]
             item["after"] = [{"board": _link_board(target, name), "id": block_id} for target, block_id, _ in card.inside.after]
-            item["after_raw_extra"] = card.inside.after_raw_extra
+            if titles:
+                item["after_titles"] = list(card.inside.after_titles)
+                item["after_raw_extra"] = card.inside.after_raw_extra
+            else:
+                item["after_raw_extra"] = card.inside.after_raw_extra or bool(card.inside.after_titles)
         cards.append(item)
     return {
         "lanes": [lane.title for lane in board.lanes],
@@ -326,14 +329,10 @@ def _check_text(text: object) -> str:
     escaped: an escape would travel back to the planner as the title."""
     if not isinstance(text, str):
         raise Refused("bad_card")
-    text = unicodedata.normalize("NFC", text).strip()
-    if not text or len(text) > BOARD_CARD_MAX_CHARS:
+    clean = board_subs.clean_text(text)
+    if clean is None:
         raise Refused("bad_card")
-    if any(unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp") for c in text):
-        raise Refused("bad_card")
-    if "%%" in text or _BLOCK_ID_RE.search(text) or _DATE_RE.search(text):
-        raise Refused("bad_card")
-    return text
+    return clean
 
 
 def _check_date(date: object) -> str | None:

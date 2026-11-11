@@ -474,9 +474,20 @@ line under a card, and can write them:
   have its own `@{date}` and `^id`, like a card. Lines indented under a
   subtask belong to it.
 - An **`after:` line**, indented one step, lists the cards this one
-  waits for: `[[#^id|Label]]` for a card on the same board,
-  `[[Board name#^id|Label]]` for one on another board named in
-  `task_boards`, separated by commas.
+  waits for, separated by commas: `[[#^id|Label]]` for a card on the
+  same board, `[[Board name#^id|Label]]` for one on another board named
+  in `task_boards`, or just the card's title:
+  `after: Wiz MCP integration, [[#^k3f9a2|Spec]]`. A title must be the
+  card's exact title (case does not matter); Echo looks for it on this
+  board first, then on the other boards, among cards it has already
+  paired with the planner, and on its next write rewrites the line as
+  links. A title it finds on no card, or on more than one, leaves the
+  line as you wrote it (the links on it still count) until you fix it.
+  A title with a comma in it needs a link. To get a card's id: type
+  `[[#^` in source mode and Obsidian offers the blocks of the note to
+  pick from; copy the `^id` Echo already appended to a card it synced;
+  or set the dependency in the planner's "Waits for" field and let Echo
+  write the link.
 - New lines are written with tabs if the board's cards already use
   tabs, otherwise four spaces. A new subtask goes at the end of its
   parent's subtasks, the `after:` line right under the card's first

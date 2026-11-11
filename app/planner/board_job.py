@@ -260,6 +260,7 @@ def as_board(board: TaskBoard) -> board_sync.Board:
             ),
             after=c.after,
             after_raw_extra=c.after_raw_extra,
+            after_titles=c.after_titles,
         )
         for c in board.cards
     )

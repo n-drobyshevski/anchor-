@@ -17,10 +17,13 @@ here, and every other line is left opaque, byte for byte and in place:
 - **Dependencies**, one line `after: [[Board#^id|Label]], [[#^id|Label]]`
   indented by exactly one unit (`after:` in any case). Each link names a
   card by block id, on another board (its file name without `.md`) or on
-  this one (no name); the label is optional. Anything on the line that is
-  not a link is reported as `after_raw_extra` and is dropped only when the
-  bot rewrites the line. Only the first such line counts; others are
-  opaque.
+  this one (no name); the label is optional. The line is split on the
+  commas outside `[[...]]`; a segment may also be a plain card title
+  (`after: Buy soil, [[#^card02|Water]]`): no `[`, `]` or `|`, and a text
+  a card could have (`clean_text`). The bot resolves titles to cards and
+  rewrites the line as links. Anything else on the line is reported as
+  `after_raw_extra` and is dropped only when the bot rewrites the line.
+  Only the first such line counts; others are opaque.
 
 New lines are indented in the board's own style: tabs when the first
 indented continuation line of the board's cards starts with a tab, four
@@ -32,9 +35,10 @@ Pure: lines in, structure out. boards.py does the writing.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
-from vaultd.config import BOARD_SUB_MAX_DEPTH
+from vaultd.config import BOARD_CARD_MAX_CHARS, BOARD_SUB_MAX_DEPTH
 
 BLOCK_ID_RE = re.compile(r" \^([A-Za-z0-9-]+)$")
 DATE_RE = re.compile(r" ?@\{(\d{4}-\d{2}-\d{2})\}")
@@ -70,6 +74,8 @@ class Inside:
     after_line: int | None = None
     # (target as written, without `.md` or empty, block id, label or None)
     after: list[tuple[str, str, str | None]] = field(default_factory=list)
+    # The plain titles on the line, in order (clean_text's form).
+    after_titles: list[str] = field(default_factory=list)
     after_raw_extra: bool = False
 
 
@@ -105,11 +111,58 @@ def split_rest(rest: str, *, dates: bool) -> tuple[str, str | None, str | None]:
     return rest.strip(), date, block_id
 
 
-def parse_links(raw: str) -> tuple[list[tuple[str, str, str | None]], bool]:
-    """The links on an `after:` line, and whether anything else is there."""
-    links = [(m.group(1).strip(), m.group(2), m.group(3)) for m in LINK_RE.finditer(raw)]
-    leftover = LINK_RE.sub("", raw).replace(",", "").strip()
-    return links, bool(leftover)
+def clean_text(text: str) -> str | None:
+    """`text` as a card's text (NFC, stripped), or None when it is not one
+    the bot may write: one line that reads back as the same text, so no
+    line break or control character, no trailing block id, no date token,
+    no comment fence."""
+    text = unicodedata.normalize("NFC", text).strip()
+    if not text or len(text) > BOARD_CARD_MAX_CHARS:
+        return None
+    if any(unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp") for c in text):
+        return None
+    if "%%" in text or BLOCK_ID_RE.search(text) or DATE_RE.search(text):
+        return None
+    return text
+
+
+def _segments(raw: str) -> list[str]:
+    """`raw` split on the commas outside `[[...]]`."""
+    out, start, depth, i = [], 0, 0, 0
+    while i < len(raw):
+        pair = raw[i : i + 2]
+        if pair == "[[":
+            depth, i = depth + 1, i + 2
+        elif pair == "]]" and depth:
+            depth, i = depth - 1, i + 2
+        elif raw[i] == "," and not depth:
+            out.append(raw[start:i])
+            start, i = i + 1, i + 1
+        else:
+            i += 1
+    out.append(raw[start:])
+    return out
+
+
+def parse_after(raw: str) -> tuple[list[tuple[str, str, str | None]], list[str], bool]:
+    """The links on an `after:` line, its plain titles, and whether
+    anything else is there."""
+    links: list[tuple[str, str, str | None]] = []
+    titles: list[str] = []
+    extra = False
+    for segment in _segments(raw):
+        if not segment.strip():
+            continue
+        if any(c in segment for c in "[]|"):
+            links += [(m.group(1).strip(), m.group(2), m.group(3)) for m in LINK_RE.finditer(segment)]
+            extra = extra or bool(LINK_RE.sub("", segment).strip())
+            continue
+        title = clean_text(segment)
+        if title is None:
+            extra = True
+        else:
+            titles.append(title)
+    return links, titles, extra
 
 
 def scan(lines: list[str], first: int, last: int, *, dates: bool) -> Inside:
@@ -133,7 +186,7 @@ def scan(lines: list[str], first: int, last: int, *, dates: bool) -> Inside:
             found = AFTER_RE.match(text)
             if found:
                 inside.after_line = i
-                inside.after, inside.after_raw_extra = parse_links(found.group(2))
+                inside.after, inside.after_titles, inside.after_raw_extra = parse_after(found.group(2))
     by_line = {sub.line: sub for sub in inside.subs}
     for sub in inside.subs:
         j = sub.line + 1

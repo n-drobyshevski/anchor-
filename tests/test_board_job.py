@@ -56,6 +56,7 @@ def _cards(*specs, subs_known: bool = False) -> tuple[BoardCard, ...]:
             BoardCard(
                 n=i, id=s.get("id"), lane="Todo", text=s["text"], checked=s.get("checked", False), date=s.get("date"),
                 subs=tuple(subs), after=tuple(s.get("after", ())), subs_known=subs_known,
+                after_titles=tuple(s.get("titles", ())),
             )
         )
     return tuple(out)
@@ -243,7 +244,7 @@ def _rebuild(vault: FakeVault, board: TaskBoard) -> TaskBoard:
         BoardCard(
             c.n, c.id, "Todo", c.text, c.checked, c.date,
             subs=tuple(BoardSub(s.n, s.id, s.depth, s.text, s.checked, s.date) for s in c.subs),
-            after=c.after, subs_known=known,
+            after=c.after, subs_known=known, after_titles=c.after_titles,
         )
         for c in after.cards
     )
@@ -983,3 +984,30 @@ async def test_an_unwritable_after_line_is_tracked_apart_and_settles(sessionmake
     for _ in range(2):
         await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert planner.writes == [] and vault.posts == [] and planner.tasks["t1"]["blockedBy"] == ["t3"]
+
+
+async def test_a_title_on_the_after_line_becomes_a_link_and_a_blocker(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "Поездка"), (GENERAL, "gen01", "g1", "Купить чемодан")])
+    work = _board({"text": "Поездка", "id": "card1", "titles": ["купить чемодан"]}, subs_known=True)
+    general = _board({"text": "Купить чемодан", "id": "gen01"}, name=GENERAL, subs_known=True)
+    vault = FakeVault([work, general])
+    planner = FakePlanner([_task("t1", "Поездка"), _task("g1", "Купить чемодан", tags=("general",))])
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    ops = {name: o for name, _sha, o, _cs in vault.posts}
+    assert ops == {NAME: [{"op": "after_set", "id": "card1", "links": [{"board": GENERAL, "id": "gen01", "label": "Купить чемодан"}]}]}
+    assert ("update", {"id": "t1", "blockedBy": ["g1"]}) in planner.writes
+    rows = {r.block_id: r for r in await _rows(sessionmaker)}
+    assert (rows["card1"].deps, rows["card1"].deps_card) == (["g1"], None)
+
+    # The line is links now: the next pass does nothing.
+    vault.boards = [_rebuild(vault, work), general]
+    assert vault.boards[0].cards[0].after_titles == () and vault.boards[0].cards[0].after == ((GENERAL, "gen01"),)
+    vault.posts.clear()
+    planner.writes.clear()
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert vault.posts == [] and planner.writes == []
