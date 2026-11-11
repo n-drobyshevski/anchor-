@@ -15,22 +15,33 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
 
 **One pass, in an order where a crash can only cause a harmless repeat:**
 
-1. Read every mapped board (`GET /v1/boards`) and, per board, the
-   planner's own top-level tasks with its tag (`list_tasks`), and the
-   stored pairs; once per pass, the user's own open top-level tasks
-   with no tag, which a card may adopt by title (board_sync's module
-   docstring). Compute every board's plan; a task adopted by one board
-   is not offered to the next.
-2. Per board: the planner creates (idempotent by `clientRequestId`, so a
-   pass that dies after one and before the board write gets the same
-   task back next time, or pairs it by title).
+1. Read every mapped board with its subtasks (`GET /v1/boards?subs=1`),
+   the user's own tasks once (`list_tasks` with no tag, subtasks and
+   done ones included: a subtask carries no tag, so a board's subtasks
+   are found as the descendants of its tagged top-level tasks), and the
+   stored pairs and subtask pairs. Compute every board's plan, then the
+   dependencies across all of them (board_sync's `merge_deps`, from the
+   rows as the pass found them), which go last into each board's batch;
+   a task adopted by one board is not offered to the next. A board read
+   from an older vaultd (no subtasks in the answer), or a pass whose
+   planner rows carry no `position` (an older planner), leaves subtasks
+   and dependencies alone and syncs cards as before.
+2. Per board: the planner creates, tasks first, then subtasks (each
+   under a task that already had a pair; idempotent by
+   `clientRequestId`, so a pass that dies after one and before the board
+   write gets the same task back next time, or pairs it by title).
 3. `POST /v1/boards` with the board's batch, under the pass's one fresh
    changeset (`boards_...`). A 409 (the user typed, Sync landed) changes
    nothing more for that board this pass; the next pass reads it again.
 4. Pairs whose unit needs no planner call are committed now.
-5. The planner updates (title, due, done, untag, tag), each unit's row
-   committed only once its calls succeeded: a row never records a value
-   the planner has not taken, so a lost call is retried, never reverted.
+5. The planner updates (title, due, done, untag, tag, blockers), each
+   unit's rows committed only once its calls succeeded: a row never
+   records a value the planner has not taken, so a lost call is retried,
+   never reverted. Blockers the planner refuses (a cycle) are counted as
+   a conflict and skipped, and their snapshot stored as planned: the next
+   pass reads the planner as having moved and writes its set back to the
+   card, so a loop's link put on the card by this pass's write comes off
+   again instead of being retried forever.
 
 A planner or vault failure aborts the pass quietly: logged by event name
 only, recorded as an outcome in `board_sync_run`, never retried by the
@@ -49,7 +60,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,12 +69,12 @@ from app.config import Settings
 from app.core import echo_write
 from app.core.clock import Clock
 from app.db.jobs import enqueue_job
-from app.db.models import BoardPair, BoardSyncRun
+from app.db.models import BoardPair, BoardSubPair, BoardSyncRun
 from app.planner import auth as planner_auth
 from app.planner import board_sync
 from app.planner.auth import PlannerAuthError
 from app.planner.board_sync import Counts, Plan
-from app.planner.client import PlannerToolError, PlannerUnavailable
+from app.planner.client import PlannerToolError, PlannerToolRefused, PlannerUnavailable
 from app.vault.client import TaskBoard
 from app.vault.errors import VaultError
 
@@ -171,7 +182,7 @@ async def enqueue_command(session: AsyncSession, clock: Clock, trigger: str) -> 
 def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
     """`list_tasks`' answer, strictly: a row of the wrong shape is a
     planner failure (the pass aborts), never a task the merge could act
-    on wrongly. Each task with its parent id."""
+    on wrongly. Each task with its parent id (also on the task)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
         raise PlannerToolError("list_tasks: malformed answer")
     out = []
@@ -187,31 +198,76 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
             raise PlannerToolError("list_tasks: malformed tags")
         if due is not None and not isinstance(due, str):
             raise PlannerToolError("list_tasks: malformed due date")
+        if parent is not None and not (isinstance(parent, str) and parent):
+            raise PlannerToolError("list_tasks: malformed parent")
+        position, blocked = item.get("position", 0), item.get("blockedBy", [])
+        if isinstance(position, bool) or not isinstance(position, (int, float)):
+            raise PlannerToolError("list_tasks: malformed position")
+        if blocked is None:
+            blocked = []
+        if not (isinstance(blocked, list) and all(isinstance(b, str) and b for b in blocked)):
+            raise PlannerToolError("list_tasks: malformed blockers")
         if task_id in seen:
             raise PlannerToolError("list_tasks: a task twice")
         seen.add(task_id)
-        out.append((board_sync.Task(id=task_id, title=title, done=done, due=due, tags=tuple(tags)), parent))
+        task = board_sync.Task(
+            id=task_id,
+            title=title,
+            done=done,
+            due=due,
+            tags=tuple(tags),
+            parent_id=parent,
+            position=float(position),
+            blocked_by=tuple(dict.fromkeys(blocked)),
+        )
+        out.append((task, parent))
     return out
 
 
-def parse_tasks(raw: object, tag: str) -> list[board_sync.Task]:
-    """`list_tasks`' answer for one tag as merge input. A subtask or a
-    row without the tag (neither should come back) is left out."""
-    return [task for task, parent in _read_rows(raw) if parent is None and tag in task.tags]
+def untagged_of(tasks: list[board_sync.Task]) -> list[board_sync.Task]:
+    """The tasks a card may adopt (`parse_all`'s answer cut down):
+    top-level, open, with no tag at all."""
+    return [task for task in tasks if task.parent_id is None and not task.done and not task.tags]
 
 
-def parse_untagged(raw: object) -> list[board_sync.Task]:
-    """`list_tasks`' answer with no tag filter, cut to the tasks a card
-    may adopt: top-level, open, with no tag at all."""
-    return [task for task, parent in _read_rows(raw) if parent is None and not task.done and not task.tags]
+def knows_subtasks(raw: object) -> bool:
+    """Whether the planner that answered `list_tasks` is one with subtasks
+    and blockers in its rows: every row carries `position`. An older one
+    would drop a create's `parentId` (making a top-level task of a card's
+    subtask) and read every blocker as gone, so with it a pass leaves
+    subtasks and dependencies alone, as with an older vaultd."""
+    rows = raw.get("tasks") if isinstance(raw, dict) else None
+    return isinstance(rows, list) and all(isinstance(r, dict) and "position" in r for r in rows)
+
+
+def parse_all(raw: object) -> list[board_sync.Task]:
+    """`list_tasks`' answer with no tag filter and subtasks included."""
+    return [task for task, _parent in _read_rows(raw)]
 
 
 def as_board(board: TaskBoard) -> board_sync.Board:
     cards = tuple(
-        board_sync.Card(n=c.n, id=c.id, text=c.text, checked=c.checked, date=c.date, lane=c.lane)
+        board_sync.Card(
+            n=c.n,
+            id=c.id,
+            text=c.text,
+            checked=c.checked,
+            date=c.date,
+            lane=c.lane,
+            subs=tuple(
+                board_sync.Sub(n=s.n, id=s.id, depth=s.depth, text=s.text, checked=s.checked, date=s.date)
+                for s in c.subs
+            ),
+            after=c.after,
+            after_raw_extra=c.after_raw_extra,
+        )
         for c in board.cards
     )
-    return board_sync.Board(name=board.name, dates=board.dates, cards=cards, sha256=board.sha256 or "")
+    # An older vaultd answers without subtasks: unknown, not "none".
+    subs_known = all(c.subs_known for c in board.cards)
+    return board_sync.Board(
+        name=board.name, dates=board.dates, cards=cards, sha256=board.sha256 or "", subs_known=subs_known
+    )
 
 
 async def load_rows(session: AsyncSession, board: str) -> list[board_sync.Row]:
@@ -220,6 +276,25 @@ async def load_rows(session: AsyncSession, board: str) -> list[board_sync.Row]:
         board_sync.Row(
             block_id=r.block_id,
             task_id=r.task_id,
+            title=r.title,
+            done=r.done,
+            due=r.due.isoformat() if r.due else None,
+            status=r.status,
+            deps=tuple(r.deps) if r.deps is not None else None,
+            deps_card=tuple(r.deps_card) if r.deps_card is not None else None,
+        )
+        for r in rows
+    ]
+
+
+async def load_sub_rows(session: AsyncSession, board: str) -> list[board_sync.SubRow]:
+    rows = (await session.execute(select(BoardSubPair).where(BoardSubPair.board == board))).scalars().all()
+    return [
+        board_sync.SubRow(
+            block_id=r.block_id,
+            card_block_id=r.card_block_id,
+            task_id=r.task_id,
+            parent_block_id=r.parent_block_id,
             title=r.title,
             done=r.done,
             due=r.due.isoformat() if r.due else None,
@@ -246,6 +321,13 @@ async def _apply_row(
             await session.delete(existing)
         await session.flush()
         return
+    if change.op == "deps":
+        if existing is not None:
+            existing.deps = list(change.deps) if change.deps is not None else None
+            existing.deps_card = list(change.deps_card) if change.deps_card is not None else None
+            existing.updated_at = now
+        await session.flush()
+        return
     due = datetime.date.fromisoformat(change.due) if change.due else None
     if existing is None:
         existing = BoardPair(board=board, block_id=change.block_id, created_at=now)
@@ -257,6 +339,41 @@ async def _apply_row(
     existing.status = change.status
     existing.updated_at = now
     await session.flush()
+
+
+async def _apply_sub_row(
+    session: AsyncSession, board: str, change: board_sync.SubRowChange, task_id: str | None, now: datetime.datetime
+) -> None:
+    """One subtask row change, flushed, not committed."""
+    existing = await session.get(BoardSubPair, (board, change.block_id))
+    if change.op == "delete":
+        if existing is not None:
+            await session.delete(existing)
+        await session.flush()
+        return
+    due = datetime.date.fromisoformat(change.due) if change.due else None
+    if existing is None:
+        existing = BoardSubPair(board=board, block_id=change.block_id, created_at=now)
+        session.add(existing)
+    existing.card_block_id = change.card_block_id
+    existing.task_id = task_id or change.task_id
+    existing.parent_block_id = change.parent_block_id
+    existing.title = change.title
+    existing.done = change.done
+    existing.due = due
+    existing.status = change.status
+    existing.updated_at = now
+    await session.flush()
+
+
+async def _apply_unit_rows(
+    session: AsyncSession, board: str, unit: board_sync.Unit, task_id: str | None, now: datetime.datetime
+) -> None:
+    """A unit's row and subtask rows; `task_id` is what its create answered."""
+    if unit.row is not None:
+        await _apply_row(session, board, unit.row, task_id, now)
+    for change in unit.sub_rows:
+        await _apply_sub_row(session, board, change, task_id, now)
 
 
 def _run_row(now: datetime.datetime, board: str | None, outcome: str, counts: Counts | None = None) -> BoardSyncRun:
@@ -273,6 +390,7 @@ async def forget_boards(session: AsyncSession, names: list[str]) -> int:
     if not names:
         return 0
     result = await session.execute(delete(BoardPair).where(BoardPair.board.in_(names)))
+    await session.execute(delete(BoardSubPair).where(BoardSubPair.board.in_(names)))
     await session.commit()
     return result.rowcount or 0
 
@@ -351,26 +469,37 @@ async def _read_and_plan(
     """Step 1: every read, then every plan. Records `missing`/`not_board`
     boards on `result` and raises `_Abort` when there is nothing to do."""
     try:
-        boards = await vault.get_boards()
+        boards = await vault.get_boards(subs=True)
     except VaultError:
         raise _Abort(UNAVAILABLE) from None
     mapped = [b for b in boards if b.name in settings.BOARD_SYNC_TAGS]
     if not mapped:
         raise _Abort(NO_BOARDS)
     plans = []
-    untagged: list[board_sync.Task] | None = None
+    every: list[board_sync.Task] | None = None
+    untagged: list[board_sync.Task] = []
+    planner_subs = False
+    sides: list[board_sync.DepsSide] = []
     for board in sorted(mapped, key=lambda b: b.name):
         if board.state != "ok":
             result.boards.append(BoardResult(board.name, MISSING if board.state == "missing" else NOT_BOARD))
             continue
-        if untagged is None:
-            raw = await planner.list_tasks(settings, session, clock, tag=None, include_completed=False)
-            untagged = parse_untagged(raw)
+        if every is None:
+            # One read for every board: a subtask has no tag of its own.
+            raw = await planner.list_tasks(
+                settings, session, clock, tag=None, include_subtasks=True, include_completed=True
+            )
+            every = parse_all(raw)
+            untagged = untagged_of(every)
+            planner_subs = knows_subtasks(raw)
         tag = settings.BOARD_SYNC_TAGS[board.name]
-        raw = await planner.list_tasks(settings, session, clock, tag=tag)
-        tasks = parse_tasks(raw, tag)
+        tasks = [t for t in every if t.parent_id is None and tag in t.tags]
+        subtasks = [t for t in every if t.parent_id is not None]
         rows = await load_rows(session, board.name)
+        sub_rows = await load_sub_rows(session, board.name)
         merged = as_board(board)
+        if not planner_subs:
+            merged = replace(merged, subs_known=False)
         plan = board_sync.merge(
             merged,
             tasks,
@@ -379,11 +508,19 @@ async def _read_and_plan(
             creates_max=settings.BOARD_SYNC_CREATES_PER_PASS,
             guard=guard,
             untagged=untagged,
+            subtasks=subtasks,
+            sub_rows=sub_rows,
         )
         # One task, one board: what this board adopts is not offered to the next.
         taken = {call.task_id for call in plan.calls if call.kind == "tag"}
         untagged = [task for task in untagged if task.id not in taken]
         plans.append((tag, merged, plan))
+        sides.append(board_sync.DepsSide(merged, tuple(tasks), tuple(rows), tuple(sub_rows)))
+    # Dependencies, across boards, from the rows as the pass found them;
+    # the lowest priority in each board's batch.
+    deps = board_sync.merge_deps(sides, every or [])
+    for _tag, merged, plan in plans:
+        board_sync.add_units(plan, deps.get(merged.name))
     return plans
 
 
@@ -409,13 +546,20 @@ async def _carry_out(
     a planner error) to stop the pass."""
     now = clock.now_utc()
     known_tasks = {row.task_id for row in await load_rows(session, board.name)}
+    known_tasks |= {row.task_id for row in await load_sub_rows(session, board.name)}
 
-    # 2. Planner creates.
+    # 2. Planner creates: tasks, then subtasks (each under a task that
+    # already had a pair, so its parent id is known).
     created: dict[str, str] = {}
-    for create in plan.creates:
+    creates = sorted(plan.creates, key=lambda c: c.parent_task_id is not None)
+    for create in creates:
         answer = await planner.create_task(
             settings, session, clock,
-            title=create.title, due_date=create.due, client_request_id=create.request_id, tags=[create.tag],
+            title=create.title,
+            due_date=create.due,
+            client_request_id=create.request_id,
+            tags=[create.tag] if create.tag else None,
+            parent_id=create.parent_task_id,
         )
         task_id = _created_id(answer)
         if create.done:
@@ -454,19 +598,35 @@ async def _carry_out(
 
     # 4. Rows that wait on nothing else.
     for unit in kept.units:
-        if unit.row is not None and not unit.calls:
+        if not unit.calls:
             task_id = created.get(unit.create.block_id) if unit.create is not None else None
-            await _apply_row(session, board.name, unit.row, task_id, now)
+            await _apply_unit_rows(session, board.name, unit, task_id, now)
     await session.commit()
 
-    # 5. Planner updates, each unit's row once its calls are made.
+    # 5. Planner updates, each unit's rows once its calls are made.
     for unit in kept.units:
         if not unit.calls:
             continue
+        refused = False
         for call in unit.calls:
-            await _call(planner, settings, session, clock, call)
-        if unit.row is not None:
-            await _apply_row(session, board.name, unit.row, None, now)
+            try:
+                await _call(planner, settings, session, clock, call)
+            except PlannerToolRefused:
+                if call.kind != "blocked_by":
+                    raise
+                refused = True
+        if refused:
+            # A cycle, refused after the board write may already have put
+            # the link on the card. The planner's set stands: the snapshot
+            # is stored as planned all the same, so the next pass sees the
+            # planner as the side that moved and writes its set back to
+            # the card, taking the loop's link off (board_sync,
+            # "Dependencies"). A conflict and a skip, never a loop.
+            plan.counts.skipped += 1
+            plan.counts.conflicts += 1
+            if not unit.ops:
+                plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
+        await _apply_unit_rows(session, board.name, unit, None, now)
         await session.commit()
     return OK
 
@@ -480,6 +640,8 @@ async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock
         await planner.complete_task(settings, session, clock, task_id=call.task_id, done=bool(call.value))
     elif call.kind in ("untag", "tag"):
         await planner.update_task(settings, session, clock, task_id=call.task_id, tags=list(call.value))
+    elif call.kind == "blocked_by":
+        await planner.update_task(settings, session, clock, task_id=call.task_id, blocked_by=list(call.value))
     else:
         raise ValueError(f"unknown board call: {call.kind}")
 

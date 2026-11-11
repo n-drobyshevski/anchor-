@@ -13,18 +13,19 @@ from __future__ import annotations
 
 import datetime
 import logging
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import func, select
 
 from app.config import Settings
 from app.core import echo_write
-from app.db.models import BoardPair, BoardSyncRun, Job, PlannerCredential, PlannerSnapshot, UserState
+from app.db.models import BoardPair, BoardSubPair, BoardSyncRun, Job, PlannerCredential, PlannerSnapshot, UserState
 from app.planner import board_job, board_sync
-from app.planner.client import UNSET, PlannerToolError, PlannerUnavailable
+from app.planner.client import UNSET, PlannerToolError, PlannerToolRefused, PlannerUnavailable
 from app.tg import boards as boards_ui
 from app.vault import errors
-from app.vault.client import BoardCard, BoardPost, ChangeEntry, ChangeFile, TaskBoard, UndoResult
+from app.vault.client import BoardCard, BoardPost, BoardSub, ChangeEntry, ChangeFile, TaskBoard, UndoResult
 from app.vault.errors import VaultError
 
 pytestmark = pytest.mark.asyncio
@@ -41,11 +42,23 @@ def _settings(**extra) -> Settings:
     return Settings(**values)
 
 
-def _cards(*specs) -> tuple[BoardCard, ...]:
-    return tuple(
-        BoardCard(n=i, id=s.get("id"), lane="Todo", text=s["text"], checked=s.get("checked", False), date=s.get("date"))
-        for i, s in enumerate(specs)
-    )
+def _cards(*specs, subs_known: bool = False) -> tuple[BoardCard, ...]:
+    """Cards as vaultd reports them; with `subs_known`, as a vaultd that
+    reads subtasks does (`subs`: (id, depth, text) or a dict each)."""
+    out = []
+    for i, s in enumerate(specs):
+        subs = []
+        for k, sub in enumerate(s.get("subs", ())):
+            if isinstance(sub, tuple):
+                sub = {"id": sub[0], "depth": sub[1], "text": sub[2]}
+            subs.append(BoardSub(k, sub.get("id"), sub["depth"], sub["text"], sub.get("checked", False), sub.get("date")))
+        out.append(
+            BoardCard(
+                n=i, id=s.get("id"), lane="Todo", text=s["text"], checked=s.get("checked", False), date=s.get("date"),
+                subs=tuple(subs), after=tuple(s.get("after", ())), subs_known=subs_known,
+            )
+        )
+    return tuple(out)
 
 
 class FakeVault:
@@ -58,8 +71,10 @@ class FakeVault:
         self.undone: list[tuple[str, str]] = []
         self.undo = undo
         self.log: list[str] = []
+        self.read_subs: list[bool] = []
 
-    async def get_boards(self):
+    async def get_boards(self, subs=False):
+        self.read_subs.append(subs)
         if self.boards_error:
             raise VaultError(self.boards_error)
         return self.boards
@@ -80,9 +95,14 @@ class FakeVault:
 
 
 class FakePlanner:
-    def __init__(self, tasks=None, *, fail_on=None, log=None):
+    """The planner's MCP tools as board sync uses them. `refuse_cycles`
+    makes `update_task` refuse blockers that would close a cycle, as the
+    planner does."""
+
+    def __init__(self, tasks=None, *, fail_on=None, log=None, refuse_cycles=True):
         self.tasks = {t["id"]: dict(t) for t in (tasks or [])}
         self.fail_on = fail_on or set()
+        self.refuse_cycles = refuse_cycles
         self.writes: list[tuple[str, dict]] = []
         self.log = log if log is not None else []
         self.by_request: dict[str, str] = {}
@@ -92,28 +112,49 @@ class FakePlanner:
         if name in self.fail_on:
             raise PlannerUnavailable(name)
 
-    async def list_tasks(self, settings, session, clock, *, tag, include_completed=True, **kw):
+    async def list_tasks(self, settings, session, clock, *, tag, include_completed=True, include_subtasks=False, **kw):
         self._maybe_fail("list_tasks")
         self.reads.append(tag)
         rows = [dict(t) for t in self.tasks.values() if tag is None or tag in t.get("tags", [])]
+        if not include_subtasks:
+            rows = [t for t in rows if t.get("parentId") is None]
         if not include_completed:
             rows = [t for t in rows if not t["done"]]
         return {"count": len(rows), "tasks": rows}
 
-    async def create_task(self, settings, session, clock, *, title, due_date, client_request_id, tags=None):
+    async def create_task(
+        self, settings, session, clock, *, title, due_date, client_request_id, tags=None, parent_id=None, blocked_by=None
+    ):
         self._maybe_fail("create_task")
         self.log.append("create")
-        self.writes.append(("create", {"title": title, "due": due_date, "request": client_request_id, "tags": tags}))
+        write = {"title": title, "due": due_date, "request": client_request_id, "tags": tags}
+        if parent_id is not None:
+            write["parent"] = parent_id
+        self.writes.append(("create", write))
         if client_request_id in self.by_request:
             task_id = self.by_request[client_request_id]
         else:
             task_id = f"new{len(self.by_request) + 1}"
             self.by_request[client_request_id] = task_id
-            row = {"id": task_id, "title": title, "done": False, "tags": list(tags or [])}
+            row = {"id": task_id, "title": title, "done": False, "tags": list(tags or []), "position": len(self.tasks)}
             if due_date:
                 row["dueDate"] = due_date
+            if parent_id is not None:
+                row["parentId"] = parent_id
             self.tasks[task_id] = row
         return {"id": task_id, "title": title}
+
+    def _closes_cycle(self, task_id, blockers) -> bool:
+        stack, seen = list(blockers), set()
+        while stack:
+            current = stack.pop()
+            if current == task_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(self.tasks.get(current, {}).get("blockedBy", []))
+        return False
 
     async def complete_task(self, settings, session, clock, *, task_id, done=None):
         self._maybe_fail("complete_task")
@@ -122,10 +163,15 @@ class FakePlanner:
         self.tasks[task_id]["done"] = True if done is None else done
         return {"id": task_id}
 
-    async def update_task(self, settings, session, clock, *, task_id, title=None, due_date=UNSET, tags=None):
+    async def update_task(self, settings, session, clock, *, task_id, title=None, due_date=UNSET, tags=None, blocked_by=None):
         self._maybe_fail("update_task")
         self.log.append("update")
         args = {"id": task_id}
+        if blocked_by is not None:
+            if self.refuse_cycles and self._closes_cycle(task_id, blocked_by):
+                raise PlannerToolRefused("cycle")
+            args["blockedBy"] = list(blocked_by)
+            self.tasks[task_id]["blockedBy"] = list(blocked_by)
         if title is not None:
             args["title"] = title
             self.tasks[task_id]["title"] = title
@@ -139,10 +185,15 @@ class FakePlanner:
         return {"id": task_id}
 
 
-def _task(task_id, title, *, done=False, due=None, tags=("work",)):
-    row = {"id": task_id, "title": title, "done": done, "tags": list(tags)}
+def _task(task_id, title, *, done=False, due=None, tags=("work",), parent=None, position=0, blocked_by=None):
+    row = {"id": task_id, "title": title, "done": done, "tags": list(tags), "position": position}
     if due:
         row["dueDate"] = due
+    if parent is not None:
+        row["parentId"] = parent
+        row["tags"] = []
+    if blocked_by is not None:
+        row["blockedBy"] = list(blocked_by)
     return row
 
 
@@ -174,17 +225,28 @@ async def _runs(sessionmaker):
         return list((await session.execute(select(BoardSyncRun).order_by(BoardSyncRun.id))).scalars().all())
 
 
-def _board(*specs, name=NAME, dates=True, sha=SHA):
-    return TaskBoard(name=name, state="ok", sha256=sha, lanes=("Todo", "Done"), done_lane=True, dates=dates, cards=_cards(*specs))
+def _board(*specs, name=NAME, dates=True, sha=SHA, subs_known=False):
+    return TaskBoard(
+        name=name, state="ok", sha256=sha, lanes=("Todo", "Done"), done_lane=True, dates=dates,
+        cards=_cards(*specs, subs_known=subs_known),
+    )
 
 
 def _rebuild(vault: FakeVault, board: TaskBoard) -> TaskBoard:
-    """The board after the fake vault's last post, via the merge's own model."""
-    ops = vault.posts[-1][2]
+    """The board after the fake vault's last post to it, via the merge's own model."""
+    ops = next(p[2] for p in reversed(vault.posts) if p[0] == board.name)
     merged = board_job.as_board(board)
     plan = board_sync.Plan(board=board.name, units=[board_sync.Unit(ops=tuple(ops))])
     after, _, _ = board_sync.apply_to_state(merged, [], [], plan, tag="work")
-    cards = tuple(BoardCard(c.n, c.id, "Todo", c.text, c.checked, c.date) for c in after.cards)
+    known = all(c.subs_known for c in board.cards)
+    cards = tuple(
+        BoardCard(
+            c.n, c.id, "Todo", c.text, c.checked, c.date,
+            subs=tuple(BoardSub(s.n, s.id, s.depth, s.text, s.checked, s.date) for s in c.subs),
+            after=c.after, subs_known=known,
+        )
+        for c in after.cards
+    )
     return TaskBoard(board.name, "ok", "c" * 64, board.lanes, board.done_lane, board.dates, cards)
 
 
@@ -251,8 +313,8 @@ async def test_an_untagged_task_is_adopted_by_title_once_across_boards(sessionma
     preview = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_PREVIEW)
     assert {b.name: b.counts.paired for b in preview.boards} == {"General tasks.md": 1, NAME: 0}
     assert planner.writes == [] and vault.posts == []
-    # One untagged read per pass, then one per board's tag.
-    assert planner.reads == [None, "general", "work"]
+    # One read per pass, every task with its subtasks.
+    assert planner.reads == [None]
 
     result = await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert result.outcome == board_job.OK
@@ -637,7 +699,7 @@ async def test_logs_never_carry_a_title_or_a_board_name(sessionmaker, frozen_clo
     assert "board_sync_ok" in logged
 
 
-async def test_parse_untagged_keeps_open_top_level_tasks_with_no_tag():
+async def test_the_untagged_tasks_are_the_open_top_level_ones_with_no_tag():
     raw = {
         "tasks": [
             {"id": "a", "title": "A", "done": False},
@@ -647,6 +709,277 @@ async def test_parse_untagged_keeps_open_top_level_tasks_with_no_tag():
             {"id": "e", "title": "E", "done": False, "tags": [], "dueDate": "2026-11-12"},
         ]
     }
-    assert [(t.id, t.due) for t in board_job.parse_untagged(raw)] == [("a", None), ("e", "2026-11-12")]
+    # Cut from the pass's one parsed list, not parsed again.
+    every = board_job.parse_all(raw)
+    assert [(t.id, t.due) for t in board_job.untagged_of(every)] == [("a", None), ("e", "2026-11-12")]
+    assert not hasattr(board_job, "parse_tasks") and not hasattr(board_job, "parse_untagged")
     with pytest.raises(PlannerToolError):
-        board_job.parse_untagged({"tasks": [{"id": "a", "title": "A"}]})
+        board_job.parse_all({"tasks": [{"id": "a", "title": "A"}]})
+
+
+# -- subtasks and dependencies ---------------------------------------------------------------
+
+GENERAL = "General tasks.md"
+
+
+async def _seed_pairs(sessionmaker, clock, pairs, sub_pairs=()):
+    now = clock.now_utc()
+    async with sessionmaker() as session:
+        for board, block, task, title in pairs:
+            session.add(BoardPair(board=board, block_id=block, task_id=task, title=title, done=False, created_at=now, updated_at=now))
+        for board, block, card, task, title, parent in sub_pairs:
+            session.add(
+                BoardSubPair(
+                    board=board, block_id=block, card_block_id=card, task_id=task, parent_block_id=parent,
+                    title=title, done=False, created_at=now, updated_at=now,
+                )
+            )
+        await session.commit()
+
+
+async def _sub_rows(sessionmaker):
+    async with sessionmaker() as session:
+        return list((await session.execute(select(BoardSubPair).order_by(BoardSubPair.block_id))).scalars().all())
+
+
+def _two_boards():
+    work = _board(
+        {"text": "Поездка", "id": "card1", "subs": [("sub1", 1, "Билеты"), (None, 2, "Поезд")],
+         "after": [(GENERAL, "gen01")]},
+        {"text": "Отчёт", "id": "card2"},
+        subs_known=True,
+    )
+    general = _board({"text": "Купить чемодан", "id": "gen01"}, name=GENERAL, subs_known=True)
+    return work, general
+
+
+def _two_planners(**kw):
+    return FakePlanner(
+        [
+            _task("t1", "Поездка", blocked_by=["t2", "elsewhere"]),
+            _task("t2", "Отчёт"),
+            _task("g1", "Купить чемодан", tags=("general",)),
+            _task("s1", "Билеты", parent="t1", position=1),
+            _task("s2", "Отель", parent="t1", position=2, done=True),
+            _task("x9", "Чужое", tags=()),
+        ],
+        **kw,
+    )
+
+
+async def test_a_full_pass_with_subtasks_and_a_dependency_across_boards(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(
+        sessionmaker, clock,
+        [(NAME, "card1", "t1", "Поездка"), (NAME, "card2", "t2", "Отчёт"), (GENERAL, "gen01", "g1", "Купить чемодан")],
+        [(NAME, "sub1", "card1", "s1", "Билеты", None)],
+    )
+    work, general = _two_boards()
+    vault = FakeVault([work, general])
+    planner = _two_planners()
+
+    preview = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_PREVIEW)
+    counts = {b.name: b.counts for b in preview.boards}
+    assert (counts[NAME].subs_created, counts[NAME].subs_added, counts[NAME].deps_changed) == (1, 1, 1)
+    assert vault.read_subs == [True] and planner.writes == [] and vault.posts == []
+    text = boards_ui.result_text(preview)
+    assert "подзадачи: добавить 1, изменить 0, убрать 0, создать в планере 1, отцепить 0, связать 0" in text
+    assert "связи: изменить 1" in text and "Билеты" not in text
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    # The card's new subtask is a planner subtask of its task's subtask.
+    (create,) = [w[1] for w in planner.writes if w[0] == "create"]
+    assert (create["title"], create["parent"], create["tags"]) == ("Поезд", "s1", None)
+    ops = {name: o for name, _sha, o, _cs in vault.posts}
+    assert set(ops) == {NAME}
+    kinds = [op["op"] for op in ops[NAME]]
+    assert kinds == ["sub_tag", "after_set", "sub_add"]
+    after = next(op for op in ops[NAME] if op["op"] == "after_set")
+    assert after["links"] == [
+        {"board": GENERAL, "id": "gen01", "label": "Купить чемодан"},
+        {"board": NAME, "id": "card2", "label": "Отчёт"},
+    ]
+    add = next(op for op in ops[NAME] if op["op"] == "sub_add")
+    assert (add["text"], add["checked"], "parent" in add) == ("Отель", True, False)
+    # The planner keeps the blocker no board shows.
+    assert sorted(planner.tasks["t1"]["blockedBy"]) == ["elsewhere", "g1", "t2"]
+    subs = await _sub_rows(sessionmaker)
+    assert sorted((s.task_id, s.parent_block_id) for s in subs) == [("new1", "sub1"), ("s1", None), ("s2", None)]
+    rows = {r.block_id: r for r in await _rows(sessionmaker)}
+    assert rows["card1"].deps == ["g1", "t2"]
+    runs = {r.board: r for r in await _runs(sessionmaker)}
+    assert (runs[NAME].subs_created, runs[NAME].subs_added, runs[NAME].deps_changed) == (1, 1, 1)
+
+    # And the next pass on what this one left does nothing.
+    vault.boards = [_rebuild(vault, work), general]
+    vault.posts.clear()
+    planner.writes.clear()
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert vault.posts == [] and planner.writes == []
+
+
+async def test_a_lost_blockers_call_is_retried_and_a_refused_cycle_is_undone_on_the_card(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "A"), (NAME, "card2", "t2", "B")])
+    board = _board({"text": "A", "id": "card1", "after": [(NAME, "card2")]}, {"text": "B", "id": "card2"}, subs_known=True)
+    vault = FakeVault([board])
+    planner = FakePlanner([_task("t1", "A"), _task("t2", "B", blocked_by=["t1"])], fail_on={"update_task"})
+
+    # The call fails: the pass stops, the snapshot was never written.
+    assert (await _pass(sessionmaker, _settings(), planner, vault, clock)).outcome == board_job.PLANNER_UNAVAILABLE
+    assert {r.block_id: r.deps for r in await _rows(sessionmaker)}["card1"] is None
+
+    # Back: t1 after t2 would close t2 after t1, and the planner says no. The
+    # board write already gave card2 its link to card1, so the loop is on the
+    # board: a conflict, skipped, and the snapshot stored as planned.
+    planner.fail_on = set()
+    vault.boards = [_rebuild(vault, board)] if vault.posts else [board]
+    posts = len(vault.posts)
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert result.boards[0].counts.skipped >= 1 and result.boards[0].counts.conflicts >= 1
+    assert "blockedBy" not in planner.tasks["t1"]
+    assert {r.block_id: r.deps for r in await _rows(sessionmaker)}["card1"] == ["t2"]
+
+    # The next pass reads the planner as having moved: card1's link comes off.
+    if len(vault.posts) > posts:
+        vault.boards = [_rebuild(vault, vault.boards[0])]
+    posts = len(vault.posts)
+    planner.writes.clear()
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    (_name, _sha, ops, _cs) = vault.posts[-1]
+    assert ops == [{"op": "after_set", "id": "card1", "links": []}]
+    assert planner.writes == []
+    assert {r.block_id: r.deps for r in await _rows(sessionmaker)} == {"card1": [], "card2": ["t1"]}
+
+    # And then nothing: converged, the planner's dependency on both sides.
+    vault.boards = [_rebuild(vault, vault.boards[0])]
+    posts = len(vault.posts)
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert len(vault.posts) == posts and planner.writes == []
+    assert planner.tasks["t2"]["blockedBy"] == ["t1"] and "blockedBy" not in planner.tasks["t1"]
+    assert [c.after for c in vault.boards[0].cards] == [(), ((NAME, "card1"),)]
+
+
+async def test_an_older_vaultd_without_subtasks_touches_no_subtask(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(
+        sessionmaker, clock, [(NAME, "card1", "t1", "Поездка")], [(NAME, "sub1", "card1", "s1", "Билеты", None)]
+    )
+    # The old shape: no `subs`, no `after` on any card.
+    vault = FakeVault([_board({"text": "Поездка", "id": "card1"})])
+    planner = FakePlanner(
+        [_task("t1", "Поездка", blocked_by=["t2"]), _task("t2", "Отчёт"), _task("s1", "Билеты", parent="t1"), _task("s2", "Отель", parent="t1")]
+    )
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert vault.read_subs == [True]
+    # The new tagged task t2 still becomes a card as before; nothing else.
+    assert [op["op"] for op in vault.posts[0][2]] == ["add"]
+    assert not any("blockedBy" in w[1] or "parent" in w[1] for w in planner.writes)
+    subs = await _sub_rows(sessionmaker)
+    assert [(s.block_id, s.status) for s in subs] == [("sub1", "ok")]
+    assert {r.block_id: r.deps for r in await _rows(sessionmaker)}["card1"] is None
+
+
+async def test_a_subtask_gone_from_the_card_is_detached_and_the_planner_keeps_it(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(
+        sessionmaker, clock, [(NAME, "card1", "t1", "Поездка")], [(NAME, "sub1", "card1", "s1", "Билеты", None)]
+    )
+    vault = FakeVault([_board({"text": "Поездка", "id": "card1"}, subs_known=True)])
+    planner = FakePlanner([_task("t1", "Поездка"), _task("s1", "Билеты", parent="t1")])
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.boards[0].counts.subs_detached == 1
+    assert vault.posts == [] and planner.writes == [] and "s1" in planner.tasks
+    assert [(s.block_id, s.status) for s in await _sub_rows(sessionmaker)] == [("sub1", "detached")]
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert vault.posts == [] and planner.writes == []
+
+
+async def test_forgetting_a_board_forgets_its_subtask_pairs(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _seed_pairs(
+        sessionmaker, clock, [(NAME, "card1", "t1", "A")], [(NAME, "sub1", "card1", "s1", "Б", None), (GENERAL, "sub2", "c", "s2", "В", None)]
+    )
+    async with sessionmaker() as session:
+        await board_job.forget_boards(session, [NAME])
+    assert [s.board for s in await _sub_rows(sessionmaker)] == [GENERAL]
+
+
+async def test_list_rows_are_read_strictly_with_positions_and_blockers():
+    raw = {"tasks": [{"id": "a", "title": "A", "done": False, "position": 2.5, "blockedBy": ["b", "b"], "parentId": "p"}]}
+    (task,) = board_job.parse_all(raw)
+    assert (task.parent_id, task.position, task.blocked_by) == ("p", 2.5, ("b",))
+    for bad in ({"position": "1"}, {"position": True}, {"blockedBy": "b"}, {"blockedBy": [1]}, {"parentId": 3}):
+        with pytest.raises(PlannerToolError):
+            board_job.parse_all({"tasks": [{"id": "a", "title": "A", "done": False, **bad}]})
+
+
+async def test_an_older_planner_without_positions_touches_no_subtask(sessionmaker, frozen_clock):
+    """An older planner would drop `parentId` and send no `blockedBy`."""
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "Поездка"), (NAME, "card2", "t2", "Отчёт")])
+    board = _board(
+        {"text": "Поездка", "id": "card1", "subs": [(None, 1, "Билеты")], "after": [(NAME, "card2")]},
+        {"text": "Отчёт", "id": "card2"},
+        subs_known=True,
+    )
+    vault = FakeVault([board])
+    rows = [_task("t1", "Поездка"), _task("t2", "Отчёт")]
+    for row in rows:
+        del row["position"]
+    planner = FakePlanner(rows)
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert vault.posts == [] and planner.writes == []
+    assert await _sub_rows(sessionmaker) == []
+
+
+async def test_subtask_pairings_are_counted_apart_from_card_pairings(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "Поездка")])
+    board = _board({"text": "Поездка", "id": "card1", "subs": [(None, 1, "Билеты")]}, subs_known=True)
+    vault = FakeVault([board])
+    planner = FakePlanner([_task("t1", "Поездка"), _task("s1", "Билеты", parent="t1")])
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    counts = result.boards[0].counts
+    assert (counts.paired, counts.subs_paired) == (0, 1)
+    (run,) = [r for r in await _runs(sessionmaker) if r.board == NAME]
+    assert (run.paired, run.subs_paired) == (0, 1)
+    text = boards_ui.result_text(result)
+    assert "отцеплено 0, связано 1" in text and "пар по названию 0" in text
+
+
+async def test_an_unwritable_after_line_is_tracked_apart_and_settles(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "A"), (NAME, "card2", "t2", "B"), (NAME, "card3", "t3", "C")])
+    cards = _cards(
+        {"text": "A", "id": "card1", "after": [(NAME, "card2")]}, {"text": "B", "id": "card2"}, {"text": "C", "id": "card3"},
+        subs_known=True,
+    )
+    cards = (replace(cards[0], after_raw_extra=True), *cards[1:])
+    board = TaskBoard(NAME, "ok", SHA, ("Todo", "Done"), True, True, cards)
+    vault = FakeVault([board])
+    planner = FakePlanner([_task("t1", "A", blocked_by=["t3"]), _task("t2", "B"), _task("t3", "C")])
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert vault.posts == [] and sorted(planner.tasks["t1"]["blockedBy"]) == ["t2", "t3"]
+    rows = {r.block_id: r for r in await _rows(sessionmaker)}
+    assert (rows["card1"].deps, rows["card1"].deps_card) == (["t2", "t3"], ["t2"])
+    # The union is not sent again; the user's removal in the planner stays.
+    planner.writes.clear()
+    planner.tasks["t1"]["blockedBy"] = ["t3"]
+    for _ in range(2):
+        await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert planner.writes == [] and vault.posts == [] and planner.tasks["t1"]["blockedBy"] == ["t3"]

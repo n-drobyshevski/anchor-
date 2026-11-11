@@ -20,8 +20,8 @@ future caller that tries `update_event` (which can edit the partner's
 joint events) or any `delete_*` tool fails fast and loud, in Anchor's
 own process, rather than depending on the planner never adding a tool
 this client should not use. `update_task` is on the list for board sync
-only, and its wrapper can send a title, a due date and tags and nothing
-else (see the comment on ALLOWED_TOOLS).
+only, and its wrapper can send a title, a due date, tags and the task's
+blockers and nothing else (see the comment on ALLOWED_TOOLS).
 """
 
 from __future__ import annotations
@@ -57,14 +57,19 @@ _TIMEOUT = aiohttp.ClientTimeout(total=5)
 #
 # Board sync (app/planner/board_job.py) needs one: keeping a board card
 # and a planner task in step means carrying a renamed card's title, a
-# moved due date and a removed board tag to the task. So update_task is
-# allowed now, and only through `update_task` below, which can send
-# nothing but a task's title, due date and tags; and the board job only
-# ever calls it on tasks it read with `list_tasks(mine=True)`, the user's
-# own (the planner's `update_task` is RLS-scoped, but RLS lets a member
-# edit the partner's shared tasks, so `mine` is this side's own line).
-# update_event and every delete_* tool stay out: a card that leaves a
-# board takes the board's tag off its task, never the task.
+# moved due date and a removed board tag to the task, and a card's
+# `after:` line to the task's blockers (`blockedBy`, the whole set). So
+# update_task is allowed now, and only through `update_task` below, which
+# can send nothing but a task's title, due date, tags and blockers; and
+# the board job only ever calls it on tasks it read with
+# `list_tasks(mine=True)`, the user's own, subtasks included (the
+# planner's `update_task` is RLS-scoped, but RLS lets a member edit the
+# partner's shared tasks, so `mine` is this side's own line). Subtasks
+# need no new tool: create_task takes a `parentId`, update_task and
+# complete_task work on a subtask as on any task. update_event and every
+# delete_* tool stay out: a card that leaves a board takes the board's
+# tag off its task, never the task, and a subtask that leaves a card is
+# let go of (its pair is detached), never deleted.
 #
 # Anchor plan, "Anchor" section: get_health, read-only, caller's own
 # data only (same as get_agenda). No get_sleep_summary -- get_health's
@@ -97,6 +102,12 @@ FLOWS_LIMIT_MAX = 10
 class PlannerToolError(Exception):
     """A JSON-RPC error came back, the tool is not allowlisted, or the
     response shape was not what an MCP tool call returns."""
+
+
+class PlannerToolRefused(PlannerToolError):
+    """The tool ran and said no (`isError: true`), e.g. `update_task`
+    refusing blockers that would make a cycle. A PlannerToolError like any
+    other, for every caller that does not tell the two apart."""
 
 
 def _parse_body(raw: str) -> dict | None:
@@ -249,6 +260,8 @@ class PlannerClient:
         result = payload.get("result")
         if not isinstance(result, dict):
             raise PlannerToolError("malformed tool result")
+        if result.get("isError") is True:
+            raise PlannerToolRefused("tool refused the call")
         text = next(
             (item.get("text") for item in result.get("content", []) if item.get("type") == "text"),
             None,
@@ -346,7 +359,11 @@ class PlannerClient:
         due_date: str | None,
         client_request_id: str,
         tags: list[str] | None = None,
+        parent_id: str | None = None,
+        blocked_by: list[str] | None = None,
     ) -> dict:
+        """A task, or with `parent_id` a subtask of that task (it takes its
+        parent's collection), optionally blocked by `blocked_by`."""
         # The planner's schema is `dueDate: z.string().optional()`, which
         # rejects an explicit null -- omit the key entirely rather than
         # sending `"dueDate": null` for a dateless task.
@@ -357,6 +374,10 @@ class PlannerClient:
         # there are none rather than sending an empty list.
         if tags:
             arguments["tags"] = list(tags)
+        if parent_id is not None:
+            arguments["parentId"] = parent_id
+        if blocked_by:
+            arguments["blockedBy"] = list(blocked_by)
         return await self.call_tool(settings, session, clock, "create_task", arguments)
 
     async def create_event(
@@ -423,8 +444,10 @@ class PlannerClient:
     ) -> dict:
         """The tasks carrying `tag` (None: any tags or none): by default
         the user's own (`mine`), top-level ones, done or not. Rows are
-        `{id, title, done, tags?, dueDate?, parentId?, ...}`; the caller
-        parses them."""
+        `{id, title, done, tags?, dueDate?, parentId?, position, blockedBy?,
+        ...}`; the caller parses them. Subtasks carry no tags, so
+        `include_subtasks` with a tag filter does not find a tagged
+        task's subtasks: board sync lists with no tag."""
         args: dict = {
             "mine": bool(mine),
             "includeSubtasks": bool(include_subtasks),
@@ -444,10 +467,13 @@ class PlannerClient:
         title: str | None = None,
         due_date: str | None | object = UNSET,
         tags: list[str] | None = None,
+        blocked_by: list[str] | None = None,
     ) -> dict:
-        """Change a task's title, due date (None clears it) or tags (the
-        whole list), and nothing else: there is no argument here for any
-        other field update_task accepts (ALLOWED_TOOLS' comment)."""
+        """Change a task's title, due date (None clears it), tags (the
+        whole list) or blockers (`blocked_by`, the whole set; None leaves
+        them), and nothing else: there is no argument here for any other
+        field update_task accepts (ALLOWED_TOOLS' comment). Blockers that
+        would make a cycle are PlannerToolRefused."""
         arguments: dict[str, Any] = {"id": task_id}
         if title is not None:
             arguments["title"] = title
@@ -455,6 +481,8 @@ class PlannerClient:
             arguments["dueDate"] = due_date
         if tags is not None:
             arguments["tags"] = list(tags)
+        if blocked_by is not None:
+            arguments["blockedBy"] = list(blocked_by)
         if len(arguments) == 1:
             raise ValueError("update_task needs a field to change")
         return await self.call_tool(settings, session, clock, "update_task", arguments)
@@ -471,5 +499,6 @@ __all__ = [
     "PlannerClient",
     "PlannerUnavailable",
     "PlannerToolError",
+    "PlannerToolRefused",
     "build_planner_client",
 ]

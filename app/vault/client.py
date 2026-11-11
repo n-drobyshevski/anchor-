@@ -33,8 +33,12 @@ changesets; `list_changes` reports each changeset's writer.
 `get_boards` returns the boards the user named, each card with its
 index, block id, lane, first line, checked state and date, parsed as
 strictly as the rest (a missing key, an extra one, a card out of order
-is BAD_RESPONSE). `post_board` sends card operations; its 409 (the board
-changed since it was read) is an outcome, `BoardPost(conflict=True)`,
+is BAD_RESPONSE). `get_boards(subs=True)` asks `?subs=1` and each card
+then also carries its subtasks and the cards its `after:` line names;
+an older vaultd answers without those keys, and the card says so
+(`subs_known=False`) instead of reading as a card with no subtasks.
+`post_board` sends card, subtask and `after:` operations; its 409 (the
+board changed since it was read) is an outcome, `BoardPost(conflict=True)`,
 not an error.
 
 **What the client refuses to do.** No redirects (a 3xx is a bad
@@ -268,10 +272,27 @@ _SHA256_RE_CHARS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
+class BoardSub:
+    """One subtask inside a card (vaultd/vaultd/board_subs.py): its index
+    within the card (pre-order), block id, depth (1..3), first line,
+    checked state and date."""
+
+    n: int
+    id: str | None
+    depth: int
+    text: str
+    checked: bool
+    date: str | None
+
+
+@dataclass(frozen=True)
 class BoardCard:
     """One active card of a task board (vaultd/vaultd/boards.py): its
     index in the board, block id (None when it has none), lane title,
-    first line, checked state and date (`yyyy-MM-dd`, or None)."""
+    first line, checked state and date (`yyyy-MM-dd`, or None). Read with
+    subtasks, also its subtasks, the (board file name, block id) pairs its
+    `after:` line names and whether that line holds anything else;
+    `subs_known` is False when vaultd sent none of that (an older one)."""
 
     n: int
     id: str | None
@@ -279,6 +300,10 @@ class BoardCard:
     text: str
     checked: bool
     date: str | None
+    subs: tuple[BoardSub, ...] = ()
+    after: tuple[tuple[str, str], ...] = ()
+    after_raw_extra: bool = False
+    subs_known: bool = False
 
 
 @dataclass(frozen=True)
@@ -314,8 +339,33 @@ def _sha256(value: Any) -> str:
     return value
 
 
+_CARD_KEYS = frozenset({"n", "id", "lane", "text", "checked", "date"})
+_CARD_SUB_KEYS = _CARD_KEYS | {"subs", "after", "after_raw_extra"}
+_SUB_DEPTH_MAX = 3
+
+
+def _board_sub(item: Any, index: int, prev_depth: int) -> BoardSub:
+    _require(isinstance(item, dict) and set(item) == {"n", "id", "depth", "text", "checked", "date"})
+    _require(_count(item["n"]) == index)
+    block_id, depth, text, checked, date = (item[k] for k in ("id", "depth", "text", "checked", "date"))
+    _require(block_id is None or (isinstance(block_id, str) and block_id != ""))
+    # Pre-order: the first subtask is at depth 1, each at most one deeper
+    # than the one before it.
+    _require(isinstance(depth, int) and not isinstance(depth, bool) and 1 <= depth <= min(_SUB_DEPTH_MAX, prev_depth + 1))
+    _require(isinstance(text, str) and isinstance(checked, bool))
+    _require(date is None or (isinstance(date, str) and _BOARD_DATE_RE.match(date) is not None))
+    return BoardSub(n=index, id=block_id, depth=depth, text=text, checked=checked, date=date)
+
+
+def _board_after(item: Any) -> tuple[str, str]:
+    _require(isinstance(item, dict) and set(item) == {"board", "id"})
+    board, block_id = item["board"], item["id"]
+    _require(isinstance(board, str) and board != "" and isinstance(block_id, str) and block_id != "")
+    return board, block_id
+
+
 def _board_card(item: Any, index: int) -> BoardCard:
-    _require(isinstance(item, dict) and set(item) == {"n", "id", "lane", "text", "checked", "date"})
+    _require(isinstance(item, dict) and set(item) in (_CARD_KEYS, _CARD_SUB_KEYS))
     _require(_count(item["n"]) == index)
     block_id, lane, text, checked, date = (item[k] for k in ("id", "lane", "text", "checked", "date"))
     _require(block_id is None or (isinstance(block_id, str) and block_id != ""))
@@ -323,7 +373,25 @@ def _board_card(item: Any, index: int) -> BoardCard:
     # The shape only: a user can type `@{2026-02-30}`, and vaultd reports
     # what is there. Whether it is a real day is the merge's to decide.
     _require(date is None or (isinstance(date, str) and _BOARD_DATE_RE.match(date) is not None))
-    return BoardCard(n=index, id=block_id, lane=lane, text=text, checked=checked, date=date)
+    if set(item) == _CARD_KEYS:
+        return BoardCard(n=index, id=block_id, lane=lane, text=text, checked=checked, date=date)
+    raw_subs, raw_after, extra = item["subs"], item["after"], item["after_raw_extra"]
+    _require(isinstance(raw_subs, list) and isinstance(raw_after, list) and isinstance(extra, bool))
+    subs: list[BoardSub] = []
+    for k, raw in enumerate(raw_subs):
+        subs.append(_board_sub(raw, k, subs[-1].depth if subs else 0))
+    return BoardCard(
+        n=index,
+        id=block_id,
+        lane=lane,
+        text=text,
+        checked=checked,
+        date=date,
+        subs=tuple(subs),
+        after=tuple(_board_after(raw) for raw in raw_after),
+        after_raw_extra=extra,
+        subs_known=True,
+    )
 
 
 def _task_board(item: Any) -> TaskBoard:
@@ -829,12 +897,14 @@ class VaultClient:
 
     # -- Task boards (vaultd/vaultd/boards.py) ---------------------------------------
 
-    async def get_boards(self) -> list[TaskBoard]:
+    async def get_boards(self, subs: bool = False) -> list[TaskBoard]:
         """`GET /v1/boards`: the boards named under `task_boards` in
         `Anchor/settings.md`, each with its cards. Parsed strictly: an
         answer of any other shape is BAD_RESPONSE, never a partial list.
-        Two boards with one name are BAD_RESPONSE too."""
-        data = await self._request("GET", "/v1/boards")
+        Two boards with one name are BAD_RESPONSE too. With `subs`, asks
+        for each card's subtasks and `after:` links (`?subs=1`); a card
+        in the old shape still parses, with `subs_known` false."""
+        data = await self._request("GET", "/v1/boards", params={"subs": "1"} if subs else None)
         _require(set(data) == {"boards"} and isinstance(data["boards"], list))
         boards = [_task_board(item) for item in data["boards"]]
         _require(len({b.name for b in boards}) == len(boards))

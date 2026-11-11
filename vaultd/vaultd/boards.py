@@ -16,13 +16,18 @@ narrow:
    board (`kanban-starlane:` in its frontmatter) is reported as
    `not_board` and never read further or written.
 2. **Cards, not the file.** The read returns each active card's lane,
-   first line, checked state, date and block id -- not lane
-   descriptions, continuation lines, the archive, the history or the
-   settings. The write takes operations (`add`, `text`, `check`, `date`,
-   `tag`, `remove`), never file content.
+   first line, checked state, date and block id, and on request
+   (`describe(subs=True)`, `GET /v1/boards?subs=1`) its subtasks' first
+   lines and the cards its `after:` line names -- not lane descriptions,
+   other continuation lines, the archive, the history or the settings.
+   The write takes operations, never file content: on cards `add`,
+   `text`, `check`, `date`, `tag`, `remove`; on a card's subtasks
+   `sub_add`, `sub_text`, `sub_check`, `sub_date`, `sub_tag`,
+   `sub_remove`; on its dependencies `after_set`.
 3. **Everything else is kept byte for byte.** The file is handled as
-   lines. An operation rewrites one card's first line, or moves or
-   removes one card's lines, or inserts one new line; frontmatter, lane
+   lines. An operation rewrites one card's or subtask's first line or a
+   card's `after:` line, or moves or removes one card's or subtask's
+   lines, or inserts one new line; frontmatter, lane
    headings and descriptions, other cards, the archive, the history and
    settings blocks and the line endings are never re-serialised. The
    plugin promises the same of itself (its board-format document), so a
@@ -43,6 +48,30 @@ a trailing ` ^id`. A board whose settings change the date syntax
 (`date-trigger`, `date-format`, `date-syntax`) keeps its dates to
 itself: they are left in the card's text and never rewritten.
 
+**Inside a card** (board_subs.py), two kinds of continuation line are
+read; every other one stays opaque and in place:
+
+    - [ ] Plan the trip @{2026-11-14} ^card01
+        after: [[#^card02|Water the plants]], [[General tasks#^gen001|Buy soil]]
+        - [x] Pick dates ^sub001
+        - [ ] Book the train @{2026-11-17} ^sub002
+            - [ ] Compare fares ^sub003
+
+A subtask is a `- [c] text` line indented 1..BOARD_SUB_MAX_DEPTH units
+(a tab or four spaces each), at most one deeper than the subtask before
+it; it carries a mark, text, date and block id like a card, and its
+block (the lines under it indented further, children included) goes
+with it. The `after:` line, indented one unit, names the cards this one
+waits for by block id: `[[#^id]]` on this board, `[[Board#^id]]` on
+another named board. `sub_add` appends a subtask after its parent's
+block, or a top-level one after the last subtask's block (after the
+card's last continuation line when it has none); `after_set` rewrites
+the `after:` line in place or writes it right under the card's first
+line, and removes it for an empty list. New lines use the card's indent
+style, or the board's (tabs when its first continuation line has one).
+Checking, moving and removing a card carry its subtasks, since they are
+its continuation lines.
+
 **Done and lanes.** Checking a card moves it to the done lane when the
 board has one, and unchecking one that sits there moves it back to the
 first lane, as the plugin itself does; otherwise the box changes in
@@ -60,15 +89,24 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from vaultd import frontmatter
-from vaultd.config import BOARD_CARD_MAX_CHARS, BOARD_MAX_BYTES, BOARD_MAX_CARDS, BOARD_OPS_MAX
+from vaultd import board_subs, frontmatter
+from vaultd.board_subs import BLOCK_ID_RE as _BLOCK_ID_RE
+from vaultd.board_subs import DATE_RE as _DATE_RE
+from vaultd.board_subs import Inside, Sub
+from vaultd.config import (
+    BOARD_AFTER_LINKS_MAX,
+    BOARD_CARD_MAX_CHARS,
+    BOARD_MAX_BYTES,
+    BOARD_MAX_CARDS,
+    BOARD_OPS_MAX,
+    BOARD_SUB_MAX_DEPTH,
+    BOARD_SUBS_PER_CARD_MAX,
+)
 from vaultd.knowledge import Refused
 
 BOARD_KEY = "kanban-starlane"
 _HEADING_RE = re.compile(r"^## +(.*?)\s*$")
 _CARD_RE = re.compile(r"^- \[(.)\] ?(.*)$")
-_BLOCK_ID_RE = re.compile(r" \^([A-Za-z0-9-]+)$")
-_DATE_RE = re.compile(r" ?@\{(\d{4}-\d{2}-\d{2})\}")
 _WIP_RE = re.compile(r"\s*\(\d+\)$")
 _THEMATIC_RE = re.compile(r"^(\*\*\*+|---+|___+)\s*$")
 _BLOCK_START_RE = re.compile(r"^%% (kanban-starlane:(history|settings)|kanban:settings)\s*$")
@@ -92,6 +130,8 @@ class Card:
     text: str
     date: str | None
     block_id: str | None
+    # Its subtasks and its `after:` line (board_subs.py).
+    inside: Inside = field(default_factory=Inside)
 
     @property
     def checked(self) -> bool:
@@ -116,6 +156,8 @@ class Board:
     lanes: list[Lane]
     # Dates are read and written only when the board uses the default syntax.
     dates: bool
+    # The indent new continuation lines are written with: a tab or four spaces.
+    indent: str = "    "
 
     @property
     def cards(self) -> list[Card]:
@@ -214,25 +256,21 @@ def parse(data: bytes) -> Board | None:
         for lane in lanes:
             for card in lane.cards:
                 card.text, card.date = _split(_eol(lines[card.first]), dates=False)[1:3]
-    return Board(lines=lines, newline=newline, lanes=lanes, dates=dates)
+    spans = []
+    for lane in lanes:
+        for card in lane.cards:
+            card.inside = board_subs.scan(lines, card.first, card.last, dates=dates)
+            spans.append((card.first, card.last))
+    indent = board_subs.indent_unit(lines, spans)
+    return Board(lines=lines, newline=newline, lanes=lanes, dates=dates, indent=indent)
 
 
 def _split(line: str, *, dates: bool) -> tuple[str, str, str | None, str | None]:
     """(mark, text, date, block id) of a card's first line."""
     match = _CARD_RE.match(line)
     assert match is not None
-    mark, rest = match.group(1), match.group(2)
-    block_id = None
-    found = _BLOCK_ID_RE.search(rest)
-    if found:
-        block_id, rest = found.group(1), rest[: found.start()]
-    date = None
-    if dates:
-        found = _DATE_RE.search(rest)
-        if found:
-            date = found.group(1)
-            rest = rest[: found.start()] + rest[found.end() :]
-    return mark, rest.strip(), date, block_id
+    text, date, block_id = board_subs.split_rest(match.group(2), dates=dates)
+    return match.group(1), text, date, block_id
 
 
 def _card(lane: int, first: int, last: int, mark: str, rest: str) -> Card:
@@ -240,23 +278,41 @@ def _card(lane: int, first: int, last: int, mark: str, rest: str) -> Card:
     return Card(lane=lane, first=first, last=last, mark=mark, text=text, date=date, block_id=block_id)
 
 
-def describe(board: Board) -> dict:
-    """What the bot may know of a board: its lanes' titles and its cards."""
+def _link_board(target: str, name: str | None) -> str | None:
+    """The file an `after:` link names: this board's own for `[[#^id]]`."""
+    if not target:
+        return name
+    return target if target.endswith(".md") else f"{target}.md"
+
+
+def describe(board: Board, *, name: str | None = None, subs: bool = False) -> dict:
+    """What the bot may know of a board: its lanes' titles and its cards.
+    With `subs`, each card also carries its subtasks (first lines only) and
+    the cards its `after:` line names, `name` being this board's file name
+    (what a same-board link resolves to)."""
+    cards = []
+    for n, card in enumerate(board.cards):
+        item = {
+            "n": n,
+            "id": card.block_id,
+            "lane": board.lanes[card.lane].title,
+            "text": card.text,
+            "checked": card.checked,
+            "date": card.date,
+        }
+        if subs:
+            item["subs"] = [
+                {"n": k, "id": sub.block_id, "depth": sub.depth, "text": sub.text, "checked": sub.checked, "date": sub.date}
+                for k, sub in enumerate(card.inside.subs)
+            ]
+            item["after"] = [{"board": _link_board(target, name), "id": block_id} for target, block_id, _ in card.inside.after]
+            item["after_raw_extra"] = card.inside.after_raw_extra
+        cards.append(item)
     return {
         "lanes": [lane.title for lane in board.lanes],
         "done_lane": any(lane.complete for lane in board.lanes),
         "dates": board.dates,
-        "cards": [
-            {
-                "n": n,
-                "id": card.block_id,
-                "lane": board.lanes[card.lane].title,
-                "text": card.text,
-                "checked": card.checked,
-                "date": card.date,
-            }
-            for n, card in enumerate(board.cards)
-        ],
+        "cards": cards,
     }
 
 
@@ -368,8 +424,180 @@ def _move(board: Board, card: Card, lane: Lane) -> Board:
     return _reparse(board)
 
 
-def _apply_one(board: Board, op: dict) -> Board:
+def _ids(board: Board) -> set[str]:
+    """Every block id on the board's active cards and their subtasks."""
+    out = set()
+    for card in board.cards:
+        if card.block_id:
+            out.add(card.block_id)
+        out.update(sub.block_id for sub in card.inside.subs if sub.block_id)
+    return out
+
+
+def _is_index(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _find_sub(card: Card, block_id: object) -> Sub:
+    wanted = _check_id(block_id)
+    for sub in card.inside.subs:
+        if sub.block_id == wanted:
+            return sub
+    raise Refused("card_missing")
+
+
+def _insert(board: Board, at: int, new: list[str]) -> None:
+    if at > 0 and not board.lines[at - 1].endswith("\n"):
+        board.lines[at - 1] += board.newline
+    board.lines[at:at] = new
+
+
+def _unit(board: Board, card: Card) -> str:
+    """The indent a new line in `card` gets: the card's own style when it
+    has continuation lines, else the board's."""
+    if card.last > card.first:
+        return "\t" if board.lines[card.first + 1].startswith("\t") else "    "
+    return board.indent
+
+
+def _expect_sub(board: Board, card_id: str, sub_id: str) -> Board:
+    """The reparsed board must show the subtask the op wrote."""
+    card = next(card for card in board.cards if card.block_id == card_id)
+    if not any(sub.block_id == sub_id for sub in card.inside.subs):
+        raise Refused("bad_card")
+    return board
+
+
+def _check_label(label: object) -> str:
+    label = _check_text(label)
+    if any(c in label for c in "[]|"):
+        raise Refused("bad_card")
+    return label
+
+
+def _apply_sub(board: Board, op: dict, kind: str) -> Board:
+    """The subtask operations: each names its card by block id."""
+    keys = set(op)
+    if kind == "sub_tag":
+        if keys != {"op", "card", "n", "id"} or not _is_index(op["n"]):
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        subs = card.inside.subs
+        if not 0 <= op["n"] < len(subs) or subs[op["n"]].block_id is not None:
+            raise Refused("card_missing")
+        new_id = _check_id(op["id"])
+        if new_id in _ids(board):
+            raise Refused("bad_card")
+        sub = subs[op["n"]]
+        board.lines[sub.line] = f"{_eol(board.lines[sub.line])} ^{new_id}{board.newline}"
+        return _expect_sub(_reparse(board), card.block_id, new_id)
+    if kind == "sub_add":
+        required = {"op", "card", "id", "text", "checked"}
+        if not required <= keys or not keys <= required | {"parent", "date"} or not isinstance(op["checked"], bool):
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        new_id = _check_id(op["id"])
+        if new_id in _ids(board):
+            raise Refused("bad_card")
+        text = _check_text(op["text"])
+        date = _check_date(op.get("date"))
+        if date is not None and not board.dates:
+            raise Refused("bad_card")
+        subs = card.inside.subs
+        if len(subs) >= BOARD_SUBS_PER_CARD_MAX:
+            raise Refused("bad_card")
+        unit = _unit(board, card)
+        if "parent" in op:
+            parent = _find_sub(card, op["parent"])
+            if parent.depth + 1 > BOARD_SUB_MAX_DEPTH:
+                raise Refused("bad_card")
+            prefix = parent.prefix + ("\t" if parent.prefix.endswith("\t") else "    ")
+            at = parent.end + 1
+        else:
+            prefix = unit
+            at = max(sub.end for sub in subs) + 1 if subs else card.last + 1
+        mark = "x" if op["checked"] else " "
+        _insert(board, at, [board_subs.sub_line(prefix, mark, text, date, new_id, board.newline)])
+        return _expect_sub(_reparse(board), card.block_id, new_id)
+    if kind == "sub_text":
+        if keys != {"op", "card", "id", "text"}:
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        sub = _find_sub(card, op["id"])
+        text = _check_text(op["text"])
+        board.lines[sub.line] = board_subs.sub_line(sub.prefix, sub.mark, text, sub.date, sub.block_id, board.newline)
+        return _expect_sub(_reparse(board), card.block_id, sub.block_id)
+    if kind == "sub_check":
+        if keys != {"op", "card", "id", "checked"} or not isinstance(op["checked"], bool):
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        sub = _find_sub(card, op["id"])
+        if sub.checked != op["checked"]:
+            # Only the box changes: the rest of the line stays as written.
+            line, at = board.lines[sub.line], len(sub.prefix) + 3
+            board.lines[sub.line] = line[:at] + ("x" if op["checked"] else " ") + line[at + 1 :]
+        return _reparse(board)
+    if kind == "sub_date":
+        if keys != {"op", "card", "id", "date"} or not board.dates:
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        sub = _find_sub(card, op["id"])
+        date = _check_date(op["date"])
+        board.lines[sub.line] = board_subs.sub_line(sub.prefix, sub.mark, sub.text, date, sub.block_id, board.newline)
+        return _expect_sub(_reparse(board), card.block_id, sub.block_id)
+    if kind == "sub_remove":
+        if keys != {"op", "card", "id"}:
+            raise Refused("bad_card")
+        card = _find(board, op["card"])
+        sub = _find_sub(card, op["id"])
+        del board.lines[sub.line : sub.end + 1]
+        return _reparse(board)
+    raise Refused("bad_card")
+
+
+def _apply_after(board: Board, op: dict, name: str | None, named: tuple[str, ...]) -> Board:
+    """Rewrite a card's `after:` line from `links`, or remove it."""
+    if set(op) != {"op", "id", "links"} or name is None:
+        raise Refused("bad_card")
+    links = op["links"]
+    if not isinstance(links, list) or len(links) > BOARD_AFTER_LINKS_MAX:
+        raise Refused("bad_card")
+    card = _find(board, op["id"])
+    written, seen = [], set()
+    for link in links:
+        if not isinstance(link, dict) or set(link) != {"board", "id", "label"}:
+            raise Refused("bad_card")
+        target = link["board"]
+        if not isinstance(target, str) or not target.endswith(".md") or (target != name and target not in named):
+            raise Refused("bad_card")
+        if any(c in target for c in "[]|#^"):
+            raise Refused("bad_card")
+        link_id = _check_id(link["id"])
+        key = (target, link_id)
+        if key in seen:
+            raise Refused("bad_card")
+        seen.add(key)
+        label = _check_label(link["label"])
+        written.append(board_subs.link_text("" if target == name else target[: -len(".md")], link_id, label))
+    at = card.inside.after_line
+    if not written:
+        if at is not None:
+            del board.lines[at]
+        return _reparse(board)
+    if at is not None:
+        indent = board_subs.AFTER_RE.match(_eol(board.lines[at])).group(1)
+        board.lines[at] = f"{indent}after: {', '.join(written)}{board.newline}"
+    else:
+        _insert(board, card.first + 1, [f"{_unit(board, card)}after: {', '.join(written)}{board.newline}"])
+    return _reparse(board)
+
+
+def _apply_one(board: Board, op: dict, name: str | None = None, named: tuple[str, ...] = ()) -> Board:
     kind = op.get("op")
+    if isinstance(kind, str) and kind.startswith("sub_"):
+        return _apply_sub(board, op, kind)
+    if kind == "after_set":
+        return _apply_after(board, op, name, named)
     if kind == "tag":
         # Give a card that has no block id one, so it can be followed.
         if set(op) != {"op", "n", "id"} or not isinstance(op["n"], int) or isinstance(op["n"], bool):
@@ -378,7 +606,7 @@ def _apply_one(board: Board, op: dict) -> Board:
         if not 0 <= op["n"] < len(cards) or cards[op["n"]].block_id is not None:
             raise Refused("card_missing")
         new_id = _check_id(op["id"])
-        if any(card.block_id == new_id for card in cards):
+        if new_id in _ids(board):
             raise Refused("bad_card")
         card = cards[op["n"]]
         line = _eol(board.lines[card.first])
@@ -388,7 +616,7 @@ def _apply_one(board: Board, op: dict) -> Board:
         if not {"op", "id", "text"} <= set(op) or not set(op) <= {"op", "id", "text", "date", "checked"}:
             raise Refused("bad_card")
         new_id = _check_id(op["id"])
-        if any(card.block_id == new_id for card in board.cards):
+        if new_id in _ids(board):
             raise Refused("bad_card")
         checked = op.get("checked", False)
         if not isinstance(checked, bool):
@@ -435,9 +663,11 @@ def _apply_one(board: Board, op: dict) -> Board:
     raise Refused("bad_card")
 
 
-def apply(data: bytes, ops: object) -> bytes:
+def apply(data: bytes, ops: object, *, name: str | None = None, named: tuple[str, ...] = ()) -> bytes:
     """`data` with `ops` applied in order, all or nothing. Raises Refused
-    (`not_board`, `bad_card`, `card_missing`, `board_no_lane`)."""
+    (`not_board`, `bad_card`, `card_missing`, `board_no_lane`). `name` is
+    this board's file name and `named` the other boards the user named:
+    the boards an `after_set` link may point at (none without `name`)."""
     board = parse(data)
     if board is None:
         raise Refused("not_board")
@@ -446,7 +676,7 @@ def apply(data: bytes, ops: object) -> bytes:
     for op in ops:
         if not isinstance(op, dict):
             raise Refused("bad_card")
-        board = _apply_one(board, op)
+        board = _apply_one(board, op, name, named)
     out = "".join(board.lines).encode("utf-8")
     if len(out) > BOARD_MAX_BYTES:
         raise Refused("too_large")

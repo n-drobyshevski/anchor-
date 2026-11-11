@@ -11,9 +11,9 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from app.planner import client as planner_client
-from app.planner.client import ALLOWED_TOOLS, PlannerClient, PlannerToolError
+from app.planner.client import ALLOWED_TOOLS, PlannerClient, PlannerToolError, PlannerToolRefused
 from app.vault import errors
-from app.vault.client import BoardCard, BoardPost, TaskBoard, VaultClient, _purpose
+from app.vault.client import BoardCard, BoardPost, BoardSub, TaskBoard, VaultClient, _purpose
 from app.vault.errors import VaultError
 from vault_stub import TOKEN, start_stub
 
@@ -96,6 +96,74 @@ async def test_a_board_answer_of_the_wrong_shape_is_a_protocol_error(stub, body)
     stub.respond("GET", "/v1/boards", 200, body)
     with pytest.raises(VaultError) as exc:
         await _client(stub).get_boards()
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+def _sub(n, depth=1, **extra):
+    base = {"n": n, "id": None, "depth": depth, "text": f"Пункт {n}", "checked": False, "date": None}
+    return {**base, **extra}
+
+
+def _subs_card(n, subs=(), after=(), extra=False, **more):
+    return _card(n, subs=list(subs), after=list(after), after_raw_extra=extra, **more)
+
+
+async def test_get_boards_with_subs_asks_for_them_and_parses_them(stub):
+    card = _subs_card(
+        0,
+        subs=[_sub(0, id="sub1"), _sub(1, 2, checked=True, date="2026-11-14"), _sub(2, 1)],
+        after=[{"board": "General tasks.md", "id": "gen1"}, {"board": "Work tasks.md", "id": "abcd2"}],
+        extra=True,
+        id="abcd1",
+    )
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board(cards=[card, _subs_card(1)])]})
+    (board,) = await _client(stub).get_boards(subs=True)
+    first, second = board.cards
+    assert first.subs == (
+        BoardSub(0, "sub1", 1, "Пункт 0", False, None),
+        BoardSub(1, None, 2, "Пункт 1", True, "2026-11-14"),
+        BoardSub(2, None, 1, "Пункт 2", False, None),
+    )
+    assert first.after == (("General tasks.md", "gen1"), ("Work tasks.md", "abcd2"))
+    assert first.after_raw_extra is True and first.subs_known is True
+    assert (second.subs, second.after, second.subs_known) == ((), (), True)
+    assert stub.requests[-1].query == {"subs": "1"}
+
+
+async def test_get_boards_from_an_older_vaultd_says_subtasks_are_unknown(stub):
+    """During a deploy vaultd may not know `?subs=1` yet: the old shape
+    still parses, and the card says its subtasks were not read."""
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board()]})
+    (board,) = await _client(stub).get_boards(subs=True)
+    assert all(not c.subs_known and c.subs == () for c in board.cards)
+    (board,) = await _client(stub).get_boards()
+    assert stub.requests[-1].query == {}
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        _card(0, subs=[]),  # half the new keys
+        _subs_card(0, subs=[_sub(1)]),  # out of order
+        _subs_card(0, subs=[_sub(0, 2)]),  # starts deeper than 1
+        _subs_card(0, subs=[_sub(0), _sub(1, 3)]),  # jumps two levels
+        _subs_card(0, subs=[_sub(0, 4)]),
+        _subs_card(0, subs=[_sub(0, True)]),
+        _subs_card(0, subs=[{**_sub(0), "extra": 1}]),
+        _subs_card(0, subs=[_sub(0, id="")]),
+        _subs_card(0, subs=[_sub(0, checked=1)]),
+        _subs_card(0, subs=[_sub(0, date="14.11.2026")]),
+        _subs_card(0, after=[{"board": "A.md"}]),
+        _subs_card(0, after=[{"board": "", "id": "x1"}]),
+        _subs_card(0, after=["A.md#^x1"]),
+        _subs_card(0, extra="no"),
+        _subs_card(0, subs="x"),
+    ],
+)
+async def test_subtasks_of_the_wrong_shape_are_a_protocol_error(stub, card):
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board(cards=[card])]})
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).get_boards(subs=True)
     assert exc.value.code == errors.BAD_RESPONSE
 
 
@@ -200,11 +268,62 @@ async def test_update_task_sends_only_the_fields_given():
         await client.update_task(None, None, None, task_id="t1")
 
 
+async def test_update_task_sends_blockers_as_the_whole_set_or_not_at_all():
+    client = _Recorder()
+    await client.update_task(None, None, None, task_id="t1", blocked_by=["t2", "t3"])
+    await client.update_task(None, None, None, task_id="t1", blocked_by=[])
+    await client.update_task(None, None, None, task_id="t1", title="Т")
+    assert client.calls == [
+        ("update_task", {"id": "t1", "blockedBy": ["t2", "t3"]}),
+        ("update_task", {"id": "t1", "blockedBy": []}),
+        ("update_task", {"id": "t1", "title": "Т"}),
+    ]
+
+
+async def test_create_task_sends_a_parent_and_blockers_only_when_given():
+    client = _Recorder()
+    await client.create_task(None, None, None, title="A", due_date=None, client_request_id="r1", tags=["work"])
+    await client.create_task(None, None, None, title="B", due_date=None, client_request_id="r2", parent_id="t1")
+    await client.create_task(None, None, None, title="C", due_date=None, client_request_id="r3", blocked_by=["t9"])
+    assert client.calls == [
+        ("create_task", {"title": "A", "clientRequestId": "r1", "tags": ["work"]}),
+        ("create_task", {"title": "B", "clientRequestId": "r2", "parentId": "t1"}),
+        ("create_task", {"title": "C", "clientRequestId": "r3", "blockedBy": ["t9"]}),
+    ]
+
+
+async def test_a_tool_that_says_no_is_planner_tool_refused(monkeypatch):
+    """`isError: true` (update_task refusing a cycle): a PlannerToolError
+    every other caller treats as before, and one board sync can tell apart."""
+    client = PlannerClient(None, "http://planner.invalid")
+
+    async def token(*_a, **_kw):
+        return "tok"
+
+    async def initialized(_token):
+        return None
+
+    async def post(body, *, token):
+        result = {"content": [{"type": "text", "text": "would create a cycle"}], "isError": True}
+        return 200, {"jsonrpc": "2.0", "id": body["id"], "result": result}, None
+
+    monkeypatch.setattr(planner_client, "get_access_token", token)
+    monkeypatch.setattr(client, "_ensure_initialized", initialized)
+    monkeypatch.setattr(client, "_post", post)
+    with pytest.raises(PlannerToolRefused) as exc:
+        await client.update_task(None, None, None, task_id="t1", blocked_by=["t2"])
+    assert isinstance(exc.value, PlannerToolError)
+
+
 def test_update_task_cannot_send_any_other_field():
     import inspect
 
     params = set(inspect.signature(PlannerClient.update_task).parameters)
-    assert params == {"self", "settings", "session", "clock", "task_id", "title", "due_date", "tags"}
+    assert params == {"self", "settings", "session", "clock", "task_id", "title", "due_date", "tags", "blocked_by"}
+    params = set(inspect.signature(PlannerClient.create_task).parameters)
+    assert params == {
+        "self", "settings", "session", "clock", "title", "due_date", "client_request_id", "tags", "parent_id", "blocked_by"
+    }
 
 
 async def test_list_tasks_asks_for_the_users_own_top_level_tasks():
@@ -218,7 +337,11 @@ async def test_list_tasks_asks_for_the_users_own_top_level_tasks():
 async def test_list_tasks_with_no_tag_sends_no_tag_filter():
     client = _Recorder()
     await client.list_tasks(None, None, None, tag=None, include_completed=False)
-    assert client.calls == [("list_tasks", {"mine": True, "includeSubtasks": False, "includeCompleted": False})]
+    await client.list_tasks(None, None, None, tag=None, include_subtasks=True)
+    assert client.calls == [
+        ("list_tasks", {"mine": True, "includeSubtasks": False, "includeCompleted": False}),
+        ("list_tasks", {"mine": True, "includeSubtasks": True, "includeCompleted": True}),
+    ]
 
 
 async def test_complete_task_sends_done_only_when_given():
