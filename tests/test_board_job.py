@@ -226,10 +226,10 @@ async def _runs(sessionmaker):
         return list((await session.execute(select(BoardSyncRun).order_by(BoardSyncRun.id))).scalars().all())
 
 
-def _board(*specs, name=NAME, dates=True, sha=SHA, subs_known=False):
+def _board(*specs, name=NAME, dates=True, sha=SHA, subs_known=False, modified=None):
     return TaskBoard(
         name=name, state="ok", sha256=sha, lanes=("Todo", "Done"), done_lane=True, dates=dates,
-        cards=_cards(*specs, subs_known=subs_known),
+        cards=_cards(*specs, subs_known=subs_known), modified=modified,
     )
 
 
@@ -1054,3 +1054,44 @@ async def test_the_planner_trigger_queues_once_a_minute_and_says_where_it_came_f
     result = board_job.PassResult(trigger=board_job.TRIGGER_PLANNER, outcome=board_job.OK)
     result.boards.append(board_job.BoardResult(NAME, board_job.OK, board_sync.Counts(cards_changed=2)))
     assert boards_ui.result_text(result).startswith("Проход по кнопке в планере:\n")
+
+
+async def test_a_board_edited_moments_ago_gets_no_write_but_its_changes_reach_the_planner(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    now = int(clock.now_utc().timestamp())
+    async with sessionmaker() as session:
+        for block, task, title in (("aaaa1", "t1", "A"), ("bbbb1", "t2", "B")):
+            session.add(BoardPair(board=NAME, block_id=block, task_id=task, title=title, done=False, created_at=clock.now_utc(), updated_at=clock.now_utc()))
+        await session.commit()
+    # Card A retitled on the board (goes to the planner); task B retitled in
+    # the planner (would be written to the board); a new planner task (an add).
+    board = _board({"text": "A2", "id": "aaaa1"}, {"text": "B", "id": "bbbb1"}, modified=now - 30)
+    vault = FakeVault([board])
+    planner = FakePlanner([_task("t1", "A"), _task("t2", "B planner"), _task("t3", "Новая")])
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+
+    assert result.outcome == board_job.OK
+    assert [b.outcome for b in result.boards] == [board_job.BUSY]
+    assert vault.posts == []
+    assert planner.tasks["t1"]["title"] == "A2"
+    rows = {r.block_id: r.title for r in await _rows(sessionmaker)}
+    assert rows == {"aaaa1": "A2", "bbbb1": "B"}
+    runs = await _runs(sessionmaker)
+    assert [(r.outcome, r.waiting) for r in runs] == [("busy", 2)]
+
+    # Quiet again: the held writes go out.
+    vault.boards = [_board({"text": "A2", "id": "aaaa1"}, {"text": "B", "id": "bbbb1"}, modified=now - 600)]
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert [b.outcome for b in result.boards] == [board_job.OK]
+    kinds = sorted(op["op"] for op in vault.posts[0][2])
+    assert kinds == ["add", "text"]
+
+
+async def test_a_board_with_no_file_time_is_never_busy(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    vault = FakeVault([_board({"text": "Новая"}, modified=None)])
+    result = await _pass(sessionmaker, _settings(), FakePlanner([]), vault, clock)
+    assert [b.outcome for b in result.boards] == [board_job.OK] and vault.posts

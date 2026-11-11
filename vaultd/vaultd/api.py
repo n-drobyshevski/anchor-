@@ -603,7 +603,7 @@ async def put_echo_stream(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "sha256": sha, "changed": True})
 
 
-def _read_boards(store: Store, subs: bool = False, titles: bool = False) -> list[dict]:
+def _read_boards(store: Store, subs: bool = False, titles: bool = False, modified: bool = False) -> list[dict]:
     rules = classes.load_rules(store.vault_path)
     out = []
     for name in rules.task_boards if rules.state == "ok" else ():
@@ -618,7 +618,16 @@ def _read_boards(store: Store, subs: bool = False, titles: bool = False) -> list
         if board is None:
             out.append({"name": name, "state": "not_board"})
             continue
-        out.append({"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board, name=name, subs=subs, titles=titles)})
+        item = {"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board, name=name, subs=subs, titles=titles)}
+        if modified:
+            # When the file last changed: the bot holds its own writes back
+            # while the user is still editing the board (board_job.py).
+            try:
+                mtime = paths.modified_at(store.vault_path, name)
+            except paths.Refused:
+                mtime = None
+            item["modified"] = int(mtime) if mtime is not None else None
+        out.append(item)
     return out
 
 
@@ -635,7 +644,11 @@ async def get_boards(request: web.Request) -> web.Response:
     settings file: no boards."""
     subs = request.query.get("subs") == "1"
     titles = subs and request.query.get("titles") == "1"
-    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY], subs, titles)
+    # `?modified=1`: each ok board also carries `modified`, the file's
+    # mtime in epoch seconds (or null), so the bot can leave a board alone
+    # while the user is editing it. Asked without, the old shape.
+    modified = request.query.get("modified") == "1"
+    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY], subs, titles, modified)
     logger.info("boards", extra={"event": "boards_read", "count": len(found)})
     return web.json_response({"boards": found})
 
@@ -692,7 +705,13 @@ async def post_board(request: web.Request) -> web.Response:
         except OSError:
             return _json_error("io_error", 500)
         await asyncio.to_thread(undo_store.append_board, changeset, FileEntry(name, data, sha))
-    logger.info("boards", extra={"event": "board_write", "count": len(ops)})
+    kinds: dict[str, int] = {}
+    for op in ops:
+        kinds[str(op.get("op"))] = kinds.get(str(op.get("op")), 0) + 1
+    logger.info(
+        "boards",
+        extra={"event": "board_write", "count": len(ops), "ops": ",".join(f"{k}:{n}" for k, n in sorted(kinds.items()))},
+    )
     return web.json_response({"sha256": sha, "changed": True})
 
 

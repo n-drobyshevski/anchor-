@@ -246,6 +246,8 @@ class Board:
     cards: tuple[Card, ...]
     sha256: str = ""
     subs_known: bool = False
+    # When the board's file last changed (epoch seconds); None = unknown.
+    modified: int | None = None
 
 
 @dataclass(frozen=True)

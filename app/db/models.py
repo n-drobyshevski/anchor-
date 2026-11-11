@@ -3176,7 +3176,7 @@ class BoardSyncRun(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "outcome in ('ok', 'changed', 'unavailable', 'refused', 'planner_unavailable',"
+            "outcome in ('ok', 'changed', 'busy', 'unavailable', 'refused', 'planner_unavailable',"
             " 'no_boards', 'missing', 'not_board')",
             name="ck_board_sync_run_outcome",
         ),

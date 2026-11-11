@@ -950,6 +950,10 @@ class Settings(BaseSettings):
     }
     # Planner creates per pass (new cards); the rest wait for the next.
     BOARD_SYNC_CREATES_PER_PASS: int = 20
+    # A board edited less than this many seconds ago is not written to:
+    # the user may still be editing it (Obsidian Sync and Kanban Starlane
+    # would race the bot's write). Its changes still reach the planner.
+    BOARD_SYNC_QUIET_S: int = 180
     # --- 8a: the vault (phase-8 plan section 3) ---
     #
     # The kill switch, staged per milestone: off -> status -> mirror ->

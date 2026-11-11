@@ -97,6 +97,9 @@ COMMAND_TRIGGERS = (TRIGGER_NOW, TRIGGER_PREVIEW, TRIGGER_PLANNER)
 # per-board ones besides `ok`.
 OK = "ok"
 CHANGED = "changed"
+# The board was edited less than BOARD_SYNC_QUIET_S ago: only the
+# planner side was brought up to date, the board's own changes wait.
+BUSY = "busy"
 UNAVAILABLE = "unavailable"
 REFUSED = "refused"
 PLANNER_UNAVAILABLE = "planner_unavailable"
@@ -258,6 +261,20 @@ def parse_all(raw: object) -> list[board_sync.Task]:
     return [task for task, _parent in _read_rows(raw)]
 
 
+def _writes_board(unit: board_sync.Unit) -> bool:
+    """A unit that writes to the board, or creates a task whose card needs
+    its id written: held back while the board is busy."""
+    return bool(unit.ops) or unit.create is not None
+
+
+def busy(board: board_sync.Board, now: datetime.datetime, settings: Settings) -> bool:
+    """Whether the board's file changed within BOARD_SYNC_QUIET_S of `now`.
+    Unknown (an older vaultd) is not busy."""
+    if board.modified is None:
+        return False
+    return now.timestamp() - board.modified < settings.BOARD_SYNC_QUIET_S
+
+
 def as_board(board: TaskBoard) -> board_sync.Board:
     cards = tuple(
         board_sync.Card(
@@ -280,7 +297,8 @@ def as_board(board: TaskBoard) -> board_sync.Board:
     # An older vaultd answers without subtasks: unknown, not "none".
     subs_known = all(c.subs_known for c in board.cards)
     return board_sync.Board(
-        name=board.name, dates=board.dates, cards=cards, sha256=board.sha256 or "", subs_known=subs_known
+        name=board.name, dates=board.dates, cards=cards, sha256=board.sha256 or "", subs_known=subs_known,
+        modified=board.modified,
     )
 
 
@@ -448,8 +466,14 @@ async def run_pass(
             changeset = echo_write.new_boards_ref()
             for tag, board, plan in plans:
                 outcome = await _carry_out(session, settings, planner, vault, clock, tag, board, plan, changeset)
-                # A board that changed under the pass did none of it.
-                counts = plan.counts if outcome == OK else Counts()
+                # A board that changed under the pass did none of it; a busy
+                # one did only its planner side, and the rest waits.
+                if outcome == OK:
+                    counts = plan.counts
+                elif outcome == BUSY:
+                    counts = Counts(waiting=sum(1 for u in plan.units if _writes_board(u)))
+                else:
+                    counts = Counts()
                 result.boards.append(BoardResult(board.name, outcome, counts))
                 session.add(_run_row(now, board.name, outcome, counts))
                 await session.commit()
@@ -560,6 +584,16 @@ async def _carry_out(
     """Steps 2-5 for one board. Returns its outcome; raises `_Abort` (or
     a planner error) to stop the pass."""
     now = clock.now_utc()
+    # The user edited this board moments ago (and may still be at it, with
+    # Kanban Starlane holding it open): writing now would race their edit
+    # through Obsidian Sync. Changes from the board still reach the planner
+    # (units with no board op); every unit that writes to the board waits
+    # for a pass after the board has been quiet for BOARD_SYNC_QUIET_S.
+    held = busy(board, now, settings)
+    if held:
+        plan = Plan(board=board.name, units=[u for u in plan.units if not _writes_board(u)], counts=Counts())
+        if not plan.units:
+            return BUSY
     known_tasks = {row.task_id for row in await load_rows(session, board.name)}
     known_tasks |= {row.task_id for row in await load_sub_rows(session, board.name)}
 
@@ -643,7 +677,7 @@ async def _carry_out(
                 plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
         await _apply_unit_rows(session, board.name, unit, None, now)
         await session.commit()
-    return OK
+    return BUSY if held else OK
 
 
 async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock, call: board_sync.Call) -> None:

@@ -30,6 +30,9 @@ SAFE_EXTRA_KEYS = frozenset(
         "count",
         "backoff_s",
         "reason",
+        # Board writes: the op kinds and how many of each ("tag:1,text:2"),
+        # a fixed vocabulary, never a card's text.
+        "ops",
     }
 )
 
