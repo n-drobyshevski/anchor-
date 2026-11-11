@@ -29,7 +29,13 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
    card's lane as its task's state, board_sync's "Lanes by role") need
    both sides too: a pass whose planner rows carry no `state`, or a board
    from a vaultd that does not name its done lane, syncs done and open
-   only, as before.
+   only, as before. Each board named in `BOARD_SYNC_COLLECTIONS` gets its
+   planner collection (`_Collections`: one `get_workspace` read per pass,
+   found by name, else made with `create_collection` from the board's
+   lanes, before the merge; a preview only counts it); a planner with
+   no collections (no `columns`, or no `create_collection`) leaves every
+   board without one for the pass, as before (board_sync, "Collection per
+   board and columns by name").
 2. Per board: the planner creates, tasks first, then subtasks (each
    under a task that already had a pair; idempotent by
    `clientRequestId`, so a pass that dies after one and before the board
@@ -47,9 +53,12 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
    a conflict and skipped, and their snapshot stored as planned: the next
    pass reads the planner as having moved and writes its set back to the
    card, so a loop's link put on the card by this pass's write comes off
-   again instead of being retried forever. A state it refuses (no column
-   of that role for the task) is handled the same way: the card goes
-   back to a lane of the planner's state on the next pass.
+   again instead of being retried forever. A state, column or completion
+   it refuses (a task in no collection, no column of that role, no done
+   column), also the completion right after a create, is handled the
+   same way, never an abort: the card goes back to a lane of the
+   planner's state on the next pass. A refused move into the collection
+   is a skip, retried next pass.
 
 A planner or vault failure aborts the pass quietly: logged by event name
 only, recorded as an outcome in `board_sync_run`, never retried by the
@@ -85,8 +94,11 @@ from app.planner.auth import PlannerAuthError
 from app.planner.board_sync import Counts, Plan
 from app.planner.client import (
     TASK_STATES,
+    Collection,
+    Column,
     PlannerToolError,
     PlannerToolRefused,
+    PlannerToolUnknown,
     PlannerUnavailable,
 )
 from app.vault.client import TaskBoard
@@ -240,6 +252,13 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
         state = item.get("state")
         if "state" in item and state not in TASK_STATES:
             raise PlannerToolError("list_tasks: malformed state")
+        # Optional: a task in no collection carries no `collectionId`, one in
+        # no column (or from an older planner) no `column`.
+        collection, column = item.get("collectionId"), item.get("column")
+        if collection is not None and not (isinstance(collection, str) and collection):
+            raise PlannerToolError("list_tasks: malformed collection")
+        if column is not None and not isinstance(column, str):
+            raise PlannerToolError("list_tasks: malformed column")
         if task_id in seen:
             raise PlannerToolError("list_tasks: a task twice")
         seen.add(task_id)
@@ -253,6 +272,8 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
             position=float(position),
             blocked_by=tuple(dict.fromkeys(blocked)),
             state=state,
+            collection_id=collection,
+            column=column or None,
         )
         out.append((task, parent))
     return out
@@ -350,6 +371,7 @@ async def load_rows(session: AsyncSession, board: str) -> list[board_sync.Row]:
             deps=tuple(r.deps) if r.deps is not None else None,
             deps_card=tuple(r.deps_card) if r.deps_card is not None else None,
             state=r.state,
+            lane=r.lane,
         )
         for r in rows
     ]
@@ -406,6 +428,7 @@ async def _apply_row(
     existing.due = due
     existing.status = change.status
     existing.state = change.state
+    existing.lane = change.lane
     existing.updated_at = now
     await session.flush()
 
@@ -497,7 +520,7 @@ async def run_pass(
         # (board_sync.merge); a preview keeps it, to show what would be
         # held, and so does the planner's button.
         plans = await _read_and_plan(
-            session, settings, planner, vault, clock, result, guard=trigger != TRIGGER_NOW
+            session, settings, planner, vault, clock, result, guard=trigger != TRIGGER_NOW, dry_run=dry_run
         )
         if not dry_run:
             changeset = echo_write.new_boards_ref()
@@ -536,8 +559,75 @@ async def run_pass(
     return result
 
 
+def _find_collection(collections: tuple[Collection, ...], name: str) -> Collection | None:
+    """The collection of that name, as the planner matches names (trimmed,
+    case-insensitively); the first the planner lists when two share one."""
+    key = board_sync.title_key(name)
+    return next((c for c in collections if board_sync.title_key(c.name) == key), None)
+
+
+class _Collections:
+    """The pass's planner collections (module docstring, step 1): read once
+    with `get_workspace`, each board's found by name or made. `supported`
+    goes false, for the rest of the pass, with a planner whose collections
+    carry no columns or that has no `create_collection`: the boards then
+    sync as before, with no collection. Nothing is cached across passes."""
+
+    def __init__(self) -> None:
+        self.read = False
+        self.supported = True
+        self.known: tuple[Collection, ...] = ()
+
+    async def for_board(
+        self, settings: Settings, session: AsyncSession, planner, clock: Clock, board: board_sync.Board, *, dry_run: bool
+    ) -> tuple[Collection | None, bool]:
+        """The board's collection (None: none), and whether this pass made
+        it (a preview: would make it, with an empty id; nothing is made)."""
+        name = settings.BOARD_SYNC_COLLECTIONS.get(board.name)
+        if name is None:
+            return None, False
+        if not self.read:
+            self.read = True
+            collections = await planner.get_workspace(settings, session, clock)
+            if collections is None:
+                self.supported = False
+            else:
+                self.known = collections
+        if not self.supported:
+            return None, False
+        found = _find_collection(self.known, name)
+        if found is not None:
+            return found, False
+        columns = board_sync.collection_columns(board)
+        if columns is None:
+            # Lanes that cannot be read by role: nothing to make columns from.
+            return None, False
+        if dry_run:
+            pending = tuple(Column("", n, done, float(k)) for k, (n, done) in enumerate(columns))
+            return Collection("", name, pending), True
+        try:
+            made, created = await planner.create_collection(settings, session, clock, name=name, columns=columns)
+        except PlannerToolUnknown:
+            self.supported = False
+            logger.info("board sync: planner has no collections", extra={"event": "board_sync_no_collections"})
+            return None, False
+        except PlannerToolRefused:
+            logger.info("board sync: collection refused", extra={"event": "board_sync_collection_refused"})
+            return None, False
+        self.known = (*self.known, made)
+        return made, created
+
+
 async def _read_and_plan(
-    session: AsyncSession, settings: Settings, planner, vault, clock: Clock, result: PassResult, *, guard: bool = True
+    session: AsyncSession,
+    settings: Settings,
+    planner,
+    vault,
+    clock: Clock,
+    result: PassResult,
+    *,
+    guard: bool = True,
+    dry_run: bool = False,
 ) -> list[tuple[str, board_sync.Board, Plan]]:
     """Step 1: every read, then every plan. Records `missing`/`not_board`
     boards on `result` and raises `_Abort` when there is nothing to do."""
@@ -553,6 +643,7 @@ async def _read_and_plan(
     untagged: list[board_sync.Task] = []
     planner_subs = planner_states = False
     sides: list[board_sync.DepsSide] = []
+    collections = _Collections()
     for board in sorted(mapped, key=lambda b: b.name):
         if board.state != "ok":
             result.boards.append(BoardResult(board.name, MISSING if board.state == "missing" else NOT_BOARD))
@@ -574,6 +665,11 @@ async def _read_and_plan(
         merged = as_board(board)
         if not planner_subs:
             merged = replace(merged, subs_known=False)
+        # The board's collection, found or made before the merge (a preview
+        # makes nothing: it counts what it would make).
+        collection, created = await collections.for_board(
+            settings, session, planner, clock, merged, dry_run=dry_run
+        )
         plan = board_sync.merge(
             merged,
             tasks,
@@ -585,7 +681,9 @@ async def _read_and_plan(
             subtasks=subtasks,
             sub_rows=sub_rows,
             states=planner_states,
+            collection=collection,
         )
+        plan.counts.collections_created = int(created)
         # One task, one board: what this board adopts is not offered to the next.
         taken = {call.task_id for call in plan.calls if call.kind == "tag"}
         untagged = [task for task in untagged if task.id not in taken]
@@ -647,10 +745,19 @@ async def _carry_out(
             client_request_id=create.request_id,
             tags=[create.tag] if create.tag else None,
             parent_id=create.parent_task_id,
+            collection_id=create.collection_id or None,
         )
         task_id = _created_id(answer)
         if create.done:
-            await planner.complete_task(settings, session, clock, task_id=task_id, done=True)
+            try:
+                await planner.complete_task(settings, session, clock, task_id=task_id, done=True)
+            except PlannerToolRefused:
+                # A task in no collection (or one with no done column): the
+                # planner cannot record the completion. A conflict and a
+                # skip; the row is stored as planned, so the next pass reads
+                # the planner as having moved and the card follows it.
+                plan.counts.skipped += 1
+                plan.counts.conflicts += 1
         # A wip card's state is a call of its unit (`CREATED_TASK`), made in
         # step 5 for a unit that is kept, after the board write.
         created[create.block_id] = task_id
@@ -679,7 +786,8 @@ async def _carry_out(
     if ops:
         written = await echo_write.write_board(vault, board.name, board.sha256, ops, changeset)
         if written.outcome == echo_write.BOARD_CHANGED:
-            return CHANGED, Counts()
+            # Nothing of the board's was done; a collection made for it was.
+            return CHANGED, Counts(collections_created=plan.counts.collections_created)
         if written.outcome == echo_write.REFUSED:
             raise _Abort(REFUSED)
         if written.outcome != echo_write.OK:
@@ -705,8 +813,11 @@ async def _carry_out(
             try:
                 await _call(planner, settings, session, clock, call)
             except PlannerToolRefused:
-                if call.kind == "state":
+                if call.kind in ("state", "done"):
                     _refused_state(plan.counts, unit)
+                    continue
+                if call.kind == "collection":
+                    _refused_move(plan.counts)
                     continue
                 if call.kind != "blocked_by":
                     raise
@@ -742,17 +853,28 @@ def _busy_plan(plan: Plan) -> Plan:
 
 
 def _refused_state(counts: Counts, unit: board_sync.Unit) -> None:
-    """A state the planner refused (a task in no collection, or one whose
-    collection has no column of that role): a conflict and a skip, and
-    the change it was is taken back from the counts. As with a refused
-    blocker set, the unit's row is stored as planned, so the next pass
-    reads the planner as the side that moved and puts the card back in a
-    lane of the planner's state (board_sync, "Lanes by role")."""
+    """A state, column or completion the planner refused (a task in no
+    collection, one whose collection has no column of that role, or no
+    done column): a conflict and a skip, and the change it was is taken
+    back from the counts. As with a refused blocker set, the unit's row is
+    stored as planned, so the next pass reads the planner as the side that
+    moved and puts the card back in a lane of the planner's state
+    (board_sync, "Lanes by role"). Never an abort."""
     counts.skipped += 1
     counts.conflicts += 1
-    counts.states_changed = max(0, counts.states_changed - 1)
-    if unit.create is None and all(call.kind == "state" for call in unit.calls):
+    if unit.counts is None or unit.counts.states_changed:
+        counts.states_changed = max(0, counts.states_changed - 1)
+    if unit.create is None and all(call.kind in ("state", "done", "collection") for call in unit.calls):
         counts.tasks_changed = max(0, counts.tasks_changed - 1)
+
+
+def _refused_move(counts: Counts) -> None:
+    """A move into the board's collection the planner refused: a skip, not
+    counted as moved; the next pass finds the task in no collection and
+    tries again. The unit's other calls still run (a state call after it
+    is then refused too, and counted as such)."""
+    counts.skipped += 1
+    counts.tasks_moved = max(0, counts.tasks_moved - 1)
 
 
 async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock, call: board_sync.Call) -> None:
@@ -767,7 +889,11 @@ async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock
     elif call.kind == "blocked_by":
         await planner.update_task(settings, session, clock, task_id=call.task_id, blocked_by=list(call.value))
     elif call.kind == "state":
-        await planner.update_task(settings, session, clock, task_id=call.task_id, state=str(call.value))
+        await planner.update_task(
+            settings, session, clock, task_id=call.task_id, state=str(call.value), column=call.column
+        )
+    elif call.kind == "collection":
+        await planner.update_task(settings, session, clock, task_id=call.task_id, collection_id=str(call.value))
     else:
         raise ValueError(f"unknown board call: {call.kind}")
 

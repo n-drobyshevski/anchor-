@@ -20,8 +20,10 @@ future caller that tries `update_event` (which can edit the partner's
 joint events) or any `delete_*` tool fails fast and loud, in Anchor's
 own process, rather than depending on the planner never adding a tool
 this client should not use. `update_task` is on the list for board sync
-only, and its wrapper can send a title, a due date, tags and the task's
-blockers and nothing else (see the comment on ALLOWED_TOOLS).
+only, and its wrapper can send a title, a due date, tags, the task's
+blockers, its state and column, and its collection, and nothing else
+(see the comment on ALLOWED_TOOLS); `create_collection` is on it for
+board sync too.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -77,6 +80,19 @@ TASK_STATES = ("planned", "wip", "done")
 # tag off its task, never the task, and a subtask that leaves a card is
 # let go of (its pair is detached), never deleted.
 #
+#
+# Board sync also keeps one planner collection per board (docs/decisions.md,
+# "Collection per board and columns by name"): a task in no collection has
+# no column, so the planner can record neither its lane nor its completion.
+# So `create_collection` is allowed, for board sync only, through
+# `create_collection` below: a name and its columns, nothing else. It is
+# idempotent by name, so a retried pass makes nothing twice, and it only
+# adds: there is still no tool here that deletes or renames anything.
+# `update_task` may now also carry a task's `collectionId` (a task the
+# board sync paired that sits in no collection, moved into its board's)
+# and a `column` by name (the card's lane of that name). `get_workspace`
+# (read-only) gives the collections and their columns.
+#
 # Anchor plan, "Anchor" section: get_health, read-only, caller's own
 # data only (same as get_agenda). No get_sleep_summary -- get_health's
 # `sleep` field is enough for the one health line render_lines() adds.
@@ -88,8 +104,11 @@ ALLOWED_TOOLS: frozenset[str] = frozenset(
         "create_task",
         "create_event",
         "complete_task",
-        # Board sync: a task's title, due date and tags only (above).
+        # Board sync: a task's title, due date, tags, blockers, state,
+        # column and collection only (above).
         "update_task",
+        # Board sync: one collection per board, made once (above).
+        "create_collection",
         "get_health",
         # PLANNER_FLOWS: read-only, the caller's own tasks grouped into
         # streams with an attention score.
@@ -114,6 +133,74 @@ class PlannerToolRefused(PlannerToolError):
     """The tool ran and said no (`isError: true`), e.g. `update_task`
     refusing blockers that would make a cycle. A PlannerToolError like any
     other, for every caller that does not tell the two apart."""
+
+
+class PlannerToolUnknown(PlannerToolRefused):
+    """The planner has no tool of that name (an older planner): the MCP
+    SDK answers `isError: true` with "Tool <name> not found". A refusal
+    like any other, for every caller that does not tell the two apart;
+    board sync reads it as "collections not supported yet"."""
+
+
+@dataclass(frozen=True)
+class Column:
+    """One column of a planner collection, as `get_workspace` and
+    `create_collection` report it. `done`: the collection's done column."""
+
+    id: str
+    name: str
+    done: bool
+    position: float = 0
+
+
+@dataclass(frozen=True)
+class Collection:
+    """A planner collection with its columns. `id` is "" for one a board
+    sync preview would create (it never is)."""
+
+    id: str
+    name: str
+    columns: tuple[Column, ...] = ()
+
+
+def _parse_column(raw: object) -> Column:
+    if not isinstance(raw, dict):
+        raise PlannerToolError("malformed column")
+    col_id, name, done, position = raw.get("id"), raw.get("name"), raw.get("done"), raw.get("position", 0)
+    if not (isinstance(col_id, str) and col_id and isinstance(name, str) and isinstance(done, bool)):
+        raise PlannerToolError("malformed column")
+    if isinstance(position, bool) or not isinstance(position, (int, float)):
+        raise PlannerToolError("malformed column position")
+    return Column(col_id, name, done, float(position))
+
+
+def _parse_collection(raw: object) -> Collection:
+    """A collection with its columns, strictly."""
+    if not isinstance(raw, dict):
+        raise PlannerToolError("malformed collection")
+    col_id, name, columns = raw.get("id"), raw.get("name"), raw.get("columns")
+    if not (isinstance(col_id, str) and col_id and isinstance(name, str) and isinstance(columns, list)):
+        raise PlannerToolError("malformed collection")
+    parsed = tuple(_parse_column(c) for c in columns)
+    if len({c.id for c in parsed}) != len(parsed):
+        raise PlannerToolError("malformed collection: a column twice")
+    return Collection(col_id, name, parsed)
+
+
+def parse_collections(raw: object) -> tuple[Collection, ...] | None:
+    """`get_workspace`'s collections, strictly: a collection of the wrong
+    shape is a planner failure. None when any collection carries no
+    `columns` key: a planner from before collections were synced, with
+    which board sync keeps to tasks with no collection, as before."""
+    collections = raw.get("collections") if isinstance(raw, dict) else None
+    if not isinstance(collections, list):
+        raise PlannerToolError("get_workspace: malformed answer")
+    if any(isinstance(c, dict) and "columns" not in c for c in collections):
+        return None
+    out = tuple(_parse_collection(c) for c in collections)
+    if len({c.id for c in out}) != len(out):
+        raise PlannerToolError("get_workspace: a collection twice")
+    return out
 
 
 def _parse_body(raw: str) -> dict | None:
@@ -266,12 +353,15 @@ class PlannerClient:
         result = payload.get("result")
         if not isinstance(result, dict):
             raise PlannerToolError("malformed tool result")
-        if result.get("isError") is True:
-            raise PlannerToolRefused("tool refused the call")
         text = next(
             (item.get("text") for item in result.get("content", []) if item.get("type") == "text"),
             None,
         )
+        if result.get("isError") is True:
+            # The text is the planner's own words: never logged, never kept.
+            if text == f"Tool {name} not found":
+                raise PlannerToolUnknown("no such tool")
+            raise PlannerToolRefused("tool refused the call")
         if text is None:
             raise PlannerToolError("tool result had no text content")
         try:
@@ -367,9 +457,11 @@ class PlannerClient:
         tags: list[str] | None = None,
         parent_id: str | None = None,
         blocked_by: list[str] | None = None,
+        collection_id: str | None = None,
     ) -> dict:
         """A task, or with `parent_id` a subtask of that task (it takes its
-        parent's collection), optionally blocked by `blocked_by`."""
+        parent's collection), optionally blocked by `blocked_by`; with
+        `collection_id`, made in that collection (its first open column)."""
         # The planner's schema is `dueDate: z.string().optional()`, which
         # rejects an explicit null -- omit the key entirely rather than
         # sending `"dueDate": null` for a dateless task.
@@ -384,6 +476,10 @@ class PlannerClient:
             arguments["parentId"] = parent_id
         if blocked_by:
             arguments["blockedBy"] = list(blocked_by)
+        if collection_id is not None:
+            if not collection_id:
+                raise ValueError("an empty collection id")
+            arguments["collectionId"] = collection_id
         return await self.call_tool(settings, session, clock, "create_task", arguments)
 
     async def create_event(
@@ -475,13 +571,18 @@ class PlannerClient:
         tags: list[str] | None = None,
         blocked_by: list[str] | None = None,
         state: str | None = None,
+        column: str | None = None,
+        collection_id: str | None = None,
     ) -> dict:
         """Change a task's title, due date (None clears it), tags (the
         whole list), blockers (`blocked_by`, the whole set; None leaves
-        them) or state (`planned`, `wip` or `done`; None leaves it: a
-        card's lane, by role), and nothing else: there is no argument here
-        for any other field update_task accepts (ALLOWED_TOOLS' comment).
-        Blockers that would make a cycle are PlannerToolRefused."""
+        them), state (`planned`, `wip` or `done`; None leaves it: a card's
+        lane, by role), column (`column`, a column name in the task's
+        collection: a card's lane by name; with `state`, a column of that
+        role) or collection (`collection_id`: the task, and its subtasks,
+        moved into it), and nothing else: there is no argument here for any
+        other field update_task accepts (ALLOWED_TOOLS' comment). Blockers
+        that would make a cycle are PlannerToolRefused."""
         arguments: dict[str, Any] = {"id": task_id}
         if title is not None:
             arguments["title"] = title
@@ -495,9 +596,53 @@ class PlannerClient:
             if state not in TASK_STATES:
                 raise ValueError(f"not a task state: {state}")
             arguments["state"] = state
+        if column is not None:
+            if not (isinstance(column, str) and column.strip()):
+                raise ValueError("an empty column name")
+            arguments["column"] = column
+        if collection_id is not None:
+            if not (isinstance(collection_id, str) and collection_id):
+                raise ValueError("an empty collection id")
+            arguments["collectionId"] = collection_id
         if len(arguments) == 1:
             raise ValueError("update_task needs a field to change")
         return await self.call_tool(settings, session, clock, "update_task", arguments)
+
+    async def get_workspace(
+        self, settings: Settings, session: AsyncSession, clock: Clock
+    ) -> tuple[Collection, ...] | None:
+        """The workspace's collections with their columns, parsed strictly
+        (`parse_collections`; None: a planner whose collections carry no
+        columns). The rest of the answer is not read."""
+        raw = await self.call_tool(settings, session, clock, "get_workspace", {})
+        return parse_collections(raw)
+
+    async def create_collection(
+        self,
+        settings: Settings,
+        session: AsyncSession,
+        clock: Clock,
+        *,
+        name: str,
+        columns: list[tuple[str, bool]],
+    ) -> tuple[Collection, bool]:
+        """A collection named `name` with `columns` ((name, done) each, in
+        order, exactly one done), or the one already of that name (the
+        planner matches names case-insensitively). Returns it, with its
+        columns, and whether this call made it. An older planner with no
+        such tool is PlannerToolUnknown."""
+        if not (isinstance(name, str) and name.strip()):
+            raise ValueError("a collection needs a name")
+        if not columns or sum(1 for _n, done in columns if done) != 1:
+            raise ValueError("a collection needs exactly one done column")
+        if any(not (isinstance(n, str) and n.strip()) for n, _done in columns):
+            raise ValueError("a column needs a name")
+        arguments = {"name": name, "columns": [{"name": n, "done": bool(done)} for n, done in columns]}
+        raw = await self.call_tool(settings, session, clock, "create_collection", arguments)
+        created = raw.get("created") if isinstance(raw, dict) else None
+        if not isinstance(created, bool):
+            raise PlannerToolError("create_collection: malformed answer")
+        return _parse_collection(raw), created
 
 
 def build_planner_client(settings: Settings, http: aiohttp.ClientSession) -> PlannerClient:
@@ -512,6 +657,10 @@ __all__ = [
     "PlannerUnavailable",
     "PlannerToolError",
     "PlannerToolRefused",
+    "PlannerToolUnknown",
+    "Collection",
+    "Column",
+    "parse_collections",
     "TASK_STATES",
     "build_planner_client",
 ]

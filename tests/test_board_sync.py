@@ -1746,3 +1746,296 @@ def test_each_unit_carries_its_own_counts():
         assert unit.counts is not None
         total.add(unit.counts)
     assert total == plan.counts
+
+
+# -- collection per board, columns by name ----------------------------------------------------
+
+NLANES = ("Todo", "Doing", "Waiting", "Done")
+COLL = bs.Collection(
+    "col1",
+    "Work tasks",
+    (
+        bs.Column("k1", "Todo", False, 0),
+        bs.Column("k2", "Doing", False, 1),
+        bs.Column("k3", "Waiting", False, 2),
+        bs.Column("k4", "Done", True, 3),
+    ),
+)
+
+
+def nboard(*cards: Card, lanes=NLANES) -> Board:
+    return lboard(*cards, lanes=lanes)
+
+
+def ntask(id: str, title: str, state: str = P, column: str | None = "Todo", collection: str | None = "col1") -> Task:
+    if collection is None:
+        column = None
+    return Task(id=id, title=title, done=state == D, tags=(TAG,), state=state, collection_id=collection, column=column)
+
+
+def nrow(block_id: str, task_id: str, title: str, state: str | None = P, lane: str | None = "Todo") -> Row:
+    return Row(block_id, task_id, title, state == D, None, state=state, lane=lane)
+
+
+def nmerge(b: Board, tasks, rows, collection=COLL, **kw) -> bs.Plan:
+    return lmerge(b, tasks, rows, collection=collection, **kw)
+
+
+def nsettle(b: Board, tasks, rows, *, passes: int = 1, collection=COLL, **kw):
+    tasks, rows = list(tasks), list(rows)
+    plan = None
+    for _ in range(passes):
+        plan = nmerge(b, tasks, rows, collection=collection, **kw)
+        b, tasks, rows = bs.apply_to_state(b, tasks, rows, plan, tag=TAG, states=True, collection=collection)
+    return b, tasks, rows, plan
+
+
+def assert_nidle(b: Board, tasks, rows, collection=COLL, **kw) -> bs.Plan:
+    plan = nmerge(b, tasks, rows, collection=collection, **kw)
+    assert plan.ops == [] and plan.creates == [] and plan.calls == [] and plan.row_changes == []
+    return plan
+
+
+def test_the_collection_is_made_from_the_boards_lanes():
+    assert bs.collection_columns(nboard()) == [("Todo", False), ("Doing", False), ("Waiting", False), ("Done", True)]
+    # Several complete lanes: the first is the one done column, the others are not made.
+    assert bs.collection_columns(cboard()) == [("Todo", False), ("Doing", False), ("Cancelled", True)]
+    # No complete lane: a done column all the same (the planner wants one).
+    assert bs.collection_columns(lboard(lanes=("Todo", "Doing"), done=None)) == [
+        ("Todo", False), ("Doing", False), ("Done", True)
+    ]
+    # Lanes that cannot be read by role, or the same but for case: none.
+    assert bs.collection_columns(lboard(known=False)) is None
+    assert bs.collection_columns(lboard(lanes=("Todo", "TODO", "Done"))) is None
+    assert bs.collection_columns(lboard(lanes=("Todo", "done"), done=None)) is None
+
+
+def test_column_roles_follow_the_planner_first_open_planned_others_wip():
+    cols = (bs.Column("b", "Later", False, 5), bs.Column("a", "Now", False, 1), bs.Column("z", "Fin", True, 0))
+    assert [(c.name, r) for c, r in bs.column_roles(cols)] == [("Fin", D), ("Now", P), ("Later", W)]
+
+
+def test_a_card_moved_between_two_lanes_of_the_same_role_moves_its_task_by_name():
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    tasks, rows = [ntask("t1", "A", W, "Doing")], [nrow("aaaa1", "t1", "A", W, "Doing")]
+    plan = nmerge(b, tasks, rows)
+    assert plan.calls == [bs.Call("state", "t1", W, column="Waiting")] and plan.ops == []
+    assert (plan.row_changes[0].state, plan.row_changes[0].lane) == (W, "Waiting")
+    assert plan.counts.states_changed == 1
+    b, tasks, rows, _ = nsettle(b, tasks, rows)
+    assert (tasks[0].state, tasks[0].column) == (W, "Waiting")
+    assert_nidle(b, tasks, rows)
+
+
+def test_a_task_moved_between_two_columns_of_the_same_role_moves_its_card_by_name():
+    b = nboard(lcard("A", "aaaa1", "Doing"))
+    tasks, rows = [ntask("t1", "A", W, "Waiting")], [nrow("aaaa1", "t1", "A", W, "Doing")]
+    plan = nmerge(b, tasks, rows)
+    assert plan.ops == [{"op": "move", "id": "aaaa1", "lane": "Waiting"}] and plan.calls == []
+    b, tasks, rows, _ = nsettle(b, tasks, rows)
+    assert lane_of(b, "aaaa1") == ("Waiting", False)
+    assert_nidle(b, tasks, rows)
+
+
+def test_names_match_case_insensitively_and_the_planners_name_is_sent():
+    b = nboard(lcard("A", "aaaa1", "waiting"), lanes=("Todo", "Doing", "waiting", "Done"))
+    plan = nmerge(b, [ntask("t1", "A", W, "Doing")], [nrow("aaaa1", "t1", "A", W, "Doing")])
+    assert plan.calls == [bs.Call("state", "t1", W, column="Waiting")]
+    b, tasks, rows, _ = nsettle(b, [ntask("t1", "A", W, "Doing")], [nrow("aaaa1", "t1", "A", W, "Doing")])
+    assert_nidle(b, tasks, rows)
+    # And the other way: the card goes to the board's own spelling.
+    plan = nmerge(b, [ntask("t1", "A", W, "Waiting")], [nrow("aaaa1", "t1", "A", W, "Doing")])
+    assert plan.ops == []  # already there
+
+
+def test_a_lane_or_column_with_no_namesake_falls_back_to_its_role():
+    # The board has Review, the planner does not: a card moved into it from
+    # Doing keeps its task wip where it is (no call), and nothing moves back.
+    lanes = ("Todo", "Doing", "Review", "Done")
+    b = nboard(lcard("A", "aaaa1", "Review"), lanes=lanes)
+    tasks, rows = [ntask("t1", "A", W, "Doing")], [nrow("aaaa1", "t1", "A", W, "Doing")]
+    plan = nmerge(b, tasks, rows)
+    assert plan.ops == [] and plan.calls == [] and plan.row_changes == []
+    # From the first lane into Review: in progress, by role (the first wip column).
+    plan = nmerge(b, [ntask("t1", "A", P, "Todo")], [nrow("aaaa1", "t1", "A", P, "Todo")])
+    assert plan.calls == [bs.Call("state", "t1", W)]
+    b2, tasks2, rows2, _ = nsettle(b, [ntask("t1", "A", P, "Todo")], [nrow("aaaa1", "t1", "A", P, "Todo")])
+    assert (tasks2[0].column, rows2[0].lane) == ("Doing", "Doing")
+    assert_nidle(b2, tasks2, rows2)
+    # The planner has In progress, the board does not: a card in a wip lane stays.
+    coll = bs.replace(COLL, columns=(*COLL.columns, bs.Column("k5", "In progress", False, 1.5)))
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    plan = nmerge(b, [ntask("t1", "A", W, "In progress")], [nrow("aaaa1", "t1", "A", W, "Waiting")], collection=coll)
+    assert plan.ops == [] and plan.calls == []
+    assert plan.row_changes[0].lane == "In progress"
+
+
+def test_any_complete_lane_is_the_one_done_column():
+    coll = bs.Collection("col1", "W", (bs.Column("a", "Todo", False, 0), bs.Column("b", "Doing", False, 1),
+                                       bs.Column("c", "Cancelled", True, 2)))
+    b = cboard(lcard("A", "aaaa1", "Done", checked=True))
+    assert_nidle(b, [ntask("t1", "A", D, "Cancelled")], [nrow("aaaa1", "t1", "A", D, "Cancelled")], collection=coll)
+    # Dropped into the done lane: a completion (complete_task), not a column move.
+    b = nboard(lcard("A", "aaaa1", "Done", checked=True))
+    plan = nmerge(b, [ntask("t1", "A", W, "Waiting")], [nrow("aaaa1", "t1", "A", W, "Waiting")])
+    assert plan.calls == [bs.Call("done", "t1", True)]
+    assert (plan.row_changes[0].state, plan.row_changes[0].lane) == (D, "Done")
+
+
+def test_a_card_out_of_the_done_lane_reopens_its_task_in_the_column_of_that_name():
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    plan = nmerge(b, [ntask("t1", "A", D, "Done")], [nrow("aaaa1", "t1", "A", D, "Done")])
+    assert plan.calls == [bs.Call("state", "t1", W, column="Waiting")]
+    b = nboard(lcard("A", "aaaa1", "Todo"))
+    plan = nmerge(b, [ntask("t1", "A", D, "Done")], [nrow("aaaa1", "t1", "A", D, "Done")])
+    assert plan.calls == [bs.Call("done", "t1", False)]
+    b, tasks, rows, _ = nsettle(b, [ntask("t1", "A", D, "Done")], [nrow("aaaa1", "t1", "A", D, "Done")])
+    assert (tasks[0].state, tasks[0].column) == (P, "Todo")
+    assert_nidle(b, tasks, rows)
+
+
+def test_both_sides_moved_by_name_the_planner_wins():
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    plan = nmerge(b, [ntask("t1", "A", P, "Todo")], [nrow("aaaa1", "t1", "A", W, "Doing")])
+    assert plan.ops == [{"op": "move", "id": "aaaa1", "lane": "Todo"}] and plan.calls == []
+    assert plan.counts.conflicts == 1
+    # The same move on both sides: the snapshot only.
+    plan = nmerge(b, [ntask("t1", "A", W, "Waiting")], [nrow("aaaa1", "t1", "A", W, "Doing")])
+    assert plan.ops == [] and plan.calls == [] and plan.counts.conflicts == 0
+    assert plan.row_changes[0].lane == "Waiting"
+
+
+def test_a_row_with_no_lane_compares_by_role_and_is_filled_without_a_move():
+    # Card in Waiting, task in Doing, both wip: no move either way, the lane is filled.
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    tasks, rows = [ntask("t1", "A", W, "Doing")], [nrow("aaaa1", "t1", "A", W, None)]
+    assert_nidle(b, tasks, rows)
+    # Agreeing by name too: the lane is filled, with no move.
+    b = nboard(lcard("A", "aaaa1", "Doing"))
+    plan = nmerge(b, tasks, rows)
+    assert plan.ops == [] and plan.calls == []
+    assert [(c.state, c.lane) for c in plan.row_changes] == [(W, "Doing")]
+    assert plan.counts.states_changed == 0
+    b, tasks, rows, _ = nsettle(b, tasks, rows)
+    assert_nidle(b, tasks, rows)
+    # Then a move between two wip columns is a change.
+    plan = nmerge(b, [ntask("t1", "A", W, "Waiting")], rows)
+    assert plan.ops == [{"op": "move", "id": "aaaa1", "lane": "Waiting"}]
+    # A row from before states altogether (no state, no lane) reads its base from done.
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    plan = nmerge(b, [ntask("t1", "A", P, "Todo")], [nrow("aaaa1", "t1", "A", None, None)])
+    assert plan.calls == [bs.Call("state", "t1", W, column="Waiting")]
+
+
+def test_a_paired_task_in_no_collection_is_moved_into_the_boards_first():
+    b = nboard(lcard("A", "aaaa1", "Waiting"), lcard("B", "bbbb1"))
+    tasks = [ntask("t1", "A", P, collection=None), ntask("t2", "B", P, collection=None)]
+    rows = [nrow("aaaa1", "t1", "A", W, None), nrow("bbbb1", "t2", "B", P, None)]
+    plan = nmerge(b, tasks, rows)
+    # t1's wip snapshot is a state the planner refused (no collection, no
+    # column): not read as the planner moving it back. The move first, then
+    # the card's lane by name; no card goes back to the first lane.
+    assert [c for c in plan.calls if c.task_id == "t1"] == [
+        bs.Call("collection", "t1", "col1"), bs.Call("state", "t1", W, column="Waiting")
+    ]
+    assert [c for c in plan.calls if c.task_id == "t2"] == [bs.Call("collection", "t2", "col1")]
+    assert plan.ops == [] and plan.counts.tasks_moved == 2
+    b, tasks, rows, _ = nsettle(b, tasks, rows)
+    assert {t.id: (t.collection_id, t.column) for t in tasks} == {"t1": ("col1", "Waiting"), "t2": ("col1", "Todo")}
+    assert_nidle(b, tasks, rows)
+    # A done snapshot the planner could not record (its trigger): the same.
+    plan = nmerge(nboard(lcard("A", "aaaa1", "Done", checked=True)), [ntask("t1", "A", P, collection=None)],
+                  [nrow("aaaa1", "t1", "A", D, None)])
+    assert plan.calls == [bs.Call("collection", "t1", "col1"), bs.Call("done", "t1", True)] and plan.ops == []
+
+
+def test_a_task_in_another_collection_is_left_there_and_compared_by_role():
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    tasks, rows = [ntask("t1", "A", W, "Elsewhere", collection="other")], [nrow("aaaa1", "t1", "A", W, None)]
+    assert_nidle(b, tasks, rows)
+    plan = nmerge(nboard(lcard("A", "aaaa1", "Todo")), tasks, rows)
+    assert plan.calls == [bs.Call("state", "t1", P)]
+    assert not any(c.kind == "collection" for c in plan.calls)
+
+
+def test_a_fresh_pair_in_no_collection_is_moved_and_adopted_ones_too():
+    plan = nmerge(nboard(lcard("A", "aaaa1")), [ntask("t1", "A", collection=None)], [])
+    assert plan.calls == [bs.Call("collection", "t1", "col1")] and plan.counts.tasks_moved == 1
+    untagged = [Task("u1", "Карта", False, state=P)]
+    plan = nmerge(nboard(lcard("Карта")), [], [], untagged=untagged)
+    assert [c.kind for c in plan.calls] == ["tag", "collection"]
+
+
+def test_new_cards_are_made_in_the_collection_and_in_their_lanes_column():
+    b = nboard(lcard("Первая"), lcard("Вторая", lane="Waiting"), lcard("Третья", lane="Done", checked=True))
+    plan = nmerge(b, [], [])
+    assert {c.title: c.collection_id for c in plan.creates} == {"Первая": "col1", "Вторая": "col1", "Третья": "col1"}
+    assert plan.calls == [bs.Call("state", bs.CREATED_TASK, W, column="Waiting")]
+    assert {r.title: (r.state, r.lane) for r in plan.row_changes} == {
+        "Первая": (P, "Todo"), "Вторая": (W, "Waiting"), "Третья": (D, "Done")
+    }
+    assert plan.counts.states_changed == 1
+    b, tasks, rows, _ = nsettle(b, [], [])
+    assert {t.title: (t.state, t.column) for t in tasks} == {
+        "Первая": (P, "Todo"), "Вторая": (W, "Waiting"), "Третья": (D, "Done")
+    }
+    assert_nidle(b, tasks, rows)
+
+
+def test_a_new_task_is_added_in_the_lane_of_its_columns_name():
+    plan = nmerge(nboard(), [ntask("t1", "Из планера", W, "Waiting")], [])
+    block = bs.mint_for_task(NAME, "t1")
+    assert plan.ops == [{"op": "add", "id": block, "text": "Из планера"}, {"op": "move", "id": block, "lane": "Waiting"}]
+    assert (plan.row_changes[0].state, plan.row_changes[0].lane) == (W, "Waiting")
+    b, tasks, rows, _ = nsettle(nboard(), [ntask("t1", "Из планера", W, "Waiting")], [])
+    assert lane_of(b, block) == ("Waiting", False)
+    assert_nidle(b, tasks, rows)
+    # In no collection: added, and moved into the board's after the board write.
+    plan = nmerge(nboard(), [ntask("t2", "Б", collection=None)], [])
+    assert plan.calls == [bs.Call("collection", "t2", "col1")] and plan.counts.tasks_moved == 1
+
+
+def test_the_guard_counts_moves_by_name_and_never_holds_a_move_into_the_collection():
+    cards = [lcard(f"К{i}", f"card{i:03}", "Waiting") for i in range(6)]
+    b = nboard(*cards)
+    tasks = [ntask(f"t{i}", f"К{i}", W, "Doing", collection=None if i == 0 else "col1") for i in range(6)]
+    tasks[0] = bs.replace(tasks[0], state=P)
+    rows = [nrow(f"card{i:03}", f"t{i}", f"К{i}", W, "Doing") for i in range(6)]
+    plan = nmerge(b, tasks, rows)
+    assert (plan.counts.states_changed, plan.counts.states_held) == (0, 6)
+    # Every column move held; the task in no collection still moves into it.
+    assert plan.calls == [bs.Call("collection", "t0", "col1")] and plan.counts.tasks_moved == 1
+    b, tasks, rows, plan = nsettle(b, tasks, rows, guard=False)
+    assert plan.counts.states_changed == 6
+    assert {t.column for t in tasks} == {"Waiting"}
+    assert_nidle(b, tasks, rows)
+
+
+def test_without_a_collection_or_its_columns_nothing_changes():
+    b = nboard(lcard("A", "aaaa1", "Waiting"))
+    tasks, rows = [ntask("t1", "A", W, "Doing")], [lrow("aaaa1", "t1", "A", W)]
+    assert_lidle(b, tasks, rows)
+    assert_nidle(b, tasks, rows, collection=bs.replace(COLL, columns=()))
+    plan = lmerge(lboard(lcard("Новая")), [], [])
+    assert plan.creates[0].collection_id is None
+
+
+def test_a_mixed_board_settles_by_name_and_then_stays_still():
+    lanes = ("Todo", "Doing", "Review", "Waiting", "Done", "Cancelled")
+    b = bs.replace(
+        lboard(
+            lcard("A", "aaaa1", "Review"), lcard("B", "bbbb1", "Waiting"), lcard("C", "cccc1", "Cancelled", checked=True),
+            lcard("Новая", lane="Waiting"), lanes=lanes,
+        ),
+        lane_complete=(False, False, False, False, True, True),
+    )
+    tasks = [
+        ntask("t1", "A", P, collection=None), ntask("t2", "B", W, "Doing"), ntask("t3", "C", W, "Doing"),
+        ntask("t4", "Из планера", W, "Waiting"),
+    ]
+    rows = [nrow("aaaa1", "t1", "A", P, None), nrow("bbbb1", "t2", "B", W, "Doing"), nrow("cccc1", "t3", "C", W, "Doing")]
+    b, tasks, rows, _ = nsettle(b, tasks, rows, passes=3)
+    by_title = {t.title: (t.state, t.column, t.collection_id) for t in tasks}
+    assert by_title["B"] == (W, "Waiting", "col1") and by_title["C"][0] == D and by_title["Новая"][1] == "Waiting"
+    assert by_title["A"][2] == "col1"
+    assert_nidle(b, tasks, rows)
