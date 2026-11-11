@@ -83,7 +83,7 @@ from app.tg.planner import LINK_FAILED, LINKED_OK
 from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
-from app.web import mcp, mcp_claude, oauth, oauth_store
+from app.web import board_sync_trigger, mcp, mcp_claude, oauth, oauth_store
 from app.web import auth as web_auth
 from app.web.hub import WebHub
 from app.web.routes import setup_web
@@ -426,6 +426,10 @@ def build_webhook_app(
     # route mirrors -- the handler itself 404s when PLANNER_ENABLED is
     # off, rather than the route's existence leaking the setting.
     app.router.add_get("/planner/oauth/callback", handle_planner_oauth_callback)
+    # The planner's "Sync with Obsidian" button: registered the same way,
+    # 404s itself unless board sync, the planner link and the anon key
+    # are all there (app/web/board_sync_trigger.py).
+    board_sync_trigger.register(app)
 
     if hub is not None:
         web_bot = make_web_bot(settings.TELEGRAM_BOT_TOKEN, hub)

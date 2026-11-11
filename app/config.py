@@ -69,6 +69,7 @@ _STRIPPED_FIELDS = (
     "PLANNER_SUPABASE_URL",
     "PLANNER_OAUTH_CLIENT_ID",
     "PLANNER_OAUTH_REDIRECT_URI",
+    "PLANNER_SUPABASE_ANON_KEY",
     "VAULT_MODE",
     "VAULT_URL",
     "VAULT_API_TOKEN",
@@ -878,6 +879,13 @@ class Settings(BaseSettings):
     # MCP_ALLOWED_REDIRECT_HOSTS -- a bare "up.railway.app" there would
     # allow any Railway app (design review, table 1).
     PLANNER_OAUTH_REDIRECT_URI: str = ""
+    # The planner Supabase project's public anon (publishable) key: not a
+    # secret, it ships in the planner's own browser bundle. Needed only
+    # by `POST /planner/board-sync` (app/web/board_sync_trigger.py), the
+    # planner's "Sync with Obsidian" button, which sends it as `apikey`
+    # to `${PLANNER_SUPABASE_URL}/auth/v1/user` to check the forwarded
+    # user token. Empty: that endpoint is a 404 and nothing else changes.
+    PLANNER_SUPABASE_ANON_KEY: str = ""
     # A snapshot older than this is treated as absent by
     # app/planner/snapshot.py's render_lines() -- the plan section
     # "degradation" requirement is that the plan section of the now-
