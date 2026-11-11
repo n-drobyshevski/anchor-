@@ -603,7 +603,7 @@ async def put_echo_stream(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "sha256": sha, "changed": True})
 
 
-def _read_boards(store: Store, subs: bool = False, titles: bool = False, modified: bool = False) -> list[dict]:
+def _read_boards(store: Store, subs: bool = False, titles: bool = False, lanes: bool = False, modified: bool = False) -> list[dict]:
     rules = classes.load_rules(store.vault_path)
     out = []
     for name in rules.task_boards if rules.state == "ok" else ():
@@ -618,7 +618,7 @@ def _read_boards(store: Store, subs: bool = False, titles: bool = False, modifie
         if board is None:
             out.append({"name": name, "state": "not_board"})
             continue
-        item = {"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board, name=name, subs=subs, titles=titles)}
+        item = {"name": name, "state": "ok", "sha256": hashlib.sha256(data).hexdigest(), **boards.describe(board, name=name, subs=subs, titles=titles, lanes=lanes)}
         if modified:
             # When the file last changed: the bot holds its own writes back
             # while the user is still editing the board (board_job.py).
@@ -640,15 +640,19 @@ async def get_boards(request: web.Request) -> web.Response:
     `?subs=1&titles=1` also the plain titles on the `after:` line
     (`after_titles`); asked without, a title counts as `after_raw_extra`,
     so a bot that predates titles neither breaks on the key nor rewrites
-    the line without them. Nothing else of the file. No list, an invalid
-    settings file: no boards."""
+    the line without them. With `?lanes=1` each board also names its done
+    lane (`done_lane_title`, null when it has none): asked for only by a
+    bot that knows the key, and that reads it as "this vaultd takes
+    `move`". Nothing else of the file. No list, an invalid settings file:
+    no boards."""
     subs = request.query.get("subs") == "1"
     titles = subs and request.query.get("titles") == "1"
+    lanes = request.query.get("lanes") == "1"
     # `?modified=1`: each ok board also carries `modified`, the file's
     # mtime in epoch seconds (or null), so the bot can leave a board alone
     # while the user is editing it. Asked without, the old shape.
     modified = request.query.get("modified") == "1"
-    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY], subs, titles, modified)
+    found = await asyncio.to_thread(_read_boards, request.app[STORE_KEY], subs, titles, lanes, modified)
     logger.info("boards", extra={"event": "boards_read", "count": len(found)})
     return web.json_response({"boards": found})
 

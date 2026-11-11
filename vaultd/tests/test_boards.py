@@ -250,6 +250,80 @@ def test_add_to_an_empty_lane_and_to_a_bare_board():
         apply([{"op": "add", "id": "new00001", "text": "x"}], "---\nkanban-starlane: board\n---\n")
 
 
+def test_move_takes_a_card_with_its_lines_to_the_end_of_the_named_lane():
+    tagged = apply([{"op": "tag", "n": 1, "id": "tag00001"}, {"op": "add", "id": "doing001", "text": "Draft"}])
+    tagged = apply([{"op": "move", "id": "doing001", "lane": "Doing"}], tagged)
+    after = apply([{"op": "move", "id": "tag00001", "lane": "Doing"}], tagged)
+    doing = after.split("## Doing\n")[1].split("## Done")[0]
+    assert doing.startswith(
+        "\n- [ ] Review the budget @@{10:30}\n- [ ] Draft ^doing001\n- [ ] A multi-line card ^tag00001\n    second line, private\n"
+    )
+    assert "A multi-line card" not in after.split("## Doing")[0]
+    assert changed_lines(tagged, after) == ([], [])  # the same lines, one card's moved
+    assert [c["lane"] for c in cards(after) if c["id"] == "tag00001"] == ["Doing"]
+    assert after.endswith(BOARD[BOARD.index("***") :])
+
+
+def test_move_into_the_done_lane_checks_and_out_of_it_unchecks():
+    after = apply([{"op": "move", "id": "abc123", "lane": "Done"}])
+    assert "**Complete**\n- [x] Ship the release ^done01\n- [x] Write the report #q4 @{2026-11-20} ^abc123\n" in after
+    back = apply([{"op": "move", "id": "done01", "lane": "Doing"}])
+    assert "- [ ] Review the budget @@{10:30}\n- [ ] Ship the release ^done01\n" in back
+    assert [c["checked"] for c in cards(back) if c["id"] == "done01"] == [False]
+    # A checked card moved between two other lanes is unchecked too: on a
+    # board with a done lane, only that lane holds checked cards after a move.
+    half = apply([{"op": "move", "id": "half01", "lane": "Doing"}])
+    assert "- [ ] Half done ^half01\n" in half and "[/]" not in half.split("***")[0]
+
+
+def test_move_to_the_lane_a_card_is_in_leaves_it_in_place():
+    assert apply([{"op": "move", "id": "abc123", "lane": "Todo"}]) == BOARD
+    assert apply([{"op": "move", "id": "done01", "lane": "Done"}]) == BOARD
+    # In place, the box still follows the lane.
+    after = apply([{"op": "move", "id": "half01", "lane": "Todo"}])
+    assert changed_lines(BOARD, after) == (["- [/] Half done ^half01\n"], ["- [ ] Half done ^half01\n"])
+
+
+def test_without_a_done_lane_move_keeps_the_box():
+    plain = BOARD.replace("**Complete**\n", "")
+    after = apply([{"op": "move", "id": "half01", "lane": "Done"}], plain)
+    assert "## Done\n\n- [x] Ship the release ^done01\n- [/] Half done ^half01\n" in after
+    assert [c["lane"] for c in cards(after) if c["id"] == "half01"] == ["Done"]
+
+
+def test_move_names_a_lane_by_its_title_without_the_wip_count():
+    after = apply([{"op": "move", "id": "done01", "lane": "Todo"}])
+    assert "- [/] Half done ^half01\n- [ ] Ship the release ^done01\n" in after
+
+
+@pytest.mark.parametrize(
+    "op, reason",
+    [
+        ({"op": "move", "id": "abc123", "lane": "Archive"}, "bad_card"),  # past the thematic break
+        ({"op": "move", "id": "abc123", "lane": "Todo (3)"}, "bad_card"),
+        ({"op": "move", "id": "abc123", "lane": "Nowhere"}, "bad_card"),
+        ({"op": "move", "id": "abc123", "lane": ""}, "bad_card"),
+        ({"op": "move", "id": "abc123", "lane": 1}, "bad_card"),
+        ({"op": "move", "id": "abc123"}, "bad_card"),
+        ({"op": "move", "id": "abc123", "lane": "Doing", "checked": True}, "bad_card"),
+        ({"op": "move", "id": "BAD ID", "lane": "Doing"}, "bad_card"),
+        ({"op": "move", "id": "nope0000", "lane": "Doing"}, "card_missing"),
+        ({"op": "move", "id": "arch01", "lane": "Todo"}, "card_missing"),  # an archived card
+    ],
+)
+def test_a_bad_move_refuses_the_whole_batch(op, reason):
+    with pytest.raises(Refused, match=reason):
+        apply([{"op": "text", "id": "abc123", "text": "would have changed"}, op])
+
+
+def test_the_done_lane_is_named_only_when_asked():
+    parsed = boards.parse(BOARD.encode())
+    assert "done_lane_title" not in boards.describe(parsed)
+    assert boards.describe(parsed, lanes=True)["done_lane_title"] == "Done"
+    plain = boards.parse(BOARD.replace("**Complete**\n", "").encode())
+    assert boards.describe(plain, lanes=True)["done_lane_title"] is None
+
+
 def test_remove_takes_the_card_and_its_continuation_lines_only():
     tagged = apply([{"op": "tag", "n": 1, "id": "tag00001"}])
     after = apply([{"op": "remove", "id": "tag00001"}], tagged)
@@ -340,6 +414,9 @@ async def test_get_lists_named_boards_and_their_states(client, vault: Path, base
     write(vault, "General tasks.md", "# not a board\n")
     found = (await (await client.get("/v1/boards", headers=AUTH)).json())["boards"]
     assert found[1] == {"name": "General tasks.md", "state": "not_board"}
+    assert "done_lane_title" not in found[0]
+    asked = (await (await client.get("/v1/boards?subs=1&titles=1&lanes=1", headers=AUTH)).json())["boards"]
+    assert asked[0]["done_lane_title"] == "Done" and asked[1] == {"name": "General tasks.md", "state": "not_board"}
 
 
 async def test_no_setting_no_boards(client, vault: Path):

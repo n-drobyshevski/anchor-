@@ -316,7 +316,10 @@ class TaskBoard:
     `Anchor/settings.md`. `state` is `ok`, `missing` (no such file) or
     `not_board` (not a Kanban Starlane board); only an `ok` board has a
     hash, lanes and cards. `dates` is false when the board's own settings
-    change the date syntax: its dates then stay in the card's text."""
+    change the date syntax: its dates then stay in the card's text.
+    `done_lane_title` is the done lane's title (None: no done lane);
+    `lanes_known` is False when vaultd sent no such key (an older one,
+    which also has no `move` op)."""
 
     name: str
     state: str
@@ -328,6 +331,8 @@ class TaskBoard:
     # When the file last changed (epoch seconds), from a vaultd that
     # reports it; None when unknown.
     modified: int | None = None
+    done_lane_title: str | None = None
+    lanes_known: bool = False
 
 
 @dataclass(frozen=True)
@@ -406,6 +411,9 @@ def _board_card(item: Any, index: int) -> BoardCard:
     )
 
 
+_BOARD_KEYS = frozenset({"name", "state", "sha256", "lanes", "done_lane", "dates", "cards"})
+
+
 def _task_board(item: Any) -> TaskBoard:
     _require(isinstance(item, dict))
     name, state = item.get("name"), item.get("state")
@@ -413,21 +421,31 @@ def _task_board(item: Any) -> TaskBoard:
     if state != "ok":
         _require(set(item) == {"name", "state"})
         return TaskBoard(name=name, state=state)
-    keys = {"name", "state", "sha256", "lanes", "done_lane", "dates", "cards"}
-    _require(set(item) in (keys, keys | {"modified"}))
+    # `done_lane_title` (a vaultd that knows `move`) and `modified` (one
+    # that reports the file time) are optional.
+    _require(set(item) - {"done_lane_title", "modified"} == _BOARD_KEYS)
     done_lane, dates, cards = item["done_lane"], item["dates"], item["cards"]
     _require(isinstance(done_lane, bool) and isinstance(dates, bool) and isinstance(cards, list))
     modified = item.get("modified")
     _require(modified is None or (isinstance(modified, int) and not isinstance(modified, bool) and modified >= 0))
+    lanes = _strings(item["lanes"])
+    lanes_known = "done_lane_title" in item
+    done_title = item.get("done_lane_title")
+    if lanes_known:
+        # Named exactly when there is one, and then one of the lanes.
+        _require(done_lane == (done_title is not None))
+        _require(done_title is None or (isinstance(done_title, str) and done_title in lanes))
     return TaskBoard(
         name=name,
         state=state,
         sha256=_sha256(item["sha256"]),
-        lanes=_strings(item["lanes"]),
+        lanes=lanes,
         done_lane=done_lane,
         dates=dates,
         cards=tuple(_board_card(card, i) for i, card in enumerate(cards)),
         modified=modified,
+        done_lane_title=done_title,
+        lanes_known=lanes_known,
     )
 
 
@@ -918,12 +936,14 @@ class VaultClient:
         `Anchor/settings.md`, each with its cards. Parsed strictly: an
         answer of any other shape is BAD_RESPONSE, never a partial list.
         Two boards with one name are BAD_RESPONSE too. With `subs`, asks
-        for each card's subtasks and `after:` links and titles
-        (`?subs=1&titles=1`); a card in the old shape still parses, with
-        `subs_known` false, and one without `after_titles` with none."""
+        for each card's subtasks and `after:` links and titles, and each
+        board's done lane (`?subs=1&titles=1&lanes=1`), and always for the
+        file time (`modified=1`); a card in the old shape still parses, with
+        `subs_known` false, one without `after_titles` with none, and a
+        board without `done_lane_title` with `lanes_known` false."""
         params = {"modified": "1"}
         if subs:
-            params |= {"subs": "1", "titles": "1"}
+            params |= {"subs": "1", "titles": "1", "lanes": "1"}
         data = await self._request("GET", "/v1/boards", params=params)
         _require(set(data) == {"boards"} and isinstance(data["boards"], list))
         boards = [_task_board(item) for item in data["boards"]]

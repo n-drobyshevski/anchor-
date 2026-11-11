@@ -117,8 +117,44 @@ stored as planned all the same: the next pass then reads the planner as
 the side that moved and writes its set back to the card, taking the
 loop's link off it (board_job.py).
 
-**What is not synced.** Lanes beyond open/done, continuation lines
-other than subtasks and `after:`, descriptions, the archive. A board
+**Lanes by role** (`merge`'s `states`). A card's lane is read as its
+task's state: the board's done lane (`**Complete**`) is `done`, its
+first other lane `planned`, any other lane `wip`; a checked card is
+`done` wherever it sits, and on a board with no done lane `done` is the
+box, as before. The planner's rows carry `state` (`planned`, `wip`,
+`done`; `done` is the row's `done`), and for a top-level pair this
+three-valued state replaces the two-valued done field, merged the same
+three ways against `Row.state` (the planner wins a conflict, and a new
+pair). A row from before states has no state snapshot and reads its base
+from `Row.done`: done, else planned, the one state an open task had then.
+Not "unknown, the planner wins": the planner's first states are its
+defaults, and the board's in-progress lanes were the only record of
+that state, so on the first pass a card in such a lane makes its task
+wip rather than being moved back to the first lane. The card side is written as a
+`check` for done (vaultd moves it into the done lane) and a `move` to the
+first lane (planned) or the first lane that is neither the first nor the
+done one (wip); a card already in a lane of the right role (a second
+in-progress lane, "Review") is left where it is. The planner side is
+`complete_task` for done and undone, as before, and `update_task`'s
+`state` between planned and wip (after `complete_task(done=False)` when
+a done task goes back to wip). A state the planner refuses (a task in no
+collection, a collection with no in-progress column) is a conflict and a
+skip, and the snapshot is stored as planned, as with a refused blocker
+(below): the next pass reads the planner as the side that moved and puts
+the card back in a lane of the planner's state. A board with no such middle lane shows
+wip as planned: the comparison reads a planner wip as planned there, the
+card is not moved, the snapshot keeps wip, and the pair counts as
+skipped once, on the pass that first finds it so; the card's own moves
+(ticked, unticked) still travel. A new card makes a task of its state
+(created, then `update_task` state for wip); a new open task is added
+in its state's lane (`add`, then `move` in the same batch for wip). The
+rule is off (done/open, as before) for a pass whose planner rows carry
+no `state` (an older planner), and for a board read from a vaultd that
+does not name its done lane (an older one, which has no `move`), or whose
+lane titles are not unique or all done. Subtasks keep done/open.
+
+**What is not synced.** Continuation lines other than subtasks and
+`after:`, descriptions, the archive, a card's place inside its lane. A board
 whose dates use their own syntax (`dates: false`) syncs no due date in either direction. A done
 planner task with no row is not added as a card: the planner keeps
 every completed task forever, and adding them all to a board would bury
@@ -199,6 +235,12 @@ ROW_HELD = "held"
 # never compared, never added back, dropped once the planner's is gone.
 ROW_DETACHED = "detached"
 
+# A task's state (module docstring, "Lanes by role").
+STATE_PLANNED = "planned"
+STATE_WIP = "wip"
+STATE_DONE = "done"
+STATES = (STATE_PLANNED, STATE_WIP, STATE_DONE)
+
 
 # -- input -------------------------------------------------------------------------
 
@@ -239,7 +281,9 @@ class Card:
 class Board:
     """`subs_known` is false when the board was read without subtasks
     (an older vaultd): its subtasks and `after:` lines are then unknown,
-    not empty."""
+    not empty. `lanes` are its lanes' titles in order, `done_lane` the
+    done lane's title (None: it has none); `lanes_known` is false when
+    vaultd did not say which lane is done (an older one, with no `move`)."""
 
     name: str
     dates: bool
@@ -248,12 +292,16 @@ class Board:
     subs_known: bool = False
     # When the board's file last changed (epoch seconds); None = unknown.
     modified: int | None = None
+    lanes: tuple[str, ...] = ()
+    done_lane: str | None = None
+    lanes_known: bool = False
 
 
 @dataclass(frozen=True)
 class Task:
     """One of the planner's `list_tasks` rows: the user's own; top-level
-    with the board's tag, or (`parent_id` set) a subtask under one."""
+    with the board's tag, or (`parent_id` set) a subtask under one.
+    `state` is None for a row from a planner without states."""
 
     id: str
     title: str
@@ -263,6 +311,7 @@ class Task:
     parent_id: str | None = None
     position: float = 0
     blocked_by: tuple[str, ...] = ()
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -272,7 +321,8 @@ class Row:
     until they were first compared. `deps_card` is None while the card's
     `after:` line shows `deps`; when the line could not be written, it is
     what the line resolved to when last read (module docstring,
-    "Dependencies")."""
+    "Dependencies"). `state` is the task's state as last synced, None
+    until a pass compared states (module docstring, "Lanes by role")."""
 
     block_id: str
     task_id: str
@@ -282,6 +332,7 @@ class Row:
     status: str = ROW_OK
     deps: tuple[str, ...] | None = None
     deps_card: tuple[str, ...] | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -305,10 +356,11 @@ class SubRow:
 
 @dataclass(frozen=True)
 class Create:
-    """A planner `create_task` (then `complete_task` when `done`). The
-    task id is the planner's answer; `request_id` makes a retry return
-    the task already made. With `parent_task_id`, a subtask of that task
-    (`tag` is then None: a subtask carries none)."""
+    """A planner `create_task` (then `complete_task` when `done`, or
+    `update_task` state when `state` is set: a card in an in-progress
+    lane). The task id is the planner's answer; `request_id` makes a
+    retry return the task already made. With `parent_task_id`, a subtask
+    of that task (`tag` is then None: a subtask carries none)."""
 
     block_id: str
     title: str
@@ -317,6 +369,7 @@ class Create:
     tag: str | None
     request_id: str
     parent_task_id: str | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,8 +380,9 @@ class Call:
     dueDate, None clears it), `done` (`complete_task`), `untag`
     (`update_task` tags, `value` being the tags that stay), `tag`
     (`update_task` tags, `value` being the tags with the board's added:
-    an adopted untagged task) or `blocked_by` (`update_task` blockedBy,
-    `value` being the whole set)."""
+    an adopted untagged task), `blocked_by` (`update_task` blockedBy,
+    `value` being the whole set) or `state` (`update_task` state,
+    `planned` or `wip`)."""
 
     kind: str
     task_id: str
@@ -350,6 +404,7 @@ class RowChange:
     status: str = ROW_OK
     deps: tuple[str, ...] | None = None
     deps_card: tuple[str, ...] | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +469,10 @@ class Counts:
     deps_changed: int = 0
     # Subtask pairs made (by id or title, or a detached one back on its card).
     subs_paired: int = 0
+    # Pairs whose state was carried (a card moved, a task's state changed),
+    # and new cards and tasks made in progress (module docstring, "Lanes
+    # by role").
+    states_changed: int = 0
 
     def add(self, other: "Counts") -> None:
         for name in self.__dataclass_fields__:
@@ -434,7 +493,8 @@ class Plan:
         and `sub_tag` first (they name cards and subtasks by their index
         as read, which only they leave alone), then changes, removals and
         additions (the order units were taken in, within each kind: a
-        `sub_add` goes in as its parent's last child)."""
+        `sub_add` goes in as its parent's last child), and `move` last, so
+        it can name a card added in the same batch."""
         ops = [op for unit in self.units for op in unit.ops]
         return sorted(ops, key=lambda op: _OP_ORDER[op["op"]])
 
@@ -469,6 +529,7 @@ _OP_ORDER = {
     "remove": 4,
     "sub_add": 5,
     "add": 6,
+    "move": 7,
 }
 
 
@@ -582,6 +643,81 @@ def _three_way(base: object, card: object, task: object) -> tuple[object, object
     return task, _NOTHING, True
 
 
+def planner_state(task: Task) -> str:
+    """The task's state. The planner reads it from the task's column (its
+    role) and `done` from the completion, which agree but for a task moved
+    by hand into or out of the done column: done when either says so (a
+    completed task's card belongs in the done lane, as before states)."""
+    if task.done or task.state == STATE_DONE:
+        return STATE_DONE
+    return STATE_WIP if task.state == STATE_WIP else STATE_PLANNED
+
+
+@dataclass(frozen=True)
+class _Lanes:
+    """A board's lanes by role (module docstring, "Lanes by role"):
+    the done lane's title (None: none), the first other lane (planned)
+    and the one after it (wip; None: the board has no middle lane)."""
+
+    done: str | None
+    first: str
+    wip: str | None
+
+    def role(self, card: Card) -> str:
+        if card.checked or (self.done is not None and card.lane == self.done):
+            return STATE_DONE
+        return STATE_PLANNED if card.lane == self.first else STATE_WIP
+
+    def fit(self, state: str) -> str:
+        """What the board can show of `state`: wip with no middle lane is
+        shown (and so compared) as planned."""
+        return STATE_PLANNED if state == STATE_WIP and self.wip is None else state
+
+    def ops(self, card: Card, block_id: str, target: str) -> list[dict]:
+        """The ops that give a card of another role the role `target`
+        (fitted)."""
+        if target == STATE_DONE:
+            return [{"op": "check", "id": block_id, "checked": True}]
+        lane = self.first if target == STATE_PLANNED else self.wip
+        if self.done is not None:
+            # On a board with a done lane the box follows the lane (vaultd's
+            # `move`), so one op does it, in place when the lane is right.
+            return [{"op": "move", "id": block_id, "lane": lane}]
+        out: list[dict] = []
+        if card.checked:
+            out.append({"op": "check", "id": block_id, "checked": False})
+        if (card.lane == self.first) != (target == STATE_PLANNED):
+            out.append({"op": "move", "id": block_id, "lane": lane})
+        return out
+
+
+def _lanes_of(board: Board) -> _Lanes | None:
+    """The board's lanes by role, or None when they cannot be read: a
+    vaultd that did not name the done lane, lane titles that are not
+    unique (a card names its lane by title), no lane but the done one."""
+    titles = board.lanes
+    if not board.lanes_known or len(set(titles)) != len(titles) or "" in titles:
+        return None
+    if board.done_lane is not None and board.done_lane not in titles:
+        return None
+    others = [title for title in titles if title != board.done_lane]
+    if not others:
+        return None
+    return _Lanes(board.done_lane, others[0], others[1] if len(others) > 1 else None)
+
+
+def _state_calls(task_id: str, current: str, target: str) -> list[Call]:
+    """The planner calls that take a task from `current` to `target`:
+    `complete_task` for done and undone (as before states), `update_task`
+    state between planned and wip."""
+    if target == STATE_DONE:
+        return [Call("done", task_id, True)]
+    if current == STATE_DONE:
+        undone = [Call("done", task_id, False)]
+        return undone + ([Call("state", task_id, STATE_WIP)] if target == STATE_WIP else [])
+    return [Call("state", task_id, target)]
+
+
 @dataclass
 class _Fields:
     """The outcome of comparing one pair's three fields."""
@@ -591,6 +727,11 @@ class _Fields:
     snapshot: dict = field(default_factory=dict)
     conflicts: int = 0
     skipped: int = 0
+    # Skips that hold nothing: a planner wip on a board with no middle
+    # lane, counted on the pass that first finds it so.
+    noted: int = 0
+    # Whether the state was carried, either way.
+    moved: bool = False
 
 
 def _op(kind: str, block_id: str, card_id: str | None, **fields: object) -> dict:
@@ -607,9 +748,11 @@ def _compare(
     row: Row | SubRow | None,
     block_id: str,
     card_id: str | None = None,
+    lanes: _Lanes | None = None,
 ) -> _Fields:
     """One pair's three fields: a card and its task, or (`card_id` set,
-    the card the subtask is in) a subtask and its planner subtask."""
+    the card the subtask is in) a subtask and its planner subtask. With
+    `lanes` (a card's pair, states on), its state instead of done."""
     out = _Fields()
     base = {
         "title": norm(row.title) if row else _NOTHING,
@@ -639,14 +782,21 @@ def _compare(
         # sees the same difference and tries again.
         out.snapshot["title"] = row.title if row else c_title
 
-    # Done.
-    to_card, to_task, conflict = _three_way(base["done"], card.checked, task.done)
-    out.conflicts += conflict
-    if to_card is not _NOTHING:
-        out.ops.append(_op("check", block_id, card_id, checked=to_card))
-    if to_task is not _NOTHING:
-        out.calls.append(Call("done", task.id, to_task))
-    out.snapshot["done"] = task.done if to_task is _NOTHING else card.checked
+    if lanes is not None and isinstance(card, Card):
+        _compare_state(out, lanes, card, task, row, block_id)
+    else:
+        # Done.
+        to_card, to_task, conflict = _three_way(base["done"], card.checked, task.done)
+        out.conflicts += conflict
+        if to_card is not _NOTHING:
+            out.ops.append(_op("check", block_id, card_id, checked=to_card))
+        if to_task is not _NOTHING:
+            out.calls.append(Call("done", task.id, to_task))
+        out.snapshot["done"] = task.done if to_task is _NOTHING else card.checked
+        # A state snapshot that no longer agrees with done is dropped (read
+        # from done again when states come back).
+        old = row.state if isinstance(row, Row) else None
+        out.snapshot["state"] = old if old is not None and (old == STATE_DONE) == out.snapshot["done"] else None
 
     # Due: only on a board whose dates the bot may read and write.
     if not board.dates:
@@ -678,6 +828,37 @@ def _compare(
     return out
 
 
+def _compare_state(out: _Fields, lanes: _Lanes, card: Card, task: Task, row: Row | SubRow | None, block_id: str) -> None:
+    """A card's pair's state, three ways (module docstring, "Lanes by
+    role"), compared as the board can show it; the snapshot keeps the
+    planner's own."""
+    on_card, in_planner = lanes.role(card), planner_state(task)
+    base: object = _NOTHING
+    if isinstance(row, Row):
+        if row.state in STATES:
+            base = row.state
+        else:
+            # A row from before states: done, or open, which was planned
+            # then (module docstring, "Lanes by role").
+            base = STATE_DONE if row.done else STATE_PLANNED
+    fitted_base = base if base is _NOTHING else lanes.fit(base)
+    to_card, to_task, conflict = _three_way(fitted_base, on_card, lanes.fit(in_planner))
+    out.conflicts += conflict
+    state = in_planner
+    if to_card is not _NOTHING:
+        out.ops.extend(lanes.ops(card, block_id, to_card))
+        out.moved = True
+    if to_task is not _NOTHING:
+        out.calls.extend(_state_calls(task.id, in_planner, to_task))
+        state = to_task
+        out.moved = True
+    elif lanes.fit(in_planner) != in_planner and base != in_planner:
+        # Wip on a board with no middle lane: not shown, counted once.
+        out.noted += 1
+    out.snapshot["state"] = state
+    out.snapshot["done"] = state == STATE_DONE
+
+
 def _row_for(block_id: str, task_id: str | None, f: _Fields, op: str) -> RowChange:
     return RowChange(
         op=op,
@@ -687,11 +868,14 @@ def _row_for(block_id: str, task_id: str | None, f: _Fields, op: str) -> RowChan
         done=f.snapshot["done"],
         due=f.snapshot["due"],
         status=ROW_HELD if f.skipped else ROW_OK,
+        state=f.snapshot.get("state"),
     )
 
 
 def _row_unchanged(row: Row, change: RowChange) -> bool:
-    return (row.title, row.done, row.due, row.status) == (change.title, change.done, change.due, change.status)
+    return (row.title, row.done, row.due, row.status, row.state) == (
+        change.title, change.done, change.due, change.status, change.state,
+    )
 
 
 
@@ -996,8 +1180,11 @@ def merge(
     untagged: list[Task] | tuple[Task, ...] = (),
     subtasks: list[Task] | tuple[Task, ...] = (),
     sub_rows: list[SubRow] | tuple[SubRow, ...] = (),
+    states: bool = False,
 ) -> Plan:
-    """What one pass does for one board (module docstring). `untagged`
+    """What one pass does for one board (module docstring). `states` is
+    whether the planner's rows carry a state (module docstring, "Lanes by
+    role"; off: done/open only, as before). `untagged`
     are the user's own open top-level tasks with no tag, the ones a free
     card may adopt by title; any of them with a tag, done, or already in
     a row is ignored. `subtasks` are the planner's subtasks under `tasks`
@@ -1024,6 +1211,7 @@ def merge(
     plan = Plan(board=board.name)
     counts = plan.counts
     ids = _Ids(board.cards)
+    lanes = _lanes_of(board) if states else None
 
     rows = sorted(rows, key=lambda r: r.block_id)
     row_ids = {row.block_id for row in rows}
@@ -1085,11 +1273,12 @@ def merge(
             candidates.append(_Candidate("pair", unit, c, loss=1))
             continue
         kept_pairs.append((card, task, row))
-        f = _compare(board, card, task, row, row.block_id)
+        f = _compare(board, card, task, row, row.block_id, lanes=lanes)
         change = _row_for(row.block_id, row.task_id, f, "update")
         c.cards_changed = 1 if f.ops else 0
         c.tasks_changed = 1 if f.calls else 0
-        c.conflicts, c.skipped = f.conflicts, f.skipped
+        c.states_changed = int(f.moved)
+        c.conflicts, c.skipped = f.conflicts, f.skipped + f.noted
         if f.ops or f.calls or not _row_unchanged(row, change):
             candidates.append(_Candidate("pair", Unit(ops=tuple(f.ops), calls=tuple(f.calls), row=change), c))
         else:
@@ -1160,7 +1349,7 @@ def merge(
 
     for card, task in sorted(pairs, key=lambda p: p[0].n):
         block_id = card.id or minted[card.n]
-        f = _compare(board, card, task, None, block_id)
+        f = _compare(board, card, task, None, block_id, lanes=lanes)
         ops = ([{"op": "tag", "n": card.n, "id": block_id}] if card.id is None else []) + f.ops
         calls = f.calls
         if task.id in adopted:
@@ -1168,7 +1357,8 @@ def merge(
         c = Counts(paired=1, cards_tagged=1 if card.id is None else 0)
         c.cards_changed = 1 if f.ops else 0
         c.tasks_changed = 1 if calls else 0
-        c.skipped = f.skipped
+        c.states_changed = int(f.moved)
+        c.skipped = f.skipped + f.noted
         unit = Unit(ops=tuple(ops), calls=tuple(calls), row=_row_for(block_id, task.id, f, "insert"))
         candidates.append(_Candidate("pair", unit, c))
 
@@ -1181,17 +1371,23 @@ def merge(
         title = norm(card.text)
         due = _date(card.date) if board.dates else None
         held = board.dates and card.date is not None and due is None
+        # The task is made in the card's state: done as before, wip with a
+        # state call after the create.
+        state = lanes.role(card) if lanes is not None else None
+        done = state == STATE_DONE if state is not None else card.checked
         create = Create(
             block_id=block_id,
             title=title,
             due=due,
-            done=card.checked,
+            done=done,
             tag=tag,
             request_id=request_id(board.name, block_id),
+            state=STATE_WIP if state == STATE_WIP else None,
         )
         ops = ({"op": "tag", "n": card.n, "id": block_id},) if card.id is None else ()
-        row = RowChange("insert", block_id, None, title, card.checked, due, ROW_HELD if held else ROW_OK)
+        row = RowChange("insert", block_id, None, title, done, due, ROW_HELD if held else ROW_OK, state=state)
         c = Counts(tasks_created=1, cards_tagged=1 if card.id is None else 0, skipped=1 if held else 0)
+        c.states_changed = int(state == STATE_WIP)
         candidates.append(_Candidate("create", Unit(ops=ops, create=create, row=row), c))
 
     # 4. New tasks: a card each (open ones only, module docstring).
@@ -1207,14 +1403,24 @@ def merge(
         op: dict = {"op": "add", "id": block_id, "text": title}
         if due is not None:
             op["date"] = due
+        ops = [op]
         c = Counts(cards_added=1)
         # A planner due date that is not a date the board can show stays
         # off the card; the pair is held on it, as `_compare` would hold
         # it on every later pass.
         held = board.dates and task.due is not None and due is None
         c.skipped = 1 if held else 0
-        row = RowChange("insert", block_id, task.id, title, False, due, ROW_HELD if held else ROW_OK)
-        candidates.append(_Candidate("add", Unit(ops=(op,), row=row, adds_task=task.id), c))
+        state = planner_state(task) if lanes is not None else None
+        if state == STATE_WIP:
+            # Added to the first lane, then moved to the middle one; with
+            # none, it stays in the first lane, counted once (`_compare_state`).
+            if lanes.wip is not None:
+                ops.append({"op": "move", "id": block_id, "lane": lanes.wip})
+                c.states_changed = 1
+            else:
+                c.skipped += 1
+        row = RowChange("insert", block_id, task.id, title, False, due, ROW_HELD if held else ROW_OK, state=state)
+        candidates.append(_Candidate("add", Unit(ops=tuple(ops), row=row, adds_task=task.id), c))
 
     # 5. Subtasks of the pairs that had a row when the pass began.
     if board.subs_known:
@@ -1546,10 +1752,30 @@ def add_units(plan: Plan, deps: DepsPlan | None) -> None:
 
 
 def _apply_ops(board: Board, ops: list[dict]) -> Board:
+    """vaultd's ops on the board (vaultd/vaultd/boards.py). On a board
+    with lanes, as vaultd places cards: a card goes to the end of its new
+    lane, checking moves it into the done lane, unchecking out of it to
+    the first other lane, and `move` makes the box follow the lane when
+    the board has a done lane."""
     cards = list(board.cards)
+    order = {title: k for k, title in enumerate(board.lanes)}
+    first_open = next((t for t in board.lanes if t != board.done_lane), "")
 
     def at(card_id: str) -> int:
         return next(i for i, card in enumerate(cards) if card.id == card_id)
+
+    def to_lane_end(i: int, card: Card) -> None:
+        del cards[i]
+        where = order.get(card.lane, 0)
+        end = max((k + 1 for k, other in enumerate(cards) if order.get(other.lane, 0) <= where), default=0)
+        cards.insert(end, card)
+
+    def place(i: int, card: Card) -> None:
+        """`card` (cards[i] changed) at the end of its lane, if it moved."""
+        if board.lanes and card.lane != cards[i].lane:
+            to_lane_end(i, card)
+        else:
+            cards[i] = card
 
     for op in ops:
         kind = op["op"]
@@ -1557,7 +1783,18 @@ def _apply_ops(board: Board, ops: list[dict]) -> Board:
             cards[op["n"]] = replace(cards[op["n"]], id=op["id"])
             continue
         if kind == "add":
-            cards.append(Card(n=len(cards), id=op["id"], text=op["text"], checked=bool(op.get("checked", False)), date=op.get("date")))
+            checked = bool(op.get("checked", False))
+            lane = (board.done_lane if checked and board.done_lane else first_open) if board.lanes else ""
+            cards.append(Card(n=len(cards), id=op["id"], text=op["text"], checked=checked, date=op.get("date"), lane=lane))
+            if board.lanes:
+                to_lane_end(len(cards) - 1, cards[-1])
+            continue
+        if kind == "move":
+            index = at(op["id"])
+            card = replace(cards[index], lane=op["lane"])
+            if board.done_lane is not None:
+                card = replace(card, checked=op["lane"] == board.done_lane)
+            place(index, card)
             continue
         if kind.startswith("sub_"):
             i = at(op["card"])
@@ -1595,7 +1832,12 @@ def _apply_ops(board: Board, ops: list[dict]) -> Board:
         elif kind == "date":
             cards[index] = replace(cards[index], date=op["date"])
         elif kind == "check":
-            cards[index] = replace(cards[index], checked=op["checked"])
+            card = replace(cards[index], checked=op["checked"])
+            if board.done_lane is not None and op["checked"]:
+                card = replace(card, lane=board.done_lane)
+            elif board.done_lane is not None and card.lane == board.done_lane:
+                card = replace(card, lane=first_open)
+            place(index, card)
         elif kind == "after_set":
             cards[index] = replace(
                 cards[index],
@@ -1616,20 +1858,25 @@ def apply_state(
     plan: Plan,
     *,
     created_ids: dict[str, str] | None = None,
+    states: bool = False,
 ) -> tuple[Board, dict[str, Task], list[Row], list[SubRow]]:
     """The state after `plan` ran in full: the board with its batch
     applied, the planner (every task, by id) with its creates and calls
     made, the rows and subtask rows with their changes. A model of what
     vaultd and the planner do, for the tests' idempotence checks and for
     nothing else; `created_ids` maps a create's block id to the task id
-    the planner answered (default: `new-<block id>`)."""
+    the planner answered (default: `new-<block id>`); with `states`, a
+    planner whose tasks carry a state."""
     created_ids = created_ids if created_ids is not None else {}
     board = _apply_ops(board, plan.ops)
     planner = dict(planner)
     for create in plan.creates:
         task_id = created_ids.setdefault(create.block_id, f"new-{create.block_id}")
         if create.parent_task_id is None:
-            planner[task_id] = Task(task_id, create.title, create.done, create.due, (create.tag,))
+            state = None
+            if states:
+                state = STATE_DONE if create.done else (create.state or STATE_PLANNED)
+            planner[task_id] = Task(task_id, create.title, create.done, create.due, (create.tag,), state=state)
         else:
             siblings = [t.position for t in planner.values() if t.parent_id == create.parent_task_id]
             planner[task_id] = Task(
@@ -1643,7 +1890,14 @@ def apply_state(
         elif call.kind == "due":
             planner[call.task_id] = replace(task, due=call.value)
         elif call.kind == "done":
-            planner[call.task_id] = replace(task, done=call.value)
+            # The planner's state follows done (a planner without states
+            # keeps none).
+            state = task.state
+            if state is not None:
+                state = STATE_DONE if call.value else STATE_PLANNED
+            planner[call.task_id] = replace(task, done=call.value, state=state)
+        elif call.kind == "state":
+            planner[call.task_id] = replace(task, state=call.value, done=call.value == STATE_DONE)
         elif call.kind in ("untag", "tag"):
             planner[call.task_id] = replace(task, tags=tuple(call.value))
         elif call.kind == "blocked_by":
@@ -1662,7 +1916,7 @@ def apply_state(
         keep = old is not None and change.op == "update"
         by_block[change.block_id] = Row(
             change.block_id, task_id, change.title, change.done, change.due, change.status,
-            old.deps if keep else None, old.deps_card if keep else None,
+            old.deps if keep else None, old.deps_card if keep else None, change.state,
         )
     subs_by_block = {row.block_id: row for row in sub_rows}
     for change in plan.sub_row_changes:
@@ -1699,9 +1953,10 @@ def apply_to_state(
     tag: str,
     created_ids: dict[str, str] | None = None,
     untagged: list[Task] | tuple[Task, ...] = (),
+    states: bool = False,
 ) -> tuple[Board, list[Task], list[Row]]:
     """`apply_state` for a board with no subtasks: the board, its tagged
     tasks and its rows after `plan`."""
     planner = {task.id: task for task in (*untagged, *tasks)}
-    board, planner, rows, _subs = apply_state(board, planner, rows, [], plan, created_ids=created_ids)
+    board, planner, rows, _subs = apply_state(board, planner, rows, [], plan, created_ids=created_ids, states=states)
     return board, [task for task in planner.values() if tag in task.tags], rows
