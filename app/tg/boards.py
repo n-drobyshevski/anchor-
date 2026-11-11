@@ -133,9 +133,16 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
     ]
     if counts.waiting:
         parts.append(f"ждут следующего прохода {counts.waiting}")
-    if counts.held:
+    removals = counts.held - counts.states_held
+    if removals:
         parts.append(
-            f"придержано удалений {counts.held}: одна из сторон выглядит почти пустой. "
+            f"придержано удалений {removals}: одна из сторон выглядит почти пустой. "
+            "Если так и задумано, запусти /boards now"
+        )
+    if counts.states_held:
+        parts.append(
+            f"придержано переносов между колонками {counts.states_held}: "
+            "состояние сменилось бы сразу у большинства пар доски. "
             "Если так и задумано, запусти /boards now"
         )
     return "; ".join(parts)

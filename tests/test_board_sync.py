@@ -1358,7 +1358,7 @@ def lcard(text: str, id: str | None = None, lane: str = "Todo", *, checked: bool
 
 def lboard(*cards: Card, lanes=LANES, done: str | None = "Done", known: bool = True) -> Board:
     return Board(
-        name=NAME, dates=True, lanes=tuple(lanes), done_lane=done, lanes_known=known,
+        name=NAME, dates=True, lanes=tuple(lanes), done_lane_title=done, lanes_known=known,
         cards=tuple(bs.replace(c, n=i) for i, c in enumerate(cards)),
     )
 
@@ -1457,8 +1457,9 @@ def test_a_done_task_reopened_in_progress_leaves_the_done_lane_in_one_move():
 
 
 def test_a_card_taken_out_of_the_done_lane_reopens_its_task_in_that_state():
+    # To wip: one state call (the planner clears the completion itself).
     plan = lmerge(lboard(lcard("A", "aaaa1", "Doing")), [ltask("t1", "A", D)], [lrow("aaaa1", "t1", "A", D)])
-    assert plan.calls == [bs.Call("done", "t1", False), bs.Call("state", "t1", W)]
+    assert plan.calls == [bs.Call("state", "t1", W)]
     plan = lmerge(lboard(lcard("A", "aaaa1", "Todo")), [ltask("t1", "A", D)], [lrow("aaaa1", "t1", "A", D)])
     assert plan.calls == [bs.Call("done", "t1", False)]
     b, tasks, rows, _ = lsettle(lboard(lcard("A", "aaaa1", "Doing")), [ltask("t1", "A", D)], [lrow("aaaa1", "t1", "A", D)])
@@ -1546,10 +1547,11 @@ def test_a_fresh_pair_takes_the_planners_state():
 def test_a_new_card_makes_a_task_in_its_state():
     b = lboard(lcard("Новая", lane="Doing"), lcard("Готово", lane="Done", checked=True), lcard("План"))
     plan = lmerge(b, [], [])
-    by_title = {c.title: c for c in plan.creates}
-    assert (by_title["Новая"].state, by_title["Новая"].done) == (W, False)
-    assert (by_title["Готово"].state, by_title["Готово"].done) == (None, True)
-    assert (by_title["План"].state, by_title["План"].done) == (None, False)
+    by_title = {u.create.title: u for u in plan.units if u.create is not None}
+    # The wip one's state is a call of its unit, on the task its create makes.
+    assert (by_title["Новая"].create.done, by_title["Новая"].calls) == (False, (bs.Call("state", bs.CREATED_TASK, W),))
+    assert (by_title["Готово"].create.done, by_title["Готово"].calls) == (True, ())
+    assert (by_title["План"].create.done, by_title["План"].calls) == (False, ())
     assert {r.title: r.state for r in plan.row_changes} == {"Новая": W, "Готово": D, "План": P}
     assert plan.counts.states_changed == 1
     b, tasks, rows, _ = lsettle(b, [], [])
@@ -1606,7 +1608,7 @@ def test_a_done_change_without_states_keeps_the_state_snapshot_honest():
 
 def test_subtasks_keep_done_and_open_when_states_are_on():
     b = Board(
-        name=NAME, dates=True, subs_known=True, lanes=LANES, done_lane="Done", lanes_known=True,
+        name=NAME, dates=True, subs_known=True, lanes=LANES, done_lane_title="Done", lanes_known=True,
         cards=(Card(0, "aaaa1", "A", False, None, "Doing", subs=(Sub(0, "sub01", 1, "Пункт", True),)),),
     )
     p = {"t1": ltask("t1", "A", W), "s1": Task("s1", "Пункт", False, parent_id="t1", state=P)}
@@ -1628,7 +1630,9 @@ def test_every_kind_of_state_change_then_nothing():
              ltask("t6", "Из планера", W)]
     rows = [lrow("aaaa1", "t1", "A", P), lrow("bbbb1", "t2", "B", P), lrow("cccc1", "t3", "C", D),
             lrow("dddd1", "t4", "D", W), lrow("eeee1", "t5", "E", None, done=False)]
-    plan = lmerge(b, tasks, rows)
+    # Four of five pairs move: past the mass-change guard only by hand.
+    assert lmerge(b, tasks, rows).counts.states_held == 4
+    plan = lmerge(b, tasks, rows, guard=False)
     assert plan.counts.states_changed == 6
     b, tasks, rows = bs.apply_to_state(b, tasks, rows, plan, tag=TAG, states=True)
     assert {c.text: (c.lane, c.checked) for c in b.cards} == {
@@ -1648,3 +1652,97 @@ def test_a_planner_task_done_by_its_column_or_its_completion_reads_as_done():
     assert bs.planner_state(Task("t1", "A", False)) == P
     assert_lidle(lboard(lcard("A", "aaaa1", "Done", checked=True)), [Task("t1", "A", False, tags=(TAG,), state=D)],
                  [lrow("aaaa1", "t1", "A", D)])
+
+
+# -- several complete lanes, done columns, the mass-change guard -----------------------------
+
+CANCELLED = ("Todo", "Cancelled", "Doing", "Done")
+
+
+def cboard(*cards: Card) -> Board:
+    """A board with two complete lanes: Cancelled (the first, where `check`
+    goes) and Done."""
+    return bs.replace(lboard(*cards, lanes=CANCELLED, done="Cancelled"), lane_complete=(False, True, False, True))
+
+
+def test_no_complete_lane_is_ever_a_planned_or_wip_lane():
+    b = cboard(lcard("A", "aaaa1"))
+    plan = lmerge(b, [ltask("t1", "A", W)], [lrow("aaaa1", "t1", "A", P)])
+    assert plan.ops == [{"op": "move", "id": "aaaa1", "lane": "Doing"}]
+    b, tasks, rows, _ = lsettle(b, [ltask("t1", "A", W)], [lrow("aaaa1", "t1", "A", P)])
+    assert lane_of(b, "aaaa1") == ("Doing", False) and tasks[0].state == W
+    assert_lidle(b, tasks, rows)
+    # A board whose only open lane comes after a complete one: that is its first lane.
+    first_done = bs.replace(lboard(lcard("A", "aaaa1", "Doing"), lanes=("Done", "Doing", "Todo"), done="Done"),
+                            lane_complete=(True, False, False))
+    assert bs._lanes_of(first_done) == bs._Lanes("Done", "Doing", "Todo", frozenset({"Done"}))
+    assert bs._lanes_of(cboard()) == bs._Lanes("Cancelled", "Todo", "Doing", frozenset({"Cancelled", "Done"}))
+    # Only complete lanes: nothing to read a state from.
+    assert bs._lanes_of(bs.replace(lboard(lanes=("A", "B"), done="A"), lane_complete=(True, True))) is None
+
+
+def test_a_card_in_any_complete_lane_reads_as_done_and_done_goes_to_the_first():
+    for lane in ("Cancelled", "Done"):
+        b = cboard(lcard("A", "aaaa1", lane, checked=True))
+        assert_lidle(b, [ltask("t1", "A", D)], [lrow("aaaa1", "t1", "A", D)])
+        plan = lmerge(b, [ltask("t1", "A", W)], [lrow("aaaa1", "t1", "A", W)])
+        assert plan.calls == [bs.Call("done", "t1", True)]
+    b, tasks, rows, plan = lsettle(cboard(lcard("A", "aaaa1", "Doing")), [ltask("t1", "A", D)], [lrow("aaaa1", "t1", "A", W)])
+    assert plan.ops == [{"op": "check", "id": "aaaa1", "checked": True}]
+    assert lane_of(b, "aaaa1") == ("Cancelled", True)
+    assert_lidle(b, tasks, rows)
+
+
+def test_a_task_in_the_planners_done_column_is_never_added_or_adopted():
+    column_done = Task("t1", "Сделано", False, tags=(TAG,), state=D)
+    plan = lmerge(lboard(), [column_done], [])
+    assert plan.ops == [] and plan.row_changes == []
+    untagged = [Task("u1", "Карта", False, state=D)]
+    plan = lmerge(lboard(lcard("Карта")), [], [], untagged=untagged)
+    assert [c.title for c in plan.creates] == ["Карта"] and not any(c.kind == "tag" for c in plan.calls)
+    assert bs.is_done(column_done) and not bs.is_done(ltask("t2", "A", W))
+
+
+def _many(n: int, lane: str = "Doing"):
+    b = lboard(*(lcard(f"К{i}", f"card{i:03}", lane) for i in range(n)))
+    tasks = [ltask(f"t{i}", f"К{i}", P) for i in range(n)]
+    rows = [lrow(f"card{i:03}", f"t{i}", f"К{i}", None) for i in range(n)]
+    return b, tasks, rows
+
+
+def test_the_guard_holds_a_mass_state_change_and_keeps_everything_else():
+    b, tasks, rows = _many(6)
+    tasks[0] = bs.replace(tasks[0], title="К0 новое")
+    plan = lmerge(b, tasks, rows)
+    # No state call or move; the retitle still goes, and every state waits.
+    assert plan.calls == [] and plan.ops == [{"op": "text", "id": "card000", "text": "К0 новое"}]
+    assert (plan.counts.states_changed, plan.counts.states_held, plan.counts.held) == (0, 6, 6)
+    assert {r.state for r in plan.row_changes} == {None}
+    b, tasks, rows = bs.apply_to_state(b, tasks, rows, plan, tag=TAG, states=True)
+    again = lmerge(b, tasks, rows)
+    assert again.units == [] and again.counts.states_held == 6
+    # `/boards now`: every one moves, then nothing.
+    b, tasks, rows, plan = lsettle(b, tasks, rows, guard=False)
+    assert plan.counts.states_changed == 6 and {t.state for t in tasks} == {W}
+    assert_lidle(b, tasks, rows)
+
+
+def test_a_few_state_changes_or_a_minority_still_go_through():
+    b, tasks, rows = _many(3)
+    assert lmerge(b, tasks, rows).counts.states_changed == 3
+    # Four of ten: a minority.
+    b, tasks, rows = _many(10, lane="Todo")
+    for i in range(4):
+        b = bs.replace(b, cards=tuple(bs.replace(c, lane="Doing") if c.id == f"card{i:03}" else c for c in b.cards))
+    plan = lmerge(b, tasks, rows)
+    assert (plan.counts.states_changed, plan.counts.states_held) == (4, 0)
+
+
+def test_each_unit_carries_its_own_counts():
+    b = lboard(lcard("A", "aaaa1", "Doing"), lcard("Новая"))
+    plan = lmerge(b, [ltask("t1", "A", P), ltask("t2", "Из планера", P)], [lrow("aaaa1", "t1", "A", P)])
+    total = bs.Counts()
+    for unit in plan.units:
+        assert unit.counts is not None
+        total.add(unit.counts)
+    assert total == plan.counts

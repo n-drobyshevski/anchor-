@@ -1100,7 +1100,9 @@ async def test_a_board_edited_moments_ago_gets_no_write_but_its_changes_reach_th
     rows = {r.block_id: r.title for r in await _rows(sessionmaker)}
     assert rows == {"aaaa1": "A2", "bbbb1": "B"}
     runs = await _runs(sessionmaker)
-    assert [(r.outcome, r.waiting) for r in runs] == [("busy", 2)]
+    # The run counts what ran (the retitle carried to the planner) and the
+    # rest as waiting.
+    assert [(r.outcome, r.waiting, r.tasks_changed, r.cards_changed, r.cards_added) for r in runs] == [("busy", 2, 1, 0, 0)]
 
     # Quiet again: the held writes go out.
     vault.boards = [_board({"text": "A2", "id": "aaaa1"}, {"text": "B", "id": "bbbb1"}, modified=now - 600)]
@@ -1126,7 +1128,9 @@ def _lane_board(*specs, lanes=LANES, known=True):
     return TaskBoard(
         name=NAME, state="ok", sha256=SHA, lanes=lanes, done_lane="Done" in lanes, dates=True,
         cards=_cards(*specs, subs_known=True),
-        done_lane_title="Done" if known and "Done" in lanes else None, lanes_known=known,
+        done_lane_title="Done" if known and "Done" in lanes else None,
+        lane_complete=tuple(t == "Done" for t in lanes) if known else (),
+        lanes_known=known,
     )
 
 
@@ -1164,9 +1168,9 @@ async def test_a_pass_carries_lanes_as_states_both_ways(sessionmaker, frozen_clo
 
     result = await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert result.outcome == board_job.OK
-    # The new card's task is made in progress right after its create, before the board write.
-    assert log[:3] == ["create", "update", "post"]
-    assert planner.writes[1] == ("update", {"id": "new1", "state": "wip"})
+    # The new card's task is made in progress by its unit's call, after the board write.
+    assert log[:2] == ["create", "post"]
+    assert ("update", {"id": "new1", "state": "wip"}) in planner.writes
     (_name, _sha, ops, _cs) = vault.posts[0]
     added = board_sync.mint_for_task(NAME, "t3")
     assert [op for op in ops if op["op"] in ("add", "move")] == [
@@ -1202,7 +1206,7 @@ async def test_a_pass_carries_lanes_as_states_both_ways(sessionmaker, frozen_clo
     assert vault.posts[-1][2] == [{"op": "move", "id": "card1", "lane": "Doing"}]
 
 
-async def test_a_card_out_of_the_done_lane_reopens_its_task_then_sets_its_state(sessionmaker, frozen_clock):
+async def test_a_card_out_of_the_done_lane_reopens_its_task_in_one_state_call(sessionmaker, frozen_clock):
     clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
     await _link(sessionmaker, clock)
     now = clock.now_utc()
@@ -1213,7 +1217,9 @@ async def test_a_card_out_of_the_done_lane_reopens_its_task_then_sets_its_state(
     vault = FakeVault([_lane_board({"text": "A", "id": "card1", "lane": "Doing"})])
     planner = FakePlanner([_task("t1", "A", done=True)], states=True)
     await _pass(sessionmaker, _settings(), planner, vault, clock)
-    assert planner.writes == [("complete", {"id": "t1", "done": False}), ("update", {"id": "t1", "state": "wip"})]
+    # The planner's state move clears the completion itself.
+    assert planner.writes == [("update", {"id": "t1", "state": "wip"})]
+    assert planner.tasks["t1"]["done"] is False
     (row,) = await _rows(sessionmaker)
     assert (row.state, row.done) == ("wip", False)
 
@@ -1252,10 +1258,12 @@ async def test_list_rows_read_a_state_strictly_and_say_whether_all_carry_one():
 
 async def test_the_board_carries_its_lanes_into_the_merge():
     merged = board_job.as_board(_lane_board({"text": "A", "lane": "Doing"}))
-    assert (merged.lanes, merged.done_lane, merged.lanes_known) == (LANES, "Done", True)
+    assert (merged.lanes, merged.done_lane_title, merged.lane_complete, merged.lanes_known) == (
+        LANES, "Done", (False, False, True), True
+    )
     assert merged.cards[0].lane == "Doing"
     old = board_job.as_board(_lane_board({"text": "A"}, known=False))
-    assert (old.done_lane, old.lanes_known) == (None, False)
+    assert (old.done_lane_title, old.lane_complete, old.lanes_known) == (None, (), False)
 
 
 async def test_a_state_the_planner_refuses_is_a_conflict_and_the_card_goes_back(sessionmaker, frozen_clock):
@@ -1289,3 +1297,64 @@ async def test_a_state_the_planner_refuses_is_a_conflict_and_the_card_goes_back(
     vault.posts.clear()
     await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert vault.posts == [] and planner.writes == []
+
+
+async def test_a_new_cards_state_call_runs_after_the_board_write_and_only_for_a_kept_unit(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    log: list[str] = []
+    board = _lane_board({"text": "Новая", "lane": "Doing"})
+    vault = FakeVault([board])
+    vault.log = log
+    planner = FakePlanner([], states=True, log=log)
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert log == ["create", "post", "update"]
+    (row,) = await _rows(sessionmaker)
+    assert (row.task_id, row.state) == ("new1", "wip")
+
+    # A retried create whose task is already paired (a pass lost its tag
+    # write): the unit keeps only its ops, and no state call is made.
+    block = board_sync.mint_for_card(NAME, "Другая", 0)
+    planner.by_request[board_sync.request_id(NAME, block)] = "new1"
+    vault.boards = [_lane_board({"text": "Новая", "id": row.block_id, "lane": "Doing"}, {"text": "Другая", "lane": "Doing"})]
+    planner.writes.clear()
+    log.clear()
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert [w[0] for w in planner.writes] == ["create"]
+    assert [r.task_id for r in await _rows(sessionmaker)] == ["new1"]
+
+
+async def test_a_refused_state_takes_its_change_back_from_the_counts(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, "card1", "t1", "Отчёт")])
+    vault = FakeVault([_lane_board({"text": "Отчёт", "id": "card1", "lane": "Doing"})])
+    planner = FakePlanner([_task("t1", "Отчёт")], states=True, refuse_states={"t1"})
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    counts = result.boards[0].counts
+    assert (counts.states_changed, counts.tasks_changed, counts.conflicts, counts.skipped) == (0, 0, 1, 1)
+    (run,) = [r for r in await _runs(sessionmaker) if r.board == NAME]
+    assert (run.states_changed, run.tasks_changed) == (0, 0)
+
+
+async def test_a_mass_state_change_is_held_shown_in_the_preview_and_run_by_hand(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    await _seed_pairs(sessionmaker, clock, [(NAME, f"card{i}", f"t{i}", f"К{i}") for i in range(5)])
+    vault = FakeVault([_lane_board(*({"text": f"К{i}", "id": f"card{i}", "lane": "Doing"} for i in range(5)))])
+    planner = FakePlanner([_task(f"t{i}", f"К{i}") for i in range(5)], states=True)
+
+    preview = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_PREVIEW)
+    text = boards_ui.result_text(preview)
+    assert "колонки: перенести 0" in text and "придержано переносов между колонками 5" in text
+    assert "придержано удалений" not in text
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert vault.posts == [] and planner.writes == []
+    (run,) = [r for r in await _runs(sessionmaker) if r.board == NAME]
+    assert (run.held, run.states_held, run.states_changed) == (5, 5, 0)
+    assert all(r.state is None for r in await _rows(sessionmaker))
+
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_NOW)
+    assert result.boards[0].counts.states_changed == 5
+    assert {t["state"] for t in planner.tasks.values()} == {"wip"}

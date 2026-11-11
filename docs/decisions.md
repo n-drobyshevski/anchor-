@@ -4584,9 +4584,12 @@ planner and menu test files).
 ## Board sync: lanes by role
 
 - **What.** A card's lane is read as its planner task's state, by the lane's
-  role rather than its name: the board's done lane (the one with the
-  `**Complete**` marker) is `done`, its first other lane `planned`, any other
-  lane `wip`. A checked card is `done` wherever it sits; on a board with no
+  role rather than its name: a complete lane (one with the `**Complete**`
+  marker; a board may have several, a "Cancelled" beside "Done") is `done`,
+  the first lane that is not complete `planned`, any other lane `wip`.
+  Planned and wip are only ever lanes that are not complete: vaultd's `move`
+  ticks a card it puts in a complete lane, and the next pass would read that
+  as the task done. A checked card is `done` wherever it sits; on a board with no
   done lane, `done` is the box, as before, and the lanes give planned or wip.
   The planner's `list_tasks` rows carry `state` (`planned`, `wip`, `done`) and
   `update_task` takes it. For a top-level pair this three-valued state takes
@@ -4602,15 +4605,29 @@ planner and menu test files).
   follow the lane (checked in the done lane, unchecked elsewhere), mirroring
   `check`; on one without, it leaves the box, and the bot unchecks first. In
   the planner: `complete_task` for done and undone, unchanged, and
-  `update_task(state=...)` between planned and wip (after
-  `complete_task(done=False)` for a done task going back to wip). A new card in
-  an in-progress lane makes its task and then sets it wip; a new wip task is
+  `update_task(state=...)` for wip, from done too: one call, since the
+  planner's state move clears the completion itself and puts the task in its
+  collection's first in-progress column. A new card in an in-progress lane
+  makes its task, and its unit then carries a `state` call on the created
+  task, made with the unit's other calls after the board write (so a unit the
+  job drops, a create retried onto a task already paired, makes none); a new
+  wip task is
   added (to the first lane, as `add` always does) and moved in the same batch,
   `move` going last in the batch so it can name the card just added.
 - **Reading the planner.** The planner's `state` is its column's role and
   `done` its completion; they agree except for a task moved by hand into or
   out of the done column, so a task is read as done when either says so (a
-  completed task's card belongs in the done lane, as before states).
+  completed task's card belongs in the done lane, as before states). The same
+  test (`is_done`) decides everywhere a done task is told apart: a new done
+  task gets no card, and is never adopted by title.
+- **The mass-change guard.** The first pass after states came (rows with no
+  state snapshot, read as planned) or a column reordered in the planner could
+  move many cards or tasks at once. As with removals: a pass that would carry
+  the state of more than three existing pairs and more than half of the
+  board's pairs carries none of them, each pair's other fields still travel,
+  the snapshots stay, and the count shows as held (`states_held`, part of
+  `held`; `/boards` and the preview: «придержано переносов между колонками
+  N»). `/boards now` runs past it.
 - **Refused states.** `update_task(state=...)` is refused for a task in no
   collection or one whose collection has no column of that role. That is not
   a planner failure: like a refused blocker set it counts a conflict and a
@@ -4631,8 +4648,9 @@ planner and menu test files).
 - **The done lane by name.** vaultd's read gave `done_lane` as a flag only,
   and cards name their lane by title, so the bot could not tell which lane is
   done. Asked with `?lanes=1`, each board also carries `done_lane_title` (the
-  title, or null); the client checks it names one of the lanes, exactly when
-  `done_lane` is true. Without `lanes=1` the answer is the old shape, so an
+  first complete lane, or null) and `lane_complete` (one flag per lane, in the
+  order of `lanes`); the client takes both or neither, and checks the title is
+  the first flagged lane and `done_lane` is true exactly when one is. Without `lanes=1` the answer is the old shape, so an
   older bot, which checks a board's keys exactly, is unaffected.
 - **When it is off.** A pass whose planner rows do not all carry `state` (an
   older planner, `knows_states`), and a board whose answer has no
@@ -4643,4 +4661,6 @@ planner and menu test files).
   side.
 - **Counts.** `states_changed` (`board_sync_run`, `/boards`: «колонки:
   перенесено N») counts the pairs whose state a pass carried, either way, plus
-  new tasks made wip and new cards added in progress.
+  new tasks made wip and new cards added in progress; a refused state takes
+  its change back. Each unit carries its own counts, so a busy board's run
+  row records what its planner-only units did, plus the rest as waiting.

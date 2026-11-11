@@ -495,17 +495,21 @@ line under a card, and can write them:
   where you wrote it.
 
 **Lanes by role.** A card's lane is its task's state in the planner,
-whatever the lanes are called: the first lane is *planned*, the done lane
-(the one marked `**Complete**`) is *done*, and every other lane is *in
-progress*. Move a card to "Doing" and its task is in progress; set a task
+whatever the lanes are called: a lane marked `**Complete**` is *done*
+(you may have several, such as "Done" and "Cancelled"; a card Echo
+completes goes to the first), the first lane that is not complete is
+*planned*, and every other lane is *in progress*. Move a card to "Doing" and its task is in progress; set a task
 in progress in the planner and its card moves to the first lane after the
-first one (one that is neither first nor done). A card already in a lane
+first one (the next lane that is not complete). A card already in a lane
 of the right role stays there, so you can keep a "Review" lane next to
 "Doing". A ticked box still means done wherever the card is. A board with
 only a first lane and a done lane cannot show *in progress*: such a task's
 card stays in the first lane (counted once as skipped), and nothing else
 changes. On a board with a done lane, a card the bot moves out of it is
-unticked, and one moved into it ticked. This needs the current vault
+unticked, and one moved into it ticked. If one pass would change the
+state of most of a board's cards at once (the first pass, say, if the
+planner's columns do not match the board), it holds them back and
+`/boards` says so; `/boards now` carries them. This needs the current vault
 service; with an older one, or an older planner, only done and open are
 kept in step.
 

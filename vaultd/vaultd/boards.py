@@ -81,13 +81,16 @@ already done. `move` puts a card, with all its lines, at the end of the
 lane named by its title (the first lane of that title; a lane of the
 active part, never the archive); a card already in that lane stays where
 it is. On a board with a done lane the box follows, as with `check`:
-moving into the done lane checks it, moving into any other lane unchecks
-it. On a board without one the box is left as it is. Read with
-`lanes=True` (`GET /v1/boards?lanes=1`), a board also names its done
-lane (`done_lane_title`, null when it has none), so the bot can read a
-card's lane as a state (first lane: planned, the done lane: done, any
-other: in progress); the key's presence is also how the bot knows this
-vaultd takes `move`.
+moving into a complete lane checks it, moving into any other lane
+unchecks it. On a board without one the box is left as it is. (A board may mark
+more than one lane `**Complete**`, a "Cancelled" beside "Done": each is
+complete, and `check` uses the first.) Read with `lanes=True` (`GET
+/v1/boards?lanes=1`), a board also names its done lane
+(`done_lane_title`: the first complete lane, null when it has none) and
+says which lanes are complete (`lane_complete`, one flag per title in
+`lanes`), so the bot can read a card's lane as a state (a complete lane:
+done, the first other lane: planned, any other: in progress); the keys'
+presence is also how the bot knows this vaultd takes `move`.
 
 Pure apart from nothing: no filesystem, no clock. api.py reads and
 writes; this module only turns bytes into cards and bytes into bytes.
@@ -301,9 +304,10 @@ def describe(
     (what a same-board link resolves to). With `titles` as well, also the
     plain titles on that line (`after_titles`); without it a title counts
     as `after_raw_extra`, which is all an older bot knows to keep. With
-    `lanes`, the board also names its done lane (`done_lane_title`, None
-    when it has none); an older bot, which checks a board's keys exactly,
-    asks without it."""
+    `lanes`, the board also names its done lane (`done_lane_title`, the
+    first complete lane, None when it has none) and flags each complete
+    lane (`lane_complete`, parallel to `lanes`); an older bot, which checks
+    a board's keys exactly, asks without them."""
     cards = []
     for n, card in enumerate(board.cards):
         item = {
@@ -335,6 +339,7 @@ def describe(
     if lanes:
         done = next((lane for lane in board.lanes if lane.complete), None)
         out["done_lane_title"] = done.title if done is not None else None
+        out["lane_complete"] = [lane.complete for lane in board.lanes]
     return out
 
 

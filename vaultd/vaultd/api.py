@@ -641,9 +641,10 @@ async def get_boards(request: web.Request) -> web.Response:
     (`after_titles`); asked without, a title counts as `after_raw_extra`,
     so a bot that predates titles neither breaks on the key nor rewrites
     the line without them. With `?lanes=1` each board also names its done
-    lane (`done_lane_title`, null when it has none): asked for only by a
-    bot that knows the key, and that reads it as "this vaultd takes
-    `move`". Nothing else of the file. No list, an invalid settings file:
+    lane (`done_lane_title`, the first complete lane, null when it has
+    none) and flags its complete lanes (`lane_complete`, parallel to
+    `lanes`): asked for only by a bot that knows the keys, and that reads
+    them as "this vaultd takes `move`". Nothing else of the file. No list, an invalid settings file:
     no boards."""
     subs = request.query.get("subs") == "1"
     titles = subs and request.query.get("titles") == "1"

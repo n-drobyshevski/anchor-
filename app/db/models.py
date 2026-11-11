@@ -3179,6 +3179,7 @@ class BoardSyncRun(Base):
     deps_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     subs_paired: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     states_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    states_held: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(

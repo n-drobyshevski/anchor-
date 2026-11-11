@@ -260,8 +260,9 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
 
 def untagged_of(tasks: list[board_sync.Task]) -> list[board_sync.Task]:
     """The tasks a card may adopt (`parse_all`'s answer cut down):
-    top-level, open, with no tag at all."""
-    return [task for task in tasks if task.parent_id is None and not task.done and not task.tags]
+    top-level, open (done read as board_sync's `is_done` reads it: a task
+    in the planner's done column is done), with no tag at all."""
+    return [task for task in tasks if task.parent_id is None and not board_sync.is_done(task) and not task.tags]
 
 
 def knows_subtasks(raw: object) -> bool:
@@ -329,7 +330,8 @@ def as_board(board: TaskBoard) -> board_sync.Board:
         sha256=board.sha256 or "",
         subs_known=subs_known,
         lanes=board.lanes,
-        done_lane=board.done_lane_title,
+        done_lane_title=board.done_lane_title,
+        lane_complete=board.lane_complete,
         lanes_known=board.lanes_known,
         modified=board.modified,
     )
@@ -500,15 +502,12 @@ async def run_pass(
         if not dry_run:
             changeset = echo_write.new_boards_ref()
             for tag, board, plan in plans:
-                outcome = await _carry_out(session, settings, planner, vault, clock, tag, board, plan, changeset)
                 # A board that changed under the pass did none of it; a busy
-                # one did only its planner side, and the rest waits.
-                if outcome == OK:
-                    counts = plan.counts
-                elif outcome == BUSY:
-                    counts = Counts(waiting=sum(1 for u in plan.units if _writes_board(u)))
-                else:
-                    counts = Counts()
+                # one did only its planner side (counted as such), and the
+                # rest waits.
+                outcome, counts = await _carry_out(
+                    session, settings, planner, vault, clock, tag, board, plan, changeset
+                )
                 result.boards.append(BoardResult(board.name, outcome, counts))
                 session.add(_run_row(now, board.name, outcome, counts))
                 await session.commit()
@@ -617,9 +616,11 @@ async def _carry_out(
     board: board_sync.Board,
     plan: Plan,
     changeset: str,
-) -> str:
-    """Steps 2-5 for one board. Returns its outcome; raises `_Abort` (or
-    a planner error) to stop the pass."""
+) -> tuple[str, Counts]:
+    """Steps 2-5 for one board. Returns its outcome and what it did (its
+    plan's counts; for a busy board, only the units that ran, and the
+    others as waiting; none for a board that changed under the pass);
+    raises `_Abort` (or a planner error) to stop the pass."""
     now = clock.now_utc()
     # The user edited this board moments ago (and may still be at it, with
     # Kanban Starlane holding it open): writing now would race their edit
@@ -628,9 +629,9 @@ async def _carry_out(
     # for a pass after the board has been quiet for BOARD_SYNC_QUIET_S.
     held = busy(board, now, settings)
     if held:
-        plan = Plan(board=board.name, units=[u for u in plan.units if not _writes_board(u)], counts=Counts())
+        plan = _busy_plan(plan)
         if not plan.units:
-            return BUSY
+            return BUSY, plan.counts
     known_tasks = {row.task_id for row in await load_rows(session, board.name)}
     known_tasks |= {row.task_id for row in await load_sub_rows(session, board.name)}
 
@@ -650,15 +651,8 @@ async def _carry_out(
         task_id = _created_id(answer)
         if create.done:
             await planner.complete_task(settings, session, clock, task_id=task_id, done=True)
-        elif create.state is not None:
-            try:
-                await planner.update_task(settings, session, clock, task_id=task_id, state=create.state)
-            except PlannerToolRefused:
-                # No in-progress column for it: the row keeps the card's
-                # state all the same, so the next pass moves the card to
-                # the planner's (as a refused state call in step 5).
-                plan.counts.skipped += 1
-                plan.counts.conflicts += 1
+        # A wip card's state is a call of its unit (`CREATED_TASK`), made in
+        # step 5 for a unit that is kept, after the board write.
         created[create.block_id] = task_id
 
     # A create retried by its request id may answer with a task this pass
@@ -685,7 +679,7 @@ async def _carry_out(
     if ops:
         written = await echo_write.write_board(vault, board.name, board.sha256, ops, changeset)
         if written.outcome == echo_write.BOARD_CHANGED:
-            return CHANGED
+            return CHANGED, Counts()
         if written.outcome == echo_write.REFUSED:
             raise _Abort(REFUSED)
         if written.outcome != echo_write.OK:
@@ -702,18 +696,17 @@ async def _carry_out(
     for unit in kept.units:
         if not unit.calls:
             continue
+        task_id = created.get(unit.create.block_id) if unit.create is not None else None
         refused = False
         for call in unit.calls:
+            if call.task_id == board_sync.CREATED_TASK:
+                assert task_id is not None
+                call = replace(call, task_id=task_id)
             try:
                 await _call(planner, settings, session, clock, call)
             except PlannerToolRefused:
                 if call.kind == "state":
-                    # A task in no collection, or one whose collection has no
-                    # column of that role: as a refused blocker set below,
-                    # the snapshot is stored as planned, and the next pass
-                    # moves the card back to the planner's state.
-                    plan.counts.skipped += 1
-                    plan.counts.conflicts += 1
+                    _refused_state(plan.counts, unit)
                     continue
                 if call.kind != "blocked_by":
                     raise
@@ -729,9 +722,37 @@ async def _carry_out(
             plan.counts.conflicts += 1
             if not unit.ops:
                 plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
-        await _apply_unit_rows(session, board.name, unit, None, now)
+        await _apply_unit_rows(session, board.name, unit, task_id, now)
         await session.commit()
-    return BUSY if held else OK
+    return (BUSY if held else OK), plan.counts
+
+
+def _busy_plan(plan: Plan) -> Plan:
+    """A busy board's plan: only the units that do not write to it, its
+    counts theirs plus what the plan counted beside its units (skips, the
+    guard's holds), and every other unit as waiting."""
+    ran = [u for u in plan.units if not _writes_board(u)]
+    counts = replace(plan.counts)
+    for unit in plan.units:
+        if unit.counts is not None and _writes_board(unit):
+            for name in Counts.__dataclass_fields__:
+                setattr(counts, name, getattr(counts, name) - getattr(unit.counts, name))
+    counts.waiting += len(plan.units) - len(ran)
+    return Plan(board=plan.board, units=ran, counts=counts)
+
+
+def _refused_state(counts: Counts, unit: board_sync.Unit) -> None:
+    """A state the planner refused (a task in no collection, or one whose
+    collection has no column of that role): a conflict and a skip, and
+    the change it was is taken back from the counts. As with a refused
+    blocker set, the unit's row is stored as planned, so the next pass
+    reads the planner as the side that moved and puts the card back in a
+    lane of the planner's state (board_sync, "Lanes by role")."""
+    counts.skipped += 1
+    counts.conflicts += 1
+    counts.states_changed = max(0, counts.states_changed - 1)
+    if unit.create is None and all(call.kind == "state" for call in unit.calls):
+        counts.tasks_changed = max(0, counts.tasks_changed - 1)
 
 
 async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock, call: board_sync.Call) -> None:

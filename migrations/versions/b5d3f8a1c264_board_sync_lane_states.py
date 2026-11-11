@@ -1,4 +1,4 @@
-"""board_pair.state, board_sync_run.states_changed
+"""board_pair.state, board_sync_run.states_changed and states_held
 
 Board sync, lanes by role (docs/decisions.md, "Board sync: lanes by
 role"): a card's lane is read as its planner task's state (the done
@@ -8,9 +8,10 @@ lane: done, the first other lane: planned, any other: in progress).
   `wip`, `done`), null until a pass compared states; a null row reads its
   base from `done` (done, else planned).
 - `board_sync_run.states_changed` counts the pairs whose state a pass
-  carried, default 0.
+  carried, default 0; `states_held` those the mass-change guard held back
+  (part of `held`), default 0.
 
-Reversible: downgrade drops both columns; the boards and the planner keep
+Reversible: downgrade drops the three columns; the boards and the planner keep
 what the passes wrote, and the next pass after an upgrade starts the
 states from `done` again.
 
@@ -38,10 +39,14 @@ def upgrade() -> None:
     op.add_column(
         'board_sync_run', sa.Column('states_changed', sa.Integer(), server_default=sa.text('0'), nullable=False)
     )
+    op.add_column(
+        'board_sync_run', sa.Column('states_held', sa.Integer(), server_default=sa.text('0'), nullable=False)
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.drop_column('board_sync_run', 'states_held')
     op.drop_column('board_sync_run', 'states_changed')
     op.drop_constraint('ck_board_pair_state', 'board_pair', type_='check')
     op.drop_column('board_pair', 'state')

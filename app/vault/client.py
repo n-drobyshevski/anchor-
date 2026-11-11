@@ -317,8 +317,10 @@ class TaskBoard:
     `not_board` (not a Kanban Starlane board); only an `ok` board has a
     hash, lanes and cards. `dates` is false when the board's own settings
     change the date syntax: its dates then stay in the card's text.
-    `done_lane_title` is the done lane's title (None: no done lane);
-    `lanes_known` is False when vaultd sent no such key (an older one,
+    `done_lane_title` is the done lane's title (the first complete lane;
+    None: no done lane), `lane_complete` whether each lane is complete
+    (parallel to `lanes`: a board may have several, a "Cancelled" beside
+    "Done"); `lanes_known` is False when vaultd sent neither (an older one,
     which also has no `move` op)."""
 
     name: str
@@ -332,6 +334,7 @@ class TaskBoard:
     # reports it; None when unknown.
     modified: int | None = None
     done_lane_title: str | None = None
+    lane_complete: tuple[bool, ...] = ()
     lanes_known: bool = False
 
 
@@ -421,9 +424,11 @@ def _task_board(item: Any) -> TaskBoard:
     if state != "ok":
         _require(set(item) == {"name", "state"})
         return TaskBoard(name=name, state=state)
-    # `done_lane_title` (a vaultd that knows `move`) and `modified` (one
-    # that reports the file time) are optional.
-    _require(set(item) - {"done_lane_title", "modified"} == _BOARD_KEYS)
+    # `done_lane_title` with `lane_complete` (a vaultd that knows `move`;
+    # both or neither) and `modified` (one that reports the file time) are
+    # optional.
+    _require(set(item) - {"done_lane_title", "lane_complete", "modified"} == _BOARD_KEYS)
+    _require(("done_lane_title" in item) == ("lane_complete" in item))
     done_lane, dates, cards = item["done_lane"], item["dates"], item["cards"]
     _require(isinstance(done_lane, bool) and isinstance(dates, bool) and isinstance(cards, list))
     modified = item.get("modified")
@@ -431,10 +436,15 @@ def _task_board(item: Any) -> TaskBoard:
     lanes = _strings(item["lanes"])
     lanes_known = "done_lane_title" in item
     done_title = item.get("done_lane_title")
+    complete: tuple[bool, ...] = ()
     if lanes_known:
-        # Named exactly when there is one, and then one of the lanes.
-        _require(done_lane == (done_title is not None))
-        _require(done_title is None or (isinstance(done_title, str) and done_title in lanes))
+        raw = item["lane_complete"]
+        _require(isinstance(raw, list) and len(raw) == len(lanes) and all(isinstance(c, bool) for c in raw))
+        complete = tuple(raw)
+        # Named exactly when there is one: the first complete lane.
+        _require(done_lane == any(complete))
+        first = next((title for title, c in zip(lanes, complete) if c), None)
+        _require(done_title == first)
     return TaskBoard(
         name=name,
         state=state,
@@ -445,6 +455,7 @@ def _task_board(item: Any) -> TaskBoard:
         cards=tuple(_board_card(card, i) for i, card in enumerate(cards)),
         modified=modified,
         done_lane_title=done_title,
+        lane_complete=complete,
         lanes_known=lanes_known,
     )
 

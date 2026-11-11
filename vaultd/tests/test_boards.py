@@ -318,10 +318,26 @@ def test_a_bad_move_refuses_the_whole_batch(op, reason):
 
 def test_the_done_lane_is_named_only_when_asked():
     parsed = boards.parse(BOARD.encode())
-    assert "done_lane_title" not in boards.describe(parsed)
-    assert boards.describe(parsed, lanes=True)["done_lane_title"] == "Done"
+    assert "done_lane_title" not in boards.describe(parsed) and "lane_complete" not in boards.describe(parsed)
+    asked = boards.describe(parsed, lanes=True)
+    assert (asked["done_lane_title"], asked["lane_complete"]) == ("Done", [False, False, True])
     plain = boards.parse(BOARD.replace("**Complete**\n", "").encode())
-    assert boards.describe(plain, lanes=True)["done_lane_title"] is None
+    asked = boards.describe(plain, lanes=True)
+    assert (asked["done_lane_title"], asked["lane_complete"]) == (None, [False, False, False])
+
+
+def test_several_complete_lanes_are_each_flagged_and_check_uses_the_first():
+    two = BOARD.replace("## Doing\n", "## Cancelled\n\n**Complete**\n- [x] Dropped ^drop01\n\n## Doing\n")
+    asked = boards.describe(boards.parse(two.encode()), lanes=True)
+    assert asked["lanes"] == ["Todo", "Cancelled", "Doing", "Done"]
+    assert (asked["done_lane_title"], asked["lane_complete"]) == ("Cancelled", [False, True, False, True])
+    after = apply([{"op": "check", "id": "abc123", "checked": True}], two)
+    assert [c["lane"] for c in cards(after) if c["id"] == "abc123"] == ["Cancelled"]
+    # Moving between two complete lanes keeps the box checked; out of them unchecks.
+    moved = apply([{"op": "move", "id": "drop01", "lane": "Done"}], two)
+    assert [(c["lane"], c["checked"]) for c in cards(moved) if c["id"] == "drop01"] == [("Done", True)]
+    out = apply([{"op": "move", "id": "drop01", "lane": "Doing"}], two)
+    assert [(c["lane"], c["checked"]) for c in cards(out) if c["id"] == "drop01"] == [("Doing", False)]
 
 
 def test_remove_takes_the_card_and_its_continuation_lines_only():
@@ -417,6 +433,7 @@ async def test_get_lists_named_boards_and_their_states(client, vault: Path, base
     assert "done_lane_title" not in found[0]
     asked = (await (await client.get("/v1/boards?subs=1&titles=1&lanes=1", headers=AUTH)).json())["boards"]
     assert asked[0]["done_lane_title"] == "Done" and asked[1] == {"name": "General tasks.md", "state": "not_board"}
+    assert asked[0]["lane_complete"] == [False, False, True]
 
 
 async def test_no_setting_no_boards(client, vault: Path):

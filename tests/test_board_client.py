@@ -133,12 +133,12 @@ async def test_get_boards_with_subs_asks_for_them_and_parses_them(stub):
 
 
 async def test_get_boards_reads_the_done_lane_title_when_present(stub):
-    named = _board(lanes=["Todo", "Doing", "Done"], done_lane_title="Done")
-    plain = _board(name="General tasks.md", lanes=["A", "B"], done_lane=False, done_lane_title=None)
+    named = _board(lanes=["Todo", "Doing", "Done"], done_lane_title="Done", lane_complete=[False, False, True])
+    plain = _board(name="General tasks.md", lanes=["A", "B"], done_lane=False, done_lane_title=None, lane_complete=[False, False])
     stub.respond("GET", "/v1/boards", 200, {"boards": [named, plain]})
     first, second = await _client(stub).get_boards(subs=True)
-    assert (first.done_lane_title, first.lanes_known) == ("Done", True)
-    assert (second.done_lane_title, second.lanes_known) == (None, True)
+    assert (first.done_lane_title, first.lane_complete, first.lanes_known) == ("Done", (False, False, True), True)
+    assert (second.done_lane_title, second.lane_complete, second.lanes_known) == (None, (False, False), True)
     # An older vaultd, without the key: the done lane is not known by name.
     stub.respond("GET", "/v1/boards", 200, {"boards": [_board()]})
     (old,) = await _client(stub).get_boards(subs=True)
@@ -148,10 +148,16 @@ async def test_get_boards_reads_the_done_lane_title_when_present(stub):
 @pytest.mark.parametrize(
     "extra",
     [
-        {"done_lane_title": "Nowhere"},  # not one of the lanes
-        {"done_lane_title": None},  # the board says it has a done lane
-        {"done_lane_title": 1},
-        {"done_lane": False, "done_lane_title": "Done"},
+        {"done_lane_title": "Nowhere", "lane_complete": [False, True]},  # not one of the lanes
+        {"done_lane_title": None, "lane_complete": [False, True]},  # the board says it has a done lane
+        {"done_lane_title": 1, "lane_complete": [False, True]},
+        {"done_lane": False, "done_lane_title": "Done", "lane_complete": [False, True]},
+        {"done_lane_title": "Todo", "lane_complete": [False, True]},  # not the first complete lane
+        {"done_lane_title": "Done", "lane_complete": [True]},  # not one flag per lane
+        {"done_lane_title": "Done", "lane_complete": [0, 1]},
+        {"done_lane_title": "Done", "lane_complete": [False, False]},
+        {"done_lane_title": "Done"},  # one without the other
+        {"lane_complete": [False, True]},
     ],
 )
 async def test_a_done_lane_title_that_does_not_fit_is_a_bad_response(stub, extra):
