@@ -617,10 +617,11 @@ def sub(text: str, id: str | None = None, depth: int = 1, *, checked: bool = Fal
     return Sub(n=0, id=id, depth=depth, text=text, checked=checked, date=date)
 
 
-def scard(text: str, id: str, *subs: Sub, checked: bool = False, after=(), extra: bool = False) -> Card:
+def scard(text: str, id: str, *subs: Sub, checked: bool = False, after=(), extra: bool = False, titles=()) -> Card:
     return Card(
         n=0, id=id, text=text, checked=checked, date=None,
         subs=tuple(bs.replace(s, n=k) for k, s in enumerate(subs)), after=tuple(after), after_raw_extra=extra,
+        after_titles=tuple(titles),
     )
 
 
@@ -1217,3 +1218,129 @@ def test_dependencies_settle_then_nothing_across_boards():
     assert set(p["t2"].blocked_by) == {"outside", "g1", "t1"}
     assert set(p["g1"].blocked_by) == {"t2", "t1"}
     assert set(boards[OTHER].cards[0].after) == {(NAME, "bbbb1"), (NAME, "aaaa1")}
+
+
+# -- dependencies by title -------------------------------------------------------------------
+
+
+def _titled(titles, *, after=(), blocked=(), deps=None, extra_cards=(), extra_tasks=(), extra_rows=()):
+    b = sboard(
+        scard("Сначала", "aaaa1"),
+        scard("Потом", "bbbb1", after=after, titles=titles),
+        scard("Третья", "cccc1"),
+        *extra_cards,
+    )
+    p = planner(dtask("t1", "Сначала"), dtask("t2", "Потом", blocked=blocked), dtask("t3", "Третья"), *extra_tasks)
+    rows = [drow("aaaa1", "t1", "Сначала"), drow("bbbb1", "t2", "Потом", deps), drow("cccc1", "t3", "Третья"), *extra_rows]
+    return b, p, rows
+
+
+def test_a_title_resolves_to_a_card_on_the_same_board_and_the_line_becomes_links():
+    b, p, rows = _titled(["  сначала "], after=[(NAME, "cccc1")])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [
+        {"board": NAME, "id": "cccc1", "label": "Третья"},
+        {"board": NAME, "id": "aaaa1", "label": "Сначала"},
+    ]}]
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t1", "t3"))]
+    assert plan.counts.skipped == 0
+
+
+def test_a_resolved_title_is_rewritten_even_when_nothing_else_changes():
+    b, p, rows = _titled(["Сначала"], blocked=["t1"], deps=["t1"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": NAME, "id": "aaaa1", "label": "Сначала"}]}]
+    assert plan.calls == []
+
+
+def test_titles_are_canonicalised_then_the_pass_is_idle():
+    b, p, rows = _titled(["Сначала", "ТРЕТЬЯ"])
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    assert len(plan.ops) == 1
+    assert b.cards[1].after == ((NAME, "aaaa1"), (NAME, "cccc1")) and b.cards[1].after_titles == ()
+    assert p["t2"].blocked_by == ("t1", "t3")
+    again = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert again.units == [] and again.counts.skipped == 0
+
+
+def test_a_title_on_the_own_board_wins_over_one_elsewhere():
+    work, p, rows = _titled(["Купить краску"], extra_cards=[scard("Купить краску", "dddd1")],
+                            extra_tasks=[dtask("t4", "Купить краску")], extra_rows=[drow("dddd1", "t4", "Купить краску")])
+    general = sboard(scard("Купить краску", "gen01"), name=OTHER)
+    p["g1"] = dtask("g1", "Купить краску", tags=("general",))
+    sides = [dside(work, p, rows), dside(general, p, [drow("gen01", "g1", "Купить краску")], tag="general")]
+    plan = deps_plan(sides, p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": NAME, "id": "dddd1", "label": "Купить краску"}]}]
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t4",))]
+
+
+def test_a_title_resolves_across_boards_when_the_own_board_has_none():
+    work, p, rows = _titled(["Купить краску"])
+    general = sboard(scard("Купить краску", "gen01"), name=OTHER)
+    p["g1"] = dtask("g1", "Купить краску", tags=("general",))
+    sides = [dside(work, p, rows), dside(general, p, [drow("gen01", "g1", "Купить краску")], tag="general")]
+    plan = deps_plan(sides, p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": OTHER, "id": "gen01", "label": "Купить краску"}]}]
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("g1",))]
+
+
+def test_an_unpaired_card_or_one_on_a_board_not_read_is_no_match():
+    # An unpaired card of that title, and the general board not read.
+    work, p, rows = _titled(["Купить краску"], extra_cards=[scard("Купить краску", "dddd1")])
+    plan = deps_plan([dside(work, p, rows)], p)[NAME]
+    assert plan.ops == [] and plan.calls == [] and plan.counts.skipped == 1
+
+
+@pytest.mark.parametrize("where", ["own", "other"])
+def test_an_ambiguous_title_leaves_the_line_unwritten(where):
+    dup = scard("Сначала", "dddd1")
+    if where == "own":
+        work, p, rows = _titled(["Сначала"], after=[(NAME, "cccc1")], extra_cards=[dup],
+                                extra_tasks=[dtask("t4", "Сначала")], extra_rows=[drow("dddd1", "t4", "Сначала")])
+        sides = [dside(work, p, rows)]
+    else:
+        # None on the own board but one on each of two others.
+        work = sboard(scard("Потом", "bbbb1", after=[(NAME, "cccc1")], titles=["Купить"]), scard("Третья", "cccc1"))
+        p = planner(dtask("t2", "Потом"), dtask("t3", "Третья"),
+                    dtask("g1", "Купить", tags=("general",)), dtask("h1", "Купить", tags=("home",)))
+        rows = [drow("bbbb1", "t2", "Потом"), drow("cccc1", "t3", "Третья")]
+        sides = [
+            dside(work, p, rows),
+            dside(sboard(scard("Купить", "gen01"), name=OTHER), p, [drow("gen01", "g1", "Купить")], tag="general"),
+            dside(sboard(scard("Купить", "hom01"), name="Home.md"), p, [drow("hom01", "h1", "Купить")], tag="home"),
+        ]
+    plan = deps_plan(sides, p)[NAME]
+    # Unwritable, like a line with other text: the links still reach the
+    # planner, the line is not touched, the card is skipped.
+    assert plan.ops == []
+    assert plan.calls == [bs.Call("blocked_by", "t2", ("t3",))]
+    assert plan.counts.skipped == 1
+
+
+def test_a_title_found_nowhere_is_unwritable_and_the_found_part_still_flows():
+    b, p, rows = _titled(["Сначала", "Нет такой"])
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    assert plan.ops == [] and plan.calls == [bs.Call("blocked_by", "t2", ("t1",))]
+    assert plan.counts.skipped == 1
+    assert b.cards[1].after_titles == ("Сначала", "Нет такой")
+    # Settled: nothing sent again, still skipped each pass.
+    again = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert again.units == [] and again.counts.skipped == 1
+    # The user fixes the title: the line is written as links, then idle.
+    b = bs.replace(b, cards=(b.cards[0], bs.replace(b.cards[1], after_titles=("Сначала", "Третья")), b.cards[2]))
+    b, p, rows, plan = _deps_pass(b, p, rows)
+    assert [link["id"] for link in plan.ops[0]["links"]] == ["aaaa1", "cccc1"]
+    assert p["t2"].blocked_by == ("t1", "t3")
+    assert deps_plan([dside(b, p, rows)], p)[NAME].units == []
+
+
+def test_a_title_naming_the_card_itself_is_not_a_match():
+    b, p, rows = _titled(["Потом"])
+    plan = deps_plan([dside(b, p, rows)], p)[NAME]
+    assert plan.ops == [] and plan.calls == [] and plan.counts.skipped == 1
+    # Another card of that title elsewhere is the one it names.
+    general = sboard(scard("Потом", "gen01"), name=OTHER)
+    p["g1"] = dtask("g1", "Потом", tags=("general",))
+    sides = [dside(b, p, rows), dside(general, p, [drow("gen01", "g1", "Потом")], tag="general")]
+    plan = deps_plan(sides, p)[NAME]
+    assert plan.ops == [{"op": "after_set", "id": "bbbb1", "links": [{"board": OTHER, "id": "gen01", "label": "Потом"}]}]

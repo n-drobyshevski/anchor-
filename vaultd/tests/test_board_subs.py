@@ -10,7 +10,9 @@ Pinned here:
   the board's own indent style, and refuses anything malformed, all or
   nothing;
 - checking and removing a card moves or removes its subtasks with it;
-- the read carries subtasks and links only when asked (`?subs=1`).
+- the read carries subtasks and links only when asked (`?subs=1`), and
+  the `after:` line's plain titles only when asked as well (`&titles=1`;
+  without it a title counts as `after_raw_extra`, the old shape);
 
 Every board here is synthetic.
 """
@@ -81,9 +83,14 @@ def apply(ops, board: str = BOARD, *, name: str | None = NAME) -> str:
     return boards.apply(board.encode(), ops, name=name, named=NAMED).decode()
 
 
-def card(text: str, block_id: str) -> dict:
-    seen = boards.describe(boards.parse(text.encode()), name=NAME, subs=True)
+def card(text: str, block_id: str, *, titles: bool = False) -> dict:
+    seen = boards.describe(boards.parse(text.encode()), name=NAME, subs=True, titles=titles)
     return next(c for c in seen["cards"] if c["id"] == block_id)
+
+
+def with_after(line: str, board: str = BOARD) -> str:
+    """BOARD with card02's `after:` line replaced by `line` (indent included)."""
+    return board.replace("    after: [[#^card01|Plan the trip]], [[General tasks#^gen001|Buy soil]]", line)
 
 
 def subs(text: str, block_id: str) -> list[tuple]:
@@ -164,6 +171,45 @@ def test_after_variants_and_extra_text():
     assert second["after_raw_extra"] is True
     deeper = BOARD.replace("    after: [[#", "        after: [[#")
     assert card(deeper, "card02")["after"] == []
+
+
+def test_after_titles_mixed_with_links():
+    board = with_after("    after: Wiz MCP integration, [[#^card01|Plan, the trip]], Buy soil ,[[General tasks#^gen001]]")
+    second = card(board, "card02", titles=True)
+    assert second["after"] == [{"board": NAME, "id": "card01"}, {"board": OTHER, "id": "gen001"}]
+    assert second["after_titles"] == ["Wiz MCP integration", "Buy soil"]
+    assert second["after_raw_extra"] is False
+    # A card with no `after:` line, or one of links only, has no titles.
+    assert card(BOARD, "card02", titles=True)["after_titles"] == []
+    assert card(BOARD, "card01", titles=True)["after_titles"] == []
+
+
+@pytest.mark.parametrize("unit", ["    ", "\t"], ids=["spaces", "tabs"])
+def test_after_titles_are_stripped_in_either_indent(unit):
+    board = BOARD if unit == "    " else TABBED
+    old = f"{unit}after: [[#^card01|Plan the trip]], [[General tasks#^gen001|Buy soil]]"
+    assert old in board
+    second = card(board.replace(old, f"{unit}after:\t  Wiz MCP ,   ,\tBuy soil\t"), "card02", titles=True)
+    assert second["after_titles"] == ["Wiz MCP", "Buy soil"]
+    assert second["after"] == [] and second["after_raw_extra"] is False
+
+
+@pytest.mark.parametrize(
+    "segment",
+    ["a ] b", "a | b", "a [ b", "half [[#^card01", "ends ^blockid", "due @{2026-11-14}", "a %% comment", "in\x07side", "x" * 501],
+)
+def test_after_titles_with_forbidden_text_are_extra(segment):
+    second = card(with_after(f"    after: Buy soil, {segment}"), "card02", titles=True)
+    assert second["after_raw_extra"] is True
+    assert second["after_titles"] == ["Buy soil"]
+
+
+def test_after_titles_without_asking_read_as_extra():
+    board = with_after("    after: Wiz MCP, [[#^card01|Plan the trip]]")
+    second = card(board, "card02")
+    assert "after_titles" not in second
+    assert second["after"] == [{"board": NAME, "id": "card01"}]
+    assert second["after_raw_extra"] is True
 
 
 def test_the_indent_style_is_the_boards():
@@ -341,6 +387,25 @@ def test_after_set_drops_extra_text_only_when_it_rewrites():
     assert "(maybe)" not in rewritten and card(rewritten, "card02")["after_raw_extra"] is False
 
 
+def test_a_titles_line_round_trips_and_after_set_writes_only_links():
+    board = with_after("    after: Wiz MCP, [[#^card01|Plan the trip]],  Buy soil ")
+    # Another op leaves the titles line byte for byte.
+    other = apply([{"op": "sub_add", "card": "card02", "id": "new00001", "text": "x", "checked": False}], board)
+    assert changed_lines(board, other) == ([], ["    - [ ] x ^new00001\n"])
+    links = [
+        {"board": NAME, "id": "card03", "label": "Wiz MCP"},
+        {"board": NAME, "id": "card01", "label": "Plan the trip"},
+        {"board": OTHER, "id": "gen001", "label": "Buy soil"},
+    ]
+    rewritten = apply([{"op": "after_set", "id": "card02", "links": links}], board)
+    assert changed_lines(board, rewritten)[1] == [
+        "    after: [[#^card03|Wiz MCP]], [[#^card01|Plan the trip]], [[General tasks#^gen001|Buy soil]]\n"
+    ]
+    second = card(rewritten, "card02", titles=True)
+    assert second["after_titles"] == [] and second["after_raw_extra"] is False
+    assert second["after"] == [{"board": NAME, "id": "card03"}, {"board": NAME, "id": "card01"}, {"board": OTHER, "id": "gen001"}]
+
+
 def _link(**kw):
     return {"board": OTHER, "id": "gen001", "label": "Buy soil", **kw}
 
@@ -474,6 +539,22 @@ async def test_get_carries_subtasks_only_when_asked(client, base):
     assert first["subs"][1] == {"n": 1, "id": "sub002", "depth": 1, "text": "Book the train", "checked": False, "date": "2026-11-17"}
     assert second["after"] == [{"board": NAME, "id": "card01"}, {"board": OTHER, "id": "gen001"}]
     assert second["after_raw_extra"] is False
+    assert "after_titles" not in second
+    titled = (await (await client.get("/v1/boards", params={"subs": "1", "titles": "1"}, headers=AUTH)).json())["boards"][0]
+    assert titled["cards"][1]["after_titles"] == [] and titled["cards"][0]["after_titles"] == []
+    # `titles` alone is not `subs`.
+    alone = (await (await client.get("/v1/boards", params={"titles": "1"}, headers=AUTH)).json())["boards"][0]
+    assert set(alone["cards"][0]) == {"n", "id", "lane", "text", "checked", "date"}
+
+
+async def test_get_reports_titles_only_when_asked(client, vault: Path, base):
+    write(vault, NAME, with_after("    after: Wiz MCP, [[#^card01|Plan the trip]]"))
+    old = (await (await client.get("/v1/boards", params={"subs": "1"}, headers=AUTH)).json())["boards"][0]["cards"][1]
+    assert set(old) == {"n", "id", "lane", "text", "checked", "date", "subs", "after", "after_raw_extra"}
+    assert old["after_raw_extra"] is True
+    new = (await (await client.get("/v1/boards", params={"subs": "1", "titles": "1"}, headers=AUTH)).json())["boards"][0]["cards"][1]
+    assert new["after_titles"] == ["Wiz MCP"] and new["after_raw_extra"] is False
+    assert new["after"] == [{"board": NAME, "id": "card01"}]
 
 
 async def test_post_links_only_to_named_boards(client, vault: Path, base):
