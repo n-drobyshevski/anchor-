@@ -325,6 +325,9 @@ class TaskBoard:
     done_lane: bool = False
     dates: bool = False
     cards: tuple[BoardCard, ...] = ()
+    # When the file last changed (epoch seconds), from a vaultd that
+    # reports it; None when unknown.
+    modified: int | None = None
 
 
 @dataclass(frozen=True)
@@ -410,9 +413,12 @@ def _task_board(item: Any) -> TaskBoard:
     if state != "ok":
         _require(set(item) == {"name", "state"})
         return TaskBoard(name=name, state=state)
-    _require(set(item) == {"name", "state", "sha256", "lanes", "done_lane", "dates", "cards"})
+    keys = {"name", "state", "sha256", "lanes", "done_lane", "dates", "cards"}
+    _require(set(item) in (keys, keys | {"modified"}))
     done_lane, dates, cards = item["done_lane"], item["dates"], item["cards"]
     _require(isinstance(done_lane, bool) and isinstance(dates, bool) and isinstance(cards, list))
+    modified = item.get("modified")
+    _require(modified is None or (isinstance(modified, int) and not isinstance(modified, bool) and modified >= 0))
     return TaskBoard(
         name=name,
         state=state,
@@ -421,6 +427,7 @@ def _task_board(item: Any) -> TaskBoard:
         done_lane=done_lane,
         dates=dates,
         cards=tuple(_board_card(card, i) for i, card in enumerate(cards)),
+        modified=modified,
     )
 
 
@@ -914,7 +921,10 @@ class VaultClient:
         for each card's subtasks and `after:` links and titles
         (`?subs=1&titles=1`); a card in the old shape still parses, with
         `subs_known` false, and one without `after_titles` with none."""
-        data = await self._request("GET", "/v1/boards", params={"subs": "1", "titles": "1"} if subs else None)
+        params = {"modified": "1"}
+        if subs:
+            params |= {"subs": "1", "titles": "1"}
+        data = await self._request("GET", "/v1/boards", params=params)
         _require(set(data) == {"boards"} and isinstance(data["boards"], list))
         boards = [_task_board(item) for item in data["boards"]]
         _require(len({b.name for b in boards}) == len(boards))

@@ -175,6 +175,34 @@ def stays_under(root: Path, rel: str) -> bool:
     return os.path.commonpath([real_root, real]) == real_root
 
 
+def modified_at(root: Path, rel: str) -> float | None:
+    """A vault file's modification time (epoch seconds), or None if any
+    part of it is absent. Same refusals as `read_file`."""
+    if not stays_under(root, rel):
+        raise Refused
+    parts = rel.split("/")
+    with open_root(root) as root_fd:
+        dir_fd = open_dir(root_fd, parts[:-1])
+        if dir_fd is None:
+            return None
+        try:
+            try:
+                fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=dir_fd)
+            except FileNotFoundError:
+                return None
+            except OSError:
+                raise Refused from None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise Refused
+                return info.st_mtime
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+
+
 def read_file(root: Path, rel: str) -> bytes | None:
     """Read a vault file by relative path; None if any part of it is absent."""
     if not stays_under(root, rel):

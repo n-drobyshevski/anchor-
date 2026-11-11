@@ -566,3 +566,15 @@ async def test_post_links_only_to_named_boards(client, vault: Path, base):
     resp = await client.post("/v1/boards", json={"name": NAME, "if_sha256": sha, "ops": good, "changeset": "boards_a"}, headers=AUTH)
     assert resp.status == 200
     assert "- [ ] Plain card ^card03\n    after: [[General tasks#^abcd1234|Soil]]\n" in (vault / NAME).read_text()
+
+
+async def test_get_reports_the_file_time_only_when_asked(client, vault: Path, base):
+    import os
+
+    os.utime(vault / NAME, (1_800_000_000, 1_800_000_000))
+    plain = (await (await client.get("/v1/boards", headers=AUTH)).json())["boards"][0]
+    assert "modified" not in plain
+    asked = (await (await client.get("/v1/boards", params={"modified": "1"}, headers=AUTH)).json())["boards"][0]
+    assert asked["modified"] == 1_800_000_000
+    both = (await (await client.get("/v1/boards", params={"modified": "1", "subs": "1"}, headers=AUTH)).json())["boards"][0]
+    assert both["modified"] == 1_800_000_000 and "subs" in both["cards"][0]

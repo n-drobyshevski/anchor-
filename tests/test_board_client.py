@@ -127,7 +127,7 @@ async def test_get_boards_with_subs_asks_for_them_and_parses_them(stub):
     assert first.after == (("General tasks.md", "gen1"), ("Work tasks.md", "abcd2"))
     assert first.after_raw_extra is True and first.subs_known is True
     assert (second.subs, second.after, second.subs_known) == ((), (), True)
-    assert stub.requests[-1].query == {"subs": "1", "titles": "1"}
+    assert stub.requests[-1].query == {"subs": "1", "titles": "1", "modified": "1"}
     # Without `after_titles` (a vaultd from before titles): none.
     assert first.after_titles == () and second.after_titles == ()
 
@@ -149,7 +149,7 @@ async def test_get_boards_from_an_older_vaultd_says_subtasks_are_unknown(stub):
     (board,) = await _client(stub).get_boards(subs=True)
     assert all(not c.subs_known and c.subs == () for c in board.cards)
     (board,) = await _client(stub).get_boards()
-    assert stub.requests[-1].query == {}
+    assert stub.requests[-1].query == {"modified": "1"}
 
 
 @pytest.mark.parametrize(
@@ -377,3 +377,21 @@ def test_json_roundtrip_of_ops_is_plain():
     """The batch is plain JSON: nothing in an op is a Python-only type."""
     ops = [{"op": "add", "id": "abcd1234", "text": "Т", "date": "2026-11-12"}]
     assert json.loads(json.dumps(ops)) == ops
+
+
+async def test_get_boards_asks_for_the_file_time_and_parses_it(stub):
+    item = _board()
+    item["modified"] = 1_800_000_000
+    stub.respond("GET", "/v1/boards", 200, {"boards": [item]})
+    (board,) = await _client(stub).get_boards()
+    assert board.modified == 1_800_000_000
+    assert stub.requests[-1].query == {"modified": "1"}
+
+
+@pytest.mark.parametrize("bad", ["1", -1, 1.5, True])
+async def test_get_boards_refuses_a_bad_file_time(stub, bad):
+    item = _board()
+    item["modified"] = bad
+    stub.respond("GET", "/v1/boards", 200, {"boards": [item]})
+    with pytest.raises(Exception):
+        await _client(stub).get_boards()

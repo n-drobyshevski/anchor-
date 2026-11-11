@@ -4398,6 +4398,20 @@ planner and menu test files).
   reported as held in `/boards`, the preview and the run row. `/boards now`
   runs without the guard, because a person asked for that board to be brought
   in step; the background pass and the preview always keep it.
+- **Hands off a board while it is being edited.** The bot writes to the
+  server's copy of the vault, which Obsidian Sync keeps in step with the
+  user's devices. A write landing while the user is mid-edit (Kanban
+  Starlane holding the board open, or an edit not yet synced) raced it:
+  the reported symptom was a card moved between lanes snapping back.
+  vaultd now reports each board's file time (`GET /v1/boards?modified=1`,
+  an opt-in key so an older bot is unaffected), and a board changed less
+  than `BOARD_SYNC_QUIET_S` (180 s) ago gets no write that pass: units
+  that only update the planner (a card's own change going up) still run,
+  every unit with a board op or a create waits, and the board's run is
+  recorded as `busy` with those units counted as waiting. vaultd's
+  `board_write` log line now carries the op kinds and counts (`ops`:
+  `tag:1,text:2`), a fixed vocabulary, so a write can be explained from
+  the logs without reading the board.
 - **Manual pass from the planner.** The planner's MCP app has a "Sync with
   Obsidian" button (its app-only `sync_boards` tool), which calls
   `POST /planner/board-sync` (app/web/board_sync_trigger.py) and queues a pass
