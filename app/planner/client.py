@@ -49,6 +49,11 @@ CLIENT_INFO = {"name": "anchor", "version": "1.0"}
 # planner therefore costs one job retry, not a delayed reply.
 _TIMEOUT = aiohttp.ClientTimeout(total=5)
 
+# A task's state as the planner's `list_tasks` rows and `update_task`
+# carry it (board sync: a card's lane, by role). `done` is the same as
+# the row's `done`.
+TASK_STATES = ("planned", "wip", "done")
+
 # Plan section 2.3 left out every update and delete tool. The reason was
 # update_event: it can edit the partner's own joint events (design
 # review, table 1), and in P2-P4 nothing needed to change an item once
@@ -58,9 +63,10 @@ _TIMEOUT = aiohttp.ClientTimeout(total=5)
 # Board sync (app/planner/board_job.py) needs one: keeping a board card
 # and a planner task in step means carrying a renamed card's title, a
 # moved due date and a removed board tag to the task, and a card's
-# `after:` line to the task's blockers (`blockedBy`, the whole set). So
-# update_task is allowed now, and only through `update_task` below, which
-# can send nothing but a task's title, due date, tags and blockers; and
+# `after:` line to the task's blockers (`blockedBy`, the whole set), and
+# the card's lane (by role) to the task's state. So update_task is allowed
+# now, and only through `update_task` below, which can send nothing but a
+# task's title, due date, tags, blockers and state; and
 # the board job only ever calls it on tasks it read with
 # `list_tasks(mine=True)`, the user's own, subtasks included (the
 # planner's `update_task` is RLS-scoped, but RLS lets a member edit the
@@ -468,12 +474,14 @@ class PlannerClient:
         due_date: str | None | object = UNSET,
         tags: list[str] | None = None,
         blocked_by: list[str] | None = None,
+        state: str | None = None,
     ) -> dict:
         """Change a task's title, due date (None clears it), tags (the
-        whole list) or blockers (`blocked_by`, the whole set; None leaves
-        them), and nothing else: there is no argument here for any other
-        field update_task accepts (ALLOWED_TOOLS' comment). Blockers that
-        would make a cycle are PlannerToolRefused."""
+        whole list), blockers (`blocked_by`, the whole set; None leaves
+        them) or state (`planned`, `wip` or `done`; None leaves it: a
+        card's lane, by role), and nothing else: there is no argument here
+        for any other field update_task accepts (ALLOWED_TOOLS' comment).
+        Blockers that would make a cycle are PlannerToolRefused."""
         arguments: dict[str, Any] = {"id": task_id}
         if title is not None:
             arguments["title"] = title
@@ -483,6 +491,10 @@ class PlannerClient:
             arguments["tags"] = list(tags)
         if blocked_by is not None:
             arguments["blockedBy"] = list(blocked_by)
+        if state is not None:
+            if state not in TASK_STATES:
+                raise ValueError(f"not a task state: {state}")
+            arguments["state"] = state
         if len(arguments) == 1:
             raise ValueError("update_task needs a field to change")
         return await self.call_tool(settings, session, clock, "update_task", arguments)
@@ -500,5 +512,6 @@ __all__ = [
     "PlannerUnavailable",
     "PlannerToolError",
     "PlannerToolRefused",
+    "TASK_STATES",
     "build_planner_client",
 ]

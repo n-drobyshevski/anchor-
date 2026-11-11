@@ -127,9 +127,43 @@ async def test_get_boards_with_subs_asks_for_them_and_parses_them(stub):
     assert first.after == (("General tasks.md", "gen1"), ("Work tasks.md", "abcd2"))
     assert first.after_raw_extra is True and first.subs_known is True
     assert (second.subs, second.after, second.subs_known) == ((), (), True)
-    assert stub.requests[-1].query == {"subs": "1", "titles": "1", "modified": "1"}
+    assert stub.requests[-1].query == {"subs": "1", "titles": "1", "lanes": "1", "modified": "1"}
     # Without `after_titles` (a vaultd from before titles): none.
     assert first.after_titles == () and second.after_titles == ()
+
+
+async def test_get_boards_reads_the_done_lane_title_when_present(stub):
+    named = _board(lanes=["Todo", "Doing", "Done"], done_lane_title="Done", lane_complete=[False, False, True])
+    plain = _board(name="General tasks.md", lanes=["A", "B"], done_lane=False, done_lane_title=None, lane_complete=[False, False])
+    stub.respond("GET", "/v1/boards", 200, {"boards": [named, plain]})
+    first, second = await _client(stub).get_boards(subs=True)
+    assert (first.done_lane_title, first.lane_complete, first.lanes_known) == ("Done", (False, False, True), True)
+    assert (second.done_lane_title, second.lane_complete, second.lanes_known) == (None, (False, False), True)
+    # An older vaultd, without the key: the done lane is not known by name.
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board()]})
+    (old,) = await _client(stub).get_boards(subs=True)
+    assert (old.done_lane_title, old.lanes_known) == (None, False)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"done_lane_title": "Nowhere", "lane_complete": [False, True]},  # not one of the lanes
+        {"done_lane_title": None, "lane_complete": [False, True]},  # the board says it has a done lane
+        {"done_lane_title": 1, "lane_complete": [False, True]},
+        {"done_lane": False, "done_lane_title": "Done", "lane_complete": [False, True]},
+        {"done_lane_title": "Todo", "lane_complete": [False, True]},  # not the first complete lane
+        {"done_lane_title": "Done", "lane_complete": [True]},  # not one flag per lane
+        {"done_lane_title": "Done", "lane_complete": [0, 1]},
+        {"done_lane_title": "Done", "lane_complete": [False, False]},
+        {"done_lane_title": "Done"},  # one without the other
+        {"lane_complete": [False, True]},
+    ],
+)
+async def test_a_done_lane_title_that_does_not_fit_is_a_bad_response(stub, extra):
+    stub.respond("GET", "/v1/boards", 200, {"boards": [_board(**extra)]})
+    with pytest.raises(VaultError):
+        await _client(stub).get_boards(subs=True)
 
 
 async def test_get_boards_reads_after_titles_when_present(stub):
@@ -296,6 +330,22 @@ async def test_update_task_sends_blockers_as_the_whole_set_or_not_at_all():
     ]
 
 
+async def test_update_task_sends_a_state_only_when_given_and_only_a_known_one():
+    client = _Recorder()
+    await client.update_task(None, None, None, task_id="t1", state="wip")
+    await client.update_task(None, None, None, task_id="t1", state="planned")
+    await client.update_task(None, None, None, task_id="t1", title="Т", state=None)
+    assert client.calls == [
+        ("update_task", {"id": "t1", "state": "wip"}),
+        ("update_task", {"id": "t1", "state": "planned"}),
+        ("update_task", {"id": "t1", "title": "Т"}),
+    ]
+    with pytest.raises(ValueError):
+        await client.update_task(None, None, None, task_id="t1", state="blocked")
+    with pytest.raises(ValueError):
+        await client.update_task(None, None, None, task_id="t1", state=None)
+
+
 async def test_create_task_sends_a_parent_and_blockers_only_when_given():
     client = _Recorder()
     await client.create_task(None, None, None, title="A", due_date=None, client_request_id="r1", tags=["work"])
@@ -335,7 +385,7 @@ def test_update_task_cannot_send_any_other_field():
     import inspect
 
     params = set(inspect.signature(PlannerClient.update_task).parameters)
-    assert params == {"self", "settings", "session", "clock", "task_id", "title", "due_date", "tags", "blocked_by"}
+    assert params == {"self", "settings", "session", "clock", "task_id", "title", "due_date", "tags", "blocked_by", "state"}
     params = set(inspect.signature(PlannerClient.create_task).parameters)
     assert params == {
         "self", "settings", "session", "clock", "title", "due_date", "client_request_id", "tags", "parent_id", "blocked_by"

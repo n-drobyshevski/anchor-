@@ -3069,7 +3069,10 @@ class BoardPair(Base):
     the first pass that compared them). `deps_card` is null while the
     card's line shows `deps`; when the line could not be written, the
     task ids it resolved to as last read, so its own changes are read
-    against that (app/planner/board_sync.py, "Dependencies"). Written only
+    against that (app/planner/board_sync.py, "Dependencies"). `state` is
+    the task's state as last synced (`planned`, `wip`, `done`: the card's
+    lane by role, app/planner/board_sync.py, "Lanes by role"), null until
+    a pass compared states; `done` is kept in step with it. Written only
     by app/planner/board_job.py, after the board write succeeded.
     """
 
@@ -3085,6 +3088,7 @@ class BoardPair(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'ok'"))
     deps: Mapped[list | None] = mapped_column(JSONB)
     deps_card: Mapped[list | None] = mapped_column(JSONB)
+    state: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -3094,6 +3098,7 @@ class BoardPair(Base):
         # The plugin's block ids (vaultd/vaultd/boards.py's `_BLOCK_ID_RE`).
         CheckConstraint("block_id ~ '^[A-Za-z0-9-]{1,64}$'", name="ck_board_pair_block_id"),
         CheckConstraint("status in ('ok', 'held')", name="ck_board_pair_status"),
+        CheckConstraint("state in ('planned', 'wip', 'done')", name="ck_board_pair_state"),
     )
 
 
@@ -3173,6 +3178,8 @@ class BoardSyncRun(Base):
     subs_detached: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     deps_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     subs_paired: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    states_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    states_held: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(

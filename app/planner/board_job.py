@@ -25,23 +25,31 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
    a task adopted by one board is not offered to the next. A board read
    from an older vaultd (no subtasks in the answer), or a pass whose
    planner rows carry no `position` (an older planner), leaves subtasks
-   and dependencies alone and syncs cards as before.
+   and dependencies alone and syncs cards as before. Lanes by role (a
+   card's lane as its task's state, board_sync's "Lanes by role") need
+   both sides too: a pass whose planner rows carry no `state`, or a board
+   from a vaultd that does not name its done lane, syncs done and open
+   only, as before.
 2. Per board: the planner creates, tasks first, then subtasks (each
    under a task that already had a pair; idempotent by
    `clientRequestId`, so a pass that dies after one and before the board
-   write gets the same task back next time, or pairs it by title).
+   write gets the same task back next time, or pairs it by title). A
+   task made for a card in an in-progress lane gets its state right
+   after its create.
 3. `POST /v1/boards` with the board's batch, under the pass's one fresh
    changeset (`boards_...`). A 409 (the user typed, Sync landed) changes
    nothing more for that board this pass; the next pass reads it again.
 4. Pairs whose unit needs no planner call are committed now.
-5. The planner updates (title, due, done, untag, tag, blockers), each
+5. The planner updates (title, due, done, state, untag, tag, blockers), each
    unit's rows committed only once its calls succeeded: a row never
    records a value the planner has not taken, so a lost call is retried,
    never reverted. Blockers the planner refuses (a cycle) are counted as
    a conflict and skipped, and their snapshot stored as planned: the next
    pass reads the planner as having moved and writes its set back to the
    card, so a loop's link put on the card by this pass's write comes off
-   again instead of being retried forever.
+   again instead of being retried forever. A state it refuses (no column
+   of that role for the task) is handled the same way: the card goes
+   back to a lane of the planner's state on the next pass.
 
 A planner or vault failure aborts the pass quietly: logged by event name
 only, recorded as an outcome in `board_sync_run`, never retried by the
@@ -75,7 +83,12 @@ from app.planner import auth as planner_auth
 from app.planner import board_sync
 from app.planner.auth import PlannerAuthError
 from app.planner.board_sync import Counts, Plan
-from app.planner.client import PlannerToolError, PlannerToolRefused, PlannerUnavailable
+from app.planner.client import (
+    TASK_STATES,
+    PlannerToolError,
+    PlannerToolRefused,
+    PlannerUnavailable,
+)
 from app.vault.client import TaskBoard
 from app.vault.errors import VaultError
 
@@ -223,6 +236,10 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
             blocked = []
         if not (isinstance(blocked, list) and all(isinstance(b, str) and b for b in blocked)):
             raise PlannerToolError("list_tasks: malformed blockers")
+        # Optional: a planner from before states sends none (`knows_states`).
+        state = item.get("state")
+        if "state" in item and state not in TASK_STATES:
+            raise PlannerToolError("list_tasks: malformed state")
         if task_id in seen:
             raise PlannerToolError("list_tasks: a task twice")
         seen.add(task_id)
@@ -235,6 +252,7 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
             parent_id=parent,
             position=float(position),
             blocked_by=tuple(dict.fromkeys(blocked)),
+            state=state,
         )
         out.append((task, parent))
     return out
@@ -242,8 +260,9 @@ def _read_rows(raw: object) -> list[tuple[board_sync.Task, str | None]]:
 
 def untagged_of(tasks: list[board_sync.Task]) -> list[board_sync.Task]:
     """The tasks a card may adopt (`parse_all`'s answer cut down):
-    top-level, open, with no tag at all."""
-    return [task for task in tasks if task.parent_id is None and not task.done and not task.tags]
+    top-level, open (done read as board_sync's `is_done` reads it: a task
+    in the planner's done column is done), with no tag at all."""
+    return [task for task in tasks if task.parent_id is None and not board_sync.is_done(task) and not task.tags]
 
 
 def knows_subtasks(raw: object) -> bool:
@@ -254,6 +273,14 @@ def knows_subtasks(raw: object) -> bool:
     subtasks and dependencies alone, as with an older vaultd."""
     rows = raw.get("tasks") if isinstance(raw, dict) else None
     return isinstance(rows, list) and all(isinstance(r, dict) and "position" in r for r in rows)
+
+
+def knows_states(raw: object) -> bool:
+    """Whether the planner that answered `list_tasks` is one with task
+    states: every row carries `state`. With an older one a pass syncs
+    done and open only, as before (board_sync, "Lanes by role")."""
+    rows = raw.get("tasks") if isinstance(raw, dict) else None
+    return isinstance(rows, list) and all(isinstance(r, dict) and "state" in r for r in rows)
 
 
 def parse_all(raw: object) -> list[board_sync.Task]:
@@ -297,7 +324,15 @@ def as_board(board: TaskBoard) -> board_sync.Board:
     # An older vaultd answers without subtasks: unknown, not "none".
     subs_known = all(c.subs_known for c in board.cards)
     return board_sync.Board(
-        name=board.name, dates=board.dates, cards=cards, sha256=board.sha256 or "", subs_known=subs_known,
+        name=board.name,
+        dates=board.dates,
+        cards=cards,
+        sha256=board.sha256 or "",
+        subs_known=subs_known,
+        lanes=board.lanes,
+        done_lane_title=board.done_lane_title,
+        lane_complete=board.lane_complete,
+        lanes_known=board.lanes_known,
         modified=board.modified,
     )
 
@@ -314,6 +349,7 @@ async def load_rows(session: AsyncSession, board: str) -> list[board_sync.Row]:
             status=r.status,
             deps=tuple(r.deps) if r.deps is not None else None,
             deps_card=tuple(r.deps_card) if r.deps_card is not None else None,
+            state=r.state,
         )
         for r in rows
     ]
@@ -369,6 +405,7 @@ async def _apply_row(
     existing.done = change.done
     existing.due = due
     existing.status = change.status
+    existing.state = change.state
     existing.updated_at = now
     await session.flush()
 
@@ -465,15 +502,12 @@ async def run_pass(
         if not dry_run:
             changeset = echo_write.new_boards_ref()
             for tag, board, plan in plans:
-                outcome = await _carry_out(session, settings, planner, vault, clock, tag, board, plan, changeset)
                 # A board that changed under the pass did none of it; a busy
-                # one did only its planner side, and the rest waits.
-                if outcome == OK:
-                    counts = plan.counts
-                elif outcome == BUSY:
-                    counts = Counts(waiting=sum(1 for u in plan.units if _writes_board(u)))
-                else:
-                    counts = Counts()
+                # one did only its planner side (counted as such), and the
+                # rest waits.
+                outcome, counts = await _carry_out(
+                    session, settings, planner, vault, clock, tag, board, plan, changeset
+                )
                 result.boards.append(BoardResult(board.name, outcome, counts))
                 session.add(_run_row(now, board.name, outcome, counts))
                 await session.commit()
@@ -517,7 +551,7 @@ async def _read_and_plan(
     plans = []
     every: list[board_sync.Task] | None = None
     untagged: list[board_sync.Task] = []
-    planner_subs = False
+    planner_subs = planner_states = False
     sides: list[board_sync.DepsSide] = []
     for board in sorted(mapped, key=lambda b: b.name):
         if board.state != "ok":
@@ -531,6 +565,7 @@ async def _read_and_plan(
             every = parse_all(raw)
             untagged = untagged_of(every)
             planner_subs = knows_subtasks(raw)
+            planner_states = knows_states(raw)
         tag = settings.BOARD_SYNC_TAGS[board.name]
         tasks = [t for t in every if t.parent_id is None and tag in t.tags]
         subtasks = [t for t in every if t.parent_id is not None]
@@ -549,6 +584,7 @@ async def _read_and_plan(
             untagged=untagged,
             subtasks=subtasks,
             sub_rows=sub_rows,
+            states=planner_states,
         )
         # One task, one board: what this board adopts is not offered to the next.
         taken = {call.task_id for call in plan.calls if call.kind == "tag"}
@@ -580,9 +616,11 @@ async def _carry_out(
     board: board_sync.Board,
     plan: Plan,
     changeset: str,
-) -> str:
-    """Steps 2-5 for one board. Returns its outcome; raises `_Abort` (or
-    a planner error) to stop the pass."""
+) -> tuple[str, Counts]:
+    """Steps 2-5 for one board. Returns its outcome and what it did (its
+    plan's counts; for a busy board, only the units that ran, and the
+    others as waiting; none for a board that changed under the pass);
+    raises `_Abort` (or a planner error) to stop the pass."""
     now = clock.now_utc()
     # The user edited this board moments ago (and may still be at it, with
     # Kanban Starlane holding it open): writing now would race their edit
@@ -591,9 +629,9 @@ async def _carry_out(
     # for a pass after the board has been quiet for BOARD_SYNC_QUIET_S.
     held = busy(board, now, settings)
     if held:
-        plan = Plan(board=board.name, units=[u for u in plan.units if not _writes_board(u)], counts=Counts())
+        plan = _busy_plan(plan)
         if not plan.units:
-            return BUSY
+            return BUSY, plan.counts
     known_tasks = {row.task_id for row in await load_rows(session, board.name)}
     known_tasks |= {row.task_id for row in await load_sub_rows(session, board.name)}
 
@@ -613,6 +651,8 @@ async def _carry_out(
         task_id = _created_id(answer)
         if create.done:
             await planner.complete_task(settings, session, clock, task_id=task_id, done=True)
+        # A wip card's state is a call of its unit (`CREATED_TASK`), made in
+        # step 5 for a unit that is kept, after the board write.
         created[create.block_id] = task_id
 
     # A create retried by its request id may answer with a task this pass
@@ -639,7 +679,7 @@ async def _carry_out(
     if ops:
         written = await echo_write.write_board(vault, board.name, board.sha256, ops, changeset)
         if written.outcome == echo_write.BOARD_CHANGED:
-            return CHANGED
+            return CHANGED, Counts()
         if written.outcome == echo_write.REFUSED:
             raise _Abort(REFUSED)
         if written.outcome != echo_write.OK:
@@ -656,11 +696,18 @@ async def _carry_out(
     for unit in kept.units:
         if not unit.calls:
             continue
+        task_id = created.get(unit.create.block_id) if unit.create is not None else None
         refused = False
         for call in unit.calls:
+            if call.task_id == board_sync.CREATED_TASK:
+                assert task_id is not None
+                call = replace(call, task_id=task_id)
             try:
                 await _call(planner, settings, session, clock, call)
             except PlannerToolRefused:
+                if call.kind == "state":
+                    _refused_state(plan.counts, unit)
+                    continue
                 if call.kind != "blocked_by":
                     raise
                 refused = True
@@ -675,9 +722,37 @@ async def _carry_out(
             plan.counts.conflicts += 1
             if not unit.ops:
                 plan.counts.deps_changed = max(0, plan.counts.deps_changed - 1)
-        await _apply_unit_rows(session, board.name, unit, None, now)
+        await _apply_unit_rows(session, board.name, unit, task_id, now)
         await session.commit()
-    return BUSY if held else OK
+    return (BUSY if held else OK), plan.counts
+
+
+def _busy_plan(plan: Plan) -> Plan:
+    """A busy board's plan: only the units that do not write to it, its
+    counts theirs plus what the plan counted beside its units (skips, the
+    guard's holds), and every other unit as waiting."""
+    ran = [u for u in plan.units if not _writes_board(u)]
+    counts = replace(plan.counts)
+    for unit in plan.units:
+        if unit.counts is not None and _writes_board(unit):
+            for name in Counts.__dataclass_fields__:
+                setattr(counts, name, getattr(counts, name) - getattr(unit.counts, name))
+    counts.waiting += len(plan.units) - len(ran)
+    return Plan(board=plan.board, units=ran, counts=counts)
+
+
+def _refused_state(counts: Counts, unit: board_sync.Unit) -> None:
+    """A state the planner refused (a task in no collection, or one whose
+    collection has no column of that role): a conflict and a skip, and
+    the change it was is taken back from the counts. As with a refused
+    blocker set, the unit's row is stored as planned, so the next pass
+    reads the planner as the side that moved and puts the card back in a
+    lane of the planner's state (board_sync, "Lanes by role")."""
+    counts.skipped += 1
+    counts.conflicts += 1
+    counts.states_changed = max(0, counts.states_changed - 1)
+    if unit.create is None and all(call.kind == "state" for call in unit.calls):
+        counts.tasks_changed = max(0, counts.tasks_changed - 1)
 
 
 async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock, call: board_sync.Call) -> None:
@@ -691,6 +766,8 @@ async def _call(planner, settings: Settings, session: AsyncSession, clock: Clock
         await planner.update_task(settings, session, clock, task_id=call.task_id, tags=list(call.value))
     elif call.kind == "blocked_by":
         await planner.update_task(settings, session, clock, task_id=call.task_id, blocked_by=list(call.value))
+    elif call.kind == "state":
+        await planner.update_task(settings, session, clock, task_id=call.task_id, state=str(call.value))
     else:
         raise ValueError(f"unknown board call: {call.kind}")
 

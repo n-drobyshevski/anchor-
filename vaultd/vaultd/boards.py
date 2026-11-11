@@ -22,7 +22,7 @@ narrow:
    too) -- not lane descriptions,
    other continuation lines, the archive, the history or the settings.
    The write takes operations, never file content: on cards `add`,
-   `text`, `check`, `date`, `tag`, `remove`; on a card's subtasks
+   `text`, `check`, `date`, `tag`, `remove`, `move`; on a card's subtasks
    `sub_add`, `sub_text`, `sub_check`, `sub_date`, `sub_tag`,
    `sub_remove`; on its dependencies `after_set`.
 3. **Everything else is kept byte for byte.** The file is handled as
@@ -77,7 +77,20 @@ its continuation lines.
 board has one, and unchecking one that sits there moves it back to the
 first lane, as the plugin itself does; otherwise the box changes in
 place. A new card goes to the first lane, or the done lane if it is
-already done. Lanes carry no other meaning here.
+already done. `move` puts a card, with all its lines, at the end of the
+lane named by its title (the first lane of that title; a lane of the
+active part, never the archive); a card already in that lane stays where
+it is. On a board with a done lane the box follows, as with `check`:
+moving into a complete lane checks it, moving into any other lane
+unchecks it. On a board without one the box is left as it is. (A board may mark
+more than one lane `**Complete**`, a "Cancelled" beside "Done": each is
+complete, and `check` uses the first.) Read with `lanes=True` (`GET
+/v1/boards?lanes=1`), a board also names its done lane
+(`done_lane_title`: the first complete lane, null when it has none) and
+says which lanes are complete (`lane_complete`, one flag per title in
+`lanes`), so the bot can read a card's lane as a state (a complete lane:
+done, the first other lane: planned, any other: in progress); the keys'
+presence is also how the bot knows this vaultd takes `move`.
 
 Pure apart from nothing: no filesystem, no clock. api.py reads and
 writes; this module only turns bytes into cards and bytes into bytes.
@@ -282,13 +295,19 @@ def _link_board(target: str, name: str | None) -> str | None:
     return target if target.endswith(".md") else f"{target}.md"
 
 
-def describe(board: Board, *, name: str | None = None, subs: bool = False, titles: bool = False) -> dict:
+def describe(
+    board: Board, *, name: str | None = None, subs: bool = False, titles: bool = False, lanes: bool = False
+) -> dict:
     """What the bot may know of a board: its lanes' titles and its cards.
     With `subs`, each card also carries its subtasks (first lines only) and
     the cards its `after:` line names, `name` being this board's file name
     (what a same-board link resolves to). With `titles` as well, also the
     plain titles on that line (`after_titles`); without it a title counts
-    as `after_raw_extra`, which is all an older bot knows to keep."""
+    as `after_raw_extra`, which is all an older bot knows to keep. With
+    `lanes`, the board also names its done lane (`done_lane_title`, the
+    first complete lane, None when it has none) and flags each complete
+    lane (`lane_complete`, parallel to `lanes`); an older bot, which checks
+    a board's keys exactly, asks without them."""
     cards = []
     for n, card in enumerate(board.cards):
         item = {
@@ -311,12 +330,17 @@ def describe(board: Board, *, name: str | None = None, subs: bool = False, title
             else:
                 item["after_raw_extra"] = card.inside.after_raw_extra or bool(card.inside.after_titles)
         cards.append(item)
-    return {
+    out = {
         "lanes": [lane.title for lane in board.lanes],
         "done_lane": any(lane.complete for lane in board.lanes),
         "dates": board.dates,
         "cards": cards,
     }
+    if lanes:
+        done = next((lane for lane in board.lanes if lane.complete), None)
+        out["done_lane_title"] = done.title if done is not None else None
+        out["lane_complete"] = [lane.complete for lane in board.lanes]
+    return out
 
 
 # -- writing -----------------------------------------------------------------------
@@ -405,6 +429,25 @@ def _target_lane(board: Board, checked: bool) -> Lane:
         if not lane.complete:
             return lane
     return board.lanes[0]
+
+
+def _named_lane(board: Board, title: object) -> Lane:
+    """The first lane of the active part titled `title` (as the read
+    reports titles: without a WIP count)."""
+    if not isinstance(title, str) or not title:
+        raise Refused("bad_card")
+    for lane in board.lanes:
+        if lane.title == title:
+            return lane
+    raise Refused("bad_card")
+
+
+def _set_box(board: Board, card: Card, checked: bool) -> None:
+    """Only the box changes: the rest of the line stays as written."""
+    if card.checked != checked:
+        card.mark = "x" if checked else " "
+        line = board.lines[card.first]
+        board.lines[card.first] = f"- [{card.mark}]" + line[5:]
 
 
 def _ensure_newline(board: Board) -> None:
@@ -644,15 +687,22 @@ def _apply_one(board: Board, op: dict, name: str | None = None, named: tuple[str
         if set(op) != {"op", "id", "checked"} or not isinstance(op["checked"], bool):
             raise Refused("bad_card")
         card = _find(board, op["id"])
-        if card.checked != op["checked"]:
-            card.mark = "x" if op["checked"] else " "
-            # Only the box changes: the rest of the line stays as written.
-            line = board.lines[card.first]
-            board.lines[card.first] = f"- [{card.mark}]" + line[5:]
+        _set_box(board, card, op["checked"])
         here = board.lanes[card.lane]
         target = _target_lane(board, op["checked"])
         moves = (op["checked"] and target.complete and not here.complete) or (not op["checked"] and here.complete)
         return _move(board, card, target) if moves and target is not here else _reparse(board)
+    if kind == "move":
+        # A card, with all its lines, to the end of the lane of that title.
+        if set(op) != {"op", "id", "lane"}:
+            raise Refused("bad_card")
+        card = _find(board, op["id"])
+        target = _named_lane(board, op["lane"])
+        if any(lane.complete for lane in board.lanes):
+            # The box follows the lane, as `check` makes the lane follow the box.
+            _set_box(board, card, target.complete)
+        here = board.lanes[card.lane]
+        return _move(board, card, target) if target is not here else _reparse(board)
     if kind == "remove":
         if set(op) != {"op", "id"}:
             raise Refused("bad_card")

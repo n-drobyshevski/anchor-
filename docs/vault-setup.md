@@ -494,8 +494,27 @@ line under a card, and can write them:
   line. Every other line under a card stays exactly as you wrote it,
   where you wrote it.
 
-What it does not touch: lanes other than open and done, the other lines
-under a card, the archive and task descriptions. A card you delete or
+**Lanes by role.** A card's lane is its task's state in the planner,
+whatever the lanes are called: a lane marked `**Complete**` is *done*
+(you may have several, such as "Done" and "Cancelled"; a card Echo
+completes goes to the first), the first lane that is not complete is
+*planned*, and every other lane is *in progress*. Move a card to "Doing" and its task is in progress; set a task
+in progress in the planner and its card moves to the first lane after the
+first one (the next lane that is not complete). A card already in a lane
+of the right role stays there, so you can keep a "Review" lane next to
+"Doing". A ticked box still means done wherever the card is. A board with
+only a first lane and a done lane cannot show *in progress*: such a task's
+card stays in the first lane (counted once as skipped), and nothing else
+changes. On a board with a done lane, a card the bot moves out of it is
+unticked, and one moved into it ticked. If one pass would change the
+state of most of a board's cards at once (the first pass, say, if the
+planner's columns do not match the board), it holds them back and
+`/boards` says so; `/boards now` carries them. This needs the current vault
+service; with an older one, or an older planner, only done and open are
+kept in step.
+
+What it does not touch: the other lines under a card, a card's place
+inside its lane, the archive and task descriptions. A card you delete or
 archive takes the board's tag off its task (the task stays in the
 planner); a task you untag or delete loses its card. Completed planner
 tasks that were never on the board are not added.

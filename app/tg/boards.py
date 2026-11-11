@@ -11,7 +11,7 @@ BLOCKED_COMMANDS), like `/graph`: `now` and `undo` change the vault.
   board named in `Anchor/settings.md`). No call to anything.
 - `/boards preview` -- a dry run: queues a pass that reads and computes
   and writes nothing anywhere, and replies with its counts (cards, tasks,
-  subtasks, dependencies). Works with
+  subtasks, dependencies, lanes). Works with
   `BOARD_SYNC_ENABLED` off: it is how the first pairing is checked before
   the flag goes on.
 - `/boards now` -- one pass right away (needs the flag).
@@ -113,6 +113,7 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
         "planner": "создать в планере" if preview else "создано в планере",
         "detach": "отцепить" if preview else "отцеплено",
         "link": "связать" if preview else "связано",
+        "move": "перенести" if preview else "перенесено",
     }
     parts = [
         f"карточки: {verb['add']} {counts.cards_added}, {verb['change']} {counts.cards_changed}, "
@@ -125,15 +126,23 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
             f"{verb['detach']} {counts.subs_detached}, {verb['link']} {counts.subs_paired}"
         ),
         f"связи: {verb['change']} {counts.deps_changed}",
+        f"колонки: {verb['move']} {counts.states_changed}",
         f"пар по названию {counts.paired}",
         f"конфликтов {counts.conflicts} (побеждает планер)",
         f"пропущено {counts.skipped}",
     ]
     if counts.waiting:
         parts.append(f"ждут следующего прохода {counts.waiting}")
-    if counts.held:
+    removals = counts.held - counts.states_held
+    if removals:
         parts.append(
-            f"придержано удалений {counts.held}: одна из сторон выглядит почти пустой. "
+            f"придержано удалений {removals}: одна из сторон выглядит почти пустой. "
+            "Если так и задумано, запусти /boards now"
+        )
+    if counts.states_held:
+        parts.append(
+            f"придержано переносов между колонками {counts.states_held}: "
+            "состояние сменилось бы сразу у большинства пар доски. "
             "Если так и задумано, запусти /boards now"
         )
     return "; ".join(parts)
