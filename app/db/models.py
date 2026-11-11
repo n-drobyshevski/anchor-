@@ -3072,7 +3072,11 @@ class BoardPair(Base):
     against that (app/planner/board_sync.py, "Dependencies"). `state` is
     the task's state as last synced (`planned`, `wip`, `done`: the card's
     lane by role, app/planner/board_sync.py, "Lanes by role"), null until
-    a pass compared states; `done` is kept in step with it. Written only
+    a pass compared states; `done` is kept in step with it. `lane` is the
+    name of the planner column the task sat in when both sides last agreed
+    (the board's lane of that name, when it has one: "Collection per board
+    and columns by name"), null until a pass compared columns by name; a
+    lane name is the user's own words like `title`. Written only
     by app/planner/board_job.py, after the board write succeeded.
     """
 
@@ -3089,6 +3093,7 @@ class BoardPair(Base):
     deps: Mapped[list | None] = mapped_column(JSONB)
     deps_card: Mapped[list | None] = mapped_column(JSONB)
     state: Mapped[str | None] = mapped_column(String)
+    lane: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -3180,6 +3185,8 @@ class BoardSyncRun(Base):
     subs_paired: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     states_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     states_held: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tasks_moved: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    collections_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(

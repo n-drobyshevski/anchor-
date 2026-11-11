@@ -4664,3 +4664,99 @@ planner and menu test files).
   new tasks made wip and new cards added in progress; a refused state takes
   its change back. Each unit carries its own counts, so a busy board's run
   row records what its planner-only units did, plus the rest as waiting.
+
+## Board sync: collection per board and columns by name
+
+- **Why.** Found in production, counts only: every planner task the board
+  sync created had no collection (no column, no completion). The planner
+  refuses `update_task(state)` for such a task (counted as a conflict and a
+  skip every pass), and its completion is set only when a task enters a done
+  column, so `complete_task` recorded nothing (the planner's trigger now
+  wipes `completed_at` on a task in no column, and the tool says so). Lanes
+  and done never reached the planner. Decided with the user: **one planner
+  collection per Obsidian board**, named after it, with columns like the
+  board's lanes, and lanes and columns synced **by name**, the role staying
+  the fallback.
+- **Which collection.** `BOARD_SYNC_COLLECTIONS` (JSON, board file name →
+  collection name; default `Work tasks.md` → «Work tasks», `General tasks.md`
+  → «General tasks»; validated like `BOARD_SYNC_TAGS`, names unique
+  case-insensitively). Each pass reads the collections once (`get_workspace`,
+  now with `columns: [{id, name, done, position}]`) and finds the board's by
+  name, as the planner matches names (trimmed, case-insensitive). Missing: it
+  is made (`create_collection {name, columns}`, idempotent by name, newly
+  allowlisted for this alone) before the merge, from the board's lanes: the
+  lanes that are not complete, in board order, then the board's first complete
+  lane as the one done column. Its other complete lanes are not made: their
+  cards read as done and map to the done column. A board with no complete lane
+  gets a done column «Done». Nothing is cached across passes (one cheap read).
+  A preview makes nothing: it plans against the columns it would make and
+  says «коллекция: создать 1».
+- **When it is off.** A board with no entry, a planner whose collections carry
+  no `columns` (an older one), or one that answers `create_collection` with
+  "Tool create_collection not found" (`PlannerToolUnknown`, a refusal told
+  apart by the MCP SDK's exact text, which is never logged or kept) syncs as
+  before, with no collection, for that pass. So does a board whose lanes cannot
+  be read by role or whose lane titles are the same but for case (nothing to
+  make columns from, and names would be ambiguous). A collection refused for
+  another reason leaves that board as before for the pass.
+- **Into the collection.** New cards' tasks are made in it (`create_task`
+  `collectionId`). A paired task in no collection (`list_tasks` rows carry
+  `collectionId` and `column` when they have them; both read strictly) gets
+  one `update_task(collectionId)`, first among its unit's calls, so a column
+  or completion call after it finds the task there (the planner lands it in
+  the first open column, or the done column when done). Counted as
+  `tasks_moved` («задач перенесено в коллекцию N»); no guard holds it (it
+  loses nothing and moves no card). A task in *another* collection is left
+  there: the user may have put it there on purpose; its state keeps the role
+  rules, which work in any collection.
+- **Columns by name.** For a top-level pair whose task is in the board's
+  collection (or moving into it), the compared value is the task's (state,
+  column name). The snapshot is `board_pair.lane`: the name of the planner
+  column the task sat in when the two sides last agreed (the board's lane of
+  that name, when it has one), beside `state`. Each side is read against it on
+  its own: the planner moved when its state or column is not the snapshot's;
+  the card when it left the lane of the snapshot column's name (or, with no
+  such lane, its role). Writes: a card's lane L goes to the open column named
+  L (case-insensitive; `update_task(state=<that column's role>, column=<the
+  planner's spelling>)`), else by role as before; into a complete lane it is
+  `complete_task`, out of done into the first open column `complete_task(done
+  false)`. A planner column C goes to the board lane named C (`move`), else by
+  role as before (a card already in a lane of that role stays). Both moved:
+  the planner wins, a conflict only when the card is not already where the
+  planner's column puts it. A move between two lanes of one role (Doing →
+  Waiting) is now a change, both ways. One snapshot is enough because the
+  card side is read through the column's namesake: a card in a lane the
+  planner has no column for, its task in a column the board has a lane for,
+  is read as moved every pass but carries nothing (by role it already
+  agrees), so nothing ping-pongs.
+- **The first pass.** `lane` null (a row from before): states compare by role
+  only, as before. It is filled with the task's column when the card already
+  shows it (no move either way), else on the first carry; a pair that agrees by
+  role but not by name (card in Waiting, task in Doing) keeps null, so no pass
+  moves either side to the other's namesake on its own. A task in no collection
+  whose snapshot says wip or done is read from planned: that was a state the
+  planner refused (no column, no recordable completion), not one it chose, so
+  the card's lane is carried once the task is in the collection, instead of the
+  card going back to the first lane.
+- **New things.** A new card's task is made in the collection, then (a call
+  of its unit, after the board write, as before) put in the column of its
+  lane's name when that is not where the create lands (`state=wip,
+  column=<lane>` for a middle lane); a done card's task is completed as before.
+  A new open task is added and moved to the lane of its column's name, else by
+  role.
+- **Refusals never abort.** The planner refuses `complete_task` and
+  `update_task(state=done|planned)` for a task in no collection, and for one
+  in a collection with no done (or, reopening, no open) column. A refused
+  state, column or completion, on a pair or right after a create, is a
+  conflict and a skip, its row stored as planned (the planner wins next
+  pass), never an abort; a refused move into the collection is a skip, not
+  counted as moved, retried next pass.
+- **Kept.** Idempotence (`apply_state` models the columns: a state move lands
+  in the first column of its role, a column call in that column, a completion
+  in the done column, a reopening or a move into the collection in the first
+  open column), the mass-change guard (a change of column by name counts as a
+  state change), the busy guard, the refused-call handling. Counts:
+  `board_sync_run.tasks_moved` and `collections_created` (migration
+  `d8a4c6e2f175`, which also adds `board_pair.lane`, user content like `title`:
+  `/export` and `/delete` cover the table already). A board changed under the
+  pass still records the collection it made.

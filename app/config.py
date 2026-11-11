@@ -364,6 +364,38 @@ class Settings(BaseSettings):
             out[name] = tag
         return out
 
+    @field_validator("BOARD_SYNC_COLLECTIONS", mode="before")
+    @classmethod
+    def _parse_board_sync_collections(cls, value):
+        """A JSON object of board file name -> planner collection name,
+        refused loudly like BOARD_SYNC_TAGS: a misspelt name would make a
+        second collection beside the user's. A name is a bare `.md` file
+        name; a collection name is one line of 1-100 characters with no
+        space at either end, and no two boards share one (the planner
+        matches collection names case-insensitively)."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value) if value.strip() else {}
+            except ValueError:
+                raise ValueError("BOARD_SYNC_COLLECTIONS must be a JSON object") from None
+        if not isinstance(value, dict):
+            # pydantic reports a ValueError as a validation error.
+            raise ValueError("BOARD_SYNC_COLLECTIONS must be a JSON object")  # noqa: TRY004
+        out: dict[str, str] = {}
+        seen: set[str] = set()
+        for name, collection in value.items():
+            if not (isinstance(name, str) and name.endswith(".md") and "/" not in name and "\\" not in name
+                    and name.strip() == name and len(name) > 3):
+                raise ValueError(f"BOARD_SYNC_COLLECTIONS: {name!r} is not a bare .md file name")
+            if not (isinstance(collection, str) and 1 <= len(collection) <= 100 and collection.strip() == collection
+                    and not any(c in collection for c in "\r\n\t")):
+                raise ValueError(f"BOARD_SYNC_COLLECTIONS: the collection for {name!r} is not a collection name")
+            if collection.casefold() in seen:
+                raise ValueError(f"BOARD_SYNC_COLLECTIONS: collection {collection!r} is mapped twice")
+            seen.add(collection.casefold())
+            out[name] = collection
+        return out
+
     @field_validator("BOARD_SYNC_CREATES_PER_PASS")
     @classmethod
     def _board_sync_creates_in_range(cls, value: int) -> int:
@@ -947,6 +979,15 @@ class Settings(BaseSettings):
     BOARD_SYNC_TAGS: Annotated[dict[str, str], NoDecode] = {
         "Work tasks.md": "work",
         "General tasks.md": "general",
+    }
+    # Board file name -> the planner collection its tasks live in, as JSON
+    # (docs/decisions.md, "Collection per board and columns by name"): found
+    # by name, or made from the board's lanes, and a card's lane carried to
+    # the column of the same name. A board with no entry keeps its tasks in
+    # no collection, as before.
+    BOARD_SYNC_COLLECTIONS: Annotated[dict[str, str], NoDecode] = {
+        "Work tasks.md": "Work tasks",
+        "General tasks.md": "General tasks",
     }
     # Planner creates per pass (new cards); the rest wait for the next.
     BOARD_SYNC_CREATES_PER_PASS: int = 20

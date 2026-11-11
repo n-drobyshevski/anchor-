@@ -513,6 +513,28 @@ planner's columns do not match the board), it holds them back and
 service; with an older one, or an older planner, only done and open are
 kept in step.
 
+**A planner collection per board, columns by name.** Each board's tasks
+live in a planner collection of its own: by default `Work tasks.md` in
+«Work tasks» and `General tasks.md` in «General tasks» (set
+`BOARD_SYNC_COLLECTIONS` on the bot, as JSON, for other names:
+`{"Дом.md": "Дом"}`; a board with no entry keeps its tasks in no
+collection, as before). If the collection does not exist, the first pass
+makes it from the board's lanes: one column per lane that is not
+complete, in the board's order, then the board's first complete lane as
+the done column (a second complete lane, "Cancelled" say, is not made:
+its cards count as done). `/boards preview` says «коллекция: создать 1»
+first and makes nothing. Tasks the sync already paired that are in no
+collection are moved into it (`/boards`: «задач перенесено в коллекцию
+N»); a task you put in another collection yourself stays there.
+
+From then on lanes and columns are matched **by name** (case does not
+matter): move a card from "Doing" to "Waiting" and its task moves to the
+"Waiting" column; move the task to "Doing" in the planner and the card
+follows. A lane with no column of that name (or a column with no lane)
+falls back to the role rules above. Renaming a lane or a column on one
+side only is safe: the two then match by role until you rename the other
+to match.
+
 What it does not touch: the other lines under a card, a card's place
 inside its lane, the archive and task descriptions. A card you delete or
 archive takes the board's tag off its task (the task stays in the

@@ -22,7 +22,15 @@ from app.config import Settings
 from app.core import echo_write
 from app.db.models import BoardPair, BoardSubPair, BoardSyncRun, Job, PlannerCredential, PlannerSnapshot, UserState
 from app.planner import board_job, board_sync
-from app.planner.client import UNSET, PlannerToolError, PlannerToolRefused, PlannerUnavailable
+from app.planner.client import (
+    UNSET,
+    Collection,
+    Column,
+    PlannerToolError,
+    PlannerToolRefused,
+    PlannerToolUnknown,
+    PlannerUnavailable,
+)
 from app.tg import boards as boards_ui
 from app.vault import errors
 from app.vault.client import BoardCard, BoardPost, BoardSub, ChangeEntry, ChangeFile, TaskBoard, UndoResult
@@ -102,8 +110,20 @@ class FakePlanner:
     makes `update_task` refuse blockers that would close a cycle, as the
     planner does."""
 
-    def __init__(self, tasks=None, *, fail_on=None, log=None, refuse_cycles=True, states=False, refuse_states=()):
+    def __init__(
+        self, tasks=None, *, fail_on=None, log=None, refuse_cycles=True, states=False, refuse_states=(),
+        collections=None, unknown_collections=False, refuse_moves=(),
+    ):
         self.tasks = {t["id"]: dict(t) for t in (tasks or [])}
+        # The workspace's collections ({id, name, columns: [{id, name, done,
+        # position}]} each); None: a planner from before collections were
+        # synced (no `columns`), as every older test here expects.
+        self.collections = collections
+        # A planner with no create_collection tool.
+        self.unknown_collections = unknown_collections
+        # Tasks whose move into a collection is refused.
+        self.refuse_moves = set(refuse_moves)
+        self.workspace_reads = 0
         # A planner with task states: every row carries one.
         self.states = states
         # Tasks the planner cannot give a state (no collection, no such column).
@@ -132,14 +152,69 @@ class FakePlanner:
             rows = [t for t in rows if not t["done"]]
         return {"count": len(rows), "tasks": rows}
 
+    # -- collections (the planner's own rules, lib/mcp/tools.ts) --
+
+    def _columns(self, collection_id):
+        found = next((c for c in self.collections or [] if c["id"] == collection_id), None)
+        return sorted(found["columns"], key=lambda c: c["position"]) if found else []
+
+    def _role_of(self, collection_id, name):
+        cols = self._columns(collection_id)
+        first_open = next((c["name"] for c in cols if not c["done"]), None)
+        col = next((c for c in cols if c["name"] == name), None)
+        if col is None:
+            return None
+        return "done" if col["done"] else ("planned" if col["name"] == first_open else "wip")
+
+    def _first_of(self, collection_id, role):
+        return next((c["name"] for c in self._columns(collection_id) if self._role_of(collection_id, c["name"]) == role), None)
+
+    def _land(self, task_id, role, column=None):
+        row = self.tasks[task_id]
+        if row.get("collectionId"):
+            row["column"] = column or self._first_of(row["collectionId"], role)
+        if "state" in row or self.states:
+            row["state"] = role
+        row["done"] = role == "done"
+
+    async def get_workspace(self, settings, session, clock):
+        self._maybe_fail("get_workspace")
+        self.workspace_reads += 1
+        if self.collections is None:
+            return None
+        return tuple(
+            Collection(c["id"], c["name"], tuple(Column(k["id"], k["name"], k["done"], k["position"]) for k in c["columns"]))
+            for c in self.collections
+        )
+
+    async def create_collection(self, settings, session, clock, *, name, columns):
+        self.log.append("create_collection")
+        if self.unknown_collections:
+            raise PlannerToolUnknown("no such tool")
+        self.writes.append(("create_collection", {"name": name, "columns": list(columns)}))
+        found = next((c for c in self.collections or [] if c["name"].lower() == name.lower()), None)
+        created = found is None
+        if found is None:
+            n = len(self.collections or []) + 1
+            found = {
+                "id": f"col{n}", "name": name,
+                "columns": [{"id": f"col{n}-{k}", "name": c, "done": d, "position": k} for k, (c, d) in enumerate(columns)],
+            }
+            self.collections = [*(self.collections or []), found]
+        cols = tuple(Column(k["id"], k["name"], k["done"], k["position"]) for k in found["columns"])
+        return Collection(found["id"], found["name"], cols), created
+
     async def create_task(
-        self, settings, session, clock, *, title, due_date, client_request_id, tags=None, parent_id=None, blocked_by=None
+        self, settings, session, clock, *, title, due_date, client_request_id, tags=None, parent_id=None, blocked_by=None,
+        collection_id=None,
     ):
         self._maybe_fail("create_task")
         self.log.append("create")
         write = {"title": title, "due": due_date, "request": client_request_id, "tags": tags}
         if parent_id is not None:
             write["parent"] = parent_id
+        if collection_id is not None:
+            write["collection"] = collection_id
         self.writes.append(("create", write))
         if client_request_id in self.by_request:
             task_id = self.by_request[client_request_id]
@@ -153,6 +228,9 @@ class FakePlanner:
                 row["parentId"] = parent_id
             if self.states:
                 row["state"] = "planned"
+            if collection_id is not None:
+                row["collectionId"] = collection_id
+                row["column"] = self._first_of(collection_id, "planned")
             self.tasks[task_id] = row
         return {"id": task_id, "title": title}
 
@@ -171,24 +249,42 @@ class FakePlanner:
     async def complete_task(self, settings, session, clock, *, task_id, done=None):
         self._maybe_fail("complete_task")
         self.log.append("complete")
+        if task_id in self.refuse_states:
+            raise PlannerToolRefused("not recorded")
         self.writes.append(("complete", {"id": task_id, "done": done}))
-        self.tasks[task_id]["done"] = True if done is None else done
+        done = True if done is None else done
+        self.tasks[task_id]["done"] = done
         if "state" in self.tasks[task_id]:
-            self.tasks[task_id]["state"] = "done" if self.tasks[task_id]["done"] else "planned"
+            self.tasks[task_id]["state"] = "done" if done else "planned"
+        if self.tasks[task_id].get("collectionId"):
+            self._land(task_id, "done" if done else "planned")
         return {"id": task_id}
 
     async def update_task(
-        self, settings, session, clock, *, task_id, title=None, due_date=UNSET, tags=None, blocked_by=None, state=None
+        self, settings, session, clock, *, task_id, title=None, due_date=UNSET, tags=None, blocked_by=None, state=None,
+        column=None, collection_id=None,
     ):
         self._maybe_fail("update_task")
         self.log.append("update")
         args = {"id": task_id}
+        if collection_id is not None:
+            if task_id in self.refuse_moves:
+                raise PlannerToolRefused("no move")
+            args["collectionId"] = collection_id
+            row = self.tasks[task_id]
+            row["collectionId"] = collection_id
+            self._land(task_id, "done" if row["done"] else "planned")
         if state is not None:
             if task_id in self.refuse_states:
                 raise PlannerToolRefused("no column")
             args["state"] = state
+            role = self._role_of(self.tasks[task_id].get("collectionId"), column) if column else None
+            if column is not None:
+                args["column"] = column
             self.tasks[task_id]["state"] = state
             self.tasks[task_id]["done"] = state == "done"
+            if self.tasks[task_id].get("collectionId"):
+                self._land(task_id, state, column if role == state else None)
         if blocked_by is not None:
             if self.refuse_cycles and self._closes_cycle(task_id, blocked_by):
                 raise PlannerToolRefused("cycle")
@@ -1358,3 +1454,204 @@ async def test_a_mass_state_change_is_held_shown_in_the_preview_and_run_by_hand(
     result = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_NOW)
     assert result.boards[0].counts.states_changed == 5
     assert {t["state"] for t in planner.tasks.values()} == {"wip"}
+
+
+# -- collection per board, columns by name ------------------------------------------------------
+
+NLANES = ("Todo", "Doing", "Waiting", "Done")
+
+
+def _work_collection(*, name="Work tasks", cid="col1"):
+    return {
+        "id": cid, "name": name,
+        "columns": [
+            {"id": f"{cid}-0", "name": "Todo", "done": False, "position": 0},
+            {"id": f"{cid}-1", "name": "Doing", "done": False, "position": 1},
+            {"id": f"{cid}-2", "name": "Waiting", "done": False, "position": 2},
+            {"id": f"{cid}-3", "name": "Done", "done": True, "position": 3},
+        ],
+    }
+
+
+async def _seed_lane_pairs(sessionmaker, clock, pairs):
+    """(block, task, title, state, lane) each, on NAME."""
+    now = clock.now_utc()
+    async with sessionmaker() as session:
+        for block, task, title, state, lane in pairs:
+            session.add(BoardPair(board=NAME, block_id=block, task_id=task, title=title, done=state == "done",
+                                  state=state, lane=lane, created_at=now, updated_at=now))
+        await session.commit()
+
+
+async def test_a_first_pass_makes_the_collection_and_moves_its_tasks_into_it(sessionmaker, frozen_clock, caplog):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    # Production: a card in Doing whose task is in no collection, its state
+    # refused last time (the snapshot says wip, the planner planned).
+    await _seed_lane_pairs(sessionmaker, clock, [("card1", "t1", "Отчёт", "wip", None)])
+    log: list[str] = []
+    board = _lane_board(
+        {"text": "Отчёт", "id": "card1", "lane": "Doing"},
+        {"text": "Новая", "lane": "Waiting"},
+        lanes=NLANES,
+    )
+    vault = FakeVault([board])
+    vault.log = log
+    planner = FakePlanner([_task("t1", "Отчёт")], states=True, collections=[], log=log)
+
+    preview = await _pass(sessionmaker, _settings(), planner, vault, clock, trigger=board_job.TRIGGER_PREVIEW)
+    text = boards_ui.result_text(preview)
+    assert "коллекция: создать 1" in text and "задач перенести в коллекцию 1" in text
+    assert planner.writes == [] and planner.collections == [] and vault.posts == []
+    assert await _runs(sessionmaker) == []
+
+    caplog.set_level(logging.DEBUG)
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    # The collection first, from the board's lanes, then the create in it.
+    assert log[:3] == ["create_collection", "create", "post"]
+    assert planner.writes[0] == (
+        "create_collection",
+        {"name": "Work tasks", "columns": [("Todo", False), ("Doing", False), ("Waiting", False), ("Done", True)]},
+    )
+    (create,) = [w[1] for w in planner.writes if w[0] == "create"]
+    assert create["collection"] == "col1"
+    updates = [w[1] for w in planner.writes if w[0] == "update"]
+    # t1: moved into the collection before its column call; the new card's
+    # task goes to the column of its lane.
+    assert updates.index({"id": "t1", "collectionId": "col1"}) < updates.index({"id": "t1", "state": "wip", "column": "Doing"})
+    assert {"id": "new1", "state": "wip", "column": "Waiting"} in updates
+    assert {t["id"]: (t["collectionId"], t["column"]) for t in planner.tasks.values()} == {
+        "t1": ("col1", "Doing"), "new1": ("col1", "Waiting")
+    }
+    rows = {r.task_id: r for r in await _rows(sessionmaker)}
+    assert {k: (r.state, r.lane) for k, r in rows.items()} == {"t1": ("wip", "Doing"), "new1": ("wip", "Waiting")}
+    (run,) = [r for r in await _runs(sessionmaker) if r.board == NAME]
+    assert (run.collections_created, run.tasks_moved) == (1, 1)
+    text = boards_ui.result_text(result)
+    assert "коллекция: создано 1" in text and "задач перенесено в коллекцию 1" in text
+    logged = " ".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    assert "Work tasks" not in logged and "Waiting" not in logged and "Отчёт" not in logged
+
+    # The next pass finds the collection by name and does nothing.
+    vault.boards = [_rebuild_lanes(vault, board)]
+    vault.posts.clear()
+    planner.writes.clear()
+    assert (await _pass(sessionmaker, _settings(), planner, vault, clock)).outcome == board_job.OK
+    assert vault.posts == [] and planner.writes == [] and len(planner.collections) == 1
+
+    # Moves between two lanes of the same role now travel, both ways.
+    vault.boards = [replace(vault.boards[0], cards=tuple(
+        replace(c, lane="Waiting") if c.id == "card1" else c for c in vault.boards[0].cards
+    ))]
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert planner.writes == [("update", {"id": "t1", "state": "wip", "column": "Waiting"})]
+    planner.tasks["t1"]["column"] = "Doing"
+    await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert vault.posts[-1][2] == [{"op": "move", "id": "card1", "lane": "Doing"}]
+    rows = {r.task_id: r for r in await _rows(sessionmaker)}
+    assert rows["t1"].lane == "Doing"
+
+
+async def test_a_collection_of_that_name_is_found_not_made(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    vault = FakeVault([_lane_board({"text": "Новая"}, lanes=NLANES)])
+    planner = FakePlanner([], states=True, collections=[_work_collection(name="WORK TASKS", cid="mine")])
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK and result.boards[0].counts.collections_created == 0
+    assert not any(w[0] == "create_collection" for w in planner.writes)
+    assert [w[1]["collection"] for w in planner.writes if w[0] == "create"] == ["mine"]
+    assert planner.workspace_reads == 1
+
+
+async def test_a_board_with_no_collection_named_or_an_older_planner_syncs_as_before(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    for settings, planner in (
+        (_settings(BOARD_SYNC_COLLECTIONS="{}"), FakePlanner([], states=True, collections=[])),
+        (_settings(), FakePlanner([], states=True)),  # collections with no columns
+        (_settings(), FakePlanner([], states=True, collections=[], unknown_collections=True)),
+    ):
+        vault = FakeVault([_lane_board({"text": "Новая", "lane": "Doing"}, lanes=NLANES)])
+        result = await _pass(sessionmaker, settings, planner, vault, clock)
+        assert result.outcome == board_job.OK
+        (create,) = [w[1] for w in planner.writes if w[0] == "create"]
+        assert "collection" not in create
+        assert ("update", {"id": "new1", "state": "wip"}) in planner.writes
+        assert result.boards[0].counts.collections_created == 0
+        async with sessionmaker() as session:
+            await session.execute(BoardPair.__table__.delete())
+            await session.commit()
+    # With no collection named, get_workspace is not even read.
+    planner = FakePlanner([], states=True, collections=[])
+    await _pass(sessionmaker, _settings(BOARD_SYNC_COLLECTIONS="{}"), planner, FakeVault([_lane_board(lanes=NLANES)]), clock)
+    assert planner.workspace_reads == 0
+
+
+async def test_a_refused_completion_or_move_is_a_skip_never_an_abort(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    # An older planner (no collections): a task in no collection cannot be
+    # completed (the planner's trigger), the card checked anyway.
+    await _seed_lane_pairs(sessionmaker, clock, [("card1", "t1", "A", "planned", None)])
+    vault = FakeVault([_lane_board({"text": "A", "id": "card1", "lane": "Done", "checked": True}, {"text": "Б", "checked": True},
+                                   lanes=NLANES)])
+    planner = FakePlanner([_task("t1", "A")], states=True, refuse_states={"t1"})
+    real_create = planner.create_task
+
+    async def create(*a, **kw):
+        answer = await real_create(*a, **kw)
+        planner.refuse_states.add(answer["id"])
+        return answer
+
+    planner.create_task = create
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    counts = result.boards[0].counts
+    assert counts.conflicts == 2 and counts.skipped == 2 and counts.states_changed == 0
+
+    # A move into the collection the planner refuses: a skip, not counted as moved.
+    async with sessionmaker() as session:
+        await session.execute(BoardPair.__table__.delete())
+        await session.commit()
+    await _seed_lane_pairs(sessionmaker, clock, [("card1", "t1", "A", "planned", None)])
+    vault = FakeVault([_lane_board({"text": "A", "id": "card1"}, lanes=NLANES)])
+    planner = FakePlanner([_task("t1", "A")], states=True, collections=[_work_collection()], refuse_moves={"t1"})
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    assert result.outcome == board_job.OK
+    assert (result.boards[0].counts.tasks_moved, result.boards[0].counts.skipped) == (0, 1)
+    assert "collectionId" not in planner.tasks["t1"]
+
+
+async def test_a_board_changed_under_the_pass_still_counts_its_collection(sessionmaker, frozen_clock):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    post = BoardPost(sha256=None, changed=False, conflict=True)
+    vault = FakeVault([_lane_board({"text": "Новая"}, lanes=NLANES)], post=post)
+    planner = FakePlanner([], states=True, collections=[])
+    result = await _pass(sessionmaker, _settings(), planner, vault, clock)
+    (board,) = result.boards
+    assert board.outcome == board_job.CHANGED and board.counts.collections_created == 1
+    (run,) = [r for r in await _runs(sessionmaker) if r.board == NAME]
+    assert (run.outcome, run.collections_created, run.tasks_created) == ("changed", 1, 0)
+
+
+async def test_list_rows_read_a_collection_and_a_column_strictly():
+    (task,) = board_job.parse_all({"tasks": [{"id": "t1", "title": "A", "done": False, "position": 0,
+                                               "collectionId": "c1", "column": "Doing"}]})
+    assert (task.collection_id, task.column) == ("c1", "Doing")
+    (task,) = board_job.parse_all({"tasks": [{"id": "t1", "title": "A", "done": False, "position": 0}]})
+    assert (task.collection_id, task.column) == (None, None)
+    for bad in ({"collectionId": ""}, {"collectionId": 3}, {"column": 1}):
+        with pytest.raises(PlannerToolError):
+            board_job.parse_all({"tasks": [{"id": "t1", "title": "A", "done": False, "position": 0, **bad}]})
+
+
+def test_the_collections_setting_is_validated_like_the_tags():
+    assert _settings().BOARD_SYNC_COLLECTIONS == {"Work tasks.md": "Work tasks", "General tasks.md": "General tasks"}
+    assert _settings(BOARD_SYNC_COLLECTIONS='{"A.md": "Дела"}').BOARD_SYNC_COLLECTIONS == {"A.md": "Дела"}
+    for bad in ('[1]', '{"A": "X"}', '{"A.md": ""}', '{"A.md": " X"}', '{"A.md": "X", "B.md": "x"}', 'nope',
+                '{"A.md": "' + "x" * 101 + '"}'):
+        with pytest.raises(ValueError):
+            _settings(BOARD_SYNC_COLLECTIONS=bad)

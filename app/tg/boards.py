@@ -11,7 +11,8 @@ BLOCKED_COMMANDS), like `/graph`: `now` and `undo` change the vault.
   board named in `Anchor/settings.md`). No call to anything.
 - `/boards preview` -- a dry run: queues a pass that reads and computes
   and writes nothing anywhere, and replies with its counts (cards, tasks,
-  subtasks, dependencies, lanes). Works with
+  subtasks, dependencies, lanes, the board's planner collection and the
+  tasks moved into it). Works with
   `BOARD_SYNC_ENABLED` off: it is how the first pairing is checked before
   the flag goes on.
 - `/boards now` -- one pass right away (needs the flag).
@@ -127,6 +128,16 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
         ),
         f"связи: {verb['change']} {counts.deps_changed}",
         f"колонки: {verb['move']} {counts.states_changed}",
+        *(
+            [f"коллекция: {verb['create']} {counts.collections_created}"]
+            if counts.collections_created
+            else []
+        ),
+        *(
+            [f"задач {verb['move']} в коллекцию {counts.tasks_moved}"]
+            if counts.tasks_moved
+            else []
+        ),
         f"пар по названию {counts.paired}",
         f"конфликтов {counts.conflicts} (побеждает планер)",
         f"пропущено {counts.skipped}",

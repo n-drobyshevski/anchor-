@@ -11,7 +11,15 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from app.planner import client as planner_client
-from app.planner.client import ALLOWED_TOOLS, PlannerClient, PlannerToolError, PlannerToolRefused
+from app.planner.client import (
+    ALLOWED_TOOLS,
+    Collection,
+    Column,
+    PlannerClient,
+    PlannerToolError,
+    PlannerToolRefused,
+    PlannerToolUnknown,
+)
 from app.vault import errors
 from app.vault.client import BoardCard, BoardPost, BoardSub, TaskBoard, VaultClient, _purpose
 from app.vault.errors import VaultError
@@ -289,15 +297,16 @@ def test_the_boards_purpose_is_known():
 
 
 class _Recorder(PlannerClient):
-    def __init__(self):
+    def __init__(self, answer=None):
         super().__init__(None, "http://planner.invalid")
         self.calls: list[tuple[str, dict]] = []
+        self.answer = answer if answer is not None else {}
 
     async def call_tool(self, settings, session, clock, name, arguments):
         if name not in ALLOWED_TOOLS:
             raise PlannerToolError(name)
         self.calls.append((name, arguments))
-        return {}
+        return self.answer
 
 
 async def test_update_task_sends_only_the_fields_given():
@@ -385,11 +394,17 @@ def test_update_task_cannot_send_any_other_field():
     import inspect
 
     params = set(inspect.signature(PlannerClient.update_task).parameters)
-    assert params == {"self", "settings", "session", "clock", "task_id", "title", "due_date", "tags", "blocked_by", "state"}
+    assert params == {
+        "self", "settings", "session", "clock", "task_id", "title", "due_date", "tags", "blocked_by", "state",
+        "column", "collection_id",
+    }
     params = set(inspect.signature(PlannerClient.create_task).parameters)
     assert params == {
-        "self", "settings", "session", "clock", "title", "due_date", "client_request_id", "tags", "parent_id", "blocked_by"
+        "self", "settings", "session", "clock", "title", "due_date", "client_request_id", "tags", "parent_id", "blocked_by",
+        "collection_id",
     }
+    params = set(inspect.signature(PlannerClient.create_collection).parameters)
+    assert params == {"self", "settings", "session", "clock", "name", "columns"}
 
 
 async def test_list_tasks_asks_for_the_users_own_top_level_tasks():
@@ -445,3 +460,133 @@ async def test_get_boards_refuses_a_bad_file_time(stub, bad):
     stub.respond("GET", "/v1/boards", 200, {"boards": [item]})
     with pytest.raises(Exception):
         await _client(stub).get_boards()
+
+
+# -- collections (docs/decisions.md, "Collection per board and columns by name") ------------
+
+COLUMNS = [
+    {"id": "c1", "name": "Todo", "done": False, "position": 0},
+    {"id": "c2", "name": "Doing", "done": False, "position": 1},
+    {"id": "c3", "name": "Done", "done": True, "position": 2},
+]
+
+
+async def test_update_task_sends_a_column_and_a_collection_only_when_given():
+    client = _Recorder()
+    await client.update_task(None, None, None, task_id="t1", state="wip", column="Waiting")
+    await client.update_task(None, None, None, task_id="t1", collection_id="col1")
+    assert client.calls == [
+        ("update_task", {"id": "t1", "state": "wip", "column": "Waiting"}),
+        ("update_task", {"id": "t1", "collectionId": "col1"}),
+    ]
+    for bad in ({"column": " "}, {"column": ""}, {"collection_id": ""}):
+        with pytest.raises(ValueError):
+            await client.update_task(None, None, None, task_id="t1", **bad)
+
+
+async def test_create_task_sends_a_collection_only_when_given():
+    client = _Recorder()
+    await client.create_task(None, None, None, title="A", due_date=None, client_request_id="r1", collection_id="col1")
+    await client.create_task(None, None, None, title="B", due_date=None, client_request_id="r2")
+    assert client.calls == [
+        ("create_task", {"title": "A", "clientRequestId": "r1", "collectionId": "col1"}),
+        ("create_task", {"title": "B", "clientRequestId": "r2"}),
+    ]
+
+
+async def test_create_collection_sends_the_name_and_columns_and_parses_the_answer():
+    client = _Recorder({"id": "col1", "name": "Work tasks", "created": True, "columns": COLUMNS})
+    made, created = await client.create_collection(
+        None, None, None, name="Work tasks", columns=[("Todo", False), ("Doing", False), ("Done", True)]
+    )
+    assert client.calls == [(
+        "create_collection",
+        {"name": "Work tasks", "columns": [
+            {"name": "Todo", "done": False}, {"name": "Doing", "done": False}, {"name": "Done", "done": True},
+        ]},
+    )]
+    assert created is True
+    assert made == Collection("col1", "Work tasks", (
+        Column("c1", "Todo", False, 0), Column("c2", "Doing", False, 1), Column("c3", "Done", True, 2),
+    ))
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [[], [("Todo", False)], [("Done", True), ("Closed", True)], [("", False), ("Done", True)]],
+)
+async def test_create_collection_needs_exactly_one_done_column_and_names(columns):
+    client = _Recorder()
+    with pytest.raises(ValueError):
+        await client.create_collection(None, None, None, name="Work", columns=columns)
+    with pytest.raises(ValueError):
+        await client.create_collection(None, None, None, name=" ", columns=[("Done", True)])
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"id": "col1", "name": "W", "columns": COLUMNS},  # no `created`
+        {"id": "col1", "name": "W", "created": "yes", "columns": COLUMNS},
+        {"id": "", "name": "W", "created": True, "columns": COLUMNS},
+        {"id": "col1", "name": "W", "created": True},
+        {"id": "col1", "name": "W", "created": True, "columns": [{"id": "c1", "name": "A", "done": "no", "position": 0}]},
+        {"id": "col1", "name": "W", "created": True, "columns": [{"id": "c1", "name": "A", "done": True, "position": True}]},
+        {"id": "col1", "name": "W", "created": True, "columns": [COLUMNS[0], COLUMNS[0]]},
+    ],
+)
+async def test_a_create_collection_answer_of_the_wrong_shape_is_a_planner_error(answer):
+    client = _Recorder(answer)
+    with pytest.raises(PlannerToolError):
+        await client.create_collection(None, None, None, name="W", columns=[("Done", True)])
+
+
+async def test_get_workspace_reads_the_collections_strictly():
+    client = _Recorder({"members": [], "collections": [{"id": "col1", "name": "Work tasks", "columns": COLUMNS}]})
+    (found,) = await client.get_workspace(None, None, None)
+    assert client.calls == [("get_workspace", {})]
+    assert found.id == "col1" and [c.name for c in found.columns] == ["Todo", "Doing", "Done"]
+    # A planner from before: collections with no columns. Not an error: "unsupported".
+    older = _Recorder({"collections": [{"id": "col1", "name": "Work tasks"}]})
+    assert await older.get_workspace(None, None, None) is None
+    assert await _Recorder({"collections": []}).get_workspace(None, None, None) == ()
+    for bad in (
+        {},
+        {"collections": "x"},
+        {"collections": ["x"]},
+        {"collections": [{"id": 1, "name": "W", "columns": []}]},
+        {"collections": [{"id": "a", "name": "W", "columns": [{"id": "c"}]}]},
+        {"collections": [{"id": "a", "name": "W", "columns": []}, {"id": "a", "name": "V", "columns": []}]},
+    ):
+        with pytest.raises(PlannerToolError):
+            await _Recorder(bad).get_workspace(None, None, None)
+
+
+@pytest.mark.parametrize(("text", "unknown"), [("Tool create_collection not found", True), ("A bad name", False)])
+async def test_an_unknown_tool_is_told_apart_from_a_refusal(monkeypatch, text, unknown):
+    client = PlannerClient(None, "http://planner.invalid")
+
+    async def token(*_a, **_kw):
+        return "tok"
+
+    async def initialized(_token):
+        return None
+
+    async def post(body, *, token):
+        result = {"content": [{"type": "text", "text": text}], "isError": True}
+        return 200, {"jsonrpc": "2.0", "id": body["id"], "result": result}, None
+
+    monkeypatch.setattr(planner_client, "get_access_token", token)
+    monkeypatch.setattr(client, "_ensure_initialized", initialized)
+    monkeypatch.setattr(client, "_post", post)
+    with pytest.raises(PlannerToolRefused) as exc:
+        await client.create_collection(None, None, None, name="W", columns=[("Done", True)])
+    assert isinstance(exc.value, PlannerToolUnknown) is unknown
+    # The planner's own words never travel in the exception.
+    assert text not in str(exc.value)
+
+
+def test_create_collection_and_get_workspace_are_allowed():
+    assert {"create_collection", "get_workspace"} <= ALLOWED_TOOLS
+    assert not {"delete_collection", "update_collection", "delete_board"} & ALLOWED_TOOLS
