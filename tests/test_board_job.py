@@ -1011,3 +1011,46 @@ async def test_a_title_on_the_after_line_becomes_a_link_and_a_blocker(sessionmak
     result = await _pass(sessionmaker, _settings(), planner, vault, clock)
     assert result.outcome == board_job.OK
     assert vault.posts == [] and planner.writes == []
+
+
+# -- the planner's button ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("trigger", "guarded"),
+    [
+        (board_job.TRIGGER_AUTO, True),
+        (board_job.TRIGGER_PREVIEW, True),
+        (board_job.TRIGGER_PLANNER, True),
+        (board_job.TRIGGER_NOW, False),
+    ],
+)
+async def test_only_boards_now_runs_past_the_mass_loss_guard(sessionmaker, frozen_clock, monkeypatch, trigger, guarded):
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    await _link(sessionmaker, clock)
+    seen = []
+
+    async def fake_read_and_plan(*_args, guard=True, **_kwargs):
+        seen.append(guard)
+        return []
+
+    monkeypatch.setattr(board_job, "_read_and_plan", fake_read_and_plan)
+    await _pass(sessionmaker, _settings(), FakePlanner(), FakeVault(), clock, trigger=trigger)
+    assert seen == [guarded]
+
+
+async def test_the_planner_trigger_queues_once_a_minute_and_says_where_it_came_from(sessionmaker, frozen_clock):
+    assert board_job.TRIGGER_PLANNER in board_job.TRIGGERS
+    clock = frozen_clock(2026, 11, 10, 9, 0, tz=TZ)
+    async with sessionmaker() as session:
+        assert await board_job.enqueue_command(session, clock, board_job.TRIGGER_PLANNER)
+        assert not await board_job.enqueue_command(session, clock, board_job.TRIGGER_PLANNER)
+        job = (await session.execute(select(Job).where(Job.kind == board_job.BOARD_SYNC))).scalar_one()
+    assert job.payload == {"trigger": "planner"}
+    assert job.dedup_key == board_job.command_dedup_key(clock.now_utc(), board_job.TRIGGER_PLANNER)
+    with pytest.raises(ValueError):
+        async with sessionmaker() as session:
+            await board_job.enqueue_command(session, clock, board_job.TRIGGER_AUTO)
+    result = board_job.PassResult(trigger=board_job.TRIGGER_PLANNER, outcome=board_job.OK)
+    result.boards.append(board_job.BoardResult(NAME, board_job.OK, board_sync.Counts(cards_changed=2)))
+    assert boards_ui.result_text(result).startswith("Проход по кнопке в планере:\n")

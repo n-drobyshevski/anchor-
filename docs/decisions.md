@@ -4398,6 +4398,25 @@ planner and menu test files).
   reported as held in `/boards`, the preview and the run row. `/boards now`
   runs without the guard, because a person asked for that board to be brought
   in step; the background pass and the preview always keep it.
+- **Manual pass from the planner.** The planner's MCP app has a "Sync with
+  Obsidian" button (its app-only `sync_boards` tool), which calls
+  `POST /planner/board-sync` (app/web/board_sync_trigger.py) and queues a pass
+  with the trigger `planner`. There is no shared secret between the two apps:
+  the planner forwards the signed-in user's own Supabase access token, and Echo
+  asks Supabase whether it is valid (`GET ${PLANNER_SUPABASE_URL}/auth/v1/user`
+  with the project's anon key, `PLANNER_SUPABASE_ANON_KEY`, which is public:
+  it ships in the planner's browser bundle). Supabase checks the signature and
+  the expiry; Echo then requires the user's `id` to be the account it is
+  linked to, the `sub` of its own stored planner access token (decoded, not
+  verified: it is Echo's own token; never refreshed for this), compared in
+  constant time. Anything else is a 401 or 403, a closed gate (the flag, the
+  planner link, `VAULT_MODE`, the anon key) is a plain 404, and the endpoint
+  allows six calls a minute. It waits up to 20 seconds for the job and answers
+  with the outcome and per-board counts, never a board's name, or `queued`
+  if the pass is still running. Unlike `/boards now`, the pass keeps the
+  mass-loss guard: a tap in another app is not the deliberate "remove them"
+  that typing `/boards now` is. The worker still sends the result to Telegram
+  ("Проход по кнопке в планере"), so every pass the button runs is on record.
 
 ## Board sync: subtasks and dependencies
 

@@ -46,8 +46,9 @@ tap rule, and tests/test_idle_isolation.py keeps idle away from it.
 A planner or vault failure aborts the pass quietly: logged by event name
 only, recorded as an outcome in `board_sync_run`, never retried by the
 queue (the next pass is 15 minutes away), and the agenda snapshot is
-never touched. `/boards now` and `/boards preview` queue the same job
-with a trigger; the preview reads and computes and writes nothing
+never touched. `/boards now`, `/boards preview` and the planner's "Sync
+with Obsidian" button (`planner`, guard kept) queue the same job with a
+trigger; the preview reads and computes and writes nothing
 anywhere -- not the boards, not the planner, not a pair, not a run row --
 and works with the flag off, so the first pairing can be checked before
 the flag goes on.
@@ -85,7 +86,12 @@ BOARD_SYNC = "board_sync"
 TRIGGER_AUTO = "auto"
 TRIGGER_NOW = "now"
 TRIGGER_PREVIEW = "preview"
-TRIGGERS = (TRIGGER_AUTO, TRIGGER_NOW, TRIGGER_PREVIEW)
+# The planner's "Sync with Obsidian" button (app/web/board_sync_trigger.py):
+# a pass like `/boards now`, but with the mass-loss guard kept -- a tap in
+# another app is not the deliberate "yes, remove them" that `/boards now` is.
+TRIGGER_PLANNER = "planner"
+TRIGGERS = (TRIGGER_AUTO, TRIGGER_NOW, TRIGGER_PREVIEW, TRIGGER_PLANNER)
+COMMAND_TRIGGERS = (TRIGGER_NOW, TRIGGER_PREVIEW, TRIGGER_PLANNER)
 
 # Pass-level outcomes (BoardSyncRun.outcome with `board` null), and the
 # per-board ones besides `ok`.
@@ -165,15 +171,22 @@ async def maybe_enqueue(session: AsyncSession, settings: Settings, clock: Clock)
     return enqueued
 
 
-async def enqueue_command(session: AsyncSession, clock: Clock, trigger: str) -> bool:
-    """`/boards now` or `/boards preview`: queue one pass of that trigger
-    right away. A double tap within the same minute queues one."""
-    if trigger not in (TRIGGER_NOW, TRIGGER_PREVIEW):
+def command_dedup_key(now: datetime.datetime, trigger: str) -> str:
+    """The job's dedup key for a command trigger: one per trigger per minute."""
+    return f"{BOARD_SYNC}:{trigger}:{now.strftime('%Y-%m-%dT%H:%M')}"
+
+
+async def enqueue_command(
+    session: AsyncSession, clock: Clock, trigger: str, *, now: datetime.datetime | None = None
+) -> bool:
+    """`/boards now`, `/boards preview` or the planner's button: queue one
+    pass of that trigger right away. A double tap within the same minute
+    queues one. `now` (default: the clock's) picks the minute, so a caller
+    that waits for the job can name its key (`command_dedup_key`)."""
+    if trigger not in COMMAND_TRIGGERS:
         raise ValueError(f"not a command trigger: {trigger}")
-    minute = clock.now_utc().strftime("%Y-%m-%dT%H:%M")
-    return await enqueue_job(
-        session, BOARD_SYNC, {"trigger": trigger}, dedup_key=f"{BOARD_SYNC}:{trigger}:{minute}"
-    )
+    key = command_dedup_key(now or clock.now_utc(), trigger)
+    return await enqueue_job(session, BOARD_SYNC, {"trigger": trigger}, dedup_key=key)
 
 
 # -- reading -----------------------------------------------------------------------------
@@ -425,8 +438,9 @@ async def run_pass(
 
     now = clock.now_utc()
     try:
-        # A pass the user asked for by hand is the one way past the mass-loss
-        # guard (board_sync.merge); a preview keeps it, to show what would be held.
+        # `/boards now` is the one way past the mass-loss guard
+        # (board_sync.merge); a preview keeps it, to show what would be
+        # held, and so does the planner's button.
         plans = await _read_and_plan(
             session, settings, planner, vault, clock, result, guard=trigger != TRIGGER_NOW
         )

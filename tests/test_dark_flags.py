@@ -64,6 +64,7 @@ async def test_default_flags_register_only_the_webhook_health_and_oauth_routes(s
         "/healthz",
         "/readyz",
         "/planner/oauth/callback",
+        "/planner/board-sync",
     }
     await bot.session.close()
 

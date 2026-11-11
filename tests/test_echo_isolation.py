@@ -30,7 +30,9 @@ task boards kept in step with the planner in the background. So:
 - echo_write.py's `write_board` is named only by echo_write.py and
   app/planner/board_job.py, the `BOARD_SYNC` job -- its own job kind,
   which app/worker.py alone runs (`run_pass`), and which no idle module
-  may import (tests/test_idle_isolation.py);
+  may import (tests/test_idle_isolation.py); besides the worker, only
+  `/boards` (app/tg/boards.py) and the planner's button
+  (app/web/board_sync_trigger.py) import it, to queue a pass;
 - `undo_boards` is named only by app/tg/boards.py (`/boards undo`);
 - every other writer and undo in echo_write.py is still named only by
   the Telegram module whose tap or command runs it: the inbox writer by
@@ -67,7 +69,7 @@ WRITER_CALLERS = {
     "undo_boards": "app/tg/boards.py",
 }
 # Who may import the board-sync job at all, and who may run a pass.
-BOARD_JOB_IMPORTERS = (WORKER, "app/tg/boards.py")
+BOARD_JOB_IMPORTERS = (WORKER, "app/tg/boards.py", "app/web/board_sync_trigger.py")
 LEDGER_EXEMPT = ("app/db/models.py", "app/core/purge.py", "app/core/export.py")
 # An id column (study_card's) and a log key: ids, never the ledger.
 NOT_LEDGER_WORDS = ("echo_changeset_id",)

@@ -512,7 +512,9 @@ async def _run_job(
         # raises for a planner or vault failure -- the pass records its
         # outcome and the next one is 15 minutes away. `/boards now` and
         # `/boards preview` queue it with a trigger, and get its result
-        # as a reply; an automatic pass sends nothing.
+        # as a reply; so does the planner's "Sync with Obsidian" button
+        # (trigger `planner`), whose reply is its record in Telegram. An
+        # automatic pass sends nothing.
         if planner_client is None:
             raise ValueError("board_sync needs a PlannerClient")
         trigger = payload.get("trigger", board_job.TRIGGER_AUTO)

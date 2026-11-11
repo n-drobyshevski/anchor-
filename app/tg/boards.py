@@ -139,11 +139,17 @@ def _counts_text(counts: Counts, *, preview: bool) -> str:
 
 
 def result_text(result: board_job.PassResult) -> str:
-    """The reply to `/boards preview` or `/boards now`, sent by the worker."""
+    """The reply to `/boards preview` or `/boards now`, sent by the worker;
+    also the Telegram record of a pass the planner's button asked for."""
     preview = result.trigger == board_job.TRIGGER_PREVIEW
     if result.outcome in RESULT_GATES:
         return RESULT_GATES[result.outcome]
-    title = "Пробный проход (ничего не записано)" if preview else "Проход"
+    if preview:
+        title = "Пробный проход (ничего не записано)"
+    elif result.trigger == board_job.TRIGGER_PLANNER:
+        title = "Проход по кнопке в планере"
+    else:
+        title = "Проход"
     lines = [f"{title}:"]
     for board in result.boards:
         if board.outcome == board_job.OK:
