@@ -1,9 +1,11 @@
 # Echo — the archiver: a YouTube link becomes a note in the vault (plan)
 
-Version: 2026-11-15 (rev. 1, open questions in §14) · Scope: you send Echo a YouTube link; a separate **archiver** service transcribes the video, cleans the transcript lightly, splits it into topics and writes a summary; Echo shows you the result and, on your tap, writes it into the vault as knowledge notes.
+Version: 2026-11-15 (rev. 2, decisions settled) · Scope: you send Echo a YouTube link; a separate **archiver** service transcribes the video, cleans the transcript lightly, splits it into topics and writes a summary; Echo shows you the result and, on your tap, writes it into the vault as knowledge notes.
 Parent docs: `anchor-phase8-plan.md` (vaultd, the write rules), `anchor-phase8e-plan.md` (classes, §7 contract), `anchor-lens-plan.md` §9 and §14.5 (Echo's inbox writer, the pattern this copies), `anchor-phase4-plan.md` (jobs, caps, cards). The archiver's own design is in the `n-drobyshevski/archiver` repository (README). For this feature, **this file wins**. Every other invariant stays in force.
 
-Milestones are **V0–V3** (§12). Nothing is built yet. §14 lists the decisions this plan needs from you; the text below follows the recommended answer to each and says so where it does.
+Milestones are **V0–V3** (§12). Nothing is built here yet. §14's decisions are settled (rev. 2); the plan already follows them.
+
+Rev. 2 settles §14 and adds §15: a video note is joined to the notes you already have, by links and tags.
 
 ---
 
@@ -20,6 +22,7 @@ Milestones are **V0–V3** (§12). Nothing is built yet. §14 lists the decision
 - The archiver service does the work in the background. The chat stays responsive throughout.
 - When it finishes, Echo sends one card: title, length, number of topics, what it cost, the short summary, and the buttons «в хранилище» and ✖.
 - «в хранилище» writes the note into `Echo/Videos` in the vault, as **knowledge**. Obsidian Sync carries it to your devices. `/watch undo` takes the newest one back.
+- The note links to the knowledge and lens notes you already have on the people and ideas the video is about, and reuses your tags (§15).
 
 **The principle throughout:** the archiver service receives a link and returns text. It never sees a dialog, a memory, a note or a credential of Echo's, and it cannot reach the database or the vault. Only the bot writes to the vault, only through vaultd, and only on your tap.
 
@@ -43,6 +46,7 @@ Milestones are **V0–V3** (§12). Nothing is built yet. §14 lists the decision
 - The archiver downloading media on the server (§5), proxies, cookies, or any workaround when YouTube or ElevenLabs refuses.
 - A second speech-to-text provider; YouTube captions.
 - Editing or re-running a note that is already in the vault. A second `/watch` of the same video makes a second note.
+- Writing a link into any note you already have, and links to notes that do not exist (§15).
 
 ---
 
@@ -151,13 +155,13 @@ A video note is knowledge from the moment it is written. It reaches what any kno
 ## 12. Milestones
 
 - **V0: prove it, in the archiver repository only.** No change here.
-  - A real run on a laptop on one Russian and one English video: read the notes, tune the cleanup prompt and the fidelity thresholds.
+  - A real run on a laptop on one Russian and one English video: read the notes, tune the cleanup prompt and the fidelity thresholds. (The first Russian run is done: 45 minutes, no chunk fell back to raw text, $0.32 of Claude. The note has not been reviewed yet.)
   - From Railway: does metadata still load, and does ElevenLabs transcribe a YouTube `source_url`?
   - Measure the real cost per hour.
   - **Gate:** if `source_url` does not work, stop (§14.6).
-- **V1: the service.** `archiver serve`, the job list, the `source_url` path, the split renderer, the Dockerfile, the boot refusals. Deployed, reachable only from the bot's network, nothing calling it yet.
+- **V1: the service.** `archiver serve`, the job list, the `source_url` path, the split renderer, the concepts of §15 in the job's answer, the Dockerfile, the boot refusals. Deployed, reachable only from the bot's network, nothing calling it yet.
 - **V2: vaultd.** `echo_videos`, `PUT /v1/echo/videos`, caps, the undo purpose. Deployed before V3.
-- **V3: the bot.** Settings, the migration and debug view, the client, `/watch`, `VIDEO_POLL`, the card, `adopt_video`, `/watch undo`, export and delete, spend, the documents of §8, the tests of §11. Off behind `ARCHIVER_ENABLED`.
+- **V3: the bot.** Settings, the migration and debug view, the client, `/watch`, `VIDEO_POLL`, the card, `adopt_video` with §15's resolver, `/watch undo`, export and delete, spend, the documents of §8, the tests of §11. Off behind `ARCHIVER_ENABLED`.
 - **Deferred, not planned:** links recognised in chat; YouTube captions as a cheaper source; a video note offered to the lens garden.
 
 ## 13. Threats
@@ -170,12 +174,33 @@ A video note is knowledge from the moment it is written. It reaches what any kno
 - **What you watch, in a log.** Neither service logs a URL, a video id or a title; a test pins the bot's side and the archiver's.
 - **A second background writer by the back door.** The poll job cannot write to the vault; the isolation test names it.
 
-## 14. Open questions (yours to decide)
+## 14. Decisions (settled, rev. 2)
 
-1. **The tap before the write.** This plan keeps Echo's rule: nothing is written to the vault without a tap, so the note waits behind «в хранилище». The alternative is to treat `/watch` itself as the consent and write as soon as the job is done; that would be a second documented exception to the rule, after board sync. *Recommended: keep the tap. You see the cost and the summary first, and a bad transcript never reaches the vault.*
-2. **The class.** `knowledge` makes video notes searchable from claude.ai and editable by W2. `never` (as the streams notes are) would make them a pure archive that nothing in Echo reads. *Recommended: knowledge.*
-3. **The caps.** Separate archiver caps (as written), or count the archiver against `DAILY_USD_CAP` and raise that. *Recommended: separate.*
-4. **`yt-dlp` for metadata.** As written, or YouTube's oEmbed endpoint only, which is an official API but returns just the title and channel: no length (so no length cap before the paid call), no chapters, no description, no date. *Recommended: `yt-dlp`, metadata only.*
-5. **The command's name.** `/watch`, `/video`, or another.
-6. **If V0's gate fails.** Stop and keep the archiver on the laptop (as written), or run the service on a machine at home, where YouTube allows the download, reaching vaultd over a private link. The second is a larger change to the vault service's "no public route" rule and would need its own plan.
-7. **Direct Anthropic calls.** Settled: the archiver calls the Anthropic API directly, as built, not through OpenRouter. Recorded here because it is the first direct Anthropic processor in the system.
+1. **The tap stays.** Nothing is written to the vault without «в хранилище». You see the cost and the summary first, and a bad transcript never reaches the vault. `/watch` alone is not consent to write.
+2. **The class is `knowledge`.** Video notes are searchable from claude.ai and editable by W2, like any knowledge note. Never `lens` unless you promote one.
+3. **The archiver has its own caps**, outside `DAILY_USD_CAP` (§9).
+4. **`yt-dlp`, for metadata only.** Not oEmbed: without the length there is no cap before the paid call.
+5. **The command is `/watch`.**
+6. **If V0's gate fails, the plan stops** and the archiver stays a laptop tool. Running the service from a home machine would need its own plan.
+7. **Direct Anthropic calls.** The archiver calls the Anthropic API directly, as built, not through OpenRouter. It is the first direct Anthropic processor in the system (§8).
+
+## 15. Links and tags: joining the notes you already have (added in rev. 2)
+
+A video note that links to nothing is an island. This section joins it to the knowledge and lens notes on the same people and ideas, without any note of yours leaving the system.
+
+**The rule: the model proposes blind, the code resolves.**
+
+- **The archiver names concepts, and never sees the vault.** Its outline call returns up to 15 `concepts`: the people, organisations, works, theories and terms the video is substantially about. Each has up to five `names` (dictionary form; Russian and English; short and long) and one `relation` line saying how the video bears on it. The call's input is the transcript and the video's metadata, as before. No title, tag or alias from the vault is an input to any archiver call.
+- **The bot resolves them, in code, at the tap.** `adopt_video` reads vaultd's `GET /v1/knowledge/graph`, whose nodes are knowledge and lens notes only, each with its title, aliases and tags. A concept matches a note when one of its names equals the note's title or an alias, after normalising (case, `ё`/`е`, punctuation, spaces). No model takes part in the match.
+- **What the match adds to the index note:**
+  - a section «Связанные заметки»: one line per matched note, `[[Title]]` and the concept's `relation`; at most 12;
+  - tags: an existing tag is added when a concept's name equals it. The model's own tags (at most 5) are kept only when the vault already uses them, so a video cannot grow the tag list.
+- **What it never does:**
+  - link to a note that does not exist. An unresolved `[[name]]` would show up in the garden as a missing note;
+  - name, count or hint at a personal, `never` or unclassified note. They are not in the graph route's answer, so they are structurally absent;
+  - write into an existing note. Obsidian shows the backlink on the other side by itself;
+  - change a note's class, or put a video note into the lens.
+- **The same resolver runs in the laptop tool**, against the vault folder on disk, so both paths produce the same links. There it skips `Anchor/` and dot-folders, and reads only titles and frontmatter.
+- **Threats.** A link's target is always one of your own titles, so a video cannot forge a link to a path of its choosing. The `relation` line is model text written from the transcript: it is screened with the rest of the note (`note_checks.check_content`) and escaped as inert text. A concept name that matches too much (a note called «Идея») is bounded by the cap of 12 and by names shorter than 3 characters never matching.
+- **Tests.** The resolver with each class pair (a personal note of the same title is never linked); normalisation; the cap; the tag rule; an AST test that the archiver client's request carries nothing but the URL.
+- **Later, only if the links prove too sparse:** letting the outline call see the titles of knowledge and lens notes, so it can match by meaning («закон Эшби» to a note called «Requisite variety»). That sends vault titles to a third party and would be a new row in §10; it is not part of this plan.
