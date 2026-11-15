@@ -83,7 +83,7 @@ Built in the `archiver` repository as `archiver serve`: the existing pipeline be
 
 ## 5. Getting the audio, and the one unverified step
 
-- **Metadata** (title, channel, date, length, chapters, description) comes from `yt-dlp` with `download=False`. That worked from a datacenter address in testing.
+- **Metadata** (title, channel, date, length, chapters, description) comes from `yt-dlp` with `download=False`. From a datacenter address this is unreliable: in testing it worked for two videos and was refused with YouTube's bot check for a third, the same day. V0 has to measure it from Railway.
 - **Audio is not downloaded by the service.** YouTube refused it from a datacenter address, and this plan allows no proxy or cookie workaround (§2). Instead the service passes the video URL to ElevenLabs, whose speech-to-text API accepts a `source_url` and fetches the media itself.
 - **This is unverified.** Whether `source_url` works reliably with YouTube links has not been tested. V0 (§12) tests it before anything else is built. If it fails, this plan stops there: the archiver stays a laptop tool (§14.6).
 - `yt-dlp` does not read `robots.txt` and presents itself as a browser client. That differs from `app/research/fetch.py`, which does neither. It is confined to metadata, lives outside `app/research/`, and is named here so the difference is a decision, not an accident (§14.4).
@@ -156,9 +156,9 @@ A video note is knowledge from the moment it is written. It reaches what any kno
 
 - **V0: prove it, in the archiver repository only.** No change here.
   - A real run on a laptop on one Russian and one English video: read the notes, tune the cleanup prompt and the fidelity thresholds. (The first Russian run is done: 45 minutes, no chunk fell back to raw text, $0.32 of Claude. The note has not been reviewed yet.)
-  - From Railway: does metadata still load, and does ElevenLabs transcribe a YouTube `source_url`?
+  - From Railway: does metadata load reliably (it is sometimes refused from datacenter addresses, §5), and does ElevenLabs transcribe a YouTube `source_url`?
   - Measure the real cost per hour.
-  - **Gate:** if `source_url` does not work, stop (§14.6).
+  - **Gate:** if `source_url` does not work, or metadata is refused too often to rely on, stop (§14.6).
 - **V1: the service.** `archiver serve`, the job list, the `source_url` path, the split renderer, the concepts of §15 in the job's answer, the Dockerfile, the boot refusals. Deployed, reachable only from the bot's network, nothing calling it yet.
 - **V2: vaultd.** `echo_videos`, `PUT /v1/echo/videos`, caps, the undo purpose. Deployed before V3.
 - **V3: the bot.** Settings, the migration and debug view, the client, `/watch`, `VIDEO_POLL`, the card, `adopt_video` with §15's resolver, `/watch undo`, export and delete, spend, the documents of §8, the tests of §11. Off behind `ARCHIVER_ENABLED`.
