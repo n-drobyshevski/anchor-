@@ -144,10 +144,13 @@ def existing_prefix_length(root: Path, parts: list[str]) -> int:
             os.close(fd)
 
 
-def read_regular_at(dir_fd: int, name: str) -> bytes | None:
-    """The bytes of a regular file in `dir_fd`, or None if it is absent.
+def open_regular_at(dir_fd: int, name: str) -> int | None:
+    """A new descriptor on a regular file in `dir_fd`, or None if it is absent.
 
-    Raises Refused for a symlink or anything that is not a regular file.
+    The caller closes it. Raises Refused for a symlink or anything that
+    is not a regular file. For a reader that must look at the file's
+    `fstat` (size, mtime) before it reads, so both describe the same
+    inode (code.py).
     """
     try:
         fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
@@ -158,13 +161,31 @@ def read_regular_at(dir_fd: int, name: str) -> bytes | None:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Refused
-        chunks = []
-        while True:
-            chunk = os.read(fd, 1 << 16)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_all(fd: int) -> bytes:
+    chunks = []
+    while True:
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def read_regular_at(dir_fd: int, name: str) -> bytes | None:
+    """The bytes of a regular file in `dir_fd`, or None if it is absent.
+
+    Raises Refused for a symlink or anything that is not a regular file.
+    """
+    fd = open_regular_at(dir_fd, name)
+    if fd is None:
+        return None
+    try:
+        return read_all(fd)
     finally:
         os.close(fd)
 

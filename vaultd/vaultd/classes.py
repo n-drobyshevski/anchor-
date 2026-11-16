@@ -8,6 +8,12 @@ unclassified or `never` is invisible to the bot, exactly as an
 un-opted-in note was in 8a: not listed, and the same 404 as a missing
 file.
 
+**One exception: the code routes** (`POST /v1/code/tree` and
+`/v1/code/file`, code.py; anchor-code-window-plan.md section 3), dark
+unless `VAULT_CODE_ACCESS` is on. They also serve unclassified notes,
+as class `none`, through `code_class` below. `never`, `Anchor/` and an
+unreadable `anchor:` value stay closed there too.
+
 **Lens is a kind of knowledge, and the least strict class** (lens plan
 section 3). Stricter wins applies to it like to any other class, so:
 
@@ -29,8 +35,8 @@ because a person rule that covers nothing in the lens is a typo the
 user would never see otherwise.
 
 **This module is the one place the rule lives.** The manifest,
-`GET /v1/file`, the knowledge routes and the graph all call
-`effective_class`, never a copy of it, and
+`GET /v1/file`, the knowledge routes, the graph and the code routes
+(through `code_class`) all call `effective_class`, never a copy of it, and
 only after paths.py has already refused dot-folders and symlinks.
 
 **`Anchor/settings.md` fails closed.** If it exists but cannot be used
@@ -87,7 +93,12 @@ from typing import Literal
 import yaml
 
 from vaultd import frontmatter, paths
-from vaultd.config import ECHO_INBOX_DEFAULT, NOTE_MAX_BYTES, TASK_BOARDS_MAX
+from vaultd.config import (
+    CODE_FILE_MAX_BYTES,
+    ECHO_INBOX_DEFAULT,
+    NOTE_MAX_BYTES,
+    TASK_BOARDS_MAX,
+)
 from vaultd.frontmatter import NoteMark
 
 SETTINGS_PATH = "Anchor/settings.md"
@@ -97,6 +108,9 @@ _SETTINGS_NAME = SETTINGS_PATH.rsplit("/", 1)[1]  # "settings.md"
 NoteClass = Literal["personal", "knowledge", "lens"]
 LensKind = Literal["person", "concept"]
 SettingsState = Literal["ok", "absent", "invalid"]
+# The code routes' vocabulary: a class, or `none` for an unclassified note.
+CodeClass = Literal["personal", "knowledge", "lens", "none"]
+CODE_UNCLASSIFIED = "none"
 
 # The classes the knowledge routes read (GET /v1/knowledge, the tree, the
 # graph). Only `knowledge` is ever writable: the lens is the user's alone.
@@ -165,6 +179,9 @@ class Resolution:
     unknown_value: bool = False
     # Set exactly when note_class is "lens".
     lens_kind: LensKind | None = None
+    # The stricter-wins result was `never` (property or folder rule).
+    # Every reader but `code_class` treats it like unclassified.
+    never: bool = False
 
 
 def _segments(rel: str) -> Segments:
@@ -406,6 +423,45 @@ def effective_class(rel: str, mark: NoteMark, rules: FolderRules) -> Resolution:
         return Resolution(None, legacy_read=legacy)
     strictest = max(candidates, key=_RANK.__getitem__)
     if strictest == "never":
-        return Resolution(None, conflict=conflict, legacy_read=legacy)
+        return Resolution(None, conflict=conflict, legacy_read=legacy, never=True)
     kind = lens_kind(rel, rules) if strictest == "lens" else None
     return Resolution(strictest, conflict=conflict, legacy_read=legacy, lens_kind=kind)  # type: ignore[arg-type]
+
+
+def is_anchor_path(rel: str) -> bool:
+    """`Anchor` or anything under it, compared case-insensitively after
+    NFC: on a case-insensitive disk `anchor/Memory` is the same folder."""
+    return _segments(rel)[0].casefold() == _ANCHOR_TOP.casefold()
+
+
+def code_class(rel: str, data: bytes, rules: FolderRules) -> CodeClass | None:
+    """What a code route may serve (anchor-code-window-plan.md section 3.3):
+    the note's class, `none` for an unclassified one, or None when the
+    note stays closed. The one decision both code routes make.
+
+    Closed: not `.md`; a dot segment; `Anchor/` in any case (the
+    settings file with it); larger than CODE_FILE_MAX_BYTES; not UTF-8;
+    an `anchor:` value vaultd cannot read (it might be a mistyped
+    `never`, so it fails closed, as everywhere); effective class
+    `never`, by property or folder rule, stricter wins. An invalid
+    settings file closes everything; the routes answer 409 before they
+    get here (code.py).
+
+    The caller must have reached `data` through paths.py's O_NOFOLLOW
+    walk: no symlink is ever followed to get here.
+    """
+    if not rel.endswith(".md") or paths.has_dot_segment(rel) or is_anchor_path(rel):
+        return None
+    if rules.state == "invalid" or len(data) > CODE_FILE_MAX_BYTES:
+        return None
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    mark = frontmatter.note_mark(data)
+    if mark == "unknown":
+        return None
+    resolved = effective_class(rel, mark, rules)
+    if resolved.never:
+        return None
+    return resolved.note_class or CODE_UNCLASSIFIED

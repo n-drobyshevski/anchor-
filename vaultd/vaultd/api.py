@@ -14,13 +14,37 @@ gets a bare 401.
   itself, a note that does not exist, a dot-folder, a symlink, a
   folder: all the same 404 with the same body, so the bot cannot probe
   for what it may not see.
+- 409: a board that changed since the caller read it, a prune plan
+  that no longer matches, or, on the code routes, `settings_unusable`
+  (below).
 - 412: compare-and-swap failed (see store.py).
 - 422: a file in Anchor's own folders that is not UTF-8. It is Anchor's
   scope, so it exists as far as the bot is concerned, but it cannot be
   returned as text.
 
+**The code routes** (`POST /v1/code/tree`, `POST /v1/code/file`;
+code.py, anchor-code-window-plan.md section 3) exist only when
+`VAULT_CODE_ACCESS` is on; off, they are not registered and answer
+whatever an unknown route answers (the bare 404, after the same 401
+check as everything else). On, their bodies are JSON so that no path
+rides in a query string, and:
+
+- 400 `bad_body`: not the expected JSON object (exactly `{roots}` for
+  the tree, exactly `{path, roots}` for a file), a root or path that is
+  not a string, or more than CODE_ROOTS_MAX roots. 400
+  `malformed_path`: a root or path `paths.parse_rel` refuses.
+- 404 `not_found`, the same body as every read refusal above, for
+  every file refusal: outside the roots, missing, a folder, a symlink,
+  a dot segment, `Anchor/` in any case, `never`, not `.md`, not UTF-8
+  (not a 422 here), over CODE_FILE_MAX_BYTES. The tree has no 404: a
+  root that would be refused contributes nothing.
+- 409 `settings_unusable`: `Anchor/settings.md` is invalid or present
+  only in the wrong case, so a `never_folders` rule may not be applied
+  and nothing is served.
+
 **Logs** carry the method, the route template (`/v1/file`, never the
-query), the status and the latency. Never a path or content.
+query), the status and the latency, and for the code tree the entry
+count. Never a path, a root or content.
 """
 
 from __future__ import annotations
@@ -36,9 +60,9 @@ from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
-from vaultd import boards, classes, echo, frontmatter, graph, knowledge, paths, prune, streams
+from vaultd import boards, classes, code, echo, frontmatter, graph, knowledge, paths, prune, streams
 from vaultd import limits as limits_mod
-from vaultd.config import BODY_MAX_BYTES, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
+from vaultd.config import BODY_MAX_BYTES, CODE_ROOTS_MAX, ECHO_UNDOS_PER_HOUR, NOTE_MAX_BYTES
 from vaultd.manifest import Manifest
 from vaultd.store import Conflict, Missing, Store
 from vaultd.undo import CLAUDE, ECHO, WRITERS, CapExceeded, FileEntry, UndoStore
@@ -62,6 +86,7 @@ STATUS_KEY = web.AppKey("status", object)
 TOKEN_KEY = web.AppKey("token", bytes)
 UNDO_KEY = web.AppKey("undo_store", UndoStore)
 CLOCK_KEY = web.AppKey("clock", object)
+CODE_ACCESS_KEY = web.AppKey("code_access", bool)
 
 
 def _refused() -> web.Response:
@@ -139,7 +164,12 @@ async def healthz(request: web.Request) -> web.Response:
 
 
 async def status(request: web.Request) -> web.Response:
-    return web.json_response(request.app[STATUS_KEY].snapshot())
+    """The supervisor's snapshot, plus `code_access`: whether the code
+    routes exist (VAULT_CODE_ACCESS), so the bot can say which switch
+    is off instead of guessing from a 404."""
+    return web.json_response(
+        {**request.app[STATUS_KEY].snapshot(), "code_access": request.app[CODE_ACCESS_KEY]}
+    )
 
 
 async def manifest(request: web.Request) -> web.Response:
@@ -871,6 +901,73 @@ async def undo_changeset(request: web.Request) -> web.Response:
     return web.json_response({"restored": restored, "refused": refused})
 
 
+# -- the code window (code.py): read-only, registered only when on ---------
+
+
+class _BadBody(Exception):
+    pass
+
+
+def _code_roots(raw: Any) -> list[str]:
+    """The roots list, each parsed like any path. `_BadBody` for a wrong
+    shape, `paths.Malformed` for a malformed root."""
+    if not isinstance(raw, list) or len(raw) > CODE_ROOTS_MAX:
+        raise _BadBody
+    if not all(isinstance(item, str) for item in raw):
+        raise _BadBody
+    return [paths.parse_rel(item) for item in raw]
+
+
+async def post_code_tree(request: web.Request) -> web.Response:
+    """`POST /v1/code/tree`: body `{roots}`, answer `{files, truncated}`
+    (code.build_tree). The log line carries the entry count only."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"roots"}))
+    if body is None:
+        return _json_error("bad_body", 400)
+    try:
+        roots = _code_roots(body["roots"])
+    except _BadBody:
+        return _json_error("bad_body", 400)
+    except paths.Malformed:
+        return _json_error("malformed_path", 400)
+    try:
+        tree = await asyncio.to_thread(code.build_tree, request.app[STORE_KEY].vault_path, roots)
+    except code.SettingsUnusable:
+        return _json_error("settings_unusable", 409)
+    logger.info("code_tree", extra={"event": "code_tree", "count": len(tree["files"])})
+    return web.json_response(tree)
+
+
+async def post_code_file(request: web.Request) -> web.Response:
+    """`POST /v1/code/file`: body `{path, roots}`, answer `{path, class,
+    sha256, text}` (code.read_file). Every refusal is the one 404."""
+    try:
+        raw = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _json_error("bad_body", 400)
+    body = _parse_json_body(raw, frozenset({"path", "roots"}))
+    if body is None or not isinstance(body["path"], str):
+        return _json_error("bad_body", 400)
+    try:
+        roots = _code_roots(body["roots"])
+        rel = paths.parse_rel(body["path"])
+    except _BadBody:
+        return _json_error("bad_body", 400)
+    except paths.Malformed:
+        return _json_error("malformed_path", 400)
+    try:
+        found = await asyncio.to_thread(code.read_file, request.app[STORE_KEY].vault_path, rel, roots)
+    except code.SettingsUnusable:
+        return _json_error("settings_unusable", 409)
+    if found is None:
+        return web.json_response(_NOT_FOUND, status=404)
+    return web.json_response(found)
+
+
 def _limits_json(current: limits_mod.Limits) -> dict:
     return {
         "values": current.as_json(),
@@ -911,6 +1008,7 @@ def make_app(
     status_source: StatusSource,
     undo_store: UndoStore,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    code_access: bool = False,
 ) -> web.Application:
     app = web.Application(
         middlewares=[log_requests, require_token],
@@ -924,6 +1022,7 @@ def make_app(
     app[STATUS_KEY] = status_source
     app[UNDO_KEY] = undo_store
     app[CLOCK_KEY] = clock
+    app[CODE_ACCESS_KEY] = code_access
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/v1/status", status)
     app.router.add_get("/v1/manifest", manifest)
@@ -946,4 +1045,7 @@ def make_app(
     app.router.add_post("/v1/undo", undo_changeset)
     app.router.add_get("/v1/limits", get_limits)
     app.router.add_put("/v1/limits", put_limits)
+    if code_access:
+        app.router.add_post("/v1/code/tree", post_code_tree)
+        app.router.add_post("/v1/code/file", post_code_file)
     return app

@@ -1,7 +1,8 @@
 """vaultd's configuration: a handful of environment variables and constants.
 
 The environment carries only what differs per deploy -- credentials,
-the vault's name, paths. Every limit that protects the vault is a code
+the vault's name, paths, and the one switch that turns the code routes
+on (`VAULT_CODE_ACCESS`, off unless set). Every limit that protects the vault is a code
 constant or a default instead, so no deploy (and no pasted variable)
 can widen it: the body cap, the frontmatter cap, the note size cap and
 the restart backoff are all here, not in the environment. The only
@@ -113,6 +114,20 @@ STREAM_KEY_MAX_CHARS = 120
 # notes, as one Echo changeset (writer `echo`, purpose `prune`).
 PRUNE_MAX_FILES = 500
 
+# The code window (anchor-code-window-plan.md section 3, code.py):
+# `POST /v1/code/tree` and `POST /v1/code/file`, dark unless
+# VAULT_CODE_ACCESS is on. The switch is the only part from the
+# environment; what the routes may serve and how much are constants.
+# A tree lists at most CODE_TREE_MAX files (`truncated: true` past it)
+# under at most CODE_ROOTS_MAX roots, and a file larger than
+# CODE_FILE_MAX_BYTES is neither listed nor read.
+CODE_TREE_MAX = 5000
+CODE_ROOTS_MAX = 16
+CODE_FILE_MAX_BYTES = 2 * 1024 * 1024
+
+# What turns an on/off switch on; anything else, unset included, is off.
+_SWITCH_ON = frozenset({"1", "true", "yes", "on"})
+
 DEFAULT_VAULT_PATH = "/data/vault"
 DEFAULT_CONFIG_HOME = "/data/config"
 DEFAULT_DEVICE_NAME = "anchor-railway"
@@ -134,6 +149,8 @@ class Config:
     config_home: Path
     port: int
     undo_root: Path
+    # VAULT_CODE_ACCESS: the code routes exist only when this is on.
+    code_access: bool = False
 
     @property
     def tmp_path(self) -> Path:
@@ -164,7 +181,14 @@ def from_env(env: Mapping[str, str]) -> Config:
         config_home=Path(get("XDG_CONFIG_HOME", DEFAULT_CONFIG_HOME) or DEFAULT_CONFIG_HOME),
         port=int(port_raw),
         undo_root=Path(get("VAULT_UNDO_ROOT", DEFAULT_UNDO_ROOT) or DEFAULT_UNDO_ROOT),
+        code_access=switch_on(get("VAULT_CODE_ACCESS")),
     )
+
+
+def switch_on(raw: str) -> bool:
+    """`1`, `true`, `yes` or `on` in any case; anything else is off, so
+    a typo leaves a switch dark rather than open."""
+    return raw.strip().lower() in _SWITCH_ON
 
 # Task boards (boards.py): the user's own Kanban Starlane boards, named in
 # `Anchor/settings.md` (`task_boards`), that the bot may read as cards and

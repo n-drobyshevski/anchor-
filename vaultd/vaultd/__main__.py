@@ -40,6 +40,7 @@ async def serve(cfg: config.Config, env: dict[str, str], ob_bin: str = config.OB
         manifest_=Manifest(cfg.vault_path),
         status_source=supervisor,
         undo_store=UndoStore(cfg.undo_root),
+        code_access=cfg.code_access,
     )
     runner = web.AppRunner(app, access_log=None, handle_signals=False)
     await runner.setup()
