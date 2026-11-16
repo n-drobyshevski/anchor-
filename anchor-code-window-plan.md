@@ -1,6 +1,6 @@
 # Echo — the code window: Claude Code reads vault notes on request (plan)
 
-Version: 2026-11-16 (rev. 1) · Scope: a **debug mode** the user opens from Telegram, for a limited time and optionally for a subset of folders, during which Claude Code may read vault notes over HTTPS. Read-only. Closed by default, and closed again by itself.
+Version: 2026-11-16 (rev. 2, as built) · Scope: a **debug mode** the user opens from Telegram, for a limited time and optionally for a subset of folders, during which Claude Code may read vault notes over HTTPS. Read-only. Closed by default, and closed again by itself.
 Parent docs: `anchor-phase8-plan.md` (vaultd, §5.4 API), `anchor-phase8e-plan.md` (classes), `anchor-lens-plan.md` §11 (the lens door), `anchor-claude-connector-plan.md` §6 (windows, read notices), `docs/claude-access.md`. For this feature, **this file wins**. Every other invariant stays in force.
 
 Milestone: **CW1** (all of this file).
@@ -146,3 +146,44 @@ Window lifecycle (pending → open → expired / off / replaced; one open at a t
 - **The class boundary stays in vaultd.** A bot bug, or a stolen token inside an open window, still cannot reach `never` or `Anchor/`.
 - **Never silent.** A notice on the first read, a count in `/vault code`, a line in the digest.
 - **Nothing accumulates.** The bot relays and forgets; the tables hold counts.
+
+## 7. As built
+
+Where the implementation is more specific than sections 3 and 4. Sections 0 to 6 stand as written.
+
+**vaultd (§3).**
+
+- One function decides what a code route may serve, `classes.code_class` (`vaultd/vaultd/classes.py`), for the tree and the file alike. The switch accepts `1`, `true`, `yes` or `on`; anything else, unset included, is off. Off, the routes are not registered, so they answer what an unknown route answers, after the same 401 check as every route.
+- A body that is not exactly `{roots}` (tree) or `{path, roots}` (file), a root or path that is not a string, or more than `CODE_ROOTS_MAX` (16) roots is 400 `bad_body`; a root or path `paths.parse_rel` refuses is 400 `malformed_path`.
+- A file refusal is the one 404 `not_found`, which adds to §3's list: a path that is exactly a root (a root is a folder, and vaultd's check is "strictly inside"), and an `anchor:` value vaultd cannot read. A dot segment anywhere closes a path, and a dot-folder is not walked.
+- Roots and paths are compared by segment after NFC on both sides. The tree walks every folder from its parent's descriptor with `O_NOFOLLOW`, and a file's size and mtime come from the `fstat` of the descriptor that is then read.
+- A tree does not 404 on a refused root. The only 404 a tree can get is vaultd's own switch being off, and the bot reads that as 503 (below).
+
+**The bot's routes (§4.4).**
+
+- Guards run in this order: method, feature flag and lockout (bare 404); the token (bare 404; a missing header is not counted, a wrong one is); 120 requests a minute (429 `rate_limited`, with `Retry-After`); the body (400 `bad_request`: not a JSON object of at most 4096 bytes, a key the route does not take, or a `file` body without `path`); the window (403 `no_window`).
+- Every HTTP method is routed to the handler, so a `GET` is the same bare 404 as a wrong token, never a 405.
+- The tenth wrong token starts the lockout and sends one Telegram message («Claude Code: 10 неверных токенов за час. Окно для vault заблокировано на час.»). The lockout clears itself an hour later, on the injected `Clock`.
+- `tree` with a `root`: it must be well formed and lie under a window root (or equal one), else 400 or 404 `not_found`. A tree entry that vaultd returns outside what was asked, or with a malformed path, is dropped and logged only as a count (`dropped`).
+- `file`: a path outside the window's roots or under `Anchor/` is 404 `not_found` before vaultd is asked. At the cap, 429 `window_cap`, checked after confinement and before vaultd. `files_read` and the cap count the `file` route only.
+- vaultd's failures, as the bot answers them: 409 `settings_unusable` stays 409; a refusal code is 400 `bad_request`; on the tree a 404 is the switch off, 503 `vault_code_off`; on a file it is `not_found`; anything else (no answer, a timeout, a malformed answer) is 502 `vault_unavailable`.
+- The notice's time is `HH:MM` in the user's time zone. A failed notice is logged by exception type and does not fail the read. The notice goes after the `code_read` row is committed, and `notified_at` makes it once per window.
+- Logs carry `route`, `http_status`, `window_id`, counts, a `reason` or an `error_code`; the lockout and the failures log the exception type only.
+
+**Windows and Telegram (§4.2, §4.3).**
+
+- `parse_rel` on the bot also refuses a segment that starts with a dot. A root typed in Telegram is trimmed, loses one trailing slash and is NFC-normalised; a path sent to `file` is never rewritten, because vaultd echoes it and the disk may store it in NFD.
+- `Anchor` is refused on the first segment only (`Projects/Anchor/x.md` is an ordinary note), in any case.
+- The card's row is `pending`. «Открыть» opens it only if the issue time in the button is the row's `created_at` second; at that moment any open window closes as `replaced` and any other pending row is dropped. A pending row older than 10 minutes is dropped when the next card is made, and a button older than `CONFIRM_TTL` (300 s), or one pressed with the feature off, answers «Устарело.».
+- The card counts the notes by asking vaultd's tree for the roots. A root that matched no note is named on the card. When the tree is truncated, each such root is asked again on its own before it is called empty, and the card says the list was cut.
+- `/vault code` states, in lines: the feature, vaultd's switch (`on`, `off`, vault mode off, unreachable, unauthorized), and either the open window (until, folders, files read of the cap) or when the last one closed and why («по времени», «командой», «открыто новое», «при /delete»). `/vault code on` replies with no card, and says which, when vaultd is unreachable, its switch is off, `VAULT_MODE` is `off`, or `Anchor/settings.md` is unusable. Lifetime other than `1h`, `6h`, `24h`, more than 8 folders, or a folder that is malformed or under `Anchor/` is refused with a message.
+- Startup with `CODE_ACCESS_ENABLED` off closes any open window as `off`. The web chat refuses the subcommand pair (`vault`, `code`) and the `vc:` callbacks, so `/vault` itself still works there.
+- The debug views are `debug.code_window` (with `n_roots` in place of `roots`) and `debug.code_read`.
+
+**Settings (§4.1).**
+
+- `CODE_FILES_PER_WINDOW` is checked at startup whether or not the feature is on. With the feature on, the bot also refuses to start unless `MODE=webhook`, `PUBLIC_URL` is `https://`, `VAULT_MODE` is not `off`, and `CODE_ACCESS_TOKEN_SHA256` is 64 hex characters (upper case is accepted and lowered). The hash is never echoed.
+
+**The digest (§4.5).**
+
+- «Claude Code читал vault: N файлов, M запросов.» is added only when there was a request in the 24 hours. A window open, or a read, in them is enough to queue the digest when `CLAUDE_ACCESS_ENABLED`, `LENS_ENABLED` and board sync are all off; a day with nothing to report still sends nothing.
