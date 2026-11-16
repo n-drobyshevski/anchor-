@@ -25,6 +25,14 @@ the look-behind that keeps a longer name from matching DATABASE_URL.
 The boundary is again the role, not this hook; the user switches its
 LOGIN with `/lens code on|off`.
 
+A second content door opens only on request (anchor-code-window-plan.md,
+CW1): the code window. While the user has one open (`/vault code on`
+in Telegram), `curl -X POST "$ANCHOR_CODE_URL/tree|file|status"`
+reads vault notes through the bot. Nothing here needs to allow it:
+the URL lives in a variable, so the Railway-host rule below does not
+match, and neither name is on the secret list. The boundary is the
+window and vaultd's own refusals (`never`, `Anchor/`), not this hook.
+
 Two more doors, both about reads that leave through a side channel:
 
 - **Anchor's own connector** (anchor-claude-connector-plan.md section
@@ -123,6 +131,9 @@ HINT = (
     " (lens.gaps(n)) are read through their own role:"
     ' psql "$ANCHOR_LENS_DATABASE_URL" -c "select ... from lens.notes()"'
     " (or lens.graph(), lens.rounds(n), lens.gaps(n))."
+    " Other vault notes are readable only inside a code window the user opened"
+    ' (/vault code on): curl -sS -X POST "$ANCHOR_CODE_URL/tree" (or /file, /status);'
+    " 403 no_window means ask the user, not look for another way."
 )
 
 

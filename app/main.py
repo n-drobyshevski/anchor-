@@ -84,6 +84,7 @@ from app.tg.polling import run_polling
 from app.tg.router import build_router, register_commands
 from app.tg.webhook import handle_webhook, healthz, readyz
 from app.web import board_sync_trigger, mcp, mcp_claude, oauth, oauth_store
+from app.web import code_access as code_access_web
 from app.web import auth as web_auth
 from app.web.hub import WebHub
 from app.web.routes import setup_web
@@ -421,6 +422,10 @@ def build_webhook_app(
         mcp_claude.register(app, settings)
     if settings.GROK_ACCESS_ENABLED:
         mcp.register(app, settings)
+    # CW1 (anchor-code-window-plan.md section 4.4): Claude Code's code
+    # window. Off, /code/v1/* does not exist: aiohttp's own 404.
+    if settings.CODE_ACCESS_ENABLED:
+        code_access_web.register(app, settings)
 
     # P2: registered unconditionally, like the planner's own /api/mcp
     # route mirrors -- the handler itself 404s when PLANNER_ENABLED is

@@ -51,7 +51,15 @@ and that both name Obsidian (8e).
   gap and the titles and summaries of its notes, the search query goes
   to Exa (through OpenRouter), and pages come only from the sites in
   `PACKET_LENS`; what you accept («в Inbox») becomes a knowledge note in
-  `Echo/Inbox`, which you can undo for 14 days (`/lens undo`). In `sync`
+  `Echo/Inbox`, which you can undo for 14 days (`/lens undo`). While you
+  have a code window open (`/vault code on`, for 1, 6 or 24 hours,
+  optionally for named folders), Claude Code can read any of your notes
+  in it except `never` notes and everything under `Anchor/`: their
+  paths and text pass through the bot's memory on the way to Claude Code
+  and are neither stored nor logged, and nothing reaches a model
+  provider through the bot; what Claude Code reads goes to Anthropic,
+  and the bot only counts the reads (the first of a window is announced
+  in Telegram, and the daily digest gives the totals). In `sync`
   mode, editing or
   deleting a fact file in Anchor's folder changes Anchor's memory.
   Suggested research topics (`/interests suggest`, and once a week on

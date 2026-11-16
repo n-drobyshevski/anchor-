@@ -40,6 +40,7 @@ no model call, no outbound).
 | The lens garden (L3): once a week an idle job looks for gaps in the lens (missing links, missing notes, tensions, bridges), sends one Telegram message with a button row per gap, and writes a report to `Anchor/Reports` | **off** | `LENS_GARDEN_ENABLED` (on top of `LENS_ENABLED`, and `VAULT_MODE` `mirror` or `sync`); `GARDEN_MAX_TOKENS` (4000, 1000–8000) caps the model's answer; `GARDEN_MODEL` (empty: `LLM_MODEL_SAFETY`) moves the garden alone to another model. Deploy the vault service first (docs/vault-setup.md) |
 | The lens in reflection (L5): the idle reflection picks the lens notes that fit its draft notebook changes and may rephrase the draft's open threads on them (never observations about you); critique records which lens notes stood behind the replies it rated | **off** | `LENS_REFLECT_ENABLED` (on top of `LENS_ENABLED`) for the reflection; critique's ids need only `LENS_ENABLED`; the same `LENS_ROUND_MAX_NOTES` and `LENS_ROUND_MAX_CHARS` bound a reflection round, and its two extra calls count against `IDLE_JOB_USD_CAP` |
 | Lens research (L4): «исследовать» under a garden gap searches `PACKET_LENS` in the background, reads different publishers first (best kind of source first: reference work, Wikipedia, primary source, index), cross-checks each page's cards against the other publisher's page («подтверждает» / «противоречит», with a verbatim quote), sends the result as its own message, and «в Inbox» writes it as one knowledge note into the vault's inbox (`Echo/Inbox`); `/lens undo` takes the newest back | **off** | all of `RESEARCH_ENABLED`, `LENS_ENABLED`, `LENS_GARDEN_ENABLED` and `IDLE_ENABLED`; `PACKET_LENS` (7 domains by default, at most 12; empty turns it off); shares `/study`'s `RESEARCH_JOBS_PER_DAY` and `RESEARCH_JOB_USD_CAP`. Deploy the vault service first (docs/vault-setup.md) |
+| The code window (CW1): a window you open from Telegram (`/vault code on`, for 1, 6 or 24 hours, optionally for named folders) during which Claude Code may list and read vault notes through `/code/v1` on the bot, over HTTPS. Every class except `never` and `Anchor/`; read-only; nothing stored or logged but counts; the first read of a window is announced in Telegram and the daily digest totals them | **off** | `CODE_ACCESS_ENABLED` (webhook mode on https, `VAULT_MODE` other than `off`) + `CODE_ACCESS_TOKEN_SHA256` (the sha256 of the token you give Claude Code) + `VAULT_CODE_ACCESS` on the vault service; `CODE_FILES_PER_WINDOW` (2000, 1–20000) caps a window's file reads. Deploy the vault service first (docs/vault-setup.md); setup in docs/claude-access.md |
 
 Chat model `thedrummer/cydonia-24b-v4.1`; safety and JSON calls
 `google/gemini-2.5-flash-lite`; eval judge `openai/gpt-4.1-nano`
@@ -95,6 +96,9 @@ switched at run time from `/menu` → Настройки → 🧠 Модели (
 | `/lens garden now` | Run this week's lens garden now instead of waiting for an idle slot: skips only the inactivity wait, the idle window and the garden's own 168-hour/unchanged rules; keeps the pause, the welfare cooldown, every budget row and once per ISO week. The garden message follows under its usual holds; Telegram only | `LENS_GARDEN_ENABLED` |
 | `/lens research now` | Run the lens research a tap on «исследовать» queued, instead of waiting for an idle slot: skips only the inactivity wait, the idle window and the kind's once-a-day limit, and is never preempted; keeps the pause, the welfare cooldown, `busy` and every budget row. Takes no quota of its own (the /study quota went at the tap). The result message follows under its usual holds; Telegram only | `RESEARCH_ENABLED`, `LENS_GARDEN_ENABLED`, `PACKET_LENS` |
 | `/lens code on`, `/lens code off` | Let Claude Code log in as `anchor_lens` and read lens notes, which of them each review or reflection round picked (never the review's explanation) and the garden's proposals / close that login and end its open sessions; Telegram only | the role must exist (docs/claude-access.md) |
+| `/vault code` | The code window: whether it is on, whether the vault service's switch is on, and the open window (until when, which folders, files read of `CODE_FILES_PER_WINDOW`) or when the last one closed. Not the `/lens code` door | `CODE_ACCESS_ENABLED` |
+| `/vault code on [1h\|6h\|24h] [папка; папка]` | Ask for a window for Claude Code: a card says how many notes it opens (the folders given, up to 8, or the whole vault except `Anchor/` and `never`), for how long (default 1h), and nothing opens until «Открыть». Telegram only (the web chat refuses `/vault code` and its buttons) | `CODE_ACCESS_ENABLED` + `VAULT_CODE_ACCESS` on the vault service |
+| `/vault code off` | Close the open window now; Telegram only | `CODE_ACCESS_ENABLED` |
 | `/weblogout` | End every web session; Telegram only (typed in the web chat it is refused) | `WEB_UI_ENABLED` |
 
 The rest of this file is the build history, milestone by milestone,
@@ -1254,7 +1258,7 @@ it, and extends the isolation tests.
 | Becoming a memory fact | never automatically | never automatically | never automatically |
 | Encrypted backups | included; deleted by `/delete` | same | same |
 | `/export` | left out (derived from the vault) | left out | left out |
-| Claude Code | never: the vault is off limits, lens notes aside | never | **yes, through the `anchor_lens` role only**, while `/lens code on` (L3: also the garden's gaps, `lens.gaps(n)`; L5: reflect rounds in `lens.rounds(n)`) |
+| Claude Code | never: the vault is off limits, lens notes aside, **except inside a code window you opened (CW1)**: any note not `never` or under `Anchor/`, relayed by the bot, counted | same: never, except inside a code window | **yes, through the `anchor_lens` role**, while `/lens code on` (L3: also the garden's gaps, `lens.gaps(n)`; L5: reflect rounds in `lens.rounds(n)`), and inside a code window like any note |
 
 If notes ever reach `/grok`, personal and knowledge will be separate
 scopes, both off by default.
@@ -1532,6 +1536,49 @@ adds «Последняя рефлексия с линзой: <date>, <outcome>�
 sees the reflection's picks in `lens.rounds(n)`, never why. Why it is
 built this way: docs/decisions.md, "L5 — reflection and critique read
 the lens".
+
+## Milestone CW1 — the code window
+
+A debug mode (`anchor-code-window-plan.md`). The lens door is a Postgres
+login, which a Claude Code cloud session cannot open, and it reads lens
+notes only. The code window is an HTTPS route on the bot: you open a
+window from Telegram, and for 1, 6 or 24 hours Claude Code can list and
+read your vault notes, all of the vault or the folders you name. Off
+unless `CODE_ACCESS_ENABLED`, `CODE_ACCESS_TOKEN_SHA256` and the vault
+service's `VAULT_CODE_ACCESS` are set; **deploy the vault service
+first** (docs/vault-setup.md, section 13).
+
+1. **You open it.** `/vault code on [1h|6h|24h] [папка; папка]` sends a
+   card with the number of notes it would open, the folders and the
+   lifetime; nothing is open until «Открыть». `/vault code` shows the
+   state, `/vault code off` closes it. One window at a time; it closes
+   itself. Telegram only.
+2. **Claude Code reads.** Three `POST` routes under `/code/v1`: `status`,
+   `tree` (the notes of the window, or of one folder in it) and `file`
+   (one note's text), with a bearer token whose sha256 alone is in the
+   bot's environment. No window, or the wrong token, and it gets
+   nothing.
+3. **Two things stay closed in every window:** `never` notes and
+   everything under `Anchor/`. The vault service refuses them itself,
+   whatever the bot asks, and refuses anything else it should not serve
+   (a symlink, a dot-folder, a file that is not `.md`, over 2 MiB), all
+   with the same 404. When `Anchor/settings.md` is unusable it serves
+   nothing (409).
+4. **You see every read.** A Telegram message at a window's first read,
+   the files read so far in `/vault code`, and a line in the daily
+   digest, «Claude Code читал vault: N файлов, M запросов». The bot
+   stores counts only (`code_window`, `code_read`), and logs no token,
+   path, folder or text. The notes pass through its memory and are
+   forgotten. `/delete` erases the two tables, and `/export` leaves them
+   out.
+5. **Limits.** 120 requests a minute; `CODE_FILES_PER_WINDOW` file reads
+   per window (2000); 5000 notes in a tree; ten wrong tokens lock the
+   routes for an hour. The lockout and the rate limit reset on a redeploy.
+
+What Claude Code reads stays in its session: CLAUDE.md applies the lens
+rule to it. `/vault code` is a different door from `/lens code`. Setup:
+[docs/claude-access.md](docs/claude-access.md), "The code window (CW1)";
+why it is built this way: docs/decisions.md, "CW1 — the code window".
 
 ## Web UI
 
@@ -1822,10 +1869,10 @@ project's `.claude/settings.json` and `.claude/hooks/guard_private_data.py`
 block the Railway tools that reveal the database URL or the bot token,
 the `.env` file, and the Telegram Bot API. Logs, deployment status and
 metrics stay available. For SQL, Claude gets `ANCHOR_DEBUG_DATABASE_URL`,
-a role that can read only the content-free `debug.*` views. The one
+a role that can read only the content-free `debug.*` views. One
 content door is the lens (L1): `ANCHOR_LENS_DATABASE_URL` logs in as
 `anchor_lens`, which can call `lens.notes()`, `lens.graph()`,
-`lens.rounds(n)` and `lens.gaps(n)` and nothing else, only while `/lens code on`, and every call is counted. See
+`lens.rounds(n)` and `lens.gaps(n)` and nothing else, only while `/lens code on`, and every call is counted. The other is the code window (CW1): while you have one open (`/vault code on`), Claude Code may list and read vault notes through `/code/v1` on the bot, never `never` notes or `Anchor/`; the bot relays and forgets, stores counts only, and announces the first read in Telegram. See
 [docs/claude-access.md](docs/claude-access.md).
 
 ### Grok (opt-in)

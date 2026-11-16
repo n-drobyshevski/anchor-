@@ -584,3 +584,64 @@ async def test_list_changes_reads_the_writer(stub) -> None:
     stub.respond("GET", "/v1/changes", 200, {"changes": [{**entry, "id": "x", "writer": "grok"}]})
     with pytest.raises(VaultError):
         await _client(stub).list_changes()
+
+
+# --- CW1: the code routes (anchor-code-window-plan.md section 3) -------------------
+
+
+async def test_status_reads_the_code_switch_and_defaults_it_off(stub) -> None:
+    assert (await _client(stub).status()).code_access is False
+    stub.responses[("GET", "/v1/status")][1]["code_access"] = True
+    assert (await _client(stub).status()).code_access is True
+    stub.responses[("GET", "/v1/status")][1]["code_access"] = "yes"
+    with pytest.raises(VaultError):
+        await _client(stub).status()
+
+
+async def test_code_tree_posts_the_roots_and_parses(stub) -> None:
+    entry = {"path": "Notes/a.md", "class": "none", "bytes": 3, "mtime": "2026-11-16T10:00:00Z"}
+    stub.respond("POST", "/v1/code/tree", 200, {"files": [entry], "truncated": True})
+    tree = await _client(stub).code_tree(["Notes"])
+    assert tree.truncated is True
+    assert tree.files == [client_module.CodeTreeEntry("Notes/a.md", "none", 3, "2026-11-16T10:00:00Z")]
+    assert stub.calls() == [("POST", "/v1/code/tree")]
+    assert stub.requests[0].query == {}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"files": [], "truncated": "no"},
+        {"files": [], "truncated": False, "extra": 1},
+        {"files": [{"path": "a.md", "class": "never", "bytes": 1, "mtime": "2026-11-16T10:00:00Z"}], "truncated": False},
+        {"files": [{"path": "a.md", "class": "none", "bytes": -1, "mtime": "2026-11-16T10:00:00Z"}], "truncated": False},
+        {"files": [{"path": "a.md", "class": "none", "bytes": 1, "mtime": "yesterday"}], "truncated": False},
+        {"files": [{"path": "a.md", "class": "none", "bytes": 1}], "truncated": False},
+    ],
+)
+async def test_code_tree_refuses_a_foreign_shape(stub, body) -> None:
+    stub.respond("POST", "/v1/code/tree", 200, body)
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).code_tree([])
+    assert exc.value.code == errors.BAD_RESPONSE
+
+
+async def test_code_file_parses_and_checks_the_echoed_path(stub) -> None:
+    body = {"path": "Notes/a.md", "class": "personal", "sha256": "a" * 64, "text": "x"}
+    stub.respond("POST", "/v1/code/file", 200, body)
+    note = await _client(stub).code_file("Notes/a.md", [])
+    assert (note.path, note.note_class, note.text) == ("Notes/a.md", "personal", "x")
+    with pytest.raises(VaultError):
+        await _client(stub).code_file("Notes/b.md", [])
+    stub.respond("POST", "/v1/code/file", 200, body | {"sha256": "nope"})
+    with pytest.raises(VaultError):
+        await _client(stub).code_file("Notes/a.md", [])
+
+
+@pytest.mark.parametrize("status,code", [(404, errors.NOT_FOUND), (409, errors.CONFLICT), (400, errors.REFUSED)])
+async def test_code_refusals_map_to_codes(stub, status, code) -> None:
+    # vaultd's switch-off 404 is plain text, not JSON: never parsed.
+    stub.respond("POST", "/v1/code/tree", status, b"404: Not Found")
+    with pytest.raises(VaultError) as exc:
+        await _client(stub).code_tree([])
+    assert exc.value.code == code

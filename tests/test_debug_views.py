@@ -86,6 +86,11 @@ CONTENT_COLUMNS = {
     # Runtime model choice: a role, an OpenRouter model id and a time.
     # The prices are left out of the view, but are not content either.
     "llm_model_override": set(),
+    # CW1 (anchor-code-window-plan.md section 4.2): the folders the user
+    # typed for a window stay out of the view (it shows n_roots); the
+    # ledger is counts, times and a route name.
+    "code_window": {"roots"},
+    "code_read": set(),
 }
 
 

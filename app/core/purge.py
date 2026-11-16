@@ -256,6 +256,12 @@ PURGED_TABLES = (
     # carry lens link text; both point only at tables purged here.
     "lens_garden_run",
     "lens_gap",
+    # CW1 (anchor-code-window-plan.md section 4.2): the code window and
+    # its read ledger. Counts and times, and the folders the user typed
+    # into Telegram -- still a record of Claude Code's reads of this
+    # user's vault. Child first.
+    "code_read",
+    "code_window",
     # L4 (plan sections 9 and 14.5): Echo's inbox writes. Ids and times
     # only, like claude_changeset, but still a record of what Echo wrote
     # into this user's vault. The notes themselves stay in the vault:

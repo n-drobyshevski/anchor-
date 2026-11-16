@@ -43,6 +43,16 @@ an older vaultd answers without those keys, and the card says so
 board changed since it was read) is an outcome, `BoardPost(conflict=True)`,
 not an error.
 
+**CW1: the code window** (`POST /v1/code/tree`, `POST /v1/code/file`,
+anchor-code-window-plan.md section 3). Inside a window the user opened
+from Telegram, the bot relays any note vaultd may serve -- unclassified
+ones included (`class: none`) -- to Claude Code. This supersedes "the
+bot cannot know the names of notes it may not see" for that one relay:
+it sees them in memory for one request, and stores and logs neither.
+`never` and `Anchor/` stay vaultd's to refuse. Only
+app/web/code_access.py calls these two methods. `status()` reads
+vaultd's switch as `code_access`, false when an older vaultd omits it.
+
 **What the client refuses to do.** No redirects (a 3xx is a bad
 response, not a hop). No proxy or `.netrc` from the environment
 (`trust_env=False`), so the bearer token only ever goes to VAULT_URL,
@@ -94,6 +104,9 @@ class ServiceStatus:
     restarts: int
     last_exit_code: int | None
     running_since: datetime.datetime | None
+    # CW1: vaultd's VAULT_CODE_ACCESS switch. A vaultd from before CW1
+    # sends no key: off.
+    code_access: bool = False
 
 
 NOTE_CLASSES = ("personal", "knowledge", "lens")
@@ -347,6 +360,57 @@ class BoardPost:
     sha256: str | None
     changed: bool
     conflict: bool = False
+
+
+# CW1 (anchor-code-window-plan.md section 3): the classes a code route may
+# report -- `none` is an unclassified note. `never` and `Anchor/` are
+# refused by vaultd itself and never listed.
+CODE_CLASSES = ("personal", "knowledge", "lens", "none")
+_CODE_TREE_ENTRY_KEYS = frozenset({"path", "class", "bytes", "mtime"})
+_CODE_FILE_KEYS = frozenset({"path", "class", "sha256", "text"})
+
+
+@dataclass(frozen=True)
+class CodeTreeEntry:
+    """One `.md` file `POST /v1/code/tree` lists: its vault-relative
+    path, class, size and modification time (`mtime` as vaultd sent it,
+    UTC ISO-8601, checked to parse)."""
+
+    path: str
+    note_class: str
+    bytes: int
+    mtime: str
+
+
+@dataclass(frozen=True)
+class CodeTree:
+    files: list[CodeTreeEntry]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class CodeFile:
+    """`POST /v1/code/file`'s body: one note, whole."""
+
+    path: str
+    note_class: str
+    sha256: str
+    text: str
+
+
+def _code_path(value: Any) -> str:
+    _require(isinstance(value, str) and value != "" and "\x00" not in value)
+    return value
+
+
+def _code_tree_entry(item: Any) -> CodeTreeEntry:
+    _require(isinstance(item, dict) and set(item) == _CODE_TREE_ENTRY_KEYS)
+    note_class, mtime = item["class"], item["mtime"]
+    _require(isinstance(note_class, str) and note_class in CODE_CLASSES)
+    _require(isinstance(mtime, str) and _parse_time(mtime) is not None)
+    return CodeTreeEntry(
+        path=_code_path(item["path"]), note_class=note_class, bytes=_count(item["bytes"]), mtime=mtime
+    )
 
 
 def _sha256(value: Any) -> str:
@@ -728,12 +792,44 @@ class VaultClient:
         _require(isinstance(running, bool))
         _require(isinstance(restarts, int) and not isinstance(restarts, bool) and restarts >= 0)
         _require(exit_code is None or (isinstance(exit_code, int) and not isinstance(exit_code, bool)))
+        code_access = data.get("code_access", False)
+        _require(isinstance(code_access, bool))
         return ServiceStatus(
             sync_running=running,
             restarts=restarts,
             last_exit_code=exit_code,
             running_since=_parse_time(data.get("running_since")),
+            code_access=code_access,
         )
+
+    # -- CW1: the code window (anchor-code-window-plan.md section 3) -----------
+    #
+    # Called from app/web/code_access.py only. Both are POSTs with a JSON
+    # body, so a path or a root never rides in a query string. On these
+    # routes NOT_FOUND is every read refusal (and vaultd's switch being
+    # off), and CONFLICT is the 409 `settings_unusable`: Anchor/settings.md
+    # is invalid or wrongly named, so nothing may be served.
+
+    async def code_tree(self, roots: list[str]) -> CodeTree:
+        """`POST /v1/code/tree`: every `.md` vaultd may serve under
+        `roots` (empty: the whole vault), sorted by path, capped."""
+        data = await self._request("POST", "/v1/code/tree", body={"roots": list(roots)})
+        _require(set(data) == {"files", "truncated"})
+        files, truncated = data["files"], data["truncated"]
+        _require(isinstance(files, list) and isinstance(truncated, bool))
+        return CodeTree(files=[_code_tree_entry(item) for item in files], truncated=truncated)
+
+    async def code_file(self, path: str, roots: list[str]) -> CodeFile:
+        """`POST /v1/code/file`: one note, whole, if it lies under `roots`
+        (empty: anywhere) and vaultd may serve it."""
+        data = await self._request(
+            "POST", "/v1/code/file", body={"path": path, "roots": list(roots)}
+        )
+        _require(set(data) == _CODE_FILE_KEYS and data["path"] == path)
+        note_class, text = data["class"], data["text"]
+        _require(isinstance(note_class, str) and note_class in CODE_CLASSES)
+        _require(isinstance(text, str))
+        return CodeFile(path=path, note_class=note_class, sha256=_sha256(data["sha256"]), text=text)
 
     async def manifest(self) -> Manifest:
         data = await self._request("GET", "/v1/manifest")

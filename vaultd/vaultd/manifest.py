@@ -13,7 +13,10 @@ Two scopes, and nothing else is listed:
 **Invisible notes contribute counts only, never a path** (8e plan
 section 4): the `summary` says how many notes disagreed with their
 folder, still say `anchor: read`, or carry a value Anchor does not
-know, and whether the settings file is usable.
+know, and whether the settings file is usable. (The manifest never
+lists an unclassified note; the code routes are the one exception
+elsewhere in vaultd, dark by default: code.py, classes.code_class,
+anchor-code-window-plan.md section 3.)
 
 **The settings file's reported state is one of four** (8f):
 `missing` (no `Anchor/settings.md` at all -- fine, no folder rules),

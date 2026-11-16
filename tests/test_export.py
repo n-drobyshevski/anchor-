@@ -550,6 +550,9 @@ NOT_EXPORTED = {
     # already in the vault as the Anchor/Reports note.
     "lens_garden_run": "a derived weekly run of the lens garden: ids, scores and clusters",
     "lens_gap": "derived proposals about how the lens is organised, also in the vault's report",
+    # CW1 (anchor-code-window-plan.md section 4.2): left out like lens_read.
+    "code_window": "the code window's bookkeeping: times, a lifetime and folders already in `message`",
+    "code_read": "a derived log of Claude Code's vault reads: a route and counts",
 }
 
 

@@ -551,6 +551,27 @@ changed since it was read, and tries again on the next pass. An edit
 still on its way from another device can still meet a write and leave a
 conflicted copy of the board; open both and keep the one you want.
 
+## 13. The code window: Claude Code reads notes on request (CW1)
+
+Off by default. The vault service has one switch for it:
+
+| Variable | Value |
+|---|---|
+| `VAULT_CODE_ACCESS` | `1`, `true`, `yes` or `on` turns it on; anything else, unset included, is off |
+
+On, the vault service answers two more routes, `POST /v1/code/tree` and
+`POST /v1/code/file`, to the bot only (the same `VAULT_API_TOKEN`; the
+service still has no public domain), and `/v1/status` reports
+`"code_access": true`. Off, they do not exist. Their limits (what they
+may serve, the 5000-note tree, the 2 MiB note) are constants in the
+code, not variables, so no deploy can widen them. `never` notes and
+everything under `Anchor/` are refused here whatever the bot asks.
+
+**Deploy the vault service before the bot.** With an older vault
+service, `/vault code on` says the service's switch is off and sends no
+card. The bot's own switches, the token and how you open a window are in
+docs/claude-access.md → The code window (CW1).
+
 ## Turning it off
 
 Set `VAULT_MODE=off` on the bot. The bot then makes no request to the

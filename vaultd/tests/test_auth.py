@@ -15,6 +15,10 @@ ROUTES = [
     ("post", "/v1/purge"),
     ("get", "/v1/knowledge/tree"),
     ("get", "/v1/knowledge/graph"),
+    # The code routes, off (the shared `client` fixture) and on
+    # (test_code_access.py repeats this with the switch on).
+    ("post", "/v1/code/tree"),
+    ("post", "/v1/code/file"),
 ]
 
 BAD_HEADERS = [
@@ -52,4 +56,10 @@ async def test_healthz_needs_no_token_and_says_nothing(client) -> None:
 async def test_status_with_the_token(client) -> None:
     resp = await client.get("/v1/status", headers=AUTH)
     assert resp.status == 200
-    assert set(await resp.json()) == {"sync_running", "restarts", "last_exit_code", "running_since"}
+    assert set(await resp.json()) == {
+        "sync_running",
+        "restarts",
+        "last_exit_code",
+        "running_since",
+        "code_access",
+    }

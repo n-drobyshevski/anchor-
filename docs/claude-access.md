@@ -24,11 +24,14 @@ read them. There are two layers:
 Still allowed: Railway `get-logs`, deployments, status, metrics,
 traces (logs never carry message text, see `app/log.py`), local tests
 and eval against a throwaway local database, and the `debug.*` views.
-One content door is open on purpose, and only while you open it: lens
-notes, through the `anchor_lens` role ("Lens notes" below).
+Two content doors are open on purpose, and only while you open them:
+lens notes, through the `anchor_lens` role ("Lens notes" below), and
+vault notes inside a code window, through an HTTPS route on the bot
+("The code window" below).
 
 **Phase 8: the Obsidian vault is off limits too**, except lens notes
-through the `anchor_lens` role (L1, below). It holds the same
+through the `anchor_lens` role (L1, below) and the notes inside a code
+window you opened (CW1, below). It holds the same
 data as the database, as files. Claude never reads it and never
 connects Obsidian tools to it: no Obsidian MCP server, no Local REST
 API, no `ob` against the real vault. The vault service's logs, like the
@@ -138,12 +141,12 @@ psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select local_date, category, model, count(
 
 ## Lens notes (L1)
 
-`anchor-lens-plan.md` §11. The one exception to "the vault is off
-limits": **lens notes**, the knowledge notes the user marked
+`anchor-lens-plan.md` §11. The first exception to "the vault is off
+limits" (the second is the code window, below): **lens notes**, the knowledge notes the user marked
 `anchor: lens` or keeps under `lens_folders` (docs/vault-setup.md), may
 be read by Claude Code, so that a session changing Echo's
-self-improvement knows what Echo is told. Nothing else in the vault,
-and no other class. Since L2 the door also returns, through
+self-improvement knows what Echo is told. Nothing else through this
+door, and no other class (the code window is a separate door). Since L2 the door also returns, through
 `lens.rounds(n)`, which notes each weekly review round picked and how
 the round ended. Never the selector's rationale: it is model text
 written from the analysis of the user's week, so it is derived from
@@ -420,6 +423,232 @@ PR text, code comments, test fixtures, eval cases, logs or artifacts.
 Paraphrase the idea from public knowledge ("Ashby's requisite
 variety") and cite the note by its `lens.notes()` id. Tests and eval
 use synthetic lens notes, as they use synthetic dialogs.
+
+## The code window (CW1)
+
+`anchor-code-window-plan.md`. The second exception to "the vault is off
+limits": while you have a **code window** open, Claude Code may list and
+read the vault's notes through an HTTPS route on the bot. It is a debug
+mode. It is read-only, it is closed by default, and it closes itself.
+
+A window can open `knowledge`, `lens`, `personal` and unclassified
+notes, for the whole vault or for the folders you name. Two things stay
+closed in every window: a note whose class is `never` (by its own
+`anchor: never` or by a `never_folders` rule), and everything under
+`Anchor/` (memory, journal, reports, settings: the bot's own folders,
+which hold the conversations). vaultd refuses them itself, so a bug on
+the bot cannot open them.
+
+This is not the lens door. `/lens code on|off` flips a Postgres role
+(`anchor_lens`) that reads lens notes only; `/vault code` opens HTTPS
+routes that read any open class. They have separate switches, setup and
+counts.
+
+Why HTTPS: a Claude Code cloud session cannot open raw TCP, which is
+what a Postgres login needs (docs/decisions.md, "CW1").
+
+### One-time setup
+
+Deploy the vault service first, then the bot: with an older vault
+service, `/vault code on` says the service's switch is off and sends no
+card.
+
+1. On the vault service, set `VAULT_CODE_ACCESS=1` (`1`, `true`, `yes`
+   or `on`; anything else, unset included, is off). Redeploy it
+   (docs/vault-setup.md).
+2. Generate a token, on your own machine, and keep it:
+
+   ```sh
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+3. Compute its sha256 as lower-case hex and set that on the bot as
+   `CODE_ACCESS_TOKEN_SHA256`. The bot never holds the token, only the
+   hash, so reading the bot's variables does not yield a working token:
+
+   ```sh
+   printf %s '<the token>' | sha256sum
+   ```
+
+4. Set `CODE_ACCESS_ENABLED=true` on the bot. It needs webhook mode, an
+   `https://` `PUBLIC_URL` and a `VAULT_MODE` other than `off`. The bot
+   refuses to start with the flag on and a value that is not 64 hex
+   characters, and says which setting is wrong without showing it.
+   `CODE_FILES_PER_WINDOW` (default 2000, 1 to 20000) caps the file
+   reads of one window.
+5. Give Claude Code the URL, `ANCHOR_CODE_URL`, which is
+   `https://<bot host>/code/v1`, and the token:
+   - in a Claude Code cloud environment, the token is a **network
+     secret** for the bot's host, which the proxy injects as the
+     `Authorization: Bearer` header, so the session never holds it. The
+     bot's host must be on the environment's allowed hosts;
+   - in the CLI, the token is the environment variable
+     `ANCHOR_CODE_TOKEN`, and each `curl` below adds
+     `-H "Authorization: Bearer $ANCHOR_CODE_TOKEN"`.
+6. Open a window when you want one (next section). Until then the token
+   opens nothing.
+
+To revoke the token, change `CODE_ACCESS_TOKEN_SHA256` and redeploy. To
+turn the feature off, set `CODE_ACCESS_ENABLED` off and redeploy: the
+routes stop existing and any open window is closed at startup.
+
+### Your switch: `/vault code`
+
+Telegram only. The web chat refuses `/vault code` as a subcommand (plain
+`/vault` still works there) and its buttons.
+
+- `/vault code`: whether the feature is on, whether the vault
+  service's switch is on, and the open window: until when, which
+  folders, how many files read of `CODE_FILES_PER_WINDOW`. With none
+  open, when the last one closed and why.
+- `/vault code on [1h|6h|24h] [папка; папка]`: the lifetime (default
+  `1h`) and the folders, separated by `;` (default: the whole vault).
+  At most 8 folders, each a path from the vault's root, with no `..`,
+  no folder that starts with a dot, and not `Anchor/` in any case.
+  The bot asks the vault service how many notes that opens and sends a
+  **confirm card**: the count, the folders or «весь vault (кроме
+  Anchor/ и never)», the lifetime, and «Открыть» / «Отмена». A folder
+  that matched no note is named on the card, so a typo is seen before
+  anything opens. Nothing is open until you press «Открыть», and a card
+  older than five minutes is stale.
+- `/vault code off`: closes the open window now.
+
+If the vault service is unreachable, its switch is off, `VAULT_MODE` is
+`off`, or `Anchor/settings.md` is unusable, the reply says which and
+sends no card.
+
+One window is open at a time: opening another closes the first. A window
+also ends when its time runs out, on `/vault code off`, and on `/delete`
+(which erases its rows with the rest).
+
+### The routes
+
+All three are `POST` with a JSON body, under `/code/v1`. A path never
+rides in a URL, so the edge's HTTP log (which records request paths)
+cannot hold a note's name.
+
+| Route | Body | Answer |
+|---|---|---|
+| `/code/v1/status` | `{}` | `{"open": false}`, or `{"open": true, "expires_at", "roots", "files_read", "files_left"}` |
+| `/code/v1/tree` | `{}` or `{"root": "<folder>"}` | `{"files": [{"path", "class", "bytes", "mtime"}], "truncated": bool}` for the window's folders, or for `root` alone (it must lie under one of them) |
+| `/code/v1/file` | `{"path": "<note path>"}` | `{"path", "class", "sha256", "text"}` |
+
+`class` is `personal`, `knowledge`, `lens` or `none` (unclassified);
+`mtime` is UTC, in seconds. A tree lists at most 5000 notes, sorted by
+path, and `truncated` says the cap cut it. A body is at most 4096 bytes.
+`files_read` counts reads through `file` only.
+
+| Answer | Meaning |
+|---|---|
+| bare 404 | not a `POST`, no `Authorization` header, a wrong token, or the routes are locked out (below). The same as a route that does not exist |
+| 429 `rate_limited` | more than 120 requests in a minute; `Retry-After` says how long |
+| 429 `window_cap` | `file` only: the window has served `CODE_FILES_PER_WINDOW` files. It lasts until the window closes |
+| 400 `bad_request` | the body is not the expected JSON object, or a root or path is malformed |
+| 403 `no_window` | the token is good and no window is open: ask the user to open one |
+| 404 `not_found` | outside the window's folders, under `Anchor/`, or any refusal by the vault service (below). One body for all of them, so a refusal says nothing about what exists |
+| 409 `settings_unusable` | `Anchor/settings.md` is invalid or named in the wrong case, so a `never_folders` rule may not be applied: nothing is served until it is fixed |
+| 503 `vault_code_off` | `tree` only: the vault service's switch is off |
+| 502 `vault_unavailable` | the vault service did not answer (or timed out: a very large tree on a slow vault can) |
+
+The vault service answers a file with one 404 for each of these: outside
+the folders, missing, a folder, a symlink (on the way or at the end), a
+folder that starts with a dot, `Anchor/` (the first segment, any case),
+class `never`, not `.md`, not UTF-8, larger than 2 MiB, or an `anchor:`
+property it cannot read. The tree omits such notes, and a root it
+cannot use gives an empty list, never an error, so a root cannot be
+used to probe.
+
+**Both layers confine.** The bot checks the path against the window's
+folders by whole path segments (`Notes` does not open `Notes2`) before
+it asks the vault service, and sends the folders along, so the vault
+service checks again. A tree entry the vault service returns outside
+what was asked is dropped.
+
+**Lockout.** Ten wrong tokens in an hour lock all three routes for an
+hour, for everyone: they answer the bare 404, even to the right token,
+and the bot tells you in Telegram. A request with no `Authorization`
+header at all is not counted, so a scanner that sends none cannot lock
+you out. The lockout and the 120-a-minute count are in memory and reset
+when the bot is redeployed.
+
+### Commands Claude Code runs
+
+```sh
+curl -sS -X POST "$ANCHOR_CODE_URL/status" -H 'Content-Type: application/json' -d '{}'
+curl -sS -X POST "$ANCHOR_CODE_URL/tree" -H 'Content-Type: application/json' -d '{}'
+curl -sS -X POST "$ANCHOR_CODE_URL/tree" -H 'Content-Type: application/json' -d '{"root": "Courses"}'
+curl -sS -X POST "$ANCHOR_CODE_URL/file" -H 'Content-Type: application/json' -d '{"path": "Projects/Notes.md"}'
+```
+
+The rules (CLAUDE.md): only through `$ANCHOR_CODE_URL`, never a literal
+host, and only while you have a window open. A 403 `no_window` means
+the door is closed: ask you to open a window, and say which folders the
+task needs. Never look for another way in. Ask for the folders the task
+needs and no more, list a folder before reading in it, and read only
+the notes the task needs, not the whole tree's text. Never call the vault
+service, the database or the connector for notes.
+
+### What is counted, and where you see it
+
+Each successful `tree` or `file` call writes one `code_read` row: its
+route, how many notes it answered (the tree's entries, or 1) and how many
+bytes. `status` and refused calls write none.
+
+- **The notice.** The first read of a window sends one Telegram message:
+  «Claude Code начал читать vault: окно до HH:MM». A lockout is
+  announced too: «Claude Code: 10 неверных токенов за час. Окно для vault
+  заблокировано на час.»
+- **`/vault code`** shows the open window's files read so far, of the cap.
+- **The daily digest** (the one with the lens line) gains «Claude Code
+  читал vault: N файлов, M запросов.» for the 24 hours up to its own time
+  (21:00). «N файлов» counts reads through `file` only; «M запросов» counts
+  `tree` and `file` calls. A window open, or a read, in those hours is
+  enough to queue the digest even with `CLAUDE_ACCESS_ENABLED` and
+  `LENS_ENABLED` off, though it sends nothing on a day with nothing to
+  report.
+
+Claude Code can read the counts, never the text, through two debug
+views: `debug.code_window` (status, `n_roots` in place of the roots,
+lifetime, times, why it closed, whether the notice went) and
+`debug.code_read` (window, time, route, notes, bytes).
+
+```sh
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select id, status, n_roots, ttl_s, opened_at, expires_at, closed_reason from debug.code_window order by id desc limit 5"
+psql "$ANCHOR_DEBUG_DATABASE_URL" -c "select window_id, route, count(*), sum(files), sum(bytes) from debug.code_read group by 1, 2 order by 1 desc limit 20"
+```
+
+### What is never stored or logged
+
+The bot relays a note and forgets it. Neither table holds a path, a
+title or text; `code_window.roots` holds only the folders you typed into
+Telegram, which are already in your message, and the debug view leaves
+them out. The bot's and the vault service's logs carry the route, the
+status, the window id and counts, never the token, a path, a folder or
+text, and no exception text. The vault service keeps no cache. Nothing a
+window serves reaches a prompt, a model call or a table: the chat turn,
+the review and the connector see what they saw before.
+
+### Limits
+
+- 120 requests a minute, for all three routes together.
+- `CODE_FILES_PER_WINDOW` reads through `file` in one window, 2000 by
+  default; above it, 429 `window_cap`.
+- A tree of 5000 notes (`truncated`), a note of 2 MiB.
+- Ten wrong tokens lock the routes for an hour.
+- A folder name stored on disk in NFD may not match a folder typed in
+  NFC. Both sides compare after NFC, so this should not happen; if a
+  folder still matches nothing, the confirm card names it.
+- A very large tree on a slow vault can time out and answer 502.
+
+### Window text stays in the session
+
+The same rule as for lens text (CLAUDE.md): what Claude Code reads
+through a window never leaves the session. Not in commits, PR text, code
+comments, test fixtures, eval cases, logs or artifacts. Paraphrase the
+idea from public knowledge ("Ashby's requisite variety") and do not
+name the note. Tests and eval use synthetic notes. Closing a window
+stops further reads, not what was already read: the confirm card says
+so.
 
 ## Adding a table
 

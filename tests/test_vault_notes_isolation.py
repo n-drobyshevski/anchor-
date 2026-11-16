@@ -178,6 +178,10 @@ TABLES = {
     # L3: the garden's runs and gaps (plan section 8), the same module's.
     "lens_garden_run": ("app/vault/lens.py", ("lens_garden_run", "LensGardenRun")),
     "lens_gap": ("app/vault/lens.py", ("lens_gap", "LensGap")),
+    # CW1 (anchor-code-window-plan.md section 4.2): the code window and
+    # its read ledger, app/vault/code_access.py's alone. Counts only.
+    "code_window": ("app/vault/code_access.py", ("code_window", "CodeWindow")),
+    "code_read": ("app/vault/code_access.py", ("code_read", "CodeRead")),
 }
 # L2: words that contain a lens table's name without meaning the table.
 # review_proposal's two new columns hold ids, never a note's text, and
