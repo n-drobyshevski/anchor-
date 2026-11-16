@@ -17,8 +17,9 @@ selector's why, whose result the exported review_proposal rows already
 carry as lens_round_id and lens_note_ids -- as, from L5, the exported
 notebook_entry rows do for the idle reflect's rounds; L3's lens_garden_run and
 lens_gap: the garden's derived proposals about the lens, rebuilt weekly
-from it, and already in the vault as the Anchor/Reports note) and
-vault_status. Including
+from it, and already in the vault as the Anchor/Reports note),
+vault_status and CW1's code window tables (counts and times of Claude
+Code's reads, and the folders already in `message`). Including
 them would double the file with Telegram's own envelope format and make
 it harder to read, not more complete. tests/test_export.py keeps that list honest: a table
 is exported or it is named there, and nothing may be neither.

@@ -73,6 +73,8 @@ _STRIPPED_FIELDS = (
     "VAULT_MODE",
     "VAULT_URL",
     "VAULT_API_TOKEN",
+    # CW1: a hash pasted from a terminal, same reasoning as the above.
+    "CODE_ACCESS_TOKEN_SHA256",
 )
 
 
@@ -817,6 +819,23 @@ class Settings(BaseSettings):
     CLAUDE_WINDOW_MAX_HOURS: int = 24
     # Per connection, a sliding one-minute window on /mcp/claude.
     CLAUDE_MAX_CALLS_PER_MINUTE: int = 30
+
+    # --- CW1: the code window (anchor-code-window-plan.md section 4.1) ---
+    #
+    # Claude Code reads vault notes over HTTPS, only inside a window the
+    # user opens with `/vault code on` and confirms on a card. Ships off:
+    # with this false the `/code/v1` routes do not exist and `/vault code`
+    # says so. Needs MODE=webhook, an https PUBLIC_URL and a VAULT_MODE
+    # other than `off` (check_runtime_settings), and vaultd's own
+    # VAULT_CODE_ACCESS: two switches and a window.
+    CODE_ACCESS_ENABLED: bool = False
+    # The lower-case hex sha256 of the token Claude Code presents as
+    # `Authorization: Bearer <token>` (`secrets.token_urlsafe(32)` or
+    # longer). The token itself never reaches the bot's environment.
+    CODE_ACCESS_TOKEN_SHA256: str = ""
+    # File reads one window may serve; above it `/code/v1/file` answers
+    # 429 until the window closes. 1 to 20000.
+    CODE_FILES_PER_WINDOW: int = 2000
 
     # The three /study packets. Comma-separated domains, parsed by the
     # validator below. GUIDES ships empty and /study guides refuses
@@ -1590,7 +1609,42 @@ def check_runtime_settings(settings: Settings) -> None:
     if not 1 <= settings.CLAUDE_WINDOW_MAX_HOURS <= 24:
         raise SystemExit("CLAUDE_WINDOW_MAX_HOURS must be between 1 and 24.")
 
+    check_code_access_settings(settings)
     check_vault_settings(settings)
+
+
+# CW1: the bounds on CODE_FILES_PER_WINDOW (plan section 4.1).
+CODE_FILES_PER_WINDOW_RANGE = (1, 20000)
+_CODE_TOKEN_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def check_code_access_settings(settings: Settings) -> None:
+    """The code window's part of the boot check (anchor-code-window-plan.md
+    section 4.1). The hash is never echoed: it is not the token, but it
+    confirms a guess at it."""
+    low, high = CODE_FILES_PER_WINDOW_RANGE
+    if not low <= settings.CODE_FILES_PER_WINDOW <= high:
+        raise SystemExit(
+            f"CODE_FILES_PER_WINDOW must be between {low} and {high}, "
+            f"got {settings.CODE_FILES_PER_WINDOW}."
+        )
+    if not settings.CODE_ACCESS_ENABLED:
+        return
+    if settings.MODE != "webhook" or not settings.PUBLIC_URL.strip().startswith("https://"):
+        raise SystemExit(
+            "CODE_ACCESS_ENABLED requires MODE=webhook and an https:// PUBLIC_URL: "
+            "Claude Code reaches the code window only over public HTTPS."
+        )
+    if settings.VAULT_MODE == "off":
+        raise SystemExit(
+            "CODE_ACCESS_ENABLED requires VAULT_MODE other than off: the code window "
+            "relays notes from the vault service."
+        )
+    if not _CODE_TOKEN_SHA256_RE.match(settings.CODE_ACCESS_TOKEN_SHA256):
+        raise SystemExit(
+            "CODE_ACCESS_TOKEN_SHA256 must be the 64-character hex sha256 of the code "
+            "window's token (the value is deliberately not shown)."
+        )
 
 
 def _web_ui_origin_is_permitted(public_url: str) -> bool:

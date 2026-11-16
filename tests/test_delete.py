@@ -25,6 +25,8 @@ from app.db.models import (
     BoardPair,
     BoardSubPair,
     BoardSyncRun,
+    CodeRead,
+    CodeWindow,
     Obligation,
     AccessGrant,
     ClaudeChangeset,
@@ -502,6 +504,14 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
             )
         )
         session.add(BoardSyncRun(at=now, board="Work tasks.md", outcome="ok"))
+        # CW1: one closed code window and one read through it.
+        window = CodeWindow(
+            status="closed", roots=["Notes"], ttl_s=3600, created_at=now, opened_at=now,
+            expires_at=now, closed_at=now, closed_reason="off",
+        )
+        session.add(window)
+        await session.flush()
+        session.add(CodeRead(window_id=window.id, at=now, route="file", files=1, bytes=10))
         session.add(
             BoardSubPair(
                 board="Work tasks.md", block_id="sub12345", card_block_id="abcd1234", task_id="s1",

@@ -15,6 +15,14 @@ for knowledge roots (missing, invalid, wrong case, or the folders it
 actually names) -- the line that would have told the user their
 `Anchor/Settings.md` (capital S) was never read.
 
+CW1 (anchor-code-window-plan.md section 4.3) adds `/vault code`, at the
+end of this module: the code window's status, its confirm card and
+`vc:` buttons, `/vault code off`, and the daily digest's line «Claude
+Code читал vault: N файлов, M запросов». The window's choice lives in
+a `pending` row of app/vault/code_access.py; the note count comes from
+vaultd's tree, through app/web/code_access.py, and only its length is
+shown -- never a note's path or title.
+
 Every line here is a reply to a command, so it is sent whatever the
 pause, quiet or welfare state; `may_report_now` governs unsolicited
 vault messages (8c), not this.
@@ -33,11 +41,15 @@ from app.core import clock as clock_module
 from app.core.clock import Clock
 from app.core.report import may_report_now
 from app.core.state import get_state
+from app.tg.data import is_fresh
 from app.tg.send import answer_callback, edit_keyboard, send_keyboard
+from app.vault import code_access
 from app.vault import errors as vault_errors
 from app.vault import holds as vault_holds
 from app.vault import status as vault_status
+from app.vault.client import VaultClient
 from app.vault.epoch import EPOCH_RE
+from app.web import code_access as code_access_web
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +107,10 @@ NOTES_ON_REPLY = (
     "справка. /vault notes off — забыть всё прочитанное."
 )
 NOTES_OFF_REPLY = "Заметки выключены: всё, что Echo прочитал из заметок, удалено."
-VAULT_USAGE = "Команды: /vault — состояние, /vault notes on — читать заметки, /vault notes off — забыть их."
+VAULT_USAGE = (
+    "Команды: /vault — состояние, /vault notes on — читать заметки, /vault notes off — забыть их, "
+    "/vault code — окно для Claude Code."
+)
 
 UNKNOWN = "—"
 
@@ -468,3 +483,317 @@ async def handle_callback(
     if result.outcome == vault_holds.STALE_PRESS:
         return
     await edit_keyboard(bot, chat_id, message_id, message_text or text, None)
+
+
+# --- /vault code: the code window (anchor-code-window-plan.md section 4.3) --
+#
+# Telegram only (the router's is_web_sink guard and app/web/ingress.py's
+# BLOCKED_SUBCOMMANDS for `/vault code`, BLOCKED_CALLBACK_PREFIX for
+# `vc:`): opening a window is an access decision. Counts and the user's
+# own folder names only -- never a note's path or title. The card's
+# choice lives in a `pending` row (app/vault/code_access.py); its buttons
+# carry only the row's id and issue time, `vc:o:<id>:<issued_at>` /
+# `vc:x:<id>:<issued_at>`, and a button older than CONFIRM_TTL is stale.
+
+CODE_DISABLED = "Окно для Claude Code выключено в настройках (CODE_ACCESS_ENABLED)."
+CODE_USAGE = (
+    "/vault code — окно для Claude Code: состояние\n"
+    "/vault code on [1h|6h|24h] [папка; папка; ...] — открыть (по умолчанию 1h и весь vault)\n"
+    "/vault code off — закрыть сейчас"
+)
+CODE_ENABLED_LINE = "Окно для Claude Code: включено в настройках."
+CODE_VAULT_ON_LINE = "Хранилище: доступ для Claude Code включён (VAULT_CODE_ACCESS)."
+CODE_VAULT_OFF_LINE = "Хранилище: доступ для Claude Code выключен на сервисе хранилища (VAULT_CODE_ACCESS)."
+CODE_VAULT_MODE_OFF_LINE = "Хранилище выключено (VAULT_MODE)."
+CODE_VAULT_UNREACHABLE_LINE = UNREACHABLE_LINE
+CODE_VAULT_UNAUTHORIZED_LINE = UNAUTHORIZED_LINE
+CODE_OPEN_LINE = "Окно открыто до {until}: {roots}. Прочитано файлов: {read} из {cap}. Закрыть: /vault code off"
+CODE_NEVER_LINE = "Окно ещё не открывалось. Открыть: /vault code on"
+CODE_LAST_LINE = "Окно закрыто. Последнее закрылось {when} ({reason})."
+CODE_CLOSE_REASONS = {
+    "expired": "по времени",
+    "off": "командой",
+    "replaced": "открыто новое",
+    "delete": "при /delete",
+}
+CODE_WHOLE_VAULT = "весь vault (кроме Anchor/ и never)"
+
+CODE_BAD_TTL = "Срок окна: 1h, 6h или 24h."
+CODE_TOO_MANY_ROOTS = "Не больше {n} папок."
+CODE_BAD_ROOT = (
+    "Папка «{root}» не подходит: нужен путь от корня vault, без «..», без Anchor/ "
+    "и без папок, начинающихся с точки."
+)
+CODE_REFUSED_VAULT_MODE = "Хранилище выключено (VAULT_MODE): окно не открыто."
+CODE_REFUSED_UNREACHABLE = "Нет связи с сервисом хранилища: окно не открыто."
+CODE_REFUSED_UNAUTHORIZED = (
+    "Сервис хранилища отказал в доступе (VAULT_API_TOKEN на боте и на сервисе различается): "
+    "окно не открыто."
+)
+CODE_REFUSED_SWITCH = (
+    "На сервисе хранилища доступ для Claude Code выключен (VAULT_CODE_ACCESS): окно не открыто."
+)
+CODE_REFUSED_SETTINGS = (
+    "Anchor/settings.md с ошибкой или назван не так: пока он не исправлен, правила never_folders "
+    "не применяются, и окно не открывается."
+)
+CODE_CARD = (
+    "Открыть Claude Code окно для чтения vault?\n\n"
+    "Заметок откроется: {count}{more}.\n"
+    "Папки: {roots}\n"
+    "Срок: {ttl}\n"
+    "{empty}"
+    "\nТолько чтение. Всё, что Claude Code прочитает, останется в его сессии: закрыть можно "
+    "дальнейшее чтение, но не то, что уже прочитано. Anchor/ и заметки never закрыты всегда."
+)
+CODE_CARD_MORE = " (а то и больше: список обрезан)"
+CODE_CARD_EMPTY_ROOTS = (
+    "В этих папках не нашлось ни одной заметки: {roots}. Проверь имя (регистр и буквы вроде «й» "
+    "и «ё» важны) — иначе окно ничего в них не откроет.\n"
+)
+CODE_OPEN_BUTTON = "Открыть"
+CODE_CANCEL_BUTTON = "Отмена"
+CODE_OPENED = "Окно открыто до {until}: {roots}. О первом чтении я напишу здесь. Закрыть: /vault code off"
+CODE_CANCELLED = "Отменено. Окно не открыто."
+CODE_CLOSED = "Окно закрыто."
+CODE_NOTHING_OPEN = "Открытого окна нет."
+CODE_STALE = "Устарело."
+
+CODE_DIGEST_LINE = "Claude Code читал vault: {files} {files_noun}, {requests} {requests_noun}."
+CODE_FILE_FORMS = ("файл", "файла", "файлов")
+CODE_REQUEST_FORMS = ("запрос", "запроса", "запросов")
+
+
+def _code_roots(roots) -> str:
+    return "; ".join(roots) if roots else CODE_WHOLE_VAULT
+
+
+def _code_until(moment: datetime.datetime | None, timezone: str, clock: Clock) -> str:
+    return _when(moment, timezone, clock) if moment is not None else UNKNOWN
+
+
+def parse_code_on(rest: str) -> tuple[int, list[str]] | str:
+    """`[1h|6h|24h] [папка; папка; ...]` -> (ttl_s, roots), or the reply
+    that says what is wrong with it."""
+    rest = rest.strip()
+    ttl_word = code_access.DEFAULT_TTL
+    head, _, tail = rest.partition(" ")
+    if head.lower() in code_access.TTL_CHOICES:
+        ttl_word, rest = head.lower(), tail.strip()
+    elif head and head[0].isdigit() and head[-1:].lower() in ("h", "ч") and ";" not in head:
+        return CODE_BAD_TTL
+    roots: list[str] = []
+    for raw in rest.split(";"):
+        if not raw.strip():
+            continue
+        root = code_access.parse_root(raw)
+        if root is None or code_access.is_anchor(root):
+            return CODE_BAD_ROOT.format(root=raw.strip())
+        if root not in roots:
+            roots.append(root)
+    if len(roots) > code_access.MAX_ROOTS:
+        return CODE_TOO_MANY_ROOTS.format(n=code_access.MAX_ROOTS)
+    return code_access.TTL_CHOICES[ttl_word], roots
+
+
+def code_keyboard(window_id: int, issued_at: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=CODE_OPEN_BUTTON, callback_data=f"vc:o:{window_id}:{issued_at}"),
+                InlineKeyboardButton(text=CODE_CANCEL_BUTTON, callback_data=f"vc:x:{window_id}:{issued_at}"),
+            ]
+        ]
+    )
+
+
+def _ttl_label(ttl_s: int) -> str:
+    return f"{ttl_s // 3600} ч"
+
+
+async def _vault_switch(settings: Settings, client) -> str:
+    """`on`, `off`, or a vault error code: what vaultd says of its switch."""
+    if settings.VAULT_MODE == vault_status.OFF:
+        return "mode_off"
+    try:
+        service = await client.status()
+    except vault_errors.VaultError as exc:
+        return exc.code
+    return "on" if service.code_access else "off"
+
+
+async def code_status(sessionmaker, settings: Settings, clock: Clock, client_factory=VaultClient.from_settings) -> str:
+    switch = await _vault_switch(settings, client_factory(settings))
+    lines = [CODE_ENABLED_LINE]
+    lines.append(
+        {
+            "on": CODE_VAULT_ON_LINE,
+            "off": CODE_VAULT_OFF_LINE,
+            "mode_off": CODE_VAULT_MODE_OFF_LINE,
+            vault_errors.UNAUTHORIZED: CODE_VAULT_UNAUTHORIZED_LINE,
+        }.get(switch, CODE_VAULT_UNREACHABLE_LINE)
+    )
+    async with sessionmaker() as session:
+        timezone = (await get_state(session)).timezone
+        window = await code_access.current(session, clock)
+        if window is not None:
+            read = await code_access.files_read(session, window.id)
+            lines.append(
+                CODE_OPEN_LINE.format(
+                    until=_code_until(window.expires_at, timezone, clock),
+                    roots=_code_roots(window.roots),
+                    read=read,
+                    cap=settings.CODE_FILES_PER_WINDOW,
+                )
+            )
+            return "\n".join(lines)
+        last = await code_access.last_closed(session)
+    if last is None:
+        lines.append(CODE_NEVER_LINE)
+    else:
+        lines.append(
+            CODE_LAST_LINE.format(
+                when=_code_until(last.closed_at, timezone, clock),
+                reason=CODE_CLOSE_REASONS.get(last.closed_reason or "", last.closed_reason or UNKNOWN),
+            )
+        )
+    return "\n".join(lines)
+
+
+async def code_on(
+    sessionmaker, settings: Settings, clock: Clock, rest: str, client_factory=VaultClient.from_settings
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """`/vault code on ...`: the card, or the reason there is none."""
+    parsed = parse_code_on(rest)
+    if isinstance(parsed, str):
+        return parsed, None
+    ttl_s, roots = parsed
+    client = client_factory(settings)
+    switch = await _vault_switch(settings, client)
+    if switch != "on":
+        return {
+            "off": CODE_REFUSED_SWITCH,
+            "mode_off": CODE_REFUSED_VAULT_MODE,
+            vault_errors.UNAUTHORIZED: CODE_REFUSED_UNAUTHORIZED,
+        }.get(switch, CODE_REFUSED_UNREACHABLE), None
+    try:
+        tree = await code_access_web.count_notes(client, roots)
+        empty = [root for root in roots if not any(code_access.covers([root], e.path) for e in tree.files)]
+        if tree.truncated:
+            # A root cut off by the cap may still hold notes: ask it alone.
+            confirmed = []
+            for root in empty:
+                alone = await code_access_web.count_notes(client, [root])
+                if not alone.files:
+                    confirmed.append(root)
+            empty = confirmed
+    except vault_errors.VaultError as exc:
+        if exc.code == vault_errors.NOT_FOUND:
+            return CODE_REFUSED_SWITCH, None
+        if exc.code == vault_errors.CONFLICT:
+            return CODE_REFUSED_SETTINGS, None
+        if exc.code == vault_errors.UNAUTHORIZED:
+            return CODE_REFUSED_UNAUTHORIZED, None
+        return CODE_REFUSED_UNREACHABLE, None
+    async with sessionmaker() as session:
+        window = await code_access.create_pending(session, clock, roots, ttl_s)
+    logger.info("code window card", extra={"event": "code_card", "window_id": window.id, "count": len(tree.files)})
+    text = CODE_CARD.format(
+        count=len(tree.files),
+        more=CODE_CARD_MORE if tree.truncated else "",
+        roots=_code_roots(roots),
+        ttl=_ttl_label(ttl_s),
+        empty=CODE_CARD_EMPTY_ROOTS.format(roots="; ".join(empty)) if empty else "",
+    )
+    return text, code_keyboard(window.id, int(window.created_at.timestamp()))
+
+
+async def code_off(sessionmaker, clock: Clock) -> str:
+    async with sessionmaker() as session:
+        closed = await code_access.close_open(session, clock)
+    if closed is None:
+        return CODE_NOTHING_OPEN
+    logger.info("code window closed", extra={"event": "code_off", "window_id": closed.id})
+    return CODE_CLOSED
+
+
+async def code_command(
+    sessionmaker, settings: Settings, clock: Clock, args: str, client_factory=VaultClient.from_settings
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """`/vault code ...`. `args` is what follows `code`."""
+    if not settings.CODE_ACCESS_ENABLED:
+        return CODE_DISABLED, None
+    word, _, rest = args.strip().partition(" ")
+    word = word.lower()
+    if not word:
+        return await code_status(sessionmaker, settings, clock, client_factory), None
+    if word == "on":
+        return await code_on(sessionmaker, settings, clock, rest, client_factory)
+    if word == "off" and not rest.strip():
+        return await code_off(sessionmaker, clock), None
+    return CODE_USAGE, None
+
+
+def _parse_code_callback(data: str) -> tuple[str, int, int] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "vc" or parts[1] not in ("o", "x"):
+        return None
+    if not (parts[2].isascii() and parts[2].isdigit() and parts[3].isascii() and parts[3].isdigit()):
+        return None
+    return parts[1], int(parts[2]), int(parts[3])
+
+
+async def handle_code_callback(
+    sessionmaker,
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+    *,
+    callback_id: str,
+    chat_id: int,
+    message_id: int,
+    data: str,
+) -> None:
+    """«Открыть» / «Отмена» on the card. A malformed, stale (older than
+    CONFIRM_TTL), replayed or forged press, and any press while the
+    feature is off, opens nothing and answers «Устарело.»."""
+    parsed = _parse_code_callback(data)
+    await answer_callback(bot, callback_id)
+    if (
+        parsed is None
+        or not settings.CODE_ACCESS_ENABLED
+        or not is_fresh(parsed[2], now=clock.now_utc().timestamp())
+    ):
+        await edit_keyboard(bot, chat_id, message_id, CODE_STALE, None)
+        return
+    action, window_id, issued_at = parsed
+    async with sessionmaker() as session:
+        if action == "x":
+            cancelled = await code_access.cancel_pending(session, window_id, issued_at)
+            await edit_keyboard(bot, chat_id, message_id, CODE_CANCELLED if cancelled else CODE_STALE, None)
+            return
+        window = await code_access.open_pending(session, clock, window_id, issued_at)
+        if window is None:
+            await edit_keyboard(bot, chat_id, message_id, CODE_STALE, None)
+            return
+        timezone = (await get_state(session)).timezone
+    logger.info("code window opened", extra={"event": "code_open", "window_id": window.id})
+    assert window.expires_at is not None  # an open window has one
+    until = window.expires_at.astimezone(clock_module.zone(timezone)).strftime("%d.%m %H:%M")
+    await edit_keyboard(
+        bot, chat_id, message_id, CODE_OPENED.format(until=until, roots=_code_roots(window.roots)), None
+    )
+
+
+async def code_digest_line(session, start: datetime.datetime, end: datetime.datetime) -> str | None:
+    """The daily Claude digest's code-window line for [start, end), or
+    None when there were no reads (plan section 4.5). Counts only."""
+    files, requests = await code_access.reads_between(session, start, end)
+    if not requests:
+        return None
+    return CODE_DIGEST_LINE.format(
+        files=files,
+        files_noun=_ru_plural(files, CODE_FILE_FORMS),
+        requests=requests,
+        requests_noun=_ru_plural(requests, CODE_REQUEST_FORMS),
+    )

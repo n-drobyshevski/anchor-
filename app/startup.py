@@ -27,6 +27,7 @@ from app.core.clock import SystemClock
 from app.core.prompt import PERSONA_PATH, load_persona, persona_path_for
 from app.core.state import STATE_ID
 from app.db.models import PersonaVersion, UserState
+from app.vault import code_access
 from app.web import oauth_store
 
 logger = logging.getLogger(__name__)
@@ -102,3 +103,7 @@ async def run_startup_tasks(
         # Connector plan section 3: turning the flag off revokes every
         # connection, so turning it back on cannot revive an old token.
         await oauth_store.revoke_everything(session, SystemClock())
+    if not settings.CODE_ACCESS_ENABLED:
+        # CW1 (anchor-code-window-plan.md section 4.1): with the flag off
+        # no window stays open, so turning it back on revives none.
+        await code_access.close_open(session, SystemClock())

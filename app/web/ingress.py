@@ -93,7 +93,17 @@ BLOCKED_COMMANDS = frozenset(
 # message is only ever sent to Telegram, like the garden's, because its
 # text can be drawn from lens notes and a tap can start a paid search. A
 # tuple, because str.startswith takes one.
-BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:", "gp:", "is:")
+#
+# `vc:` is the code window card's «Открыть» / «Отмена» (app/tg/vault.py,
+# anchor-code-window-plan.md section 4.3): a window lets Claude Code read
+# vault notes, and is opened from Telegram or not at all.
+BLOCKED_CALLBACK_PREFIX = ("d:", "g:", "cl:", "v:", "cu:", "cw:", "lg:", "gp:", "is:", "vc:")
+
+# Subcommands blocked where the command itself is not (CW1): `/vault`
+# stays usable from the web, but `/vault code ...` opens the code window
+# for Claude Code (app/tg/vault.py), an access decision like `/lens code
+# on`. Matched case-insensitively on the first argument word.
+BLOCKED_SUBCOMMANDS = frozenset({("vault", "code")})
 
 
 class BlockedCommand(Exception):
@@ -157,7 +167,11 @@ def is_blocked_command(text: str) -> bool:
     prefix, command, _mention = parsed
     if prefix != "/":
         return False
-    return command.casefold() in BLOCKED_COMMANDS
+    if command.casefold() in BLOCKED_COMMANDS:
+        return True
+    rest = text.split(maxsplit=1)
+    first = rest[1].split(maxsplit=1)[0].casefold() if len(rest) > 1 and rest[1].strip() else ""
+    return (command.casefold(), first) in BLOCKED_SUBCOMMANDS
 
 
 def build_message_update(update_id: int, text: str, settings: Settings) -> dict:

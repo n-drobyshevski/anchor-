@@ -152,6 +152,12 @@ SAFE_EXTRA_KEYS: tuple[str, ...] = (
     # suggestion's text, packet or reason, a topic, a lens title or the
     # model's reply.
     "suggest_batch_id",
+    # CW1: the code window (app/web/code_access.py, app/tg/vault.py) --
+    # the window's row id and a route's HTTP status code; counts go under
+    # "count"/"bytes"/"dropped", refusals under "reason"/"error_code".
+    # Never the token, a path, a root or text.
+    "window_id",
+    "http_status",
 )
 
 

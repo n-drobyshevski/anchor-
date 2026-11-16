@@ -1110,6 +1110,18 @@ def build_router(
         consent is on, and only to count notes by class.
         """
         args = (command.args or "").split()
+        if args and args[0].lower() == "code":
+            # CW1 (anchor-code-window-plan.md section 4.3): the code
+            # window. Telegram only, like /lens code: app/web/ingress.py
+            # refuses `/vault code` before it is queued, and this is the
+            # second layer.
+            if getattr(message.bot, "is_web_sink", False):
+                await message.answer(WEB_ONLY_REPLY)
+                return
+            rest = (command.args or "").strip()[len("code"):]
+            text, keyboard = await vault_ui.code_command(sessionmaker, settings, clock, rest)
+            await message.answer(text, reply_markup=keyboard)
+            return
         if args:
             if args == ["notes", "on"]:
                 async with sessionmaker() as session:
@@ -3540,6 +3552,26 @@ def build_router(
             message_id=callback.message.message_id,
             data=callback.data,
             message_text=callback.message.text,
+        )
+
+    @router.callback_query(F.data.startswith("vc:"))
+    async def vault_code_decision(callback: CallbackQuery) -> None:
+        """`vc:o:<window id>:<issued_at>` / `vc:x:...` -- the code
+        window card's «Открыть» / «Отмена» (anchor-code-window-plan.md
+        section 4.3). Refused from the web chat, like `v:` and `cl:`: a
+        window is opened from Telegram or not at all."""
+        if getattr(callback.bot, "is_web_sink", False):
+            await callback.bot.answer_callback_query(callback.id, text=WEB_ONLY_REPLY)
+            return
+        await vault_ui.handle_code_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
         )
 
     @router.callback_query(F.data.startswith("cw:"))

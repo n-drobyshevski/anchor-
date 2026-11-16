@@ -102,7 +102,7 @@ from app.db.models import Outbound
 from app.planner import auth as planner_auth
 from app.planner.jobs import PLANNER_SYNC
 from app.research.sweeps import RESEARCH_SWEEP
-from app.vault import lens
+from app.vault import code_access, lens
 from app.core import retention as retention_module
 from app.ops import backup as backup_module
 
@@ -643,6 +643,10 @@ async def maybe_enqueue_library_digest(
         if not (
             await lens.code_access(session)
             or await lens.reads_between(session, start, clock.now_utc())
+            # CW1 (anchor-code-window-plan.md section 4.5): the code
+            # window's line rides the same digest; its trigger is a
+            # window open, or a read, in this digest's 24 hours.
+            or await code_access.active_between(session, start, clock.now_utc())
         ):
             return False
     enqueued = await enqueue_job(

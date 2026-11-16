@@ -43,6 +43,7 @@ from app.core.scene import Deferred
 from app.core.state import get_state
 from app.tg import boards as boards_ui
 from app.tg import lens as lens_ui
+from app.tg import vault as vault_ui
 from app.tg.data import STALE_TEXT, is_fresh
 from app.tg.send import answer_callback, edit_keyboard
 from app.tg.vault import _ru_plural
@@ -760,7 +761,16 @@ async def run_library_digest(
     # Board sync: one line when the window's passes met a conflict or a
     # title they could not carry (counts only, app/tg/boards.py).
     boards_line = await boards_ui.digest_line(session, lens_start, lens_end)
-    if read_count == 0 and not write_rows and lens_line is None and boards_line is None:
+    # CW1 (anchor-code-window-plan.md section 4.5): «Claude Code читал
+    # vault: N файлов, M запросов», over the same 24 hours as the lens line.
+    code_line = await vault_ui.code_digest_line(session, lens_start, lens_end)
+    if (
+        read_count == 0
+        and not write_rows
+        and lens_line is None
+        and boards_line is None
+        and code_line is None
+    ):
         return
     if not may_report_now(settings, clock, state):
         raise Deferred(clock.now_utc() + DIGEST_RETRY)
@@ -789,6 +799,8 @@ async def run_library_digest(
         lines.append(lens_line)
     if boards_line is not None:
         lines.append(boards_line)
+    if code_line is not None:
+        lines.append(code_line)
     if not lines:
         return
     await bot.send_message(chat_id=state.chat_id, text=" ".join(lines), reply_markup=keyboard)

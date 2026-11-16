@@ -129,3 +129,23 @@ def test_default_judge_is_independent_so_eval_never_exits_3():
     assert judge == "openai/gpt-4.1-nano"
     assert same_judge_warning(judge, settings) is None
     assert EXIT_SAME_JUDGE == 3
+
+
+async def test_code_window_routes_exist_only_when_enabled(sessionmaker):
+    """CW1 (anchor-code-window-plan.md section 4.6): off, no /code route
+    exists at all; on, the three do."""
+    app, bot = _app(_settings(), sessionmaker)
+    assert not any(path.startswith("/code") for path in _paths(app))
+    await bot.session.close()
+    app, bot = _app(_settings(CODE_ACCESS_ENABLED=True), sessionmaker)
+    assert {"/code/v1/status", "/code/v1/tree", "/code/v1/file"} <= _paths(app)
+    await bot.session.close()
+
+
+async def test_vault_code_says_the_window_is_off(sessionmaker):
+    from app.core.clock import SystemClock
+    from app.tg import vault as vault_ui
+
+    assert not Settings().CODE_ACCESS_ENABLED
+    reply = await vault_ui.code_command(sessionmaker, Settings(), SystemClock(), " on")
+    assert reply == (vault_ui.CODE_DISABLED, None)

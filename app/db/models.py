@@ -3196,3 +3196,82 @@ class BoardSyncRun(Base):
         ),
         Index("ix_board_sync_run_at", "at"),
     )
+
+
+class CodeWindow(Base):
+    """One code window (anchor-code-window-plan.md section 4.2, CW1): a
+    stretch of time, opened by the user from Telegram, during which
+    Claude Code may list and read vault notes over HTTPS.
+
+    `pending` is a card waiting for «Открыть» (no times but
+    `created_at`); `open` has `opened_at` and `expires_at`; `closed` has
+    `closed_at` and `closed_reason` (`expired`, `off`, `replaced` or
+    `delete`). At most one row is `open` (`ux_code_window_open`). A row
+    past `expires_at` is closed for every reader, and marked so lazily
+    by whoever notices (app/vault/code_access.py).
+
+    `roots` holds the folders the user typed into Telegram, already in
+    `message`; never a note's path, title or text. Written and read
+    only by app/vault/code_access.py."""
+
+    __tablename__ = "code_window"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    roots: Mapped[list] = mapped_column(JSONB, nullable=False)
+    ttl_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    opened_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_reason: Mapped[str | None] = mapped_column(String)
+    notified_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("status in ('pending', 'open', 'closed')", name="ck_code_window_status"),
+        CheckConstraint(
+            "closed_reason is null or closed_reason in ('expired', 'off', 'replaced', 'delete')",
+            name="ck_code_window_closed_reason",
+        ),
+        CheckConstraint("ttl_s in (3600, 21600, 86400)", name="ck_code_window_ttl"),
+        CheckConstraint(
+            "jsonb_typeof(roots) = 'array' and jsonb_array_length(roots) <= 8",
+            name="ck_code_window_roots",
+        ),
+        CheckConstraint(
+            "(status = 'pending') = (opened_at is null) and (opened_at is null) = (expires_at is null)",
+            name="ck_code_window_opened",
+        ),
+        CheckConstraint(
+            "(status = 'closed') = (closed_at is not null)"
+            " and (closed_at is null) = (closed_reason is null)",
+            name="ck_code_window_closed",
+        ),
+        Index("ux_code_window_open", "status", unique=True, postgresql_where=text("status = 'open'")),
+    )
+
+
+class CodeRead(Base):
+    """One successful read through a code window (plan section 4.2):
+    `route` is `tree` or `file`, `files` the entry count (tree) or 1
+    (file), `bytes` the size of the answer relayed. Counts only -- never
+    a path, a root or text. Read by `/vault code` and the daily digest
+    («Claude Code читал vault: N файлов, M запросов»)."""
+
+    __tablename__ = "code_read"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    window_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("code_window.id", ondelete="CASCADE"), nullable=False
+    )
+    at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    route: Mapped[str] = mapped_column(String, nullable=False)
+    files: Mapped[int] = mapped_column(Integer, nullable=False)
+    bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("route in ('tree', 'file')", name="ck_code_read_route"),
+        CheckConstraint("files >= 0 and bytes >= 0", name="ck_code_read_counts"),
+        Index("ix_code_read_at", "at"),
+        Index("ix_code_read_window_id", "window_id"),
+    )

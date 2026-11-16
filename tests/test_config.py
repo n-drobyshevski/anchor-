@@ -727,3 +727,60 @@ def test_model_choices_refuse_junk_at_boot(raw):
 def test_model_catalog_ttl_must_be_positive():
     with pytest.raises(ValidationError):
         _settings(MODEL_CATALOG_TTL_H=0)
+
+
+# --- CW1: the code window (anchor-code-window-plan.md section 4.1) ---
+
+_CODE_ON = {
+    "CODE_ACCESS_ENABLED": True,
+    "MODE": "webhook",
+    "TELEGRAM_SECRET_TOKEN": "a" * 32,
+    "PUBLIC_URL": "https://anchor.example",
+    "VAULT_MODE": "status",
+    "VAULT_API_TOKEN": "t" * 32,
+    "CODE_ACCESS_TOKEN_SHA256": "ab" * 32,
+}
+
+
+def test_the_code_window_is_dark_by_default():
+    settings = _settings()
+    assert settings.CODE_ACCESS_ENABLED is False
+    assert settings.CODE_ACCESS_TOKEN_SHA256 == ""
+    assert settings.CODE_FILES_PER_WINDOW == 2000
+    check_runtime_settings(settings)
+
+
+def test_the_code_window_on_with_everything_starts():
+    check_runtime_settings(_settings(**_CODE_ON))
+    check_runtime_settings(_settings(**(_CODE_ON | {"CODE_ACCESS_TOKEN_SHA256": "AB" * 32})))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"MODE": "polling"},
+        {"PUBLIC_URL": "http://anchor.example"},
+        {"VAULT_MODE": "off", "VAULT_API_TOKEN": ""},
+        {"CODE_ACCESS_TOKEN_SHA256": ""},
+        {"CODE_ACCESS_TOKEN_SHA256": "ab" * 31},
+        {"CODE_ACCESS_TOKEN_SHA256": "zz" * 32},
+    ],
+)
+def test_the_code_window_refuses_to_start_half_configured(overrides, capsys):
+    with pytest.raises(SystemExit) as exc:
+        check_runtime_settings(_settings(**(_CODE_ON | overrides)))
+    assert "CODE_ACCESS" in str(exc.value) or "VAULT_MODE" in str(exc.value)
+    assert "ab" * 31 not in str(exc.value)
+
+
+def test_a_pasted_hash_is_stripped():
+    assert _settings(CODE_ACCESS_TOKEN_SHA256=" " + "ab" * 32 + "\n").CODE_ACCESS_TOKEN_SHA256 == "ab" * 32
+
+
+@pytest.mark.parametrize("value,ok", [(0, False), (1, True), (20000, True), (20001, False)])
+def test_files_per_window_is_bounded(value, ok):
+    if ok:
+        check_runtime_settings(_settings(CODE_FILES_PER_WINDOW=value))
+    else:
+        with pytest.raises(SystemExit, match="CODE_FILES_PER_WINDOW"):
+            check_runtime_settings(_settings(CODE_FILES_PER_WINDOW=value))
