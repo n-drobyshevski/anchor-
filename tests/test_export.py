@@ -322,6 +322,17 @@ async def _seed_everything(sessionmaker, *extra_update_ids: int) -> None:
         )
         await session.commit()
 
+    # E1c: one rating of one reply (its message is SET NULL on delete,
+    # so the row stands alone here).
+    async with sessionmaker() as session:
+        session.add(
+            models.JudgeLabel(
+                message_id=None, item="voice", user_ok=False, judge_score=3,
+                judge_model="b/judge", created_at=now,
+            )
+        )
+        await session.commit()
+
 
 # --- contents ---
 
@@ -556,7 +567,18 @@ NOT_EXPORTED = {
     # E1a (anchor-eval-reliability-plan.md section 3.3): synthetic eval
     # runs' counts per case and model pair, no content.
     "eval_case_run": "derived eval run counts per case and model pair, from synthetic cases",
+    # E1c (plan section 5.4): which items the user was last told about;
+    # judge_label itself is exported.
+    "judge_notice": "a derived flag per rubric item: whether its advisory notice was sent",
 }
+
+
+async def test_judge_label_export_has_no_text_columns():
+    """E1c (plan section 5.2): the user's ratings are exported, and they
+    are ids, booleans, scores, a model id and a time -- nothing else."""
+    columns = {column.name for column in models.JudgeLabel.__table__.columns}
+    assert models.JudgeLabel in export.EXPORTED_MODELS
+    assert columns == {"id", "message_id", "item", "user_ok", "judge_score", "judge_model", "created_at"}
 
 
 async def test_every_table_is_either_exported_or_deliberately_omitted():

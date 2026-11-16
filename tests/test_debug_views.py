@@ -94,6 +94,10 @@ CONTENT_COLUMNS = {
     # E1a (anchor-eval-reliability-plan.md section 3.3): ids, counts and
     # model ids of the synthetic eval runs; the whole table.
     "eval_case_run": set(),
+    # E1c (plan sections 5.2 and 5.4): ids, booleans, scores, a model id
+    # and times; the whole tables.
+    "judge_label": set(),
+    "judge_notice": set(),
 }
 
 

@@ -81,6 +81,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core.clock import Clock, to_local, within_window
 from app.core import amendments as amendments_module
+from app.core import judge_calibration
 from app.core.amendments import AMENDMENT_TRIAL
 from app.core.extract import EXTRACT, ExtractOutcome, run_extract
 from app.core.idle import IDLE_RUN
@@ -146,6 +147,7 @@ from app.research.jobs import RESEARCH, run_research_job
 from app.research.sweeps import RESEARCH_SWEEP, run_daily_sweep
 from app.research.suggest import INTEREST_SUGGEST, run_batch as run_suggest_batch
 from app.tg import interests as interests_ui
+from app.tg import judge as judge_ui
 from app.tg import research as research_ui
 from app.tg import vault as vault_ui
 from app.tg import garden as garden_ui
@@ -443,8 +445,12 @@ async def _run_job(
         # the trial extend its own lease across ~13 cases of up to
         # EVAL_RUNS_PER_CASE runs each, refreshed after every run (E1a)
         # -- see app/db/jobs.touch_job_lock's docstring for why that
-        # matters here specifically. No advisory items until E1c.
+        # matters here specifically. E1c: the advisory items are read
+        # from this (live) database first -- the user's /judge ratings
+        # -- and handed down as names; the throwaway database the trial
+        # runs in never sees a label.
         outcome = ExtractOutcome()
+        advisory = await judge_calibration.unreliable_items(session, settings)
 
         async def _on_run_done() -> None:
             if job_id is not None:
@@ -456,7 +462,7 @@ async def _run_job(
             clock=clock,
             amendment_id=payload["amendment_id"],
             on_run_done=_on_run_done,
-            advisory_items=frozenset(),
+            advisory_items=advisory,
         )
         if result is not None:
             outcome.amendment_trial_id = result.amendment_id
@@ -1029,6 +1035,25 @@ async def _heartbeat_loop(
             logger.warning("heartbeat failed", extra={"event": type(exc).__name__})
         if bot is not None:
             await _send_interest_suggestions(sessionmaker, bot, settings, clock)
+            await _send_judge_notice(sessionmaker, bot, settings, clock)
+
+
+async def _send_judge_notice(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Bot,
+    settings: Settings,
+    clock: Clock,
+) -> None:
+    """E1c (anchor-eval-reliability-plan.md section 5.4): the one notice
+    that a rubric item became advisory or decides again, on the first
+    heartbeat tick `may_report_now` allows (app/tg/judge.py's
+    `send_notice`, which records what it sent so nothing repeats). A
+    failure is logged by type only and never fails the tick; the change
+    stays unannounced for the next one."""
+    try:
+        await judge_ui.send_notice(sessionmaker, bot, settings, clock)
+    except Exception as exc:  # noqa: BLE001 - a failed send must not fail the tick
+        logger.warning("judge notice send failed", extra={"event": type(exc).__name__})
 
 
 WATCHDOG_INTERVAL_SECONDS = 60

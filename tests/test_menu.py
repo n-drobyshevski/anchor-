@@ -672,7 +672,7 @@ def test_mem_layout():
         ["mn:i:pin", "mn:i:unpin"],
         ["mn:i:forget"],
         ["mn:a:mind", "mn:i:mind_add"],
-        ["mn:a:amendments"],
+        ["mn:a:amendments", "mn:a:judge"],
         ["mn:a:digest", "mn:a:digest_7d"],
         ["mn:s:main", "mn:x"],
     ]
@@ -1246,9 +1246,9 @@ def test_data_layout_and_the_sensitive_acts_are_telegram_only():
 
 def test_action_count_and_kinds():
     # 91 before runtime model choice (92 with PLANNER_FLOWS' «Потоки»,
-    # 95 with board sync's status, preview and undo), plus a pick, ✏️
-    # and ↩️ per role.
-    assert len(menu.ACTIONS) == 95 + 3 * len(llm_models.ROLES)
+    # 95 with board sync's status, preview and undo, 96 with E1c's
+    # /judge), plus a pick, ✏️ and ↩️ per role.
+    assert len(menu.ACTIONS) == 96 + 3 * len(llm_models.ROLES)
     assert menu.KINDS == (menu.RUN, menu.PROMPT, menu.CONFIRM)
     for key, action in menu.ACTIONS.items():
         assert action.kind in menu.KINDS, key

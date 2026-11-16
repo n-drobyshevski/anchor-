@@ -28,6 +28,8 @@ from app.db.models import (
     CodeRead,
     CodeWindow,
     EvalCaseRun,
+    JudgeLabel,
+    JudgeNotice,
     Obligation,
     AccessGrant,
     ClaudeChangeset,
@@ -526,6 +528,16 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
                 title="Пункт", done=False, created_at=now, updated_at=now,
             )
         )
+        await session.commit()
+        # E1c: one rating of the seeded reply and one sent notice.
+        message_id = (await session.execute(select(Message.id).limit(1))).scalar_one()
+        session.add(
+            JudgeLabel(
+                message_id=message_id, item="voice", user_ok=True, judge_score=5,
+                judge_model="b/j", created_at=now,
+            )
+        )
+        session.add(JudgeNotice(item="voice", advisory=True, announced_at=now))
         await session.commit()
 
 

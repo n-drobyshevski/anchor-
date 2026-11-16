@@ -266,6 +266,12 @@ PURGED_TABLES = (
     # eval cases fared per trial and canary. Ids, counts and model ids,
     # no text -- but a record of this user's amendments being tried.
     "eval_case_run",
+    # E1c (anchor-eval-reliability-plan.md section 5.2): the user's own
+    # ratings of the bot's replies and the judge's scores beside them,
+    # and which items they were last told about. judge_label points at
+    # `message`, purged in this same statement.
+    "judge_label",
+    "judge_notice",
     # L4 (plan sections 9 and 14.5): Echo's inbox writes. Ids and times
     # only, like claude_changeset, but still a record of what Echo wrote
     # into this user's vault. The notes themselves stay in the vault:

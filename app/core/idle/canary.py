@@ -73,7 +73,7 @@ class CanaryResult:
     preempted: bool = False
     # E1a: per-case run counts (eval.trial.RunCounts.as_dict()), the
     # history's three classes over the current model pair, and the
-    # advisory items the run was given (plan section 5.4; empty until E1c).
+    # advisory items the run was given (plan section 5.4, from /judge, E1c).
     runs: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
     signal: eval_history.Signal = eval_history.Signal()
     advisory: tuple[str, ...] = ()
@@ -117,8 +117,9 @@ async def run_canary(
     `persona_provider`/`judge_provider` let a test inject
     `FakeLLMProvider`s -- same shape as `eval.trial.run_blocking_subset`
     itself; production leaves both None. `advisory_items` (plan section
-    5.4) reach every judge call; app/core/idle/runner.py passes none
-    until E1c computes them.
+    5.4) reach every judge call; app/core/idle/runner.py computes them
+    from the live database (app/core/judge_calibration.py's
+    `unreliable_items`, E1c) before the canary starts.
     """
     from app.core.idle.runner import RunContext, is_preempted
     from app.db.jobs import touch_job_lock

@@ -512,6 +512,8 @@ ACTIONS: dict[str, Action] = {
     "mind": _run("📝 Заметки Echo", "mind"),
     "mind_add": _prompt("✏️ Новая заметка", "mind", args="add"),
     "amendments": _run("✍️ Поправки к стилю", "amendments"),
+    # E1c (anchor-eval-reliability-plan.md section 5).
+    "judge": _run("⚖️ Сверка судьи", "judge"),
     "digest": _run("🌙 Фон за сутки", "digest"),
     "digest_7d": _run("🌙 За неделю", "digest", args="7d"),
     # research
@@ -1433,7 +1435,7 @@ def _render_mem(settings: Settings, *, web: bool, view: MenuView, origin: str | 
         ("pin", "unpin"),
         ("forget",),
         ("mind", "mind_add"),
-        ("amendments",),
+        ("amendments", "judge"),
         ("digest", "digest_7d"),
     ):
         _add(rows, _row(settings, web, *keys))

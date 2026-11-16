@@ -56,6 +56,7 @@ from app.db.models import (
     InterestSuggestion,
     InterestTopic,
     Journal,
+    JudgeLabel,
     LlmModelOverride,
     NotebookEntry,
     Obligation,
@@ -210,6 +211,12 @@ EXPORTED_MODELS = (
     # Board sync, subtasks: the tracked subtask pairs, each with the
     # subtask text last synced. User data like board_pair.
     BoardSubPair,
+    # E1c (anchor-eval-reliability-plan.md section 5.2): the user's own
+    # ratings of the bot's replies, item by item, with the judge's score
+    # beside each -- ids, booleans, scores and a model id, no text.
+    # judge_notice (which items the user was last told about) is a
+    # derived flag per item and stays out (tests/test_export.py).
+    JudgeLabel,
 )
 
 FILENAME_TEMPLATE = "anchor-export-{date}.json"

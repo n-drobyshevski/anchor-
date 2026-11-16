@@ -382,12 +382,19 @@ async def run_idle(
             }
             reversible = False
         elif kind == CANARY:
+            from app.core import judge_calibration
             from app.core.idle.canary import run_canary
 
+            # E1c (anchor-eval-reliability-plan.md section 5.4): the
+            # advisory items from the live database's /judge ratings,
+            # read before the canary starts and handed down as names --
+            # the throwaway database never sees a label.
+            async with session_factory() as advisory_session:
+                advisory = await judge_calibration.unreliable_items(advisory_session, settings)
             result = await run_canary(
                 session_factory, settings, clock,
                 run_id=run_id, started_at=started_at, timezone=timezone, job_id=job_id,
-                advisory_items=frozenset(),
+                advisory_items=advisory,
             )
             preempted_and_empty = result.preempted
             # E1a: plus the per-case run counts, the history's

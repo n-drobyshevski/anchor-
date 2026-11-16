@@ -102,6 +102,7 @@ from app.tg import garden as garden_ui
 from app.tg import grok as grok_ui
 from app.tg import idle as idle_ui
 from app.tg import interests as interests_ui
+from app.tg import judge as judge_ui
 from app.tg import graph as graph_ui
 from app.tg import boards as boards_ui
 from app.tg import lens as lens_ui
@@ -242,6 +243,9 @@ BOT_COMMANDS = [
     # 5d (phase-5 plan sections 8 and 9).
     BotCommand(command="review", description="Итоги недели"),
     BotCommand(command="amendments", description="Поправки к стилю"),
+    # E1c (anchor-eval-reliability-plan.md section 5): the judge checked
+    # against the user's own ratings.
+    BotCommand(command="judge", description="Сверка судьи с твоими оценками"),
     # 6a (Phase 6 plan section 7).
     BotCommand(command="digest", description="Фоновая работа"),
     # 6d (Phase 6 plan section 7).
@@ -1786,6 +1790,24 @@ def build_router(
             sessionmaker, clock=clock, update_id=event_update.update_id, text="[/amendments]"
         )
 
+    # --- E1c: /judge (anchor-eval-reliability-plan.md section 5) ---
+    #
+    # Allowed from the web chat, like /memories: the card quotes one of
+    # this user's own replies back to them, which the web chat already
+    # shows. `_once` because the status is a keyboard message sent
+    # directly (no stored reply), as /amendments' is.
+
+    @router.message(Command("judge"))
+    async def judge_command(message: Message, event_update: Update) -> None:
+        if not await _once(event_update.update_id):
+            return
+        await judge_ui.run_command(
+            sessionmaker, message.bot, settings, clock, chat_id=message.chat.id
+        )
+        await turn.mark_update_handled(
+            sessionmaker, clock=clock, update_id=event_update.update_id, text="[/judge]"
+        )
+
     # --- 6a: /digest (plan section 7) ---
 
     @router.message(Command("digest"))
@@ -2587,6 +2609,7 @@ def build_router(
         "memories": memories,
         "mind": _fixed(mind, "mind"),
         "amendments": amendments_command,
+        "judge": judge_command,
         # args=None is /digest's own default window (idle_ui.parse_digest_args(None)).
         "digest": _fixed(digest_command, "digest"),
         "digest_7d": _fixed(digest_command, "digest", "7d"),
@@ -3257,6 +3280,21 @@ def build_router(
         """`am:a:<id>` / `am:r:<id>` -- adopt or decline a `persona_note`
         review proposal card."""
         await review_ui.handle_decision_callback(
+            sessionmaker,
+            callback.bot,
+            settings,
+            clock,
+            callback_id=callback.id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            data=callback.data,
+        )
+
+    @router.callback_query(F.data.startswith(f"{judge_ui.PREFIX}:"))
+    async def judge_callback(callback: CallbackQuery) -> None:
+        """`jl:...` -- /judge's «Оценить ответ», a card's toggles,
+        «Всё в порядке», «Готово», «Пропустить» and «Ещё один»."""
+        await judge_ui.handle_callback(
             sessionmaker,
             callback.bot,
             settings,

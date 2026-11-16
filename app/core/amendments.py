@@ -238,8 +238,9 @@ async def run_trial(
     trial of ~13 cases, each up to `EVAL_RUNS_PER_CASE` runs, needs that.
 
     `advisory_items` (plan section 5.4) are passed to the runner and
-    named in `eval_report["advisory"]`; the caller passes the empty set
-    until E1c computes them.
+    named in `eval_report["advisory"]`; app/worker.py computes them from
+    the live database (app/core/judge_calibration.py's
+    `unreliable_items`, E1c) before the trial starts.
     """
     row = await session.get(PersonaAmendment, amendment_id)
     if row is None or row.status != TRIAL:
