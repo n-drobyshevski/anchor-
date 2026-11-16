@@ -379,6 +379,7 @@ async def run_critique(
                 case_title="idle critique sample",
                 prompt_text=prompt_text,
                 reply=reply_text,
+                require_evidence=settings.JUDGE_EVIDENCE == "required",
             )
             total_usd += verdict.usd_cost
             if not verdict.usable:

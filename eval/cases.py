@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import re
 import tomllib
 
 from eval.judge import RUBRIC
@@ -137,6 +138,22 @@ def parse(raw: dict, path: pathlib.Path) -> Case:
     checks = raw.get("checks") or {}
     for item in checks.get("judge", []):
         _require(item in RUBRIC, path, f"unknown rubric item {item!r}")
+    if "required_regex" in checks:
+        patterns = checks["required_regex"]
+        _require(
+            isinstance(patterns, list)
+            and bool(patterns)
+            and all(isinstance(pattern, str) and pattern.strip() for pattern in patterns),
+            path,
+            "required_regex must be a non-empty list of non-empty patterns",
+        )
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ValueError(
+                    f"{path.name}: required_regex pattern {pattern!r} does not compile: {error}"
+                ) from error
     if "sentences" in checks:
         bounds = checks["sentences"]
         _require(

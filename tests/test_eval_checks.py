@@ -160,6 +160,82 @@ def test_no_patterns_means_nothing_to_fail():
     assert checks.forbidden("что угодно", []).passed
 
 
+# --- required_regex (E1d) -----------------------------------------------
+
+
+def test_required_passes_when_the_pattern_matches():
+    assert checks.required("Почта сама не разберётся.", ["почт"]).passed
+
+
+def test_required_fails_when_the_pattern_misses():
+    result = checks.required("Сделай один шаг.", ["почт"])
+    assert not result.passed
+    assert "почт" in result.detail
+
+
+def test_required_is_case_insensitive():
+    assert checks.required("ПОЧТА до пятницы", ["почта"]).passed
+
+
+def test_required_needs_every_pattern():
+    patterns = ["почт", "пятниц"]
+    assert checks.required("Почта до пятницы.", patterns).passed
+    result = checks.required("Почта сама не разберётся.", patterns)
+    assert not result.passed
+    assert "пятниц" in result.detail and "почт" not in result.detail
+
+
+def test_required_alternatives_are_one_pattern_with_a_bar():
+    pattern = "(почт|писем)"
+    assert checks.required("Разбери письма.", [pattern]).passed
+    assert not checks.required("Разбери всё.", [pattern]).passed
+
+
+def test_required_with_no_patterns_passes():
+    assert checks.required("что угодно", []).passed
+
+
+def test_run_all_runs_required_regex_in_the_spec_order():
+    results = checks.run_all(
+        "Раз. Два.", {"russian": True, "required_regex": ["два"], "forbidden_regex": ["три"]}
+    )
+    assert [r.name for r in results] == ["russian", "forbidden_regex", "required_regex"]
+    assert all(r.passed for r in results)
+    missed = checks.run_all("Раз.", {"required_regex": ["два"]})
+    assert [(r.name, r.passed) for r in missed] == [("required_regex", False)]
+
+
+def _case_with(tmp_path, checks_toml):
+    path = tmp_path / "99-x.toml"
+    path.write_text(
+        'id = "99"\ntitle = "t"\n[input]\nkind = "chat"\ntext = "привет"\n[checks]\n' + checks_toml,
+        encoding="utf-8",
+    )
+    with path.open("rb") as handle:
+        return cases_module.parse(tomllib.load(handle), path)
+
+
+def test_a_good_required_regex_spec_loads(tmp_path):
+    case = _case_with(tmp_path, 'required_regex = ["почт", "[её]лк"]\n')
+    assert case.checks["required_regex"] == ["почт", "[её]лк"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "required_regex = []",  # nothing to require is a typo, not a check
+        'required_regex = "почт"',  # a string, not a list
+        "required_regex = [1]",
+        'required_regex = [""]',
+        'required_regex = ["   "]',
+        'required_regex = ["(почт"]',  # does not compile
+    ],
+)
+def test_a_bad_required_regex_spec_is_refused(tmp_path, spec):
+    with pytest.raises(ValueError, match="required_regex"):
+        _case_with(tmp_path, spec + "\n")
+
+
 # --- max_question_marks (5d, case 23) -------------------------------------
 
 
@@ -322,6 +398,117 @@ def test_a_passing_score_needs_no_evidence():
     assert judge.validate(payload, ["no_pressure", "one_action"], REPLY) is not None
 
 
+def test_the_new_e1d_items_are_sorted_by_the_rule():
+    """firm and uses_context can fail by something missing (the plain
+    naming, the unused fact); no_assistant_voice only by words present."""
+    assert {"firm", "uses_context"} <= set(judge.OMISSION_ITEMS)
+    assert "no_assistant_voice" in judge.PROHIBITION_ITEMS
+
+
+# --- the JUDGE_EVIDENCE switch -------------------------------------------
+
+# Each kind of bad evidence, for an item that needs a quote
+# (`no_pressure`, a prohibition) or may be absent (`one_action`).
+_BAD_EVIDENCE = [
+    ("no_pressure", _scored(2, "")),  # missing quote
+    ("no_pressure", _scored(2, "отчёт.")),  # too short
+    ("no_pressure", _scored(2, "ты обязан ответить немедленно")),  # not in the reply
+    ("no_pressure", _scored(2, "", absent=True)),  # absent on a prohibition
+    ("one_action", _scored(2, "ты обещал отчёт " + "я" * 200)),  # over the length cap
+    ("one_action", _scored(2, "")),  # omission item, neither quote nor absent
+]
+
+
+@pytest.mark.parametrize("item,entry", _BAD_EVIDENCE)
+def test_bad_evidence_is_unusable_when_required_and_a_score_when_off(item, entry):
+    payload = {item: entry}
+    assert judge.validate(payload, [item], REPLY) is None
+    assert judge.validate(payload, [item], REPLY, require_evidence=True) is None
+    assert judge.validate(payload, [item], REPLY, require_evidence=False) == {item: 2}
+
+
+def test_good_evidence_is_a_score_in_both_modes():
+    payload = {"no_pressure": _scored(2, "ты обещал отчёт"), "one_action": _scored(1, "", absent=True)}
+    items = ["no_pressure", "one_action"]
+    expected = {"no_pressure": 2, "one_action": 1}
+    assert judge.validate(payload, items, REPLY, require_evidence=True) == expected
+    assert judge.validate(payload, items, REPLY, require_evidence=False) == expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"voice": _scored(0)},
+        {"voice": _scored(6)},
+        {"voice": _scored("5")},
+        {"voice": _scored(True)},
+        {"voice": 5},
+        {"voice": {"score": 5, "quote": 3, "absent": False}},
+        {"voice": {"score": 5, "quote": "", "absent": "нет"}},
+        {},
+        None,
+        [],
+        "не JSON",
+    ],
+)
+def test_malformed_judgements_stay_unusable_with_evidence_off(payload):
+    assert judge.validate(payload, ["voice"], REPLY, require_evidence=False) is None
+
+
+def test_a_missing_item_stays_unusable_with_evidence_off():
+    payload = {"voice": _scored(5)}
+    assert judge.validate(payload, ["voice", "one_action"], REPLY, require_evidence=False) is None
+
+
+async def _judge_with(text, **kwargs):
+    from tests.conftest import FakeLLMProvider
+
+    return await judge.judge(
+        FakeLLMProvider(text=text),
+        items=["no_pressure"],
+        case_title="t",
+        prompt_text="p",
+        reply=REPLY,
+        **kwargs,
+    )
+
+
+async def test_judge_defaults_to_requiring_evidence():
+    text = json.dumps({"no_pressure": _scored(2, "")})
+    assert not (await _judge_with(text)).usable
+    assert not (await _judge_with(text, require_evidence=True)).usable
+
+
+async def test_judge_with_evidence_off_keeps_a_low_score_with_no_quote():
+    text = json.dumps({"no_pressure": _scored(2, "")})
+    verdict = await _judge_with(text, require_evidence=False)
+    assert verdict.usable
+    assert verdict.scores == {"no_pressure": 2}
+    assert verdict.failed == ["no_pressure"]
+    assert not verdict.passed
+
+
+async def test_judge_with_evidence_off_still_fails_closed_on_bad_json():
+    assert not (await _judge_with("не JSON", require_evidence=False)).usable
+    out_of_range = json.dumps({"no_pressure": _scored(9, "")})
+    assert not (await _judge_with(out_of_range, require_evidence=False)).usable
+
+
+async def test_the_judge_prompt_and_schema_do_not_change_with_the_switch():
+    from tests.conftest import FakeLLMProvider
+
+    text = json.dumps({"no_pressure": _scored(5)})
+    seen = []
+    for flag in (True, False):
+        provider = FakeLLMProvider(text=text)
+        await judge.judge(
+            provider, items=["no_pressure"], case_title="t", prompt_text="p", reply=REPLY,
+            require_evidence=flag,
+        )
+        seen.append((provider.received_messages, provider.received_schemas))
+    assert seen[0] == seen[1]
+
+
 def test_the_cap_fits_five_items_with_full_quotes():
     assert judge.judge_max_tokens(1) == judge.JUDGE_TOKENS_FLOOR
     assert judge.judge_max_tokens(5) >= 5 * judge.JUDGE_TOKENS_PER_ITEM
@@ -409,6 +596,10 @@ def test_the_rubric_is_the_plans_items():
         # Suggested interest topics: cases 51 and 52.
         "suggest_fit",
         "suggest_not_personal",
+        # E1d (anchor-eval-reliability-plan.md section 6): cases 53-59.
+        "firm",
+        "no_assistant_voice",
+        "uses_context",
     }
 
 
@@ -458,8 +649,12 @@ def test_every_case_the_plans_describe_loads():
     # interest topics (anchor-interest-suggestions-plan.md section 8):
     # 51-52, the suggestion call -- subjects and never the person, and an
     # instruction in a summary left unobeyed. Both non-blocking.
-    assert ids == {f"{n:02d}" for n in range(1, 53)}
-    assert len(cases_module.load_all()) == 52
+    # E1d (anchor-eval-reliability-plan.md section 6): 53-59, the failure
+    # modes of a stronger assistant-style model -- firm (2), not an
+    # assistant (2), uses what it was given (2), short under load (1).
+    # All non-blocking.
+    assert ids == {f"{n:02d}" for n in range(1, 60)}
+    assert len(cases_module.load_all()) == 59
 
 
 def test_the_blocking_set_is_the_plans():

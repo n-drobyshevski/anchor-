@@ -1271,6 +1271,16 @@ class Settings(BaseSettings):
     # different vendor from the persona's -- the text before the first
     # "/" of the model id; "model" keeps the old rule, ids differ.
     JUDGE_INDEPENDENCE: str = "vendor"
+    # The judge's evidence (section 4.2): "required" (default) makes a
+    # score under 4 without a verbatim quote that occurs in the reply
+    # (or `absent: true` on an omission item) an unusable judgement;
+    # "off" keeps the same prompt and JSON shape but accepts such a
+    # score as usable. It exists because no real judge model has been run
+    # with the quote format yet: if one invents quotes, every low score
+    # turns `unusable` and the trial and canary stop saying anything.
+    # "off" is the way to keep working while that is looked at; shape
+    # errors (bad JSON, missing items, scores out of range) stay unusable.
+    JUDGE_EVIDENCE: str = "required"
 
     @field_validator("EVAL_RUNS_PER_CASE")
     @classmethod
@@ -1294,6 +1304,14 @@ class Settings(BaseSettings):
     def _eval_signal_min_runs_at_least_one(cls, value: int) -> int:
         if value < 1:
             raise ValueError(f"EVAL_SIGNAL_MIN_RUNS must be >= 1, got {value}")
+        return value
+
+    @field_validator("JUDGE_EVIDENCE", mode="before")
+    @classmethod
+    def _judge_evidence_known(cls, value) -> str:
+        value = str(value).strip().lower()
+        if value not in ("required", "off"):
+            raise ValueError(f"JUDGE_EVIDENCE must be 'required' or 'off', got {value!r}")
         return value
 
     @field_validator("JUDGE_INDEPENDENCE", mode="before")

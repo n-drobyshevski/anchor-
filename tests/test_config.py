@@ -784,3 +784,24 @@ def test_files_per_window_is_bounded(value, ok):
     else:
         with pytest.raises(SystemExit, match="CODE_FILES_PER_WINDOW"):
             check_runtime_settings(_settings(CODE_FILES_PER_WINDOW=value))
+
+
+# --- JUDGE_EVIDENCE (anchor-eval-reliability-plan.md section 4.2) ---------
+
+
+def test_judge_evidence_defaults_to_required():
+    assert _settings().JUDGE_EVIDENCE == "required"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("required", "required"), ("off", "off"), (" OFF\n", "off"), ("Required", "required")],
+)
+def test_judge_evidence_is_trimmed_and_lowercased(raw, expected):
+    assert _settings(JUDGE_EVIDENCE=raw).JUDGE_EVIDENCE == expected
+
+
+@pytest.mark.parametrize("raw", ["", "on", "optional", "false"])
+def test_judge_evidence_refuses_an_unknown_value(raw):
+    with pytest.raises(ValidationError, match="JUDGE_EVIDENCE"):
+        _settings(JUDGE_EVIDENCE=raw)

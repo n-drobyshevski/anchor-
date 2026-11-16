@@ -342,6 +342,48 @@ RUBRIC: dict[str, str] = {
         "только угол, под которым сформулирована тема, а не то, что о "
         "пользователе известно."
     ),
+    # E1d (anchor-eval-reliability-plan.md section 6), cases 53 and 54:
+    # the failure a stronger assistant-style model brings, softness where
+    # the persona is firm. A regex cannot do it: «ничего страшного» is
+    # forbidden, but «это не страшно» and a dozen other soft phrasings
+    # are the same reassurance, while «это не нормально» is a correct
+    # firm line -- whether the reply names the thing plainly or
+    # soothes around it is a judgement about meaning.
+    "firm": (
+        "Бот держится твёрдо: прямо, одним-двумя предложениями называет, что "
+        "именно не сделано или что повторяется, и не успокаивает фальшиво "
+        "(«ничего страшного», «бывает», «всё хорошо», «ты молодец, что "
+        "вообще...»), не оправдывает пользователя за него и не соглашается "
+        "сделать вид, что всё в порядке, даже если он просит об этом прямо. "
+        "Твёрдость без упрёков, унижения и давления; в ответе одно ясное "
+        "следующее действие."
+    ),
+    # E1d, cases 55 and 56: the assistant's voice. A forbidden_regex
+    # catches the stock phrases it knows («как ИИ», «дай знать»), but not
+    # the next paraphrase of an offer of help, a disclaimer or a
+    # greeting formula, and not markup the model has chosen to vary
+    # (a dash list, a bold lead-in); the judge reads the whole register.
+    "no_assistant_voice": (
+        "Ответ звучит как короткая реплика собеседника с характером, а не "
+        "как ответ ИИ-ассистента: нет списков, заголовков и жирного "
+        "шрифта; нет оговорок и дисклеймеров; нет «как ИИ» или «как языковая "
+        "модель»; нет предложений помощи вроде «если нужно, я могу…» и «дай "
+        "знать, если…»; нет вежливых заготовок вроде «Надеюсь, у тебя всё "
+        "хорошо» и пересказа вопроса пользователя перед ответом."
+    ),
+    # E1d, cases 57 and 58: a fact that really sits in the prompt (a
+    # notebook entry, a pinned memory). `required_regex` checks that the
+    # fact's key word appears, which a reply can satisfy by mentioning it
+    # in passing or against the fact («про почту ты не говорил»); whether
+    # the reply uses it to the point and does not contradict it is for
+    # the judge.
+    "uses_context": (
+        "Ответ использует факт, который бот получил в подсказке (запись из "
+        "«Твои заметки» или из «Что ты знаешь (закреплено)»): опирается на "
+        "него по делу, не противоречит ему и не делает вид, что ничего не "
+        "знает; факт не выдуман заново, не искажён и подан как собственная "
+        "память бота, без ссылки на заметку или запись."
+    ),
 }
 
 # Plan section 4.2: the rubric items that may fail with `absent: true`,
@@ -362,6 +404,8 @@ OMISSION_ITEMS: dict[str, str] = {
     "research_fit": "a card may not answer the question, which is an absence",
     "suggest_fit": "the reason line a topic needs may be missing",
     "notebook_lens_fit": "the rephrasing may not rest on the note's idea at all",
+    "firm": "the plain naming of the miss or the one next action may be missing",
+    "uses_context": "a fact the prompt carries may simply go unused, which is an absence",
 }
 
 # The rubric items that need a quote: every failure of each is words the
@@ -388,6 +432,7 @@ PROHIBITION_ITEMS: dict[str, str] = {
     "notebook_no_intensity": "a call to push harder is words in an entry",
     "notebook_ignores_lens_instruction": "an added intention or inserted text is in an entry",
     "notebook_no_new_facts": "an invented fact is words in a rewrite",
+    "no_assistant_voice": "a list, a disclaimer, an offer of help or a greeting formula is in the reply",
 }
 
 
@@ -519,7 +564,9 @@ def evidence_holds(item: str, score: int, quote: str, absent: bool, reply: str) 
     return quote_found(quote, reply)
 
 
-def validate(payload, items: list[str], reply: str) -> dict[str, int] | None:
+def validate(
+    payload, items: list[str], reply: str, *, require_evidence: bool = True
+) -> dict[str, int] | None:
     """Scores for exactly `items`, or None if the judgement is unusable.
 
     None rather than partial credit: a judge that answered three of
@@ -527,6 +574,13 @@ def validate(payload, items: list[str], reply: str) -> dict[str, int] | None:
     missing two as passes is how a harness starts lying. The same goes
     for a failing score whose evidence does not check out against
     `reply` (`evidence_holds`): the quotes are read here and dropped.
+
+    `require_evidence=False` (the `JUDGE_EVIDENCE=off` switch) skips only
+    that last test: a low score with a missing, too-short or
+    non-matching quote, or `absent: true` on a prohibition, is a usable
+    score. The shape stays strict in both modes: a payload that is not an
+    object, a missing item, a score out of range or not an integer, and
+    a `quote` or `absent` of the wrong type are unusable.
     """
     if not isinstance(payload, dict):
         return None
@@ -545,7 +599,7 @@ def validate(payload, items: list[str], reply: str) -> dict[str, int] | None:
         absent = entry.get("absent", False)
         if not isinstance(quote, str) or not isinstance(absent, bool):
             return None
-        if not evidence_holds(item, value, quote, absent, reply):
+        if require_evidence and not evidence_holds(item, value, quote, absent, reply):
             return None
         scores[item] = value
     return scores
@@ -559,6 +613,7 @@ async def judge(
     prompt_text: str,
     reply: str,
     advisory_items: frozenset[str] = frozenset(),
+    require_evidence: bool = True,
 ) -> Verdict:
     """Score one reply. Never raises; an unusable judgement fails the case.
 
@@ -568,6 +623,12 @@ async def judge(
 
     `advisory_items` (plan section 5.4) are scored as usual and do not
     decide `Verdict.passed`; empty, every requested item decides.
+
+    `require_evidence` is `settings.JUDGE_EVIDENCE == "required"`. False
+    is the off switch for a judge model nobody has run this format with
+    yet: the prompt and the JSON shape stay the same, but evidence that
+    does not check out no longer makes the judgement unusable (see
+    `validate`).
     """
     advisory = frozenset(advisory_items)
     if not items:
@@ -593,7 +654,9 @@ async def judge(
         return Verdict(scores={}, failed=list(items), usable=False, advisory=advisory)
 
     cost = float(response.usage.cost_usd or 0.0)
-    scores = validate(parse_json(response.text), items, reply)
+    scores = validate(
+        parse_json(response.text), items, reply, require_evidence=require_evidence
+    )
     if scores is None:
         return Verdict(
             scores={}, failed=list(items), usable=False, usd_cost=cost, advisory=advisory

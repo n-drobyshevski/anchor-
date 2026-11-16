@@ -5,13 +5,15 @@ That is why they are the only part of the harness with unit tests
 (build rule 9) -- everything else here needs a real model to mean
 anything, and a test of a mocked judge would test the mock.
 
-Four checks, each answering a question a human would otherwise have to
+Five checks, each answering a question a human would otherwise have to
 ask by eye of every reply, every run:
 
 - `russian`     -- did it answer in Russian at all?
 - `sentences`   -- is it the length the prompt asked for?
 - `no_nickname` -- is the persona genuinely off when it should be?
 - `forbidden`   -- did it say a thing it must never say?
+- `required`    -- did it say a thing it must say (`required_regex`, the
+  mirror of `forbidden`: every pattern must match)?
 
 They are cheap, they never flake, and they run before the judge, so an
 obviously broken reply costs nothing to reject.
@@ -262,6 +264,26 @@ def forbidden(text: str, patterns: list[str]) -> Result:
     )
 
 
+def required(text: str, patterns: list[str]) -> Result:
+    """Every pattern matches. The case spec's `required_regex`, the mirror
+    of `forbidden` (E1d, anchor-eval-reliability-plan.md section 6).
+
+    For a fact the prompt really carries and the reply must use: a
+    pattern on the fact's key word, so a reply that ignores it fails
+    without a judge. Case-insensitive like `forbidden`. Several patterns
+    are an AND; write one pattern with `|` for an OR. With no patterns
+    there is nothing to require and the check passes.
+    """
+    misses = [
+        pattern for pattern in patterns if not re.search(pattern, text, re.IGNORECASE)
+    ]
+    return Result(
+        "required_regex",
+        not misses,
+        "обязательное есть" if not misses else f"не нашлось: {', '.join(misses)}",
+    )
+
+
 def run_all(text: str, spec: dict, settings=None) -> list[Result]:
     """Every deterministic check a case asked for, in a fixed order.
 
@@ -292,6 +314,8 @@ def run_all(text: str, spec: dict, settings=None) -> list[Result]:
         results.append(no_nickname(text, nicknames))
     if spec.get("forbidden_regex"):
         results.append(forbidden(text, spec["forbidden_regex"]))
+    if spec.get("required_regex"):
+        results.append(required(text, spec["required_regex"]))
     if "max_nicknames" in spec:
         nicknames = NICKNAMES
         if settings is not None:

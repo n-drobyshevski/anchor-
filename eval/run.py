@@ -478,6 +478,7 @@ async def run_lens_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -528,6 +529,7 @@ async def run_garden_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -591,6 +593,7 @@ async def run_reflect_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -645,6 +648,7 @@ async def run_suggest_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -694,6 +698,7 @@ async def run_research_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -796,6 +801,7 @@ async def run_case(
         prompt_text=scenario.situation(case),
         reply=reply,
         advisory_items=advisory_items,
+        require_evidence=settings.JUDGE_EVIDENCE == "required",
     )
     cost = float(response.usage.cost_usd or 0.0) + verdict.usd_cost
     return Outcome(case, reply, check_results, verdict, cost)
