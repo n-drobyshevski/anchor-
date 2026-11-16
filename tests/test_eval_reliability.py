@@ -423,7 +423,7 @@ def test_saturated_live_dead_thresholds(runs, passed, expected):
     assert eval_history.classify(runs, passed, 12) == expected
 
 
-async def test_signal_reads_only_the_current_model_pair(sessionmaker):
+async def test_signal_reads_only_canary_rows_of_the_current_model_pair(sessionmaker):
     clock = FrozenClock(NOW)
     pair = {"persona_model": "a/persona", "judge_model": "b/judge"}
 
@@ -439,9 +439,15 @@ async def test_signal_reads_only_the_current_model_pair(sessionmaker):
             )
         # Another persona model's rows never count toward this pair.
         await eval_history.record(
-            session, clock=clock, source=eval_history.TRIAL, source_id=9,
+            session, clock=clock, source=eval_history.CANARY, source_id=9,
             runs={"01": counts(3, 0), "05": counts(30, 30)},
             persona_model="c/persona", judge_model="b/judge",
+        )
+        # A trial's rows are recorded but never count: its early stop
+        # leans them towards "passed" (eval_history's docstring).
+        await eval_history.record(
+            session, clock=clock, source=eval_history.TRIAL, source_id=11,
+            runs={"02": counts(30, 30), "07": counts(30, 30)}, **pair,
         )
         # A case with no run is not recorded.
         added = await eval_history.record(

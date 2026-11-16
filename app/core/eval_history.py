@@ -14,14 +14,20 @@ app/ and eval/ for it). Callers hand it `TrialResult.runs`; it never
 commits, so a row lands in the same transaction as the trial's own
 verdict or the canary's ledger row.
 
-**What the history says** (`signal`). Over the rows of the *current*
-persona and judge models only -- a model switch starts the history
-again, since a case saturated on one model says nothing about the next
--- a case with at least `EVAL_SIGNAL_MIN_RUNS` runs is `saturated`
+**What the history says** (`signal`). Over the **canary** rows of the
+*current* persona and judge models only -- a model switch starts the
+history again, since a case saturated on one model says nothing about
+the next -- a case with at least `EVAL_SIGNAL_MIN_RUNS` runs is `saturated`
 (every run passed), `dead` (no run passed) or `live` (anything
 between). A case with fewer runs is in none of the three. Nothing is
 promoted, demoted or removed from the blocking set by this: which cases
 block is still a line in a case file the user edits.
+
+Trial rows are recorded but left out of the signal: a trial stops a case
+as soon as it is decided (plan section 3.2), so its rows lean towards
+"passed" (two quick passes and done) and would make a case look more
+saturated than it is. The canary always runs every case in full; its
+rate is the one the plan's section 3.4 means.
 
 Every time comes from the injected `Clock`.
 """
@@ -107,13 +113,15 @@ async def signal(
     session: AsyncSession, *, persona_model: str, judge_model: str, min_runs: int
 ) -> Signal:
     """Which cases still carry signal under this model pair (module
-    docstring), from every trial's and canary's rows alike."""
+    docstring), from the canary's rows only: a trial's early stop biases
+    its rows towards "passed"."""
     rows = await session.execute(
         select(
             EvalCaseRun.case_id,
             func.sum(EvalCaseRun.runs),
             func.sum(EvalCaseRun.passed),
         )
+        .where(EvalCaseRun.source == CANARY)
         .where(EvalCaseRun.persona_model == persona_model)
         .where(EvalCaseRun.judge_model == judge_model)
         .group_by(EvalCaseRun.case_id)
