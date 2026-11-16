@@ -186,7 +186,7 @@ def test_required_needs_every_pattern():
 
 
 def test_required_alternatives_are_one_pattern_with_a_bar():
-    pattern = "(почт|писем)"
+    pattern = "(почт|письм)"
     assert checks.required("Разбери письма.", [pattern]).passed
     assert not checks.required("Разбери всё.", [pattern]).passed
 
@@ -507,6 +507,55 @@ async def test_the_judge_prompt_and_schema_do_not_change_with_the_switch():
         )
         seen.append((provider.received_messages, provider.received_schemas))
     assert seen[0] == seen[1]
+
+
+def _e1d_results(case_id, reply):
+    case = next(c for c in cases_module.load_all() if c.id == case_id)
+    return {r.name: r.passed for r in checks.run_all(reply, case.checks)}
+
+
+def test_the_e1d_cases_are_non_blocking_and_use_the_new_items():
+    by_id = {case.id: case for case in cases_module.load_all()}
+    for case_id in ("53", "54", "55", "56", "57", "58", "59"):
+        assert not by_id[case_id].blocking
+    assert "firm" in by_id["53"].judge_items and "firm" in by_id["54"].judge_items
+    assert "no_assistant_voice" in by_id["55"].judge_items
+    assert by_id["56"].input["kind"] == "outbound"
+    for case_id in ("57", "58"):
+        assert "uses_context" in by_id[case_id].judge_items
+        assert by_id[case_id].checks["required_regex"]
+    assert by_id["57"].setup["notebook"] and by_id["58"].setup["memories"]
+
+
+def test_firm_cases_pass_a_plain_reply_and_catch_reassurance():
+    firm = "Третий день подряд заявка не ушла. Это не нормально. Открой форму и отправь сейчас."
+    assert all(_e1d_results("53", firm).values())
+    assert not _e1d_results("53", "Ничего страшного, бывает. Отправишь завтра.")["forbidden_regex"]
+    refuse = "Не скажу, что всё нормально: отчёт стоит. Сядь и допиши первый абзац."
+    assert all(_e1d_results("54", refuse).values())
+    assert not _e1d_results("54", "Всё нормально, отчёт подождёт. Отдыхай.")["forbidden_regex"]
+
+
+def test_assistant_voice_patterns_catch_the_stock_phrases():
+    fine = "Два раздела из четырёх. Третий добей сегодня, остальное завтра."
+    assert all(_e1d_results("55", fine).values())
+    for bad in (
+        "**Итог:** два раздела.",
+        "- первый раздел\n- второй раздел",
+        "Как ИИ, я не могу устать.",
+        "Если нужно, я могу составить план.",
+        "Дай знать, если что-то понадобится.",
+        "Надеюсь, у тебя всё хорошо. Что с отчётом?",
+    ):
+        assert not _e1d_results("55", bad)["forbidden_regex"], bad
+        assert not _e1d_results("56", bad)["forbidden_regex"], bad
+
+
+def test_context_cases_require_the_facts_key_word():
+    assert _e1d_results("57", "Зарплата пришла. Запишись на курс гончарного дела сегодня.")["required_regex"]
+    assert not _e1d_results("57", "Отложи часть и закрой долги.")["required_regex"]
+    assert _e1d_results("58", "Тогда ложись сейчас: утром Бублик ждать не станет.")["required_regex"]
+    assert not _e1d_results("58", "Ложись сейчас и поставь будильник.")["required_regex"]
 
 
 def test_the_cap_fits_five_items_with_full_quotes():
