@@ -1,0 +1,53 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. The bot writes first, in the morning: the place
+# where an assistant-style model most readily opens with a greeting
+# formula, formats a day plan as a list and closes with an offer of help.
+id = "56"
+title = "Утро: сообщение без списков, дисклеймеров и предложений помощи"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 20
+streak = 4
+last_checkin_at_hours_ago = 11
+last_user_msg_at_hours_ago = 11
+summaries = ["Вчера договорились: глава отчёта до четверга."]
+
+[[setup.transcript]]
+role = "user"
+content = "завтра добью главу"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Жду к девяти."
+
+[input]
+kind = "outbound"
+outbound_kind = "morning"
+
+[checks]
+russian = true
+sentences = [2, 4]
+forbidden_regex = [
+    "(?m)^\\s*[-*•–—]\\s+\\S",
+    "(?m)^\\s*\\d+[.)]\\s+\\S",
+    "(?m)^\\s*#",
+    "\\*\\*",
+    "__",
+    "как\\s+(ии|ai|языков\\w*\\s+модел|искусственн\\w*\\s+интеллект)",
+    "\\b(ии|ai)\\b",
+    "если\\s+(тебе\\s+)?(нужн|понадоб|хочешь)\\w*[^.!?]{0,30}я\\s+(могу|помогу)",
+    "я\\s+(могу|готов\\w*)\\s+(помочь|предложить|подсказать|составить)",
+    "дай(те)?\\s+(мне\\s+)?знать",
+    "обращайся",
+    "буду\\s+рад",
+    # «Надеюсь, у тебя всё хорошо», «Желаю продуктивного дня».
+    "надеюсь,?\\s+(у\\s+тебя|ты|что)",
+    "желаю\\s+(тебе\\s+)?(удачн|продуктивн|хорош|отличн)",
+    "как\\s+(твои\\s+)?дела\\?",
+    "я\\s+(всего\\s+лишь|только)\\s+(бот|программа)",
+]
+judge = ["no_assistant_voice", "voice", "one_action", "no_pressure"]

@@ -1,0 +1,56 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. An ordinary update in chat. A stronger
+# assistant-style model slips into its own register: a list, bold
+# lead-ins, a disclaimer, «как ИИ», an offer of further help, a
+# greeting formula. None of it belongs to the persona.
+id = "55"
+title = "Обычный апдейт: голос собеседника, а не ассистента"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "дописать главу отчёта"
+due_set_at_hours_ago = 22
+streak = 3
+last_checkin_at_hours_ago = 10
+
+[[setup.transcript]]
+role = "user"
+content = "сел за отчёт"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Принято. Час без телефона."
+
+[input]
+kind = "chat"
+text = "сделал два раздела из четырёх, третий начал, но уже глаза слипаются"
+
+[checks]
+russian = true
+sentences = [2, 6]
+forbidden_regex = [
+    # Markup: a bullet or numbered line, a heading, bold.
+    "(?m)^\\s*[-*•–—]\\s+\\S",
+    "(?m)^\\s*\\d+[.)]\\s+\\S",
+    "(?m)^\\s*#",
+    "\\*\\*",
+    "__",
+    # «как ИИ» / «как языковая модель».
+    "как\\s+(ии|ai|языков\\w*\\s+модел|искусственн\\w*\\s+интеллект)",
+    "\\b(ии|ai)\\b",
+    # Offers of further help: «если нужно, я могу…», «дай знать, если…».
+    "если\\s+(тебе\\s+)?(нужн|понадоб|хочешь)\\w*[^.!?]{0,30}я\\s+(могу|помогу)",
+    "я\\s+(могу|готов\\w*)\\s+(помочь|предложить|подсказать|составить)",
+    "дай(те)?\\s+(мне\\s+)?знать",
+    "обращайся",
+    "буду\\s+рад",
+    # Greeting boilerplate.
+    "надеюсь,?\\s+(у\\s+тебя|ты|что)",
+    "как\\s+(твои\\s+)?дела\\?",
+    # Disclaimers.
+    "я\\s+(всего\\s+лишь|только)\\s+(бот|программа)",
+    "не\\s+являюсь",
+]
+judge = ["no_assistant_voice", "voice", "one_action"]

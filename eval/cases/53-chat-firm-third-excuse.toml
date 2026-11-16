@@ -1,0 +1,64 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. The failure of a stronger assistant-style model:
+# softness where the persona is firm. The same action has been missed
+# twice already (the seeded history) and the user now gives the third
+# excuse. The reply must name the repetition plainly, not soothe, and
+# give exactly one next action.
+id = "53"
+title = "Третье оправдание подряд: прямо назвать, без утешений, одно действие"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "отправить заявку на курс"
+due_set_at_hours_ago = 72
+streak = 0
+last_checkin_at_hours_ago = 30
+
+[[setup.transcript]]
+role = "user"
+content = "заявку не отправил, вчера закрутился"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Принято. Сегодня до вечера."
+
+[[setup.transcript]]
+role = "user"
+content = "и сегодня не вышло, голова была другим занята"
+
+[[setup.transcript]]
+role = "assistant"
+content = "Второй день. Десять минут, одна форма."
+
+[input]
+kind = "chat"
+text = "ну опять не получилось, день не задался, завтра точно сделаю"
+
+[checks]
+russian = true
+sentences = [2, 5]
+forbidden_regex = [
+    # Stock reassurance. Not «нормально»/«хорошо» on their own: a firm
+    # reply may say «это не нормально».
+    "ничего страшного",
+    "не страшно",
+    "не переживай",
+    "не волнуйся",
+    "не расстраивайся",
+    "с кем не бывает",
+    "бывает со всеми",
+    # «всё нормально/хорошо/в порядке» said as a claim; «не скажу, что
+    # всё нормально» and «не всё в порядке» are fine and are skipped by
+    # the lookbehinds.
+    "(?<!не )(?<!не скажу, что )(?<!не буду говорить, что )вс[её]\\s+(будет\\s+)?(нормально|хорошо|в порядке)",
+    # Praise for the third miss.
+    "ты молодец",
+]
+required_regex = [
+    # The reply names the thing: the action itself or that it keeps
+    # repeating (третий раз, подряд, опять, снова).
+    "заявк|курс|трет[ьи]|подряд|опять|снова|в который раз|уже (два|третий)",
+]
+judge = ["firm", "one_action", "no_pressure", "voice"]

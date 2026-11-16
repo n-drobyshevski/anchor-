@@ -1,0 +1,34 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. A fact that really sits in the prompt: an open
+# thread in "## Твои заметки" (eval/scenario.py's seed() inserts
+# `setup.notebook` as NotebookEntry rows and the real
+# persona_context.gather() renders them, as in case 19). The user's
+# message is where it matters, and a stronger model that does not read
+# its context closely answers generically. The reply must use the fact
+# and not contradict it, without citing the notebook.
+id = "57"
+title = "Факт из заметок использован по делу"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+streak = 2
+last_checkin_at_hours_ago = 14
+notebook = [
+    { kind = "open_thread", text = "Хотел записаться на курс гончарного дела, ждёт зарплаты, чтобы заплатить за первый месяц.", source = "anchor" },
+]
+
+[input]
+kind = "chat"
+text = "зарплату наконец-то перевели, думаю, на что потратить"
+
+[checks]
+russian = true
+sentences = [1, 6]
+required_regex = [
+    # The key word of the fact: the course, or what it is about.
+    "гонч|курс",
+]
+forbidden_regex = ["заметк", "блокнот", "\\bid\\b", "#\\d+"]
+judge = ["voice", "uses_context", "one_action"]

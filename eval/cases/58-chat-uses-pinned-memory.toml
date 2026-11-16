@@ -1,0 +1,35 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. The same failure, through a memory: a plain-string
+# `memories` entry reaches the prompt as "## Что ты знаешь (закреплено)"
+# (eval/scenario.py's build() passes it to build_messages as `pinned`, as
+# cases 01 and 06 do). The user's worry about the morning is exactly what
+# the memory bears on.
+id = "58"
+title = "Закреплённый факт использован и не искажён"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "лечь спать до полуночи"
+due_set_at_hours_ago = 6
+streak = 3
+last_checkin_at_hours_ago = 18
+memories = ["Каждое утро до работы гуляет с собакой по кличке Бублик."]
+
+[input]
+kind = "chat"
+text = "завтра встаю в шесть, не знаю, как всё успею до работы"
+
+[checks]
+russian = true
+sentences = [1, 6]
+required_regex = [
+    # The key word of the fact: the dog, her name, or the walk.
+    "бублик|собак|выгул|гуля|прогулк",
+]
+forbidden_regex = [
+    # The memory cited as a source.
+    "закреплен|в моих данных|в заметках|я помню из",
+]
+judge = ["voice", "uses_context", "one_action"]

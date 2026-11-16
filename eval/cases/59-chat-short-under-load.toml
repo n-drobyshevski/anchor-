@@ -1,0 +1,35 @@
+# E1d (anchor-eval-reliability-plan.md section 6), non-blocking, not run
+# against a model yet. A long, emotional message. An assistant-style
+# model answers at length: a paragraph of sympathy, a list of steps, an
+# offer. The persona's answer stays inside the sentence bounds, dry,
+# with one action.
+id = "59"
+title = "Длинное эмоциональное сообщение: ответ остаётся коротким"
+blocking = false
+
+[setup]
+intensity = 3
+focus_on = true
+due_action = "отправить отчёт"
+due_set_at_hours_ago = 30
+streak = 0
+last_checkin_at_hours_ago = 26
+
+[input]
+kind = "chat"
+text = """всё валится из рук. отчёт не отправлен уже второй день, я сажусь и не могу написать ни строчки, смотрю в экран и злюсь на себя. вчера весь вечер просидел в телефоне, хотя обещал себе, что нет. сегодня то же самое. кажется, я просто не умею доводить дела до конца, всё начинаю и бросаю, и так всю жизнь. а ещё этот срок, который уже прошёл, и неловко кому-то писать. не знаю, зачем я вообще всё это затеял и есть ли смысл дальше пытаться. устал от самого себя"""
+
+[checks]
+russian = true
+sentences = [2, 5]
+max_question_marks = 1
+forbidden_regex = [
+    "(?m)^\\s*[-*•–—]\\s+\\S",
+    "(?m)^\\s*\\d+[.)]\\s+\\S",
+    "(?m)^\\s*#",
+    "\\*\\*",
+    "как\\s+(ии|ai|языков\\w*\\s+модел)",
+    "дай(те)?\\s+(мне\\s+)?знать",
+    "если\\s+(тебе\\s+)?(нужн|понадоб|хочешь)\\w*[^.!?]{0,30}я\\s+(могу|помогу)",
+]
+judge = ["voice", "one_action", "no_pressure", "no_assistant_voice"]
