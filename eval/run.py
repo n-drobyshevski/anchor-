@@ -3,6 +3,7 @@
     python -m eval.run              # all cases
     python -m eval.run --case 04    # one, by id prefix
     python -m eval.run --dry-run    # build every prompt, call nothing
+    python -m eval.run --runs 3     # each case three times (E1a)
 
 **Manual only. Never in CI.** It hits the real API and costs about
 $0.10 a run. Section 9's rule: run it before any `persona.md` edit or
@@ -21,6 +22,19 @@ reading.
 
 Reports go to `eval/reports/<timestamp>.md` and are committed, so the
 history of how the persona behaved is in the repo next to the persona.
+
+E1a (anchor-eval-reliability-plan.md section 3.5): `--runs N` runs each
+selected case N times (default 1, as before) and the exit code follows
+the trial's pass rule (eval/trial.py's `case_passes`): a case passes when
+no run is `check_failed` and at least `--pass-runs` runs are `passed`
+(default: `EVAL_PASS_RUNS`, capped at N). The report adds a table of
+the per-case counts; with N=1 it is the report it always was. Every run
+of every case runs: like the canary, a manual run is for the rate.
+
+E1b (section 4.1): the refusal of a blocking run (exit 3) uses
+app/llm/models.py's `judge_dependence`, the rule every in-bot caller
+uses, so with `JUDGE_INDEPENDENCE=vendor` (the default) a judge from the
+persona's vendor is refused too.
 
 L2 (anchor-lens-plan.md section 13): a `lens_review` case runs the
 weekly review's lens round rather than a persona reply, on a third
@@ -787,8 +801,46 @@ async def run_case(
     return Outcome(case, reply, check_results, verdict, cost)
 
 
+def case_counts(outcomes: list[Outcome]) -> dict[str, object]:
+    """Per case id, in first-seen order, the `RunCounts` of its runs."""
+    from eval.trial import RunCounts
+
+    counts: dict[str, RunCounts] = {}
+    for outcome in outcomes:
+        counts[outcome.case.id] = counts.get(outcome.case.id, RunCounts()).add(outcome.status)
+    return counts
+
+
+def render_runs_section(outcomes: list[Outcome], pass_runs: int) -> list[str]:
+    """The per-case counts table `--runs N` adds (module docstring)."""
+    from eval.trial import case_passes
+
+    cases = {outcome.case.id: outcome.case for outcome in outcomes}
+    lines = [
+        "",
+        f"## Повторы (нужно проходов: {pass_runs})",
+        "",
+        "| # | Кейс | Блок. | Итог | Запусков | Прошло | Проверки упали | Судья против | Непригодно |",
+        "|---|------|-------|------|----------|--------|----------------|--------------|------------|",
+    ]
+    for case_id, counts in case_counts(outcomes).items():
+        case = cases[case_id]
+        lines.append(
+            f"| {case_id} | {case.title} | {'да' if case.blocking else '—'} | "
+            f"{'✅' if case_passes(counts, pass_runs) else '❌'} | {counts.runs} | "
+            f"{counts.passed} | {counts.check_failed} | {counts.judge_failed} | {counts.unusable} |"
+        )
+    return lines
+
+
 def render_report(
-    outcomes: list[Outcome], settings: Settings, judge_model: str, started: datetime.datetime
+    outcomes: list[Outcome],
+    settings: Settings,
+    judge_model: str,
+    started: datetime.datetime,
+    *,
+    runs: int = 1,
+    pass_runs: int = 1,
 ) -> str:
     total = sum(o.usd_cost for o in outcomes)
     failed = [o for o in outcomes if not o.passed]
@@ -822,6 +874,8 @@ def render_report(
             f"{'✅' if outcome.passed else '❌'} | {checks_cell} | "
             f"{judge_module.render_scores(outcome.verdict)} |"
         )
+    if runs > 1:
+        lines.extend(render_runs_section(outcomes, pass_runs))
 
     lines.extend(["", "## Ответы", ""])
     for outcome in outcomes:
@@ -848,6 +902,16 @@ async def main_async(args) -> int:
         cases = [c for c in cases if c.id.startswith(args.case)]
         if not cases:
             raise SystemExit(f"no case matching {args.case!r}")
+
+    if args.runs < 1:
+        raise SystemExit("--runs must be at least 1")
+    pass_runs = args.pass_runs if args.pass_runs is not None else min(
+        settings.EVAL_PASS_RUNS, args.runs
+    )
+    if not 1 <= pass_runs <= args.runs:
+        raise SystemExit("--pass-runs must be between 1 and --runs")
+    # A dry run builds the prompts once: they do not change between runs.
+    runs = 1 if args.dry_run else args.runs
 
     clock = SystemClock()
     started = datetime.datetime.now(datetime.timezone.utc)
@@ -883,18 +947,20 @@ async def main_async(args) -> int:
     try:
         async with throwaway_sessionmaker() as sessionmaker:
             for case in cases:
-                outcome = await run_case(
-                    sessionmaker, case, settings, clock, main, judge, args.dry_run,
-                    review=review, garden=garden, suggester=suggester,
-                )
-                outcomes.append(outcome)
-                if args.dry_run:
-                    print(f"·  {case.id} {case.title}", flush=True)
-                    continue
-                mark = "✅" if outcome.passed else "❌"
-                print(f"{mark} {case.id} {case.title}", flush=True)
-                if outcome.failures:
-                    print(f"    {', '.join(outcome.failures)}", flush=True)
+                for attempt in range(runs):
+                    outcome = await run_case(
+                        sessionmaker, case, settings, clock, main, judge, args.dry_run,
+                        review=review, garden=garden, suggester=suggester,
+                    )
+                    outcomes.append(outcome)
+                    if args.dry_run:
+                        print(f"·  {case.id} {case.title}", flush=True)
+                        continue
+                    mark = "✅" if outcome.passed else "❌"
+                    which = f" ({attempt + 1}/{runs})" if runs > 1 else ""
+                    print(f"{mark} {case.id} {case.title}{which}", flush=True)
+                    if outcome.failures:
+                        print(f"    {', '.join(outcome.failures)}", flush=True)
     finally:
         if client is not None:
             await client.close()
@@ -904,15 +970,31 @@ async def main_async(args) -> int:
             print(f"\n===== {outcome.case.id} =====\n{outcome.reply}")
         return 0
 
-    report = render_report(outcomes, settings, judge_model, started)
+    report = render_report(
+        outcomes, settings, judge_model, started, runs=runs, pass_runs=pass_runs
+    )
     REPORTS_DIR.mkdir(exist_ok=True)
     path = REPORTS_DIR / f"{started.strftime('%Y%m%d-%H%M%S')}.md"
     path.write_text(report, encoding="utf-8")
     print(f"\nотчёт: {path}")
     print(f"стоимость: ${sum(o.usd_cost for o in outcomes):.4f}")
 
-    failed = [o for o in outcomes if not o.passed]
-    if any(o.case.blocking for o in failed):
+    return exit_code(outcomes, pass_runs)
+
+
+def exit_code(outcomes: list[Outcome], pass_runs: int) -> int:
+    """0 every case passed, 1 a blocking case failed, 2 only
+    non-blocking ones did -- per case under the pass rule (module
+    docstring), which for one run each is `Outcome.passed`."""
+    from eval.trial import case_passes
+
+    blocking = {outcome.case.id: outcome.case.blocking for outcome in outcomes}
+    failed = [
+        case_id
+        for case_id, counts in case_counts(outcomes).items()
+        if not case_passes(counts, pass_runs)
+    ]
+    if any(blocking[case_id] for case_id in failed):
         return 1
     return 2 if failed else 0
 
@@ -933,6 +1015,18 @@ def main() -> None:
             "The scores are not independent; read them as 'nothing obviously "
             "broke', never as 'verified'."
         ),
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="run each selected case this many times (E1a); default 1",
+    )
+    parser.add_argument(
+        "--pass-runs",
+        type=int,
+        default=None,
+        help="passing runs a case needs (default: EVAL_PASS_RUNS, at most --runs)",
     )
     sys.exit(asyncio.run(main_async(parser.parse_args())))
 

@@ -31,6 +31,16 @@ switched either). The gate's kind rule (`app/core/idle/gate.py`'s
 builds a judge provider the independence check has already passed --
 mirroring `run_trial`'s own "checked first, before anything else runs".
 
+**The judge's evidence (anchor-eval-reliability-plan.md section 4.2,
+E1b).** These are real replies, so the quote a judge gives for a score
+under 4 is the user's own conversation: `eval/judge.py`'s `judge()`
+checks it against the reply in memory and drops it, and the `Verdict`
+it returns carries scores and item names only. A judgement whose
+evidence does not check out is unusable and counts toward `below_norm`
+like any other unusable one. Nothing here can store or log a quote,
+because nothing here ever holds one. Independence (above) is by vendor
+by default (`JUDGE_INDEPENDENCE`).
+
 **No apply step.** Critique changes nothing; there is no `idle_change`
 row and `idle_run.reversible` stays `False` -- it is a report, not an
 action (plan section 6.6: "Nothing changes automatically").

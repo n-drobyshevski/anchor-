@@ -92,21 +92,24 @@ def _client() -> FakeClient:
     )
 
 
-async def _build(sessionmaker, *, web=False, catalog=True, resolver=None, client=None):
+async def _build(
+    sessionmaker, *, web=False, catalog=True, resolver=None, client=None, settings=None
+):
+    settings = settings or SETTINGS
     bot, fake = make_bot()
     if web:
         bot.is_web_sink = True
     if resolver is None:
-        resolver = await ModelResolver.create(SETTINGS, sessionmaker)
+        resolver = await ModelResolver.create(settings, sessionmaker)
     client = client or _client()
     dp = Dispatcher()
     dp.include_router(
         build_router(
             sessionmaker,
-            SETTINGS,
+            settings,
             FakeLLMProvider(),
             clock=FrozenClock(NOW),
-            model_catalog=ModelCatalog(client, SETTINGS) if catalog else None,
+            model_catalog=ModelCatalog(client, settings) if catalog else None,
             model_resolver=resolver,
         )
     )
@@ -649,3 +652,41 @@ def test_state_view_warns_when_the_judge_shares_the_persona_s_vendor():
     assert state_view.model_rows(vendor_rule, _role_rows("lab/judge"))[-1][0] != "Судья"
     same = state_view.model_rows(SETTINGS, _role_rows("vendor/persona-env"))
     assert same[-1] == (state_view.JUDGE_LABEL, state_view.JUDGE_WARNINGS["same_model"])
+
+
+VENDOR_RULE = _settings(JUDGE_INDEPENDENCE="vendor")
+
+
+async def test_a_judge_from_the_persona_s_vendor_is_refused_with_the_reason(sessionmaker):
+    """E1b, the menu's direction one: under the vendor rule the judge
+    cannot move to another model of the persona's vendor, and the reply
+    says why; under the id rule the same pick gets its confirm card."""
+    await _seed(sessionmaker, *range(1, 10))
+    dp, bot, fake, resolver, _ = await _build(sessionmaker, settings=VENDOR_RULE)
+    await _say_line(dp, bot, 1, "/menu")
+    await _tap(dp, bot, 2, "mn:a:mdl_judge:1")  # JSONish, vendor/ like the persona
+    assert fake.sent[-1].text == REFUSALS["judge_same_vendor"]
+    assert "разработчика" in fake.sent[-1].text
+    assert resolver.effective("judge") == "vendor/judge-env"
+
+    dp, bot, fake, resolver, _ = await _build(sessionmaker)  # JUDGE_INDEPENDENCE=model
+    await _say_line(dp, bot, 3, "/menu")
+    await _tap(dp, bot, 4, "mn:a:mdl_judge:1")
+    assert fake.sent[-1].text != REFUSALS["judge_same_vendor"]
+    assert fake.sent[-1].reply_markup is not None  # the confirm card
+
+
+async def test_a_persona_onto_the_judge_s_vendor_is_refused_with_the_reason(sessionmaker):
+    """E1b, direction two: the chat cannot move onto the judge's vendor."""
+    await _seed(sessionmaker, *range(1, 10))
+    dp, bot, fake, resolver, _ = await _build(sessionmaker, settings=VENDOR_RULE)
+    await resolver.set("judge", "lab/judge")
+    await resolver.set("persona", "other/persona")
+    await _say_line(dp, bot, 1, "/menu")
+    await _tap(dp, bot, 2, "mn:a:mdl_persona:1")  # Prose Two: vendor/, not lab/
+    assert fake.sent[-1].reply_markup is not None  # allowed: another vendor
+    await resolver.set("judge", "vendor/judge-env")
+    await _say_line(dp, bot, 3, "/menu")
+    await _tap(dp, bot, 4, "mn:a:mdl_persona:1")
+    assert fake.sent[-1].text == REFUSALS["judge_same_vendor"]
+    assert resolver.effective("persona") == "other/persona"

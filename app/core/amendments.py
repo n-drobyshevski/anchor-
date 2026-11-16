@@ -39,7 +39,7 @@ a case once it is decided (eval/trial.py's pass rule). `eval_report` is
 `{"cases": {id: bool}, "runs": {id: {runs, passed, check_failed,
 judge_failed, unusable}}, "advisory": [item, ...], "reason": ...}`:
 ids, counts and item names, still no text. Every reader of `"cases"`
-keeps working. One `eval_case_run` row per case goes to the history
+keeps working. One history row per case goes
 through app/core/eval_history.py (`source='trial'`, `source_id` the
 amendment's id), with the persona and judge models the trial ran on.
 

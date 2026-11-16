@@ -188,8 +188,9 @@ class IdleConfig:
     # disabled" reduces to the one switch that turns every proactive
     # send off.
     morning_enabled: bool = True
-    # 6c: true iff the judge model is set and differs from the persona's
-    # -- the *effective* ones since runtime model choice
+    # 6c: true iff the judge model is set and may grade the persona's --
+    # another model and, with JUDGE_INDEPENDENCE=vendor (E1b's default),
+    # another vendor; the *effective* ones since runtime model choice
     # (app/llm/models.py's `independent_judge`) -- the same independence check app/core/amendments.py's run_trial
     # makes before its own throwaway trial, reused here so critique and
     # canary can never grade (or bless) a model against itself.
