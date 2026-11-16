@@ -152,7 +152,14 @@ async def _body(request: web.Request) -> dict | None:
     """The JSON object sent, `{}` for an empty body, None for anything else."""
     if request.content_length is not None and request.content_length > MAX_BODY:
         return None
-    raw = await request.content.read(MAX_BODY + 1)
+    # `content.read(n)` may return one network chunk, not the whole body,
+    # so read until the end or one byte past the cap.
+    raw = b""
+    while len(raw) <= MAX_BODY:
+        chunk = await request.content.read(MAX_BODY + 1 - len(raw))
+        if not chunk:
+            break
+        raw += chunk
     if len(raw) > MAX_BODY:
         return None
     if not raw.strip():
