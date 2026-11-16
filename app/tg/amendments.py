@@ -8,6 +8,11 @@ review proposal) live in app/tg/review.py instead -- those two ids are
 `review_proposal` ids, not `persona_amendment` ids, and the card that
 carries them is one of the review's own proposal cards, not this
 module's list.
+
+E1a (anchor-eval-reliability-plan.md section 3.3): the trial's result
+message names each case that did not pass cleanly with its count, «2 из
+3», read from `eval_report["runs"]`, and the advisory items when the
+trial had any (section 5.4). Ids and counts only, like the report.
 """
 
 from __future__ import annotations
@@ -34,6 +39,10 @@ STALE = "Устарело."
 # How much of the amendment text a button label carries, matching
 # app/tg/orders.py's own `[Снять] «{text[:24]}»` convention.
 _LABEL_TEXT_MAX = 24
+
+# The trial result's extra lines (module docstring).
+UNEVEN_LINE = "Кейс {case}: {passed} из {runs}"
+ADVISORY_LINE = "Не решали исход: {items}"
 
 
 def render_amendments_list(rows: list[DisplayRow]) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -107,9 +116,27 @@ async def send_trial_result(sessionmaker, bot: Bot, *, chat_id: int, amendment_i
         row = await session.get(PersonaAmendment, amendment_id)
     if row is None:
         return
-    text = (
+    await send_reply(bot, chat_id, render_trial_result(row))
+
+
+def render_trial_result(row: PersonaAmendment) -> str:
+    """The result message: accepted or not, then one line per case whose
+    runs did not all pass («Кейс 04: 2 из 3»), then the advisory items.
+    A report from before E1a, or from a trial of one run per case, is
+    the one line it always was."""
+    lines = [
         amendments_module.ACTIVE_TEXT
         if row.status == amendments_module.ACTIVE
         else amendments_module.FAILED_TEXT
-    )
-    await send_reply(bot, chat_id, text)
+    ]
+    report = row.eval_report or {}
+    for case_id, counts in sorted((report.get("runs") or {}).items()):
+        runs, passed = int(counts.get("runs", 0)), int(counts.get("passed", 0))
+        # One run per case (EVAL_RUNS_PER_CASE=1) says nothing «из»
+        # adds: the message stays the one line it was before E1a.
+        if runs > 1 and passed < runs:
+            lines.append(UNEVEN_LINE.format(case=case_id, passed=passed, runs=runs))
+    advisory = report.get("advisory") or []
+    if advisory:
+        lines.append(ADVISORY_LINE.format(items=", ".join(advisory)))
+    return "\n".join(lines)

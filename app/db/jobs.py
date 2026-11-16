@@ -130,11 +130,12 @@ async def touch_job_lock(session: AsyncSession, job_id: int) -> None:
     again while the first run is still generating and judging replies,
     running the whole blocking subset -- and its API spend -- twice.
 
-    `app/core/amendments.py`'s `run_trial` calls this once per blocking
-    case (via `eval.trial.run_blocking_subset`'s `on_case_done` hook),
-    which keeps the lease continuously fresh across a run that can take
-    several minutes: the gap between any two touches is one case's
-    worth of two model calls, comfortably under `STUCK_AFTER`. A crash
+    `app/core/amendments.py`'s `run_trial` calls this once per run of a
+    blocking case (via `eval.trial.run_blocking_subset`'s `on_run_done`
+    hook; E1a repeats each case up to `EVAL_RUNS_PER_CASE` times), which
+    keeps the lease continuously fresh across a trial that can take
+    many minutes: the gap between any two touches is one run's worth of
+    two model calls, comfortably under `STUCK_AFTER`. A crash
     mid-run still recovers normally -- the last touch simply ages out
     like any other stuck lock once heartbeats stop arriving.
 

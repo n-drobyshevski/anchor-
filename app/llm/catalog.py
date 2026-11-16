@@ -46,6 +46,10 @@ here cannot remove; the worst a wrong "yes" costs is failed calls.
 - `judge_equals_persona`: the judge would grade the persona's own
   replies (app/core/idle/gate.py's independence rule) -- checked both
   ways, so switching the chat onto the judge's model is refused too;
+- `judge_same_vendor`: the judge and the persona would come from one
+  vendor (anchor-eval-reliability-plan.md section 4.1, with
+  `JUDGE_INDEPENDENCE=vendor`, the default), checked both ways too.
+  Both come from app/llm/models.py's `judge_dependence`, the one rule;
 - `not_decisions`: the welfare shadow runs on the Decisions API, which
   no listing describes, so a custom id is probed with one synthetic
   decision (no user text) and refused if that fails;
@@ -85,6 +89,7 @@ import openai
 from openai import AsyncOpenAI
 
 from app.config import _MODEL_ID_RE, ModelChoice, Settings, model_choices
+from app.llm import models as llm_models
 from app.llm.models import NO_PRICES, OFF_ROLE, ROLES, ModelPrices, ModelResolver
 from app.llm.openrouter import OpenRouterDecisionProvider
 from app.llm.provider import Choice, LLMError, LLMRetryableError, LLMUsage
@@ -119,6 +124,10 @@ REFUSALS: dict[str, str] = {
     ),
     "judge_equals_persona": (
         "Судья и чат не могут быть одной моделью: судья оценивал бы сам себя."
+    ),
+    "judge_same_vendor": (
+        "Судья и чат не могут быть от одного разработчика: судья оценивал бы "
+        "свою же семью моделей. Выбери модель другого разработчика."
     ),
     "not_decisions": "Это не модель Decisions API — Welfare-тени она не подойдёт.",
     "not_prose": "Эта модель в списке не для текста — для этой роли не подойдёт.",
@@ -491,13 +500,26 @@ def choices_for(role: str, settings: Settings) -> tuple[ModelChoice, ...]:
 _CAP_REFUSAL = {"prose": "not_prose", "json": "no_structured", "decisions": "not_decisions"}
 
 
-def _independence(role: str, model_id: str, resolver: ModelResolver) -> bool:
-    """False when the pick would make the judge and the persona one model."""
+# app/llm/models.py's `judge_dependence` codes -> the refusal shown.
+_DEPENDENCE_REFUSAL = {
+    llm_models.SAME_MODEL: "judge_equals_persona",
+    llm_models.SAME_VENDOR: "judge_same_vendor",
+}
+
+
+def _independence(
+    role: str, model_id: str, resolver: ModelResolver, settings: Settings
+) -> str | None:
+    """The refusal code when the pick would leave the judge unable to
+    grade the persona (one model, or by default one vendor), else None.
+    `no_judge` cannot arise here: an empty pick is refused earlier."""
     if role == "judge":
-        return model_id != resolver.effective("persona")
-    if role == "persona":
-        return model_id != resolver.effective("judge")
-    return True
+        reason = llm_models.judge_dependence(settings, model_id, resolver.effective("persona"))
+    elif role == "persona":
+        reason = llm_models.judge_dependence(settings, resolver.effective("judge"), model_id)
+    else:
+        return None
+    return _DEPENDENCE_REFUSAL.get(reason) if reason is not None else None
 
 
 async def validate_choice(
@@ -522,8 +544,9 @@ async def validate_choice(
         if role == OFF_ROLE:
             return Verdict("", None)
         return _refuse("", "missing")
-    if not _independence(role, model_id, resolver):
-        return _refuse(model_id, "judge_equals_persona")
+    refusal = _independence(role, model_id, resolver, settings)
+    if refusal is not None:
+        return _refuse(model_id, refusal)
 
     need = ROLE_NEEDS[role]
     deny = settings.LLM_DATA_COLLECTION == "deny"

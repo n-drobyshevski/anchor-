@@ -37,14 +37,12 @@ from app.db.models import (
     UserState,
     WeeklyReview,
 )
-from conftest import FakeLLMProvider
+from conftest import FakeLLMProvider, judge_json
 
 TIMEZONE = "Europe/Paris"
 UTC = datetime.timezone.utc
 
-GOOD_JUDGE_TEXT = (
-    '{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5}'
-)
+GOOD_JUDGE_TEXT = judge_json({"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5})
 
 # Three sampled replies, an hour apart, the day before the run.
 T1 = datetime.datetime(2026, 9, 22, 18, 0, tzinfo=UTC)

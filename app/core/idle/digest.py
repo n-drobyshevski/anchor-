@@ -57,6 +57,10 @@ PREBRIEF_LINE = "• Утро: заметки готовы"
 CRITIQUE_LINE = "• Самопроверка: {count} ответов, ниже нормы — {below_norm}"
 CANARY_OK_LINE = "• Канарейка: ок"
 CANARY_REGRESSION_LINE = "• ⚠️ Регрессия: кейсы {cases}"
+# E1a (anchor-eval-reliability-plan.md section 3.4): what the history
+# says about the blocking cases over the current models, appended to
+# the canary's line once some case has enough runs to say anything.
+CANARY_SIGNAL_SUFFIX = " · всегда проходят {saturated}, нестабильны {live}, всегда падают {dead}"
 # 6d (plan section 7), verbatim except the plural of «карточка», which
 # varies with N the same way app/tg/research.py's own DONE_TEXT does --
 # see `_card_noun` below on why that logic is duplicated rather than
@@ -117,6 +121,16 @@ def _is_undoable(run: IdleRun, *, now: datetime.datetime, undo_days: int) -> boo
         return False
     return (now - run.created_at) < datetime.timedelta(days=undo_days)
 
+
+
+def canary_signal_suffix(summary: dict) -> str:
+    """The saturated/live/dead counts for the canary's line (plan section
+    3.4), or "" for a summary from before E1a or with no case past
+    `EVAL_SIGNAL_MIN_RUNS` yet -- a line of three zeros says nothing."""
+    counts = {key: len(summary.get(key) or ()) for key in ("saturated", "live", "dead")}
+    if not any(counts.values()):
+        return ""
+    return CANARY_SIGNAL_SUFFIX.format(**counts)
 
 async def build_digest(
     session: AsyncSession, clock: Clock, *, undo_days: int, window: str = WINDOW_24H
@@ -189,11 +203,12 @@ async def build_digest(
     if canary_runs:
         summary = canary_runs[0].summary or {}
         if summary.get("passed", True):
-            lines.append(CANARY_OK_LINE)
+            line = CANARY_OK_LINE
         else:
             cases = summary.get("cases") or {}
             failed = sorted(case_id for case_id, ok in cases.items() if not ok)
-            lines.append(CANARY_REGRESSION_LINE.format(cases=", ".join(failed)))
+            line = CANARY_REGRESSION_LINE.format(cases=", ".join(failed))
+        lines.append(line + canary_signal_suffix(summary))
 
     # 6d: one line per *done* research run with cards, newest first --
     # research is never reversible (KIND_DAILY_MAX caps it at 1/day
@@ -306,6 +321,7 @@ __all__ = [
     "CRITIQUE_LINE",
     "CANARY_OK_LINE",
     "CANARY_REGRESSION_LINE",
+    "CANARY_SIGNAL_SUFFIX",
     "RESEARCH_LINE",
     "LENS_GARDEN_LINE",
     "LENS_RESEARCH_LINE",

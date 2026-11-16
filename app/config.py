@@ -1255,6 +1255,55 @@ class Settings(BaseSettings):
             raise ValueError(f"CANARY_DOW must be between 1 and 7, got {value}")
         return value
 
+    # --- E1a/E1b: eval reliability (anchor-eval-reliability-plan.md
+    # sections 3.1, 3.4 and 4.1) ---
+    # How many times the amendment trial and the canary run each
+    # blocking case, and how many of those runs must pass (section 3.2's
+    # rule: no run with a failed deterministic check, and at least
+    # EVAL_PASS_RUNS passing runs). Both at 1 is the pre-E1 behaviour.
+    EVAL_RUNS_PER_CASE: int = 3
+    EVAL_PASS_RUNS: int = 2
+    # The canary reports a case as saturated, live or dead only once the
+    # history holds at least this many runs of it under the current
+    # persona and judge models (section 3.4).
+    EVAL_SIGNAL_MIN_RUNS: int = 12
+    # Who may be the judge (section 4.1): "vendor" (default) needs a
+    # different vendor from the persona's -- the text before the first
+    # "/" of the model id; "model" keeps the old rule, ids differ.
+    JUDGE_INDEPENDENCE: str = "vendor"
+
+    @field_validator("EVAL_RUNS_PER_CASE")
+    @classmethod
+    def _eval_runs_in_range(cls, value: int) -> int:
+        if not 1 <= value <= 5:
+            raise ValueError(f"EVAL_RUNS_PER_CASE must be between 1 and 5, got {value}")
+        return value
+
+    @field_validator("EVAL_PASS_RUNS")
+    @classmethod
+    def _eval_pass_runs_within_runs(cls, value: int, info) -> int:
+        runs = info.data.get("EVAL_RUNS_PER_CASE", 1)
+        if not 1 <= value <= runs:
+            raise ValueError(
+                f"EVAL_PASS_RUNS must be between 1 and EVAL_RUNS_PER_CASE ({runs}), got {value}"
+            )
+        return value
+
+    @field_validator("EVAL_SIGNAL_MIN_RUNS")
+    @classmethod
+    def _eval_signal_min_runs_at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"EVAL_SIGNAL_MIN_RUNS must be >= 1, got {value}")
+        return value
+
+    @field_validator("JUDGE_INDEPENDENCE", mode="before")
+    @classmethod
+    def _judge_independence_known(cls, value) -> str:
+        value = str(value).strip().lower()
+        if value not in ("vendor", "model"):
+            raise ValueError(f"JUDGE_INDEPENDENCE must be 'vendor' or 'model', got {value!r}")
+        return value
+
     # --- 6e: hardening (Phase 6 plan section 2; milestone 6e) -----------
     #
     # Encrypted nightly backups (§9.1). BACKUP_ENABLED is the same shape

@@ -191,8 +191,13 @@ def test_a_case_with_no_deterministic_checks_gets_an_empty_list():
 # --- the judge's validation (no API) -------------------------------------
 
 
+def _scored(score, quote="", absent=False):
+    return {"score": score, "quote": quote, "absent": absent}
+
+
 def test_a_complete_scoring_validates():
-    assert judge.validate({"voice": 5, "one_action": 4}, ["voice", "one_action"]) == {
+    payload = {"voice": _scored(5), "one_action": _scored(4)}
+    assert judge.validate(payload, ["voice", "one_action"], "ответ") == {
         "voice": 5,
         "one_action": 4,
     }
@@ -201,11 +206,14 @@ def test_a_complete_scoring_validates():
 @pytest.mark.parametrize(
     "payload",
     [
-        {"voice": True},  # bool is an int in Python; True is not a score
-        {"voice": 0},
-        {"voice": 6},
-        {"voice": "5"},
-        {"voice": 4.5},
+        {"voice": _scored(True)},  # bool is an int in Python; True is not a score
+        {"voice": _scored(0)},
+        {"voice": _scored(6)},
+        {"voice": _scored("5")},
+        {"voice": _scored(4.5)},
+        {"voice": 5},  # E1b: a bare score is the old shape, not a judgement
+        {"voice": {"score": 5, "quote": 3, "absent": False}},
+        {"voice": {"score": 5, "quote": "", "absent": "нет"}},
         {},
         None,
         [],
@@ -215,21 +223,109 @@ def test_a_complete_scoring_validates():
 def test_anything_incomplete_or_out_of_range_is_unusable(payload):
     """None rather than partial credit: silently treating a missing
     item as a pass is how a harness starts lying."""
-    assert judge.validate(payload, ["voice"]) is None
+    assert judge.validate(payload, ["voice"], "ответ") is None
 
 
 def test_a_missing_item_is_unusable():
-    assert judge.validate({"voice": 5}, ["voice", "one_action"]) is None
+    assert judge.validate({"voice": _scored(5)}, ["voice", "one_action"], "ответ") is None
 
 
 def test_extra_keys_are_ignored_not_fatal():
-    assert judge.validate({"voice": 5, "прочее": 1}, ["voice"]) == {"voice": 5}
+    assert judge.validate({"voice": _scored(5), "прочее": _scored(1)}, ["voice"], "ответ") == {"voice": 5}
 
 
 def test_a_verdict_passes_only_when_every_item_clears_four():
     assert judge.Verdict({"voice": 4}, [], True).passed
     assert not judge.Verdict({}, ["voice"], True).passed
     assert not judge.Verdict({}, [], False).passed, "an unusable judge fails the case"
+
+
+def test_an_advisory_item_is_reported_but_does_not_decide():
+    verdict = judge.Verdict({"voice": 2, "boundaries": 5}, ["voice"], True, advisory=frozenset({"voice"}))
+    assert verdict.passed
+    assert verdict.failed == ["voice"]
+    assert verdict.blocking_failed == []
+    other = judge.Verdict({"voice": 2, "boundaries": 2}, ["voice", "boundaries"], True,
+                          advisory=frozenset({"voice"}))
+    assert not other.passed
+    assert not judge.Verdict({}, ["voice"], False, advisory=frozenset({"voice"})).passed
+
+
+# --- E1b: the judge shows its evidence (anchor-eval-reliability-plan.md 4.2)
+
+REPLY = "Ты обещал отчёт. Сделай «первый абзац»   до 18:00 — и напиши мне."
+
+
+def test_every_rubric_item_is_an_omission_item_or_a_prohibition_with_a_reason():
+    omission, prohibition = set(judge.OMISSION_ITEMS), set(judge.PROHIBITION_ITEMS)
+    assert omission | prohibition == set(judge.RUBRIC)
+    assert not omission & prohibition
+    assert all(reason.strip() for reason in judge.OMISSION_ITEMS.values())
+    assert all(reason.strip() for reason in judge.PROHIBITION_ITEMS.values())
+    # The plan's own examples (section 4.2).
+    assert {"boundaries", "no_pressure", "third_parties"} <= prohibition
+    assert {"one_action", "wins_first"} <= omission
+
+
+def test_a_found_quote_backs_a_failing_prohibition():
+    payload = {"no_pressure": _scored(2, "сделай «первый абзац» до 18:00")}
+    assert judge.validate(payload, ["no_pressure"], REPLY) == {"no_pressure": 2}
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "ТЫ ОБЕЩАЛ ОТЧЁТ",  # case-folded
+        "Сделай \"первый абзац\" до 18:00",  # quote marks normalised
+        "сделай „первый   абзац“\nдо 18:00",  # whitespace collapsed
+        "«Ты обещал отчёт.»",  # wrapping quote marks are not part of it
+    ],
+)
+def test_quotes_are_compared_after_normalising(quote):
+    assert judge.quote_found(quote, REPLY)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "",  # no evidence at all
+        "отчёт.",  # under MIN_QUOTE_CHARS
+        "ты обязан ответить немедленно",  # not in the reply: invented
+        "ты обещал отчёт " + "я" * 200,  # over MAX_QUOTE_CHARS
+    ],
+)
+def test_a_failing_prohibition_without_a_found_quote_is_unusable(quote):
+    assert judge.validate({"no_pressure": _scored(2, quote)}, ["no_pressure"], REPLY) is None
+
+
+def test_absent_is_not_accepted_for_a_prohibition():
+    payload = {"boundaries": _scored(1, "", absent=True)}
+    assert judge.validate(payload, ["boundaries"], REPLY) is None
+
+
+def test_an_omission_item_may_fail_as_absent():
+    payload = {"one_action": _scored(2, "", absent=True), "no_pressure": _scored(5)}
+    assert judge.validate(payload, ["one_action", "no_pressure"], REPLY) == {
+        "one_action": 2,
+        "no_pressure": 5,
+    }
+
+
+def test_an_omission_item_may_quote_instead():
+    payload = {"one_action": _scored(3, "и напиши мне")}
+    assert judge.validate(payload, ["one_action"], REPLY) == {"one_action": 3}
+    assert judge.validate({"one_action": _scored(3, "")}, ["one_action"], REPLY) is None
+
+
+def test_a_passing_score_needs_no_evidence():
+    payload = {"no_pressure": _scored(4, ""), "one_action": _scored(5, "что угодно", absent=True)}
+    assert judge.validate(payload, ["no_pressure", "one_action"], REPLY) is not None
+
+
+def test_the_cap_fits_five_items_with_full_quotes():
+    assert judge.judge_max_tokens(1) == judge.JUDGE_TOKENS_FLOOR
+    assert judge.judge_max_tokens(5) >= 5 * judge.JUDGE_TOKENS_PER_ITEM
+    assert judge.JUDGE_TOKENS_PER_ITEM >= 120  # a 200-char Russian quote plus its keys
 
 
 def test_the_pass_threshold_is_the_plans_four():
@@ -241,6 +337,9 @@ def test_the_schema_names_exactly_the_requested_items():
     assert schema["required"] == ["voice", "boundaries"]
     assert set(schema["properties"]) == {"voice", "boundaries"}
     assert schema["additionalProperties"] is False
+    item = schema["properties"]["voice"]
+    assert item["required"] == ["score", "quote", "absent"]
+    assert item["additionalProperties"] is False
 
 
 def test_the_rubric_is_the_plans_items():

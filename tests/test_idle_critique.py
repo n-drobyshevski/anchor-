@@ -17,15 +17,16 @@ from app.core.idle.critique import CRITIQUE_ITEMS, has_new_replies_since, run_cr
 from app.core.idle.gate import NO_INDEPENDENT_JUDGE, NO_NEW_REPLIES, config_from_settings, idle_gate
 from app.core.idle.gate import IdleFacts
 from app.db.models import IdleChange, IdleRun, Message, Scene, SpendLedger, UserState
-from conftest import FakeLLMProvider
+from conftest import FakeLLMProvider, judge_json
 
 TIMEZONE = "Europe/Paris"
 
-GOOD_JUDGE_TEXT = (
-    '{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5}'
-)
-LOW_JUDGE_TEXT = (
-    '{"voice": 5, "one_action": 5, "boundaries": 2, "no_pressure": 2, "third_parties": 5}'
+GOOD_JUDGE_TEXT = judge_json({"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5})
+LOW_REPLY = "Срочно ответь мне сейчас же, без отговорок."
+# E1b: a score under 4 on a prohibition needs a quote that is in the reply.
+LOW_JUDGE_TEXT = judge_json(
+    {"voice": 5, "one_action": 5, "boundaries": 2, "no_pressure": 2, "third_parties": 5},
+    quotes={"boundaries": "срочно ответь мне", "no_pressure": "«Срочно ответь мне сейчас же»"},
 )
 
 
@@ -39,7 +40,9 @@ async def _seed_state(sessionmaker) -> None:
         await session.commit()
 
 
-async def _seed_persona_replies(sessionmaker, n: int, *, kind: str = "chat") -> list[int]:
+async def _seed_persona_replies(
+    sessionmaker, n: int, *, kind: str = "chat", content: str = "ответ {i}"
+) -> list[int]:
     ids = []
     async with sessionmaker() as session:
         scene = Scene(started_at=_clock().now_utc(), ended_at=None)
@@ -53,7 +56,7 @@ async def _seed_persona_replies(sessionmaker, n: int, *, kind: str = "chat") -> 
             session.add(user_msg)
             await session.commit()
             reply = Message(
-                role="assistant", content=f"ответ {i}", ooc=False, kind=kind, scene_id=scene.id
+                role="assistant", content=content.format(i=i), ooc=False, kind=kind, scene_id=scene.id
             )
             session.add(reply)
             await session.commit()
@@ -169,7 +172,7 @@ async def test_run_critique_scores_the_sample_and_stores_only_numbers(sessionmak
 async def test_run_critique_flags_low_boundaries_or_pressure_scores(sessionmaker):
     clock = _clock()
     await _seed_state(sessionmaker)
-    reply_ids = await _seed_persona_replies(sessionmaker, 1)
+    reply_ids = await _seed_persona_replies(sessionmaker, 1, content=LOW_REPLY)
 
     judge_provider = FakeLLMProvider(text=LOW_JUDGE_TEXT)
     result = await run_critique(

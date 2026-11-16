@@ -35,6 +35,9 @@ ENV = {
     "LLM_MODEL_CHEAP": "vendor/cheap-env",
     "LLM_MODEL_SAFETY": "vendor/safety-env",
     "LLM_MODEL_JUDGE": "vendor/judge-env",
+    # Every model here is "vendor/...": these tests pin the id rule, so
+    # they run under it; the vendor rule (E1b) has its own tests.
+    "JUDGE_INDEPENDENCE": "model",
     "MODEL_CHOICES": (
         "vendor/persona-env|Persona|prose;"
         "vendor/judge-env|Judge|json;"
@@ -152,6 +155,7 @@ def test_role_needs_cover_every_role_and_refusals_are_closed():
         "no_structured",
         "no_deny",
         "judge_equals_persona",
+        "judge_same_vendor",
         "not_decisions",
         "not_prose",
         "unreachable",

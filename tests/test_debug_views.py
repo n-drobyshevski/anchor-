@@ -91,6 +91,9 @@ CONTENT_COLUMNS = {
     # ledger is counts, times and a route name.
     "code_window": {"roots"},
     "code_read": set(),
+    # E1a (anchor-eval-reliability-plan.md section 3.3): ids, counts and
+    # model ids of the synthetic eval runs; the whole table.
+    "eval_case_run": set(),
 }
 
 

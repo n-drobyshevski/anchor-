@@ -262,6 +262,10 @@ PURGED_TABLES = (
     # user's vault. Child first.
     "code_read",
     "code_window",
+    # E1a (anchor-eval-reliability-plan.md section 3.3): how the blocking
+    # eval cases fared per trial and canary. Ids, counts and model ids,
+    # no text -- but a record of this user's amendments being tried.
+    "eval_case_run",
     # L4 (plan sections 9 and 14.5): Echo's inbox writes. Ids and times
     # only, like claude_changeset, but still a record of what Echo wrote
     # into this user's vault. The notes themselves stay in the vault:

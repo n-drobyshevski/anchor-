@@ -105,6 +105,14 @@ from eval.db import throwaway_sessionmaker
 REPORTS_DIR = pathlib.Path(__file__).parent / "reports"
 
 
+# Plan section 3.2: the four ways one run of a case ends.
+PASSED = "passed"
+CHECK_FAILED = "check_failed"
+JUDGE_FAILED = "judge_failed"
+UNUSABLE = "unusable"
+RUN_STATUSES = (PASSED, CHECK_FAILED, JUDGE_FAILED, UNUSABLE)
+
+
 @dataclasses.dataclass
 class Outcome:
     case: Case
@@ -119,6 +127,20 @@ class Outcome:
         if self.error is not None:
             return False
         return all(r.passed for r in self.check_results) and self.verdict.passed
+
+    @property
+    def status(self) -> str:
+        """This run's one outcome under plan section 3.2: `check_failed`
+        (a deterministic check failed -- decisive whatever the judge
+        said), `unusable` (no reply, or no usable judgement), then
+        `judge_failed` (a non-advisory item under 4), else `passed`."""
+        if any(not r.passed for r in self.check_results):
+            return CHECK_FAILED
+        if self.error is not None or (self.case.judge_items and not self.verdict.usable):
+            return UNUSABLE
+        if not self.verdict.passed:
+            return JUDGE_FAILED
+        return PASSED
 
     @property
     def failures(self) -> list[str]:
@@ -153,21 +175,40 @@ def judge_model_for(settings: Settings) -> str:
 
 
 def same_judge_warning(judge_model: str, settings: Settings) -> str | None:
-    """A loud line when the judge is the model it is grading, else None.
+    """A loud line when the judge may not grade `LLM_MODEL`, else None.
+
+    The rule is app/llm/models.py's `judge_dependence` -- the same one
+    the trial, critique, the canary and the model menu apply (plan
+    section 4.1): another model and, with `JUDGE_INDEPENDENCE=vendor`
+    (the default), another vendor. On env's models: the offline runner
+    has no resolver.
 
     Shared by the dry run and the real one so the warning cannot drift
     between them -- a dry run is where someone would check the setup
     before spending money, and it is the cheapest place to notice.
     """
-    if judge_model != settings.LLM_MODEL:
+    from app.llm.models import SAME_VENDOR, judge_dependence, vendor
+
+    reason = judge_dependence(settings, judge_model, settings.LLM_MODEL)
+    if reason is None:
         return None
+    if reason == SAME_VENDOR:
+        what = (
+            f"!!! ПРЕДУПРЕЖДЕНИЕ: судья ({judge_model}) и оцениваемая модель\n"
+            f"!!! ({settings.LLM_MODEL}) от одного разработчика ({vendor(judge_model)}).\n"
+            "!!! Модель оценивает свою же семью. Оценка «пройдено» здесь\n"
+        )
+    else:
+        what = (
+            f"!!! ПРЕДУПРЕЖДЕНИЕ: судья и оцениваемая модель совпадают ({judge_model}).\n"
+            "!!! Модель оценивает собственные ответы. Оценка «пройдено» здесь\n"
+        )
     return (
         "\n"
         "!!! " + "=" * 68 + "\n"
-        f"!!! ПРЕДУПРЕЖДЕНИЕ: судья и оцениваемая модель совпадают ({judge_model}).\n"
-        "!!! Модель оценивает собственные ответы. Оценка «пройдено» здесь\n"
-        "!!! не значит ничего: она не независима.\n"
-        "!!! Задай LLM_MODEL_JUDGE другой моделью, или запусти с\n"
+        + what
+        + "!!! не значит ничего: она не независима.\n"
+        "!!! Задай LLM_MODEL_JUDGE моделью другого разработчика, или запусти с\n"
         "!!! --allow-same-judge, если ты понимаешь, что читаешь.\n"
         "!!! " + "=" * 68
     )
@@ -180,13 +221,15 @@ def lens_same_judge_warning(judge_model: str, settings: Settings, cases) -> str 
     `LLM_MODEL`, so `same_judge_warning` alone would let a judge set to
     that model grade its own lens rounds, gardens and research
     unnoticed."""
+    from app.llm.models import judge_dependence
+
     lens_ids = [case.id for case in cases if case.input["kind"] in SAFETY_MODEL_KINDS]
-    if not lens_ids or judge_model != settings.LLM_MODEL_SAFETY:
+    if not lens_ids or judge_dependence(settings, judge_model, settings.LLM_MODEL_SAFETY) is None:
         return None
     return (
         "\n"
         "!!! " + "=" * 68 + "\n"
-        f"!!! ПРЕДУПРЕЖДЕНИЕ: судья и модель разбора совпадают ({judge_model}).\n"
+        f"!!! ПРЕДУПРЕЖДЕНИЕ: судья ({judge_model}) не независим от модели разбора.\n"
         f"!!! Кейсы линзы ({', '.join(lens_ids)}) она оценивает сама: их оценка\n"
         "!!! не независима. Задай LLM_MODEL_JUDGE другой моделью.\n"
         "!!! " + "=" * 68
@@ -371,6 +414,7 @@ async def run_lens_case(
     judge,
     *,
     amendments: list[str] | None = None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """One `lens_review` case for real: seed, run the round, check, judge.
 
@@ -419,6 +463,7 @@ async def run_lens_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -432,6 +477,7 @@ async def run_garden_case(
     judge,
     *,
     amendments: list[str] | None = None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """One `lens_garden` case for real (L3): seed, step 1, the call,
     `validate()`, check, judge. A reply that does not parse fails the
@@ -467,6 +513,7 @@ async def run_garden_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -480,6 +527,7 @@ async def run_reflect_case(
     judge,
     *,
     amendments: list[str] | None = None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """One `lens_reflect` case for real (L5): seed, run the round and the
     merge, check, judge. A provider error fails the case even though
@@ -528,6 +576,7 @@ async def run_reflect_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -541,6 +590,7 @@ async def run_suggest_case(
     judge,
     *,
     amendments: list[str] | None = None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """One `interest_suggest` case for real: seed, the call, `validate()`,
     check, judge. A reply that does not parse fails the case, as it fails
@@ -580,6 +630,7 @@ async def run_suggest_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -589,6 +640,8 @@ async def run_research_case(
     settings: Settings,
     review,
     judge,
+    *,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """One `lens_query` or `lens_distill` case for real (L4): the call,
     the real `validate`, check, judge. A provider error or a reply that
@@ -626,6 +679,7 @@ async def run_research_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     return Outcome(case, reply, check_results, verdict, metered.usd_cost + verdict.usd_cost)
 
@@ -643,6 +697,7 @@ async def run_case(
     review=None,
     garden=None,
     suggester=None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> Outcome:
     """Run one case against a fresh, seeded scenario.
 
@@ -672,24 +727,34 @@ async def run_case(
     `interest_suggest` case (`run_suggest_case`), on the same terms as
     `garden`: a dry run builds its messages through `scenario.build`, and
     eval/trial.py passes none.
+    `advisory_items` (anchor-eval-reliability-plan.md section 5.4) are
+    rubric items scored and reported that do not decide whether this
+    run passed (`judge.Verdict.passed`, `Outcome.status`); the default,
+    empty, is every item deciding, as before.
     """
     if case.input["kind"] == LENS_REVIEW and not dry_run:
         return await run_lens_case(
-            sessionmaker, case, settings, clock, review, judge, amendments=amendments
+            sessionmaker, case, settings, clock, review, judge, amendments=amendments,
+            advisory_items=advisory_items,
         )
     if case.input["kind"] == LENS_GARDEN and not dry_run:
         return await run_garden_case(
-            sessionmaker, case, settings, clock, garden, judge, amendments=amendments
+            sessionmaker, case, settings, clock, garden, judge, amendments=amendments,
+            advisory_items=advisory_items,
         )
     if case.input["kind"] == INTEREST_SUGGEST and not dry_run:
         return await run_suggest_case(
-            sessionmaker, case, settings, clock, suggester, judge, amendments=amendments
+            sessionmaker, case, settings, clock, suggester, judge, amendments=amendments,
+            advisory_items=advisory_items,
         )
     if case.input["kind"] in RESEARCH_KINDS and not dry_run:
-        return await run_research_case(case, settings, review, judge)
+        return await run_research_case(
+            case, settings, review, judge, advisory_items=advisory_items
+        )
     if case.input["kind"] == LENS_REFLECT and not dry_run:
         return await run_reflect_case(
-            sessionmaker, case, settings, clock, review, judge, amendments=amendments
+            sessionmaker, case, settings, clock, review, judge, amendments=amendments,
+            advisory_items=advisory_items,
         )
 
     async with sessionmaker() as session:
@@ -716,6 +781,7 @@ async def run_case(
         case_title=case.title,
         prompt_text=scenario.situation(case),
         reply=reply,
+        advisory_items=advisory_items,
     )
     cost = float(response.usage.cost_usd or 0.0) + verdict.usd_cost
     return Outcome(case, reply, check_results, verdict, cost)

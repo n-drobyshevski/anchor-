@@ -28,6 +28,7 @@ from app.llm.provider import LLMResponse, LLMUsage
 from eval import scenario
 from eval.cases import load_all
 from eval.judge import RUBRIC
+from conftest import judge_json
 from eval.run import run_case
 
 ZEIGARNIK = "Эффект Зейгарник"
@@ -82,7 +83,7 @@ class _Judge:
 
     async def complete(self, messages, *, conversation_id, json_schema=None):
         usage = LLMUsage(input_tokens=1, cached_tokens=0, output_tokens=1, cost_usd=None)
-        return LLMResponse(text=json.dumps({item: 5 for item in RUBRIC}), usage=usage, model="judge")
+        return LLMResponse(text=judge_json({item: 5 for item in RUBRIC}), usage=usage, model="judge")
 
 
 def _settings() -> Settings:

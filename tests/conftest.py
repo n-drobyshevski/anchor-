@@ -468,6 +468,23 @@ class FakeLLMProvider:
         self.closed = True
 
 
+def judge_json(scores: dict[str, int], *, quotes: dict[str, str] | None = None,
+               absent: frozenset[str] | set[str] = frozenset()) -> str:
+    """A judge reply in eval/judge.py's evidence shape (E1b): per item
+    `{"score", "quote", "absent"}`. `quotes` and `absent` supply the
+    evidence for the items scored under 4."""
+    import json
+
+    quotes = quotes or {}
+    return json.dumps(
+        {
+            item: {"score": score, "quote": quotes.get(item, ""), "absent": item in absent}
+            for item, score in scores.items()
+        },
+        ensure_ascii=False,
+    )
+
+
 @pytest.fixture()
 def fake_llm_provider() -> FakeLLMProvider:
     return FakeLLMProvider()

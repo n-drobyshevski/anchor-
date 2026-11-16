@@ -34,7 +34,7 @@ from app.db.models import (
     TelegramUpdate,
     UserState,
 )
-from conftest import FakeLLMProvider
+from conftest import FakeLLMProvider, judge_json
 
 pytestmark = pytest.mark.asyncio
 
@@ -376,7 +376,7 @@ async def test_critique_preempted_mid_run_reports_preempted(sessionmaker):
     await _seed_state(sessionmaker)
     await _make_ended_scene(sessionmaker, clock, summary="Коротко.")
     run_id = await _queued_run(sessionmaker, clock, "critique")
-    scores = '{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5}'
+    scores = judge_json({"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5})
     judge = FakeLLMProvider(text=scores)
     _update_after(judge, sessionmaker)
 
@@ -397,7 +397,7 @@ async def test_canary_preempted_mid_run_keeps_no_case_results(sessionmaker, monk
     await _seed_state(sessionmaker)
     run_id = await _queued_run(sessionmaker, clock, "canary")
 
-    async def _trial(settings, *, clock, amendments, on_case_done=None, **kwargs):
+    async def _trial(settings, *, clock, amendments, on_run_done=None, **kwargs):
         from eval.trial import TrialResult
 
         async with sessionmaker() as session:

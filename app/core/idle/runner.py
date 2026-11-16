@@ -387,9 +387,14 @@ async def run_idle(
             result = await run_canary(
                 session_factory, settings, clock,
                 run_id=run_id, started_at=started_at, timezone=timezone, job_id=job_id,
+                advisory_items=frozenset(),
             )
             preempted_and_empty = result.preempted
-            summary = {"cases": result.cases, "passed": result.passed}
+            # E1a: plus the per-case run counts, the history's
+            # saturated/live/dead ids and the advisory items -- ids and
+            # counts only. "runs" is no SAFE_EXTRA_KEYS entry, so the
+            # "idle run done" line below drops it with the rest.
+            summary = result.summary()
             reversible = False
         elif kind == RESEARCH:
             from app.core.idle.research import run_research

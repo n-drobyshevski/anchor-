@@ -31,6 +31,9 @@ ENV = {
     "LLM_MODEL_CHEAP": "vendor/cheap-env",
     "LLM_MODEL_SAFETY": "vendor/safety-env",
     "LLM_MODEL_JUDGE": "vendor/judge-env",
+    # Every model here is "vendor/...": these tests pin the id rule, so
+    # they run under it; the vendor rule (E1b) has its own tests.
+    "JUDGE_INDEPENDENCE": "model",
     "OPENROUTER_API_KEY": "test-key-not-real",
 }
 
@@ -263,7 +266,7 @@ async def test_the_canary_ledger_row_names_the_judge_that_graded(sessionmaker, i
         await session.refresh(run)
         run_id = run.id
 
-    async def _fake(settings, *, clock, amendments, on_case_done=None, **kwargs):
+    async def _fake(settings, *, clock, amendments, on_run_done=None, **kwargs):
         return TrialResult(cases={"01": True}, passed=True, usd_cost=0.01)
 
     monkeypatch.setattr("eval.trial.run_blocking_subset", _fake)

@@ -27,6 +27,7 @@ from app.db.models import (
     BoardSyncRun,
     CodeRead,
     CodeWindow,
+    EvalCaseRun,
     Obligation,
     AccessGrant,
     ClaudeChangeset,
@@ -512,6 +513,13 @@ async def _seed_everything(sessionmaker, *update_ids: int) -> None:
         session.add(window)
         await session.flush()
         session.add(CodeRead(window_id=window.id, at=now, route="file", files=1, bytes=10))
+        # E1a: one case's runs in one trial.
+        session.add(
+            EvalCaseRun(
+                at=now, source="trial", source_id=1, case_id="04", runs=3, passed=2,
+                check_failed=0, judge_failed=1, unusable=0, persona_model="a/p", judge_model="b/j",
+            )
+        )
         session.add(
             BoardSubPair(
                 board="Work tasks.md", block_id="sub12345", card_block_id="abcd1234", task_id="s1",

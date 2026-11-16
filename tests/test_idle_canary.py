@@ -81,11 +81,11 @@ async def test_run_canary_stores_pass_fail_per_case_never_live_db(sessionmaker, 
 
     seen_amendments = []
 
-    async def _fake_run_blocking_subset(settings, *, clock, amendments, on_case_done=None, **kwargs):
+    async def _fake_run_blocking_subset(settings, *, clock, amendments, on_run_done=None, **kwargs):
         seen_amendments.append(list(amendments))
-        if on_case_done is not None:
-            await on_case_done()
-            await on_case_done()
+        if on_run_done is not None:
+            await on_run_done()
+            await on_run_done()
         from eval.trial import TrialResult
 
         return TrialResult(cases={"01": True, "02": False}, passed=False, usd_cost=0.02)
@@ -125,10 +125,10 @@ async def test_run_canary_refreshes_the_job_lease_per_case(sessionmaker, monkeyp
 
     monkeypatch.setattr("app.db.jobs.touch_job_lock", _fake_touch_job_lock)
 
-    async def _fake_run_blocking_subset(settings, *, clock, amendments, on_case_done=None, **kwargs):
+    async def _fake_run_blocking_subset(settings, *, clock, amendments, on_run_done=None, **kwargs):
         for _ in range(3):
-            if on_case_done is not None:
-                await on_case_done()
+            if on_run_done is not None:
+                await on_run_done()
         from eval.trial import TrialResult
 
         return TrialResult(cases={}, passed=True, usd_cost=0.0)

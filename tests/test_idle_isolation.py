@@ -47,7 +47,7 @@ from app.db.models import (
     UserState,
     VaultFile,
 )
-from conftest import FakeLLMProvider, make_bot
+from conftest import FakeLLMProvider, judge_json, make_bot
 
 MODULES = sorted(pathlib.Path("app/core/idle").glob("*.py"))
 
@@ -573,7 +573,7 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         # it is not threaded through app/worker.py. Patched here so this
         # test never reaches the network.
         judge_fake = FakeLLMProvider(
-            text='{"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5}'
+            text=judge_json({"voice": 5, "one_action": 5, "boundaries": 5, "no_pressure": 5, "third_parties": 5})
         )
 
         class _DummyClient:
@@ -588,9 +588,9 @@ async def test_idle_kind_never_sends_or_edits(sessionmaker, monkeypatch, kind):
         # run_canary reuses eval.trial.run_blocking_subset, which opens
         # its own throwaway database -- monkeypatched here so this test
         # (and its mock bot) stays fast and never touches the network.
-        async def _fake_run_blocking_subset(settings, *, clock, amendments, on_case_done=None, **kw):
-            if on_case_done is not None:
-                await on_case_done()
+        async def _fake_run_blocking_subset(settings, *, clock, amendments, on_run_done=None, **kw):
+            if on_run_done is not None:
+                await on_run_done()
             from eval.trial import TrialResult
 
             return TrialResult(cases={"01": True}, passed=True, usd_cost=0.0)

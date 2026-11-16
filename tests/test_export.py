@@ -553,6 +553,9 @@ NOT_EXPORTED = {
     # CW1 (anchor-code-window-plan.md section 4.2): left out like lens_read.
     "code_window": "the code window's bookkeeping: times, a lifetime and folders already in `message`",
     "code_read": "a derived log of Claude Code's vault reads: a route and counts",
+    # E1a (anchor-eval-reliability-plan.md section 3.3): synthetic eval
+    # runs' counts per case and model pair, no content.
+    "eval_case_run": "derived eval run counts per case and model pair, from synthetic cases",
 }
 
 

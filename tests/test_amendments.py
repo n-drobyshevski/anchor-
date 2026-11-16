@@ -215,7 +215,9 @@ async def test_run_trial_fails_with_no_judge_configured_and_touches_nothing(
     async with sessionmaker() as session:
         row = await session.get(PersonaAmendment, amendment_id)
         assert row.status == amendments.FAILED
-        assert row.eval_report == {"cases": {}, "reason": amendments.NO_INDEPENDENT_JUDGE}
+        assert row.eval_report == {
+            "cases": {}, "runs": {}, "advisory": [], "reason": amendments.NO_INDEPENDENT_JUDGE,
+        }
         # No throwaway database, no API call -- so no ledger row either.
         ledger = (await session.execute(select(SpendLedger))).scalars().all()
         assert ledger == []
@@ -363,10 +365,10 @@ async def test_run_trial_activates_on_a_clean_pass(sessionmaker, frozen_clock, m
     await _seed_state(sessionmaker)
     amendment_id = await _seed_trial_amendment(sessionmaker)
 
-    async def _fake_run_blocking_subset(*args, on_case_done=None, **kwargs):
-        if on_case_done is not None:
-            await on_case_done()
-            await on_case_done()
+    async def _fake_run_blocking_subset(*args, on_run_done=None, **kwargs):
+        if on_run_done is not None:
+            await on_run_done()
+            await on_run_done()
         return TrialResult(cases={"04": True, "05": True}, passed=True, usd_cost=0.031)
 
     monkeypatch.setattr("eval.trial.run_blocking_subset", _fake_run_blocking_subset)
@@ -379,7 +381,9 @@ async def test_run_trial_activates_on_a_clean_pass(sessionmaker, frozen_clock, m
         row = await session.get(PersonaAmendment, amendment_id)
         assert row.status == amendments.ACTIVE
         assert row.activated_at is not None
-        assert row.eval_report == {"cases": {"04": True, "05": True}, "reason": None}
+        assert row.eval_report == {
+            "cases": {"04": True, "05": True}, "runs": {}, "advisory": [], "reason": None,
+        }
 
         ledger = (await session.execute(select(SpendLedger))).scalars().all()
         assert len(ledger) == 1
@@ -409,6 +413,8 @@ async def test_run_trial_fails_on_any_case_failure_with_no_model_text_stored(
         assert row.status == amendments.FAILED
         assert row.eval_report == {
             "cases": {"04": True, "22": False},
+            "runs": {},
+            "advisory": [],
             "reason": amendments.CASE_FAILED,
         }
         # Pass/fail only -- no reply text, no prompt text, anywhere in the report.
@@ -435,7 +441,9 @@ async def test_run_trial_fails_closed_on_an_unusable_environment(
 
     async with sessionmaker() as session:
         row = await session.get(PersonaAmendment, amendment_id)
-        assert row.eval_report == {"cases": {}, "reason": amendments.TRIAL_ENV_UNAVAILABLE}
+        assert row.eval_report == {
+            "cases": {}, "runs": {}, "advisory": [], "reason": amendments.TRIAL_ENV_UNAVAILABLE,
+        }
 
 
 async def test_run_trial_is_a_noop_on_a_gone_or_non_trial_amendment(sessionmaker, frozen_clock):

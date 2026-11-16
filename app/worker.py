@@ -440,12 +440,13 @@ async def _run_job(
     if kind == AMENDMENT_TRIAL:
         # 5d: the blocking eval subset, against a throwaway database
         # only (app/core/amendments.py's own docstring). `job_id` lets
-        # the trial extend its own lease across a run of ~13 cases --
-        # see app/db/jobs.touch_job_lock's docstring for why that
-        # matters here specifically.
+        # the trial extend its own lease across ~13 cases of up to
+        # EVAL_RUNS_PER_CASE runs each, refreshed after every run (E1a)
+        # -- see app/db/jobs.touch_job_lock's docstring for why that
+        # matters here specifically. No advisory items until E1c.
         outcome = ExtractOutcome()
 
-        async def _on_case_done() -> None:
+        async def _on_run_done() -> None:
             if job_id is not None:
                 await touch_job_lock(session, job_id)
 
@@ -454,7 +455,8 @@ async def _run_job(
             settings,
             clock=clock,
             amendment_id=payload["amendment_id"],
-            on_case_done=_on_case_done,
+            on_run_done=_on_run_done,
+            advisory_items=frozenset(),
         )
         if result is not None:
             outcome.amendment_trial_id = result.amendment_id

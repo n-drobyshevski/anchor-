@@ -465,15 +465,57 @@ def effective_model(settings: Settings, role: str) -> str:
     return _installed.effective(role)
 
 
+def vendor(model_id: str) -> str:
+    """The vendor of an OpenRouter model id: the text before the first
+    "/", lower-cased and stripped ("Anthropic/claude-x" -> "anthropic").
+    An id with no "/" is its own vendor, so two such ids only share one
+    when they are equal (anchor-eval-reliability-plan.md section 4.1)."""
+    return model_id.strip().split("/", 1)[0].strip().lower()
+
+
+# Why a judge/persona pair is not independent, or None when it is.
+NO_JUDGE = "no_judge"
+SAME_MODEL = "same_model"
+SAME_VENDOR = "same_vendor"
+
+
+def judge_dependence(settings: Settings, judge: str, persona: str) -> str | None:
+    """None when `judge` may grade `persona`, else why not: `no_judge`,
+    `same_model`, or (with `JUDGE_INDEPENDENCE=vendor`, the default)
+    `same_vendor` (anchor-eval-reliability-plan.md section 4.1).
+
+    The pure rule, on two ids. `independent_judge` applies it to the
+    effective models at run time; app/llm/catalog.py applies it to a
+    proposed switch before it is made, and eval/run.py to env's models
+    before an offline blocking run -- so the rule has one definition.
+    """
+    if not judge or not judge.strip():
+        return NO_JUDGE
+    if judge.strip() == persona.strip():
+        return SAME_MODEL
+    if settings.JUDGE_INDEPENDENCE == "vendor" and vendor(judge) == vendor(persona):
+        return SAME_VENDOR
+    return None
+
+
 def independent_judge(settings: Settings) -> bool:
-    """True iff the judge resolves to a model and it is not the persona's.
+    """True iff the judge resolves to a model that may grade the persona
+    (`judge_dependence`: another model, and by default another vendor).
 
     The one rule app/core/amendments.py's `run_trial` and the idle gate's
     `independent_judge` (app/core/idle/gate.py's `config_from_settings`,
     for critique and canary) both check, on the *effective* models, so a
     switch made in the menu cannot leave the judge grading the persona
-    with itself. app/llm/catalog.py refuses that switch in either
-    direction before it is made; this is the check at run time.
+    with itself -- or with a sibling model of the same family. app/llm/
+    catalog.py refuses that switch in either direction before it is
+    made; this is the check at run time.
     """
-    judge = effective_model(settings, "judge")
-    return bool(judge) and judge != effective_model(settings, "persona")
+    return judge_dependence_now(settings) is None
+
+
+def judge_dependence_now(settings: Settings) -> str | None:
+    """`judge_dependence` on the effective judge and persona models: what
+    /state names when the judge is not independent."""
+    return judge_dependence(
+        settings, effective_model(settings, "judge"), effective_model(settings, "persona")
+    )

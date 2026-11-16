@@ -53,6 +53,9 @@ ENV = {
     "LLM_MODEL_CHEAP": "vendor/cheap-env",
     "LLM_MODEL_SAFETY": "vendor/safety-env",
     "LLM_MODEL_JUDGE": "vendor/judge-env",
+    # Every model here is "vendor/...": these tests pin the id rule, so
+    # they run under it; the vendor rule (E1b) has its own tests.
+    "JUDGE_INDEPENDENCE": "model",
     "MODEL_CHOICES": (
         "vendor/persona-env|Persona|prose;"
         f"{PROSE_TWO}|Prose Two|prose;"
@@ -623,3 +626,26 @@ async def test_state_marks_follow_the_difference_from_env_not_the_row(sessionmak
     await resolver.reset("safety")
     await _say_line(dp, bot, 3, "/state")
     assert "изменена" not in flatten_rich_message(fake.rich[-1].rich_message)
+
+
+# --- E1b: /state names a judge that may not grade the persona -------------
+
+
+def _role_rows(judge: str, persona: str = "vendor/persona-env"):
+    from app.llm.models import ROLES
+
+    model = {"persona": persona, "judge": judge}
+    return tuple(
+        (menu.MODEL_ROLE_LABELS[role], model.get(role, f"other/{role}"), False) for role in ROLES
+    )
+
+
+def test_state_view_warns_when_the_judge_shares_the_persona_s_vendor():
+    vendor_rule = Settings(_env_file=None, **{**ENV, "JUDGE_INDEPENDENCE": "vendor"})
+    rows = state_view.model_rows(vendor_rule, _role_rows("vendor/judge-env"))
+    assert rows[-1] == (state_view.JUDGE_LABEL, state_view.JUDGE_WARNINGS["same_vendor"])
+    # The id rule lets the same pair through; another vendor passes both.
+    assert state_view.model_rows(SETTINGS, _role_rows("vendor/judge-env"))[-1][0] != "Судья"
+    assert state_view.model_rows(vendor_rule, _role_rows("lab/judge"))[-1][0] != "Судья"
+    same = state_view.model_rows(SETTINGS, _role_rows("vendor/persona-env"))
+    assert same[-1] == (state_view.JUDGE_LABEL, state_view.JUDGE_WARNINGS["same_model"])

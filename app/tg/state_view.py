@@ -47,6 +47,7 @@ from app.config import Settings
 from app.core import clock as clock_module
 from app.core import safety_events
 from app.core.clock import Clock
+from app.llm import models as llm_models
 
 # Shared with _format_outbound (plan section 10's three lines) -- "—"
 # for "nothing planned/nothing to show".
@@ -200,8 +201,42 @@ def model_rows(settings: Settings, models) -> list[tuple[str, str]]:
     from env.
     """
     if models is None:
-        return [("Модель", settings.LLM_MODEL)]
-    return [(f"Модель «{label}»", model_value(model, changed)) for label, model, changed in models]
+        rows = [("Модель", settings.LLM_MODEL)]
+        judge, persona = llm_models.env_model(settings, "judge"), settings.LLM_MODEL
+    else:
+        rows = [(f"Модель «{label}»", model_value(model, changed)) for label, model, changed in models]
+        if len(models) != len(llm_models.ROLES):
+            # Not the router's one-row-per-role tuple: nothing to compare.
+            return rows
+        effective = {role: model for role, (_, model, _) in zip(llm_models.ROLES, models)}
+        judge, persona = effective["judge"], effective["persona"]
+    warning = judge_warning(settings, judge, persona)
+    if warning is not None:
+        rows.append((JUDGE_LABEL, warning))
+    return rows
+
+
+# E1b (anchor-eval-reliability-plan.md section 4.1): /state says so when
+# the judge may not grade the persona, since the trial then fails with
+# no_independent_judge and critique and the canary are skipped.
+JUDGE_LABEL = "Судья"
+JUDGE_WARNINGS = {
+    llm_models.NO_JUDGE: "⚠️ не задан — проверки поправок, самопроверка и канарейка не идут",
+    llm_models.SAME_MODEL: (
+        "⚠️ та же модель, что у чата — проверки поправок, самопроверка и канарейка не идут"
+    ),
+    llm_models.SAME_VENDOR: (
+        "⚠️ тот же разработчик, что у чата — проверки поправок, самопроверка и канарейка "
+        "не идут, пока судью не сменят"
+    ),
+}
+
+
+def judge_warning(settings: Settings, judge: str, persona: str) -> str | None:
+    """The /state line when `judge` may not grade `persona`, else None
+    (app/llm/models.py's `judge_dependence`, the one rule)."""
+    reason = llm_models.judge_dependence(settings, judge, persona)
+    return JUDGE_WARNINGS[reason] if reason is not None else None
 
 
 def _cell(text, *, header: bool = False, colspan: int | None = None) -> RichBlockTableCell:

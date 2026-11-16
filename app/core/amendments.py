@@ -32,6 +32,20 @@ own homework is exactly the failure mode that check exists to prevent.
 **`eval_report` holds pass/fail per case only, never model text** -- the
 implementation plan's non-negotiable, enforced structurally by
 `eval.trial.TrialResult.cases` being a `dict[str, bool]` end to end.
+
+**Repeated runs (anchor-eval-reliability-plan.md section 3, E1a).** The
+trial runs each blocking case up to `EVAL_RUNS_PER_CASE` times and stops
+a case once it is decided (eval/trial.py's pass rule). `eval_report` is
+`{"cases": {id: bool}, "runs": {id: {runs, passed, check_failed,
+judge_failed, unusable}}, "advisory": [item, ...], "reason": ...}`:
+ids, counts and item names, still no text. Every reader of `"cases"`
+keeps working. One `eval_case_run` row per case goes to the history
+through app/core/eval_history.py (`source='trial'`, `source_id` the
+amendment's id), with the persona and judge models the trial ran on.
+
+**Independence is by vendor** (plan section 4.1): app/llm/models.py's
+`independent_judge` refuses a judge from the persona's vendor unless
+`JUDGE_INDEPENDENCE=model`.
 """
 
 from __future__ import annotations
@@ -45,6 +59,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.core import eval_history
 from app.core import review as review_module
 from app.core.clock import Clock
 from app.core.prompt import PERSONA_PATH, load_persona, persona_path_for
@@ -206,7 +221,8 @@ async def run_trial(
     *,
     clock: Clock,
     amendment_id: int,
-    on_case_done=None,
+    on_run_done=None,
+    advisory_items: frozenset[str] = frozenset(),
 ) -> TrialOutcome | None:
     """The `amendment_trial` job body (implementation plan's "The
     amendment_trial job").
@@ -216,10 +232,14 @@ async def run_trial(
     idempotency shape every other job body in this codebase gives a
     row whose state has already moved on).
 
-    `on_case_done` is awaited once per blocking case (via
+    `on_run_done` is awaited once per run of a blocking case (via
     `eval.trial.run_blocking_subset`) so the caller can extend the
     claimed job's lease -- see app/worker.py's own comment on why a
-    ~13-case, ~26-call trial needs that.
+    trial of ~13 cases, each up to `EVAL_RUNS_PER_CASE` runs, needs that.
+
+    `advisory_items` (plan section 5.4) are passed to the runner and
+    named in `eval_report["advisory"]`; the caller passes the empty set
+    until E1c computes them.
     """
     row = await session.get(PersonaAmendment, amendment_id)
     if row is None or row.status != TRIAL:
@@ -234,9 +254,11 @@ async def run_trial(
     # persona switched in ⚙️ Настройки › 🧠 Модели is what the trial
     # would really run, and what this must compare.
     judge_model = llm_models.effective_model(settings, "judge")
+    persona_model = llm_models.effective_model(settings, "persona")
+    advisory = sorted(advisory_items)
     if not llm_models.independent_judge(settings):
         row.status = FAILED
-        row.eval_report = {"cases": {}, "reason": NO_INDEPENDENT_JUDGE}
+        row.eval_report = _report({}, {}, advisory, NO_INDEPENDENT_JUDGE)
         await session.commit()
         logger.info(
             "amendment trial failed, no independent judge", extra={"amendment_id": amendment_id}
@@ -274,11 +296,13 @@ async def run_trial(
             settings,
             clock=clock,
             amendments=[*others, row.text],
-            on_case_done=on_case_done,
+            on_run_done=on_run_done,
+            stop_early=True,
+            advisory_items=frozenset(advisory_items),
         )
     except Exception as exc:  # noqa: BLE001 - an unusable trial env fails closed
         row.status = FAILED
-        row.eval_report = {"cases": {}, "reason": TRIAL_ENV_UNAVAILABLE}
+        row.eval_report = _report({}, {}, advisory, TRIAL_ENV_UNAVAILABLE)
         await session.commit()
         logger.warning(
             "amendment trial environment unavailable",
@@ -290,10 +314,19 @@ async def run_trial(
     if result.passed:
         row.status = ACTIVE
         row.activated_at = clock.now_utc()
-        row.eval_report = {"cases": result.cases, "reason": None}
+        row.eval_report = _report(result.cases, result.runs, advisory, None)
     else:
         row.status = FAILED
-        row.eval_report = {"cases": result.cases, "reason": CASE_FAILED}
+        row.eval_report = _report(result.cases, result.runs, advisory, CASE_FAILED)
+    await eval_history.record(
+        session,
+        clock=clock,
+        source=eval_history.TRIAL,
+        source_id=amendment_id,
+        runs=result.runs,
+        persona_model=persona_model,
+        judge_model=judge_model,
+    )
     await session.commit()
 
     # Step 5: the ledger, summed persona-plus-judge cost across every
@@ -322,6 +355,11 @@ async def run_trial(
         extra={"amendment_id": amendment_id, "passed": result.passed},
     )
     return TrialOutcome(amendment_id=amendment_id, status=row.status)
+
+
+def _report(cases: dict, runs: dict, advisory: list[str], reason: str | None) -> dict:
+    """`eval_report`'s shape (module docstring): ids, counts, item names."""
+    return {"cases": dict(cases), "runs": dict(runs), "advisory": list(advisory), "reason": reason}
 
 
 def _decimal(value: float):

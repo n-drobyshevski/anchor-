@@ -2470,8 +2470,9 @@ def build_router(
             await _reply_once(message, update_id, menu.model_role_text(menu.MODEL_RESET_NOOP, role))
             return
         default = resolver.default(role)
-        if not model_catalog_module._independence(role, default, resolver):
-            await _reply_once(message, update_id, model_catalog_module.REFUSALS["judge_equals_persona"])
+        refusal = model_catalog_module._independence(role, default, resolver, settings)
+        if refusal is not None:
+            await _reply_once(message, update_id, model_catalog_module.REFUSALS[refusal])
             return
         card_id = await send_keyboard(
             message.bot,
@@ -2546,9 +2547,10 @@ def build_router(
                 )
                 return
             target = pending.model
-            if not model_catalog_module._independence(role, target, resolver):
+            refusal = model_catalog_module._independence(role, target, resolver, settings)
+            if refusal is not None:
                 await _retire_menu_message(
-                    bot, chat_id, card_id, model_catalog_module.REFUSALS["judge_equals_persona"]
+                    bot, chat_id, card_id, model_catalog_module.REFUSALS[refusal]
                 )
                 await turn.mark_update_handled(
                     sessionmaker, clock=clock, update_id=update_id, text=f"[menu:{key}]"

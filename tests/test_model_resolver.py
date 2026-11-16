@@ -30,6 +30,9 @@ ENV = {
     "LLM_MODEL_CHEAP": "vendor/cheap-env",
     "LLM_MODEL_SAFETY": "vendor/safety-env",
     "LLM_MODEL_JUDGE": "vendor/judge-env",
+    # Every model here is "vendor/...": these tests pin the id rule, so
+    # they run under it; the vendor rule (E1b) has its own tests.
+    "JUDGE_INDEPENDENCE": "model",
 }
 
 

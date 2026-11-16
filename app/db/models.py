@@ -3275,3 +3275,41 @@ class CodeRead(Base):
         Index("ix_code_read_at", "at"),
         Index("ix_code_read_window_id", "window_id"),
     )
+
+
+class EvalCaseRun(Base):
+    """How the runs of one blocking eval case ended, once per amendment
+    trial or canary (anchor-eval-reliability-plan.md section 3.3, E1a).
+
+    `source` is `trial` (`source_id` the persona_amendment's id) or
+    `canary` (`source_id` the idle_run's id); `runs` splits into
+    `passed`, `check_failed`, `judge_failed` and `unusable`. The models
+    are the persona and judge the runs were made on, so the canary's
+    saturated/live/dead report can read the current pair only (section
+    3.4). Ids, counts and model ids -- never a reply, a prompt or the
+    judge's words. Written and read only by app/core/eval_history.py."""
+
+    __tablename__ = "eval_case_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    case_id: Mapped[str] = mapped_column(String, nullable=False)
+    runs: Mapped[int] = mapped_column(Integer, nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, nullable=False)
+    check_failed: Mapped[int] = mapped_column(Integer, nullable=False)
+    judge_failed: Mapped[int] = mapped_column(Integer, nullable=False)
+    unusable: Mapped[int] = mapped_column(Integer, nullable=False)
+    persona_model: Mapped[str] = mapped_column(String, nullable=False)
+    judge_model: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("source in ('trial', 'canary')", name="ck_eval_case_run_source"),
+        CheckConstraint(
+            "runs >= 1 and passed >= 0 and check_failed >= 0 and judge_failed >= 0"
+            " and unusable >= 0 and passed + check_failed + judge_failed + unusable = runs",
+            name="ck_eval_case_run_counts",
+        ),
+        Index("ix_eval_case_run_models", "persona_model", "judge_model", "case_id"),
+    )
