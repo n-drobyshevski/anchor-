@@ -194,6 +194,26 @@ async def _preceding_user_text(session: AsyncSession, reply: Message) -> str:
     return row[0] if row is not None else ""
 
 
+def persona_reply_filter() -> tuple:
+    """The three conditions every critique input meets (module
+    docstring, "Input"): an assistant row of kind `chat` or `outbound`,
+    in character. Public for app/core/judge_calibration.py (E1c,
+    anchor-eval-reliability-plan.md section 5.1), which picks the reply
+    the user rates by the same rule and adds its own welfare-scene and
+    14-day limits on top."""
+    return (
+        Message.role == "assistant",
+        Message.kind.in_(_PERSONA_KINDS),
+        Message.ooc.is_(False),
+    )
+
+
+async def preceding_user_text(session: AsyncSession, reply: Message) -> str:
+    """`_preceding_user_text`, public: the same pairing for /judge's
+    round (E1c) as for the critique sample."""
+    return await _preceding_user_text(session, reply)
+
+
 async def has_new_replies_since(session: AsyncSession, since: datetime.datetime | None) -> bool:
     """Any qualifying persona reply newer than `since` (or ever, if no
     critique has completed) -- the kind rule (app/core/idle/gate.py's
@@ -311,6 +331,13 @@ def _build_judge_provider(settings: Settings, client) -> LLMProvider:
         structured_outputs=settings.LLM_STRUCTURED_OUTPUTS,
         **llm_models.resolver_kwargs("judge"),
     )
+
+
+def build_judge_provider(settings: Settings, client) -> LLMProvider:
+    """`_build_judge_provider`, public, for /judge's round (E1c). Looked
+    up at call time, so a test that patches `_build_judge_provider`
+    patches both."""
+    return _build_judge_provider(settings, client)
 
 
 async def run_critique(
@@ -445,7 +472,10 @@ __all__ = [
     "CRITIQUE_ITEMS",
     "LOW_SCORE_ITEMS",
     "CritiqueResult",
+    "build_judge_provider",
     "has_new_replies_since",
     "last_done_critique_finished_at",
+    "persona_reply_filter",
+    "preceding_user_text",
     "run_critique",
 ]

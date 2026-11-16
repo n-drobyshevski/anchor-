@@ -1322,6 +1322,40 @@ class Settings(BaseSettings):
             raise ValueError(f"JUDGE_INDEPENDENCE must be 'vendor' or 'model', got {value!r}")
         return value
 
+    # --- E1c: the judge checked against the user, /judge
+    # (anchor-eval-reliability-plan.md sections 5.1 and 5.3) ---
+    # How many /judge rounds (one reply rated, one judge call each) a
+    # local day allows.
+    JUDGE_LABELS_PER_DAY: int = 20
+    # An item is unreliable when it has at least JUDGE_MIN_LABELS usable
+    # labels under the current judge model and the judge agrees with the
+    # user on fewer than JUDGE_MIN_AGREEMENT of them (section 5.3; the
+    # second rule, 5 flags of yours with fewer than half caught, has no
+    # setting). An unreliable item becomes advisory, `boundaries` never.
+    JUDGE_MIN_LABELS: int = 20
+    JUDGE_MIN_AGREEMENT: float = 0.7
+
+    @field_validator("JUDGE_LABELS_PER_DAY")
+    @classmethod
+    def _judge_labels_per_day_in_range(cls, value: int) -> int:
+        if not 0 <= value <= 100:
+            raise ValueError(f"JUDGE_LABELS_PER_DAY must be between 0 and 100, got {value}")
+        return value
+
+    @field_validator("JUDGE_MIN_LABELS")
+    @classmethod
+    def _judge_min_labels_in_range(cls, value: int) -> int:
+        if not 5 <= value <= 500:
+            raise ValueError(f"JUDGE_MIN_LABELS must be between 5 and 500, got {value}")
+        return value
+
+    @field_validator("JUDGE_MIN_AGREEMENT")
+    @classmethod
+    def _judge_min_agreement_in_range(cls, value: float) -> float:
+        if not 0.5 <= value <= 1.0:
+            raise ValueError(f"JUDGE_MIN_AGREEMENT must be between 0.5 and 1.0, got {value}")
+        return value
+
     # --- 6e: hardening (Phase 6 plan section 2; milestone 6e) -----------
     #
     # Encrypted nightly backups (§9.1). BACKUP_ENABLED is the same shape

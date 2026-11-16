@@ -3313,3 +3313,53 @@ class EvalCaseRun(Base):
         ),
         Index("ix_eval_case_run_models", "persona_model", "judge_model", "case_id"),
     )
+
+
+class JudgeLabel(Base):
+    """One of the user's own ratings of one rubric item on one persona
+    reply, with the judge's score beside it (anchor-eval-reliability-
+    plan.md section 5.2, E1c).
+
+    A `/judge` round writes five rows at once, one per core rubric item:
+    `user_ok` is False when the user marked the item as wrong,
+    `judge_score` is the judge's 1-5 for it, or NULL when the judgement
+    was unusable, and `judge_model` the model that judged. No text: the
+    reply stays in `message`, and `message_id` goes NULL if that row is
+    ever deleted. Written and read only by app/core/judge_calibration.py."""
+
+    __tablename__ = "judge_label"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    message_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("message.id", ondelete="SET NULL")
+    )
+    item: Mapped[str] = mapped_column(String, nullable=False)
+    user_ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    judge_score: Mapped[int | None] = mapped_column(Integer)
+    judge_model: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("message_id", "item", name="uq_judge_label_message_item"),
+        CheckConstraint(
+            "judge_score is null or (judge_score >= 1 and judge_score <= 5)",
+            name="ck_judge_label_score",
+        ),
+        Index("ix_judge_label_model_item", "judge_model", "item"),
+        Index("ix_judge_label_created_at", "created_at"),
+    )
+
+
+class JudgeNotice(Base):
+    """What the user was last told about one rubric item's standing
+    (anchor-eval-reliability-plan.md section 5.4, E1c): `advisory` True
+    once «no longer decides» went out, False once «decides again» did.
+    No row is the same as an announced False. It exists so a restart
+    never repeats a notice. Written and read only by app/core/
+    judge_calibration.py."""
+
+    __tablename__ = "judge_notice"
+
+    item: Mapped[str] = mapped_column(String, primary_key=True)
+    advisory: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    announced_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

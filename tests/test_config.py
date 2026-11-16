@@ -805,3 +805,32 @@ def test_judge_evidence_is_trimmed_and_lowercased(raw, expected):
 def test_judge_evidence_refuses_an_unknown_value(raw):
     with pytest.raises(ValidationError, match="JUDGE_EVIDENCE"):
         _settings(JUDGE_EVIDENCE=raw)
+
+
+# --- E1c: /judge (anchor-eval-reliability-plan.md sections 5.1, 5.3) ------
+
+
+def test_judge_calibration_defaults():
+    settings = _settings()
+    assert settings.JUDGE_LABELS_PER_DAY == 20
+    assert settings.JUDGE_MIN_LABELS == 20
+    assert settings.JUDGE_MIN_AGREEMENT == 0.7
+
+
+@pytest.mark.parametrize(
+    "name,value,ok",
+    [
+        ("JUDGE_LABELS_PER_DAY", 0, True), ("JUDGE_LABELS_PER_DAY", 100, True),
+        ("JUDGE_LABELS_PER_DAY", -1, False), ("JUDGE_LABELS_PER_DAY", 101, False),
+        ("JUDGE_MIN_LABELS", 5, True), ("JUDGE_MIN_LABELS", 500, True),
+        ("JUDGE_MIN_LABELS", 4, False), ("JUDGE_MIN_LABELS", 501, False),
+        ("JUDGE_MIN_AGREEMENT", 0.5, True), ("JUDGE_MIN_AGREEMENT", 1.0, True),
+        ("JUDGE_MIN_AGREEMENT", 0.49, False), ("JUDGE_MIN_AGREEMENT", 1.01, False),
+    ],
+)
+def test_judge_calibration_settings_are_bounded(name, value, ok):
+    if ok:
+        assert getattr(_settings(**{name: value}), name) == value
+    else:
+        with pytest.raises(ValidationError, match=name):
+            _settings(**{name: value})
